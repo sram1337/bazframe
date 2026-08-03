@@ -2,10 +2,15 @@ import { assertSafeForwardedPiArgs } from '../agents/pi-args.js';
 import { BazframeError } from '../core/errors.js';
 import { isSafeProfileId } from '../profiles/profile-id.js';
 
-export type HelpTopic = 'root' | 'use' | 'pi';
+export type HelpTopic = 'root' | 'use' | 'pi' | 'adapter' | 'init' | 'status';
 export type Command =
   | { name: 'use'; profileId: string }
-  | { name: 'pi'; dryRun: boolean; forwardedArgs: string[] };
+  | { name: 'pi'; dryRun: boolean; forwardedArgs: string[] }
+  | { name: 'adapter-install-pi'; force: boolean }
+  | { name: 'adapter-uninstall-pi' }
+  | { name: 'init' }
+  | { name: 'uninit' }
+  | { name: 'status' };
 export type ParseResult =
   | { kind: 'help'; topic: HelpTopic }
   | { kind: 'version' }
@@ -31,6 +36,10 @@ export function parseArgv(argv: readonly string[]): ParseResult {
   }
   if (first === 'use') return parseUse(rest);
   if (first === 'pi') return parsePi(rest);
+  if (first === 'adapter') return parseAdapter(rest);
+  if (first === 'init') return parseNoArgumentCommand('init', rest);
+  if (first === 'uninit') return parseNoArgumentCommand('uninit', rest);
+  if (first === 'status') return parseNoArgumentCommand('status', rest);
   return usageError(`Unknown command: ${first}`);
 }
 
@@ -80,6 +89,39 @@ function parsePi(args: readonly string[]): ParseResult {
     kind: 'command',
     command: { name: 'pi', dryRun, forwardedArgs }
   };
+}
+
+function parseNoArgumentCommand(
+  name: 'init' | 'uninit' | 'status',
+  args: readonly string[]
+): ParseResult {
+  if (args.length === 1 && HELP_FLAGS.has(args[0])) {
+    return { kind: 'help', topic: name === 'status' ? 'status' : 'init' };
+  }
+  return args.length === 0
+    ? { kind: 'command', command: { name } }
+    : usageError(`${name} accepts no arguments.`);
+}
+
+function parseAdapter(args: readonly string[]): ParseResult {
+  if (args.length === 1 && HELP_FLAGS.has(args[0])) {
+    return { kind: 'help', topic: 'adapter' };
+  }
+  if (args[0] === 'install' && args[1] === 'pi') {
+    if (args.length === 2) {
+      return { kind: 'command', command: { name: 'adapter-install-pi', force: false } };
+    }
+    if (args.length === 3 && args[2] === '--force') {
+      return { kind: 'command', command: { name: 'adapter-install-pi', force: true } };
+    }
+    return usageError('adapter install pi accepts only the optional --force flag.');
+  }
+  if (args[0] === 'uninstall' && args[1] === 'pi') {
+    return args.length === 2
+      ? { kind: 'command', command: { name: 'adapter-uninstall-pi' } }
+      : usageError('adapter uninstall pi accepts no additional arguments.');
+  }
+  return usageError('adapter requires `install pi [--force]` or `uninstall pi`.');
 }
 
 function usageError(message: string): ParseResult {

@@ -1,13 +1,33 @@
 # Bazframe 2 prototype contract
 
-> This records the reversible contract and assumptions of the current vertical slice. It does not amend the product concept in [`design.md`](design.md) or settle the open product decisions in [`../TODO.md`](../TODO.md).
+> Status: deprecated launcher prototype retained temporarily for migration and historical validation.
+>
+> This records the reversible contract and assumptions of the launcher vertical slice. The current product direction is [`design.md`](design.md).
 
-## Implemented contract
+## Migration to the Pi adapter
+
+The production path uses direct Pi invocation through the global adapter:
+
+```bash
+bazframe adapter install pi
+bazframe use <profile>
+cd <worktree>
+bazframe init
+bazframe status
+pi       # native context + profile
+pi -nc   # global context + profile
+```
+
+This replaces `bazframe pi` and its temporary composed instruction file. Profiles use a profile-local `AGENTS.md` plus immediate Agent Skills-compatible skill directories. Rename an earlier prototype profile's `instructions.md` to `AGENTS.md` when migrating. Repository registration lives under `BAZFRAME_HOME/projects`.
+
+Use `bazframe uninit` to remove a worktree registration and `bazframe adapter uninstall pi` to remove the verified extension artifact. The deprecated launcher remains available during this migration window.
+
+## Implemented launcher contract
 
 - Scope is only `bazframe use <profile>` and `bazframe pi [--dry-run] [-- <pi args>]` for Pi.
 - Profiles are trusted, pre-existing directories under `BAZFRAME_HOME/profiles`. Selection is one global plain-text `active-profile` file.
 - A launch requires a Git worktree. Git discovery ignores inherited repository-selection variables, canonicalizes the root and cwd, and requires the cwd to be contained by that root.
-- Instructions are the selected profile's required `instructions.md`, followed textually by optional root `AGENTS.md`, with visible source headings. This profile-first ordering is an experiment, not a conflict or precedence policy.
+- Instructions are the selected profile's required `AGENTS.md`, followed textually by optional root `AGENTS.md`, with visible source headings. This profile-first ordering is an experiment, not a conflict or precedence policy.
 - Instruction files are opened once with read-only, nonblocking filesystem flags, inspected through that handle as regular files, and read with a 1 MiB bound before UTF-8 and NUL validation.
 - The effective prompt is a mode-`0600` temporary file outside the repository. Bazframe passes it with `--no-context-files --append-system-prompt`; it does not create a repository `.baz.agents.md`.
 - Immediate profile skill directories containing `SKILL.md` are passed with explicit `--skill` arguments. **Pi's native skill discovery deliberately remains enabled**, so profile skills are additive rather than exclusive in this prototype.

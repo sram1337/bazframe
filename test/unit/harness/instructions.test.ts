@@ -21,13 +21,13 @@ describe('instruction composition', () => {
   it('puts visibly labeled profile instructions before repository instructions', () => {
     const effective = composeInstructions({
       profileId: 'focused',
-      profile: { path: '/home/profile/instructions.md', text: 'PROFILE-RULE' },
+      profile: { path: '/home/profile/AGENTS.md', text: 'PROFILE-RULE' },
       repository: { path: '/repo/AGENTS.md', text: 'REPOSITORY-RULE' }
     });
 
     expect(effective).toBe([
       '# Bazframe profile instructions: focused',
-      'Source: /home/profile/instructions.md',
+      'Source: /home/profile/AGENTS.md',
       '',
       'PROFILE-RULE',
       '',
@@ -42,7 +42,7 @@ describe('instruction composition', () => {
   it('supports profile-only composition and enforces the effective cap', () => {
     const input = {
       profileId: 'focused',
-      profile: { path: '/profile/instructions.md', text: 'only profile' }
+      profile: { path: '/profile/AGENTS.md', text: 'only profile' }
     };
     expect(composeInstructions(input)).not.toContain('repository instructions');
     expect(() => composeInstructions(input, 4)).toThrow(/Composed instructions/u);

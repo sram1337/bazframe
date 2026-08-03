@@ -1,46 +1,27 @@
 # Pi Adapter Production Design
 
-> Status: outline for product review
+> Status: implemented baseline; acceptance gates passing for Pi 0.82.0 on the current macOS/Node environment
 >
-> Accepted behavior: [`no-launcher-harness-override.md`](no-launcher-harness-override.md)
+> Product source of truth: [`design.md`](design.md)
+>
+> Accepted runtime behavior: [`pi-adaptive-context-adapter.md`](pi-adaptive-context-adapter.md)
 >
 > Executable evidence: [`../experiments/pi-no-launcher-adapter/REPORT.md`](../experiments/pi-no-launcher-adapter/REPORT.md)
->
-> This document proposes production installation and lifecycle UX. Unmarked command names and filesystem details are not approved until review.
-
-## Index
-
-1. Product boundary
-2. User journeys
-3. Runtime behavior
-4. Proposed CLI
-5. External state and ownership
-6. Adapter installation lifecycle
-7. Repository registration lifecycle
-8. Profiles and skills
-9. Diagnostics and failure behavior
-10. Security and compatibility
-11. Acceptance criteria
-12. Review TODOs
 
 ## 1. Product boundary
 
-Bazframe's first Pi integration is a globally installed native Pi extension. Bazframe does not launch or wrap Pi and does not write into registered repositories.
-
-Accepted runtime behavior:
+Bazframe's first Pi integration is a global Pi extension. Pi remains the session entrypoint, and Bazframe supplies the active profile for registered Git worktrees.
 
 ```bash
 pi       # Pi native context + active Bazframe profile
-pi -nc   # restored global Pi context + active profile; project context excluded
+pi -nc   # restored global Pi context + active Bazframe profile
 ```
 
-Both modes leave Pi settings, extensions, packages, prompts, themes, system-prompt files, models, tools, project trust, and native skills under Pi's control. Profile skills are additive. Bazframe does not claim complete harness replacement.
+Pi owns runtime settings and resources. Bazframe owns profile selection, repository registration, adapter installation, and generated profile-skill aliases.
 
 ## 2. User journeys
 
-### 2.1 First installation
-
-Proposed flow:
+### 2.1 Install
 
 ```bash
 npm install --global bazframe
@@ -48,29 +29,30 @@ bazframe adapter install pi
 bazframe status
 ```
 
-Installation places one Bazframe-owned extension in Pi's global extension directory without changing Pi source or settings.
+Adapter installation is explicit. The command places one self-contained Bazframe artifact in Pi's effective global extension directory and records its identity under the Bazframe home. Pi auto-discovers the extension, which lets the user invoke `pi` directly; separating installation from `init` prevents repository registration from silently changing Pi's global configuration.
 
 ### 2.2 Register a repository
 
 From any directory inside a Git worktree:
 
 ```bash
+bazframe use focused
 bazframe init
 ```
 
-Initialization validates the active profile and writes one external registration. It does not modify the repository.
+`init` validates the active profile and records the canonical worktree root externally. The final summary explains the two Pi context modes.
 
-The final summary explains both launch modes rather than selecting one implicitly.
-
-### 2.3 Select a profile
+### 2.3 Run and reload
 
 ```bash
-bazframe use focused
+pi
+# or
+pi -nc
 ```
 
-New Pi sessions resolve the selected profile. A running session uses `/bzf-reload` to reload instructions, skills, and collision aliases together.
+A running session uses `/bzf-reload` to reload profile instructions, skills, and aliases as one operation.
 
-### 2.4 Inspect behavior
+### 2.4 Inspect
 
 Outside Pi:
 
@@ -84,110 +66,105 @@ Inside Pi:
 /bzf-explain
 ```
 
-### 2.5 Remove registration and adapter
-
-Proposed flow:
+### 2.5 Remove
 
 ```bash
 bazframe uninit
 bazframe adapter uninstall pi
 ```
 
-Unregistration removes only the current repository's external record. Adapter uninstall removes only an extension artifact Bazframe can prove it owns. Profiles remain unless separately removed by a future profile-lifecycle command.
+`uninit` removes the current worktree's registration. Adapter uninstall removes the verified installed artifact, ownership manifest, and generated adapter cache. User profiles and active-profile selection persist.
 
-## 3. Runtime behavior
+## 3. Command decisions
 
-The extension activates only when the canonical Git root matches an external registration.
-
-At startup or `/bzf-reload`, it:
-
-1. resolves the repository registration;
-2. resolves and validates the active profile;
-3. inspects native skill commands already loaded by Pi;
-4. projects colliding profile skills as `<name>-x-bazframe` in external cache;
-5. returns non-colliding and projected skill files through `resources_discover`;
-6. checks whether `systemPromptOptions.contextFiles` is empty;
-7. when empty, restores the global Pi context file and appends profile instructions;
-8. when non-empty, leaves context entirely to Pi and appends profile instructions only;
-9. logs the selected context mode and skill aliases once per load.
-
-The extension does not inspect context paths or parse Pi's generated prompt.
-
-## 4. Proposed CLI
-
-| Command | Proposed responsibility |
+| Command | Responsibility |
 |---|---|
-| `bazframe adapter install pi` | Install or safely update the global Pi extension. |
-| `bazframe adapter uninstall pi` | Remove the owned Pi extension after content/ownership verification. |
-| `bazframe init [--profile <id>]` | Register the canonical current Git repository externally. Default to `active`. |
-| `bazframe uninit` | Remove the current repository's external registration. |
-| `bazframe use <profile>` | Atomically change the global active profile. |
-| `bazframe status` | Report adapter, registration, active profile, and actionable problems. |
+| `bazframe adapter install pi [--force]` | Install, update, or explicitly repair the global Pi extension. |
+| `bazframe adapter uninstall pi` | Remove the verified Bazframe-owned Pi extension. |
+| `bazframe init` | Register the canonical current Git worktree against the global active profile. |
+| `bazframe uninit` | Remove the canonical current worktree's registration. |
+| `bazframe use <profile>` | Atomically select the global active profile. |
+| `bazframe status` | Report adapter, registration, profile, and actionable problems. |
 
-Review must settle whether adapter installation is explicit or automatically offered by `init`.
+Decisions:
 
-No command launches Pi. No implicit shell alias, shim, or default-argument injection is installed.
+- Adapter installation is a separate explicit command.
+- Every first-slice registration follows the global active profile.
+- Plain `pi` is the additive-context mode; `pi -nc` is instruction-context replacement.
+- `adapter install pi --force` repairs a drifted destination only when a valid ownership manifest identifies that destination.
+- Pi is invoked directly by the user.
+
+## 4. Runtime behavior
+
+The extension activates when the canonical Git root matches an external registration.
+
+At startup and `/bzf-reload`, it:
+
+1. resolves the canonical Git root with repository-selection environment variables cleared;
+2. resolves and validates the external registration;
+3. resolves and validates the active profile;
+4. inspects Pi's loaded skill commands and provenance;
+5. projects colliding profile skills as `<name>-x-bazframe` in external cache;
+6. contributes profile and alias skill paths through `resources_discover`;
+7. inspects `systemPromptOptions.contextFiles` as an empty/non-empty structured signal;
+8. restores global Pi context for an empty collection;
+9. appends profile instructions after the selected context;
+10. logs context mode and aliases once per load.
+
+The extension uses Pi's public exports and structured event data. Git discovery has a bounded timeout, and instruction reads have a 1 MiB bound.
 
 ## 5. External state and ownership
 
-Proposed layout:
+Default layout:
 
 ```text
 ~/.bazframe/
 ├── active-profile
 ├── profiles/
 │   └── <profile>/
-│       ├── instructions.md
+│       ├── AGENTS.md
 │       └── skills/
 ├── projects/
 │   └── <sha256-canonical-root>.json
 ├── adapters/
 │   └── pi.json
-└── adapter-cache/
-    └── pi/skill-aliases/<profile>/<alias>/SKILL.md
+├── adapter-cache/
+│   └── pi/skill-aliases/<profile>/<alias>/SKILL.md
+└── locks/
+    ├── adapter-pi.lock
+    └── state.lock
 
-~/.pi/agent/extensions/
+$PI_CODING_AGENT_DIR/extensions/
 └── bazframe.ts
 ```
 
-Ownership categories for this integration:
+`PI_CODING_AGENT_DIR` selects Pi's agent directory; the default is `~/.pi/agent`. The CLI and extension use the same resolution rule.
 
-- **User-owned:** profiles and their source skills.
-- **Bazframe-managed:** project registration records, adapter ownership metadata, installed extension artifact, and generated skill-alias cache.
-- **Repository-owned:** every file in the Git worktree.
-- **Pi-owned:** all native runtime configuration and resources.
+Ownership categories:
 
-The adapter manifest should record the installed path, Bazframe version, artifact hash, and expected bytes or package artifact identity. Cache is disposable and reproducible.
+- **User-owned:** profiles, profile instructions, and source skills.
+- **Bazframe-managed:** selection state, registrations, adapter manifest, installed artifact, locks, and alias cache.
+- **Repository-owned:** the Git worktree and its project instructions.
+- **Pi-owned:** runtime settings, trust, tools, models, packages, extensions, prompts, themes, system prompts, and native skills.
 
-## 6. Adapter installation lifecycle
+## 6. State formats
 
-Installation requirements:
+### 6.1 Adapter manifest
 
-- resolve Pi's configured agent directory without hard-coding `~/.pi/agent`;
-- preflight the extension destination before writing;
-- refuse to overwrite an unmanaged or modified file by default;
-- write atomically with user-only permissions where supported;
-- install a versioned, self-contained extension artifact using only Node built-ins and Pi's public package exports;
-- record ownership only after the artifact is installed successfully;
-- be idempotent when expected bytes are already installed.
+```json
+{
+  "schemaVersion": 1,
+  "adapter": "pi",
+  "bazframeVersion": "0.1.0",
+  "installedPath": "/Users/me/.pi/agent/extensions/bazframe.ts",
+  "artifactSha256": "<hex>",
+  "artifactBytes": 12345
+}
+```
 
-Upgrade requirements:
+The manifest path is `adapters/pi.json`. Paths are absolute and normalized. The hash and byte count identify the exact installed artifact.
 
-- compare installed and desired artifact identity;
-- report drift before replacement;
-- never silently replace an unmanaged extension;
-- preserve registrations, profiles, and cache unless migration requires an explicit validated step.
-
-Uninstall requirements:
-
-- remove only an artifact matching recorded or reconstructable expected identity;
-- preserve modified or unrecognized files and return an actionable failure;
-- remove adapter ownership metadata after successful artifact removal;
-- leave Pi settings and unrelated extensions unchanged.
-
-## 7. Repository registration lifecycle
-
-A registration contains at least:
+### 6.2 Repository registration
 
 ```json
 {
@@ -198,126 +175,236 @@ A registration contains at least:
 }
 ```
 
-Initialization requirements:
+The registration filename is the SHA-256 of the canonical repository path. The extension validates both the key and stored path.
 
-- require a Git worktree and canonicalize its root;
-- ignore inherited Git repository-selection environment variables;
-- validate the selected or active profile before writing;
-- compute the registration key from the same canonical root used by the extension;
-- preflight an existing registration and require explicit replacement when its content differs;
-- atomically write external state with no repository mutation;
-- print plain `pi` and `pi -nc` behavior in the final summary.
+## 7. Filesystem and concurrency policy
 
-Unregistration removes only the matching external registration. A moved or renamed repository is not silently matched; identity beyond canonical local path remains deferred.
+Bazframe-managed writes follow one shared policy:
 
-## 8. Profiles and skills
+1. resolve and validate the Bazframe home and destination;
+2. acquire the relevant lock with exclusive creation;
+3. create parent directories with user-only access;
+4. write a uniquely named mode-`0600` temporary file in the destination directory;
+5. flush and close the file;
+6. atomically rename it over the destination;
+7. release the lock in `finally`.
 
-The first production slice retains the validated profile shape:
+A lock records PID, creation time, command, and target. A live lock produces an actionable busy result. A stale lock whose PID is absent can be replaced by the next owning command after reporting the recovery.
 
-```text
-profiles/<id>/
-├── instructions.md
-└── skills/<skill>/SKILL.md
-```
+Bazframe-managed directories reject symlinked state and adapter destinations. User-owned profile entries may use symlinks; validation follows them as trusted profile content and applies regular-file, UTF-8, NUL, and size checks to the resolved targets.
 
-Requirements:
+The CLI performs state mutations. Runtime cache materialization uses atomic writes to deterministic profile/alias paths. Old alias files are inert because `resources_discover` returns only aliases selected for the current load. Adapter uninstall clears the full Pi alias cache.
 
-- profile IDs use lowercase letters, digits, and single hyphens;
-- instruction files are bounded, regular UTF-8 files without NUL bytes;
-- Agent Skills parsing uses Pi's public loader;
-- non-colliding profile skill names remain unchanged;
-- a collision with an already loaded native skill becomes `<name>-x-bazframe`;
-- generated aliases remain Agent Skills-compatible and point to the original skill file/base directory;
-- alias mappings are logged and shown in diagnostics;
-- an alias that also collides fails explicitly;
-- collisions with resources simultaneously returned by another extension remain a documented limitation.
+## 8. Adapter installation lifecycle
 
-This slice does not add profile creation, import/export, or skill artifact lifecycle management.
+The production artifact is a copied, self-contained TypeScript extension that imports Node built-ins and Pi's public package exports. Copying fixes the runtime bytes independently of global npm module resolution.
 
-## 9. Diagnostics and failure behavior
+The installer resolves these states:
 
-### 9.1 `bazframe status`
+| State | Meaning | Action |
+|---|---|---|
+| `missing` | artifact and manifest absent | install |
+| `adoptable` | artifact exactly matches the packaged bytes and manifest is absent | record ownership |
+| `current` | artifact matches desired bytes and manifest | succeed idempotently |
+| `managed-outdated` | artifact matches its manifest and desired bytes changed | update |
+| `managed-missing` | manifest exists and artifact is absent | restore |
+| `drifted` | manifest identifies the path and artifact hash differs | report; repair with `--force` |
+| `occupied` | destination exists outside a valid ownership record | report path for manual resolution |
+| `manifest-path-mismatch` | manifest records another effective Pi agent directory | report both paths for explicit resolution |
 
-Status should report:
+Install flow:
+
+1. validate the packaged artifact and compute its identity;
+2. resolve Pi's effective agent directory;
+3. lock the adapter lifecycle;
+4. classify the destination and ownership manifest;
+5. stage and atomically install the artifact;
+6. atomically write the manifest;
+7. verify the installed hash and manifest;
+8. report the installed version and path.
+
+An exact desired artifact found without a manifest can be adopted because its bytes are reconstructably Bazframe's packaged artifact. Other occupied files stay under their current owner.
+
+Upgrade preserves profiles, registrations, and alias cache. A package migration runs only after validating the source schema and writing a recoverable destination.
+
+Uninstall verifies the installed hash against the manifest, removes the artifact, removes the manifest, and clears the Pi alias cache. Drift remains visible for `--force` repair or manual recovery.
+
+## 9. Repository registration lifecycle
+
+`init` requirements:
+
+- resolve a Git worktree from the caller's exact working directory;
+- clear inherited `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`, and related repository selectors;
+- canonicalize the worktree root;
+- require a current Pi adapter installation;
+- validate the active profile;
+- compute the registration key from the canonical root;
+- write the schema-v1 registration atomically;
+- treat an identical registration as success;
+- report both Pi context modes in the final summary.
+
+`uninit` resolves the same canonical root and removes its matching registration. Canonical local path is the first-slice identity, so a moved worktree is initialized at its new location.
+
+Registration acceptance captures a content snapshot and Git status before and after each lifecycle operation.
+
+## 10. Profiles and skills
+
+Profile IDs contain 1–64 lowercase ASCII letters or digits separated by single hyphens.
+
+Instruction requirements:
+
+- `AGENTS.md` resolves to a regular file;
+- maximum size is 1 MiB;
+- content is valid UTF-8;
+- NUL bytes are rejected.
+
+Skill requirements:
+
+- immediate children of `skills/` are loaded in lexical directory-name order;
+- Pi's public Agent Skills loader parses each skill;
+- duplicate profile skill names are profile errors;
+- available profile names remain unchanged;
+- native collisions receive the deterministic `-x-bazframe` suffix;
+- aliases retain the original description and invocation setting;
+- aliases direct Pi to the original skill file and base directory;
+- a generated alias collision is a profile error.
+
+Profile instructions and skills are trusted user content. Their source lifecycle stays independent from the adapter implementation so future skill-library providers can interoperate with the same profile contract.
+
+## 11. Diagnostics and failure behavior
+
+### 11.1 `bazframe status`
+
+Status reads existing state and reports:
 
 - Bazframe home;
-- Pi adapter path, installed version/hash, and current/drifted/missing state;
-- canonical current repository and registration state;
-- active or pinned profile and validation state;
-- profile instruction source and skill count;
-- generated collision aliases currently present in cache;
-- launch guidance for `pi` and `pi -nc`;
-- corrective commands for every failure.
+- Pi agent directory and adapter path;
+- adapter state, version, hash, and drift;
+- canonical current Git root;
+- registration state;
+- active-profile ID and validation;
+- instruction source and skill count;
+- aliases present in cache;
+- launch guidance;
+- one corrective command for each problem.
 
-Status is read-only and must not create cache or repair state.
+Status returns success for a healthy setup, a distinct attention status for incomplete setup or drift, and Bazframe failure for malformed or unsafe state.
 
-### 9.2 `/bzf-explain`
+### 11.2 `/bzf-explain`
 
-The runtime command reports effective session facts:
+The runtime command reports:
 
 - additive or instruction-context replacement mode;
-- whether global context was left to Pi or restored by Bazframe;
-- native context files reported by Pi;
-- profile instructions and skills;
-- skill collision aliases;
+- global-context source;
+- context files reported by Pi;
+- profile ID and instruction source;
+- profile skills and collision aliases;
 - registration and canonical repository paths;
-- native resource categories that remain Pi-owned.
+- Pi-owned resource categories.
 
-### 9.3 Failure policy
+### 11.3 Failure policy
 
-A registered session must fail visibly rather than partially apply an invalid profile. Unregistered repositories remain fully native.
+A registered session applies the complete validated profile. Malformed registration, invalid selection, invalid instructions, unreadable skills, duplicate names, alias collision, or unsafe paths produce a visible error before an agent turn. Ordinary Pi behavior applies when the current worktree has no matching registration.
 
-Failures include malformed registration, missing/invalid active profile, invalid instructions, unreadable skills, duplicate profile names, unresolvable alias collisions, and unsafe external paths.
+## 12. Security and compatibility
 
-## 10. Security and compatibility
+- Project trust is Pi's security decision.
+- Profiles and skills are trusted user-controlled instructions and code.
+- External writes are confined to validated Bazframe-managed state and the installed extension destination.
+- Ownership hashes protect modified and independently owned extension files.
+- Locking and atomic rename protect concurrent CLI operations.
+- Runtime Git discovery uses an argument array, sanitized environment, captured output, and timeout.
+- The initial verified platform is macOS with Node `>=22.19.0` and Pi `0.82.x`.
+- Adapter startup checks the Pi APIs required for `resources_discover`, command provenance, reload, and structured system-prompt options.
+- A Pi context API that supports selective context loading requires a new compatibility decision before activation.
 
-- Project trust remains exclusively Pi's security decision.
-- Profiles and skills are trusted user-controlled instructions/code.
-- The extension never writes to a repository.
-- External writes are confined to validated Bazframe state/cache and the explicitly installed extension path.
-- Symlinks are followed only under the documented trusted-profile boundary; exact containment policy requires review.
-- The initial compatibility target is Pi 0.82 on the currently supported Node/macOS baseline.
-- Startup must fail clearly when required public Pi APIs are unavailable or behavior no longer matches the supported contract.
-- The all-or-nothing context assumption must be version-gated or revalidated if Pi adds selective context loading.
+## 13. Acceptance criteria
 
-## 11. Acceptance criteria
+A production-ready slice proves:
 
-A production-ready first slice must prove:
+1. clean install, idempotent reinstall, managed update, explicit drift repair, clean uninstall, and preservation of occupied files;
+2. init, status, and uninit with stable repository content and Git status;
+3. plain `pi` loads native context once and appends the active profile;
+4. `pi -nc` restores global context once, excludes ancestor/repository context, and appends the profile;
+5. `/bzf-reload` observes active-profile instruction and skill changes;
+6. native project resources follow Pi's project-trust behavior;
+7. skill collisions produce deterministic `-x-bazframe` aliases and diagnostics;
+8. other repositories retain native Pi behavior;
+9. broken registration, profile, cache, adapter, and lock states produce corrective diagnostics;
+10. packed-package tests exercise the installed CLI and a supported Pi executable in isolated user state.
 
-1. clean install, idempotent reinstall, safe upgrade, clean uninstall, and drift preservation;
-2. external init/status/uninit without any repository file or Git-status change;
-3. plain `pi` retains native context once and appends the active profile;
-4. `pi -nc` restores global context once, excludes ancestor/project context, and appends the profile;
-5. active-profile changes are observed after `/bzf-reload`;
-6. native project resources remain active under Pi's own trust behavior;
-7. skill collisions produce deterministic `-x-bazframe` aliases and logs;
-8. unregistered repositories retain native behavior;
-9. broken registration/profile/cache/adapter states produce actionable diagnostics;
-10. packed-package tests exercise the installed CLI and a real supported Pi executable in isolated user state.
+## 14. Implementation milestones
 
-## 12. Review TODOs
+### Milestone 1: external-state foundation
 
-### Product decisions
+Deliver:
 
-- [ ] Approve or revise the proposed command names.
-- [ ] Decide whether `init` automatically installs the Pi adapter, offers installation interactively, or requires an explicit prior command.
-- [ ] Decide whether registrations always follow the global active profile or may pin a profile in the first slice.
-- [ ] Approve plain `pi` additive mode as normal behavior and `pi -nc` as explicit instruction-context replacement terminology.
-- [ ] Decide whether adapter drift replacement gets a `--force` option or a separate repair command.
+- shared Bazframe-home and Pi-agent-directory resolution;
+- atomic file writes, permissions, locks, hashing, and ownership comparison;
+- schema-v1 adapter manifest and registration codecs;
+- focused unit tests for path, symlink, lock, codec, and drift states.
 
-### Architecture decisions
+Gate: unit tests cover every filesystem state transition and leave fixtures stable after failure.
 
-- [ ] Choose copied self-contained extension artifact versus a stable loader that imports the installed Bazframe package.
-- [ ] Define adapter ownership-manifest schema, versioning, and migration behavior.
-- [ ] Define exact atomic-write, permissions, symlink, lock, and concurrent-install policy for external state.
-- [ ] Define stale alias-cache pruning and concurrent-session behavior.
-- [ ] Define supported Pi/Node/platform versions and compatibility failure behavior.
-- [ ] Decide whether canonical-path registration is sufficient for v1 worktrees, repository moves, and clones.
+### Milestone 2: adapter lifecycle
 
-### Implementation planning
+Deliver:
 
-- [ ] Split the accepted design into installation, registration/status, runtime packaging, and end-to-end validation milestones.
-- [ ] Replace the experimental extension's synchronous filesystem/process calls where production behavior requires cancellation or bounded latency.
-- [ ] Add unit tests for registration codecs, ownership comparison, alias generation, and diagnostics.
-- [ ] Add isolated real-Pi tests for both context modes, reload, collisions, drift, and uninstall.
-- [ ] Remove or explicitly deprecate the launcher prototype only after the production adapter passes all acceptance criteria.
+- packaged self-contained Pi extension artifact;
+- `adapter install pi [--force]`;
+- `adapter uninstall pi`;
+- install-state diagnostics.
+
+Gate: isolated install, idempotent reinstall, update, drift, occupied destination, force repair, and uninstall tests pass against the packed package.
+
+### Milestone 3: registration and status
+
+Deliver:
+
+- `init` and `uninit`;
+- production `status` output and exit semantics;
+- active-profile validation shared by CLI and adapter.
+
+Gate: fake-Git and real-worktree tests prove canonical identity, external-only state, actionable diagnostics, and stable repository snapshots.
+
+### Milestone 4: production runtime adapter
+
+Deliver:
+
+- adaptive context composition;
+- profile skill discovery and collision aliases;
+- `/bzf-explain` and `/bzf-reload`;
+- compatibility and visible failure handling;
+- bounded asynchronous Git discovery and file operations where startup latency benefits.
+
+Gate: isolated Pi 0.82 tests pass for both context modes, reload, collisions, trust-owned resources, malformed state, and other repositories.
+
+### Milestone 5: package and migration gate
+
+Deliver:
+
+- packed-package end-to-end test with the supported Pi executable;
+- installation and user-flow documentation;
+- launcher-prototype deprecation and migration note;
+- final acceptance matrix.
+
+Gate: install/build/typecheck/lint/unit/integration/pack/real-Pi checks pass from a clean checkout, and repository snapshots remain stable.
+
+## 15. Acceptance evidence
+
+| Area | Evidence |
+|---|---|
+| External state and codecs | Unit coverage for paths, symlinks, permissions, atomic replacement, locks, stale recovery, manifests, registrations, hashing, and every adapter ownership state. |
+| Adapter lifecycle | Unit and packed-package checks cover install, idempotence, managed update, adoption, drift preservation, manifest-gated repair, occupied destinations, uninstall, and cache cleanup. |
+| Registration and status | Unit and fake-CLI integration checks cover canonical registration, read-only status, exit status 3, corrective actions, malformed state, and stable worktree snapshots. |
+| Runtime adapter | The isolated Pi 0.82 suite covers additive and replacement context, one global-context copy, reload, native resources, profile skills, collision aliases, explanation, registration gating, and stable repositories. |
+| Packed real-Pi flow | `npm run test:real-pi` packs and installs Bazframe, uses the installed CLI for adapter lifecycle and registration, and probes both Pi context modes with profile instructions and a profile skill. |
+
+The repeatable gates are:
+
+```bash
+npm test
+npm run test:real-pi
+BAZFRAME_ADAPTER_SOURCE="$PWD/artifacts/pi/bazframe.ts" \
+  node experiments/pi-no-launcher-adapter/run-spike.mjs
+```

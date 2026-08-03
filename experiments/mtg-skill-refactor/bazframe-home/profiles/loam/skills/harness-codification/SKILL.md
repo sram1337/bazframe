@@ -1,6 +1,8 @@
 ---
 name: harness-codification
 description: Audit an agent-enabled repository and classify durable behavior into lean always-loaded instructions, on-demand skills, skill-local resources/scripts, or historical/local state. Use when refactoring a harness for clarity or transfer.
+metadata:
+  tag: "baz2"
 ---
 
 # Harness Codification

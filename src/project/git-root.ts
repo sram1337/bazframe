@@ -7,6 +7,9 @@ const GIT_REPOSITORY_SELECTION_VARIABLES = [
   'GIT_DIR',
   'GIT_WORK_TREE',
   'GIT_COMMON_DIR',
+  'GIT_INDEX_FILE',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
   'GIT_CEILING_DIRECTORIES',
   'GIT_DISCOVERY_ACROSS_FILESYSTEM'
 ] as const;
@@ -31,7 +34,7 @@ export async function findGitRoot(
     if (errorCode(result.error) === 'ENOENT') {
       throw new BazframeError(
         'GIT_NOT_FOUND',
-        'Could not find Git on PATH; `bazframe pi` requires a Git worktree.',
+        'Could not find Git on PATH; this Bazframe command requires a Git worktree.',
         { cause: result.error }
       );
     }
@@ -103,7 +106,8 @@ function runGit(cwd: string, environment: NodeJS.ProcessEnv): Promise<GitResult>
         cwd,
         env: gitEnvironment,
         encoding: 'buffer',
-        maxBuffer: 64 * 1024
+        maxBuffer: 64 * 1024,
+        timeout: 5000
       },
       (error, stdout) => {
         resolveResult({

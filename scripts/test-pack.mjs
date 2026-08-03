@@ -33,14 +33,17 @@ try {
 
   const packageRoot = join(temporaryRoot, 'node_modules', 'bazframe-2-prototype');
   assertExists(join(packageRoot, 'dist', 'cli.js'));
+  assertExists(join(packageRoot, 'artifacts', 'pi', 'bazframe.ts'));
   assertExists(join(packageRoot, 'README.md'));
   assertExists(join(packageRoot, 'docs', 'prototype.md'));
   assertExists(join(packageRoot, 'docs', 'design.md'));
+  assertExists(join(packageRoot, 'docs', 'pi-adaptive-context-adapter.md'));
+  assertExists(join(packageRoot, 'docs', 'pi-adapter-production-design.md'));
   assertExists(join(packageRoot, 'docs', 'research', 'origin-and-rationale.md'));
   assertExists(join(packageRoot, 'docs', 'research', 'prototype-alternatives.md'));
   assertExists(join(packageRoot, 'TODO.md'));
-  assertExists(join(packageRoot, 'examples', 'profiles', 'focused', 'instructions.md'));
-  assertExists(join(packageRoot, 'examples', 'profiles', 'reviewer', 'instructions.md'));
+  assertExists(join(packageRoot, 'examples', 'profiles', 'focused', 'AGENTS.md'));
+  assertExists(join(packageRoot, 'examples', 'profiles', 'reviewer', 'AGENTS.md'));
   assertMissing(join(packageRoot, 'src'));
   assertMissing(join(packageRoot, 'test'));
   assertMissing(join(packageRoot, 'scripts'));
@@ -59,6 +62,36 @@ try {
       `Installed CLI version check failed (${result.status}).\nstdout: ${result.stdout}\nstderr: ${result.stderr}`
     );
   }
+
+  const lifecycleEnvironment = {
+    ...process.env,
+    BAZFRAME_HOME: join(temporaryRoot, 'bazframe-home'),
+    PI_CODING_AGENT_DIR: join(temporaryRoot, 'pi-agent')
+  };
+  const installed = spawnSync(executable, ['adapter', 'install', 'pi'], {
+    encoding: 'utf8',
+    shell: false,
+    env: lifecycleEnvironment
+  });
+  if (installed.status !== 0 || !installed.stdout.includes('Pi adapter: installed')) {
+    throw new Error(
+      `Packed adapter install failed (${installed.status}).\nstdout: ${installed.stdout}\nstderr: ${installed.stderr}`
+    );
+  }
+  assertExists(join(temporaryRoot, 'pi-agent', 'extensions', 'bazframe.ts'));
+  assertExists(join(temporaryRoot, 'bazframe-home', 'adapters', 'pi.json'));
+
+  const uninstalled = spawnSync(executable, ['adapter', 'uninstall', 'pi'], {
+    encoding: 'utf8',
+    shell: false,
+    env: lifecycleEnvironment
+  });
+  if (uninstalled.status !== 0 || !uninstalled.stdout.includes('Pi adapter: uninstalled')) {
+    throw new Error(
+      `Packed adapter uninstall failed (${uninstalled.status}).\nstdout: ${uninstalled.stdout}\nstderr: ${uninstalled.stderr}`
+    );
+  }
+  assertMissing(join(temporaryRoot, 'pi-agent', 'extensions', 'bazframe.ts'));
 } finally {
   if (tarballPath !== undefined && existsSync(tarballPath)) unlinkSync(tarballPath);
   rmSync(temporaryRoot, { recursive: true, force: true });

@@ -33,7 +33,7 @@ export BAZFRAME_HOME="$HOME/.bazframe-context-spike"
 mkdir -p ~/.pi/agent/extensions "$BAZFRAME_HOME/profiles/demo" "$BAZFRAME_HOME/projects"
 cp experiments/pi-no-launcher-adapter/bazframe.ts ~/.pi/agent/extensions/bazframe.ts
 printf 'demo\n' > "$BAZFRAME_HOME/active-profile"
-printf 'PROFILE_DEMO_INSTRUCTIONS\n' > "$BAZFRAME_HOME/profiles/demo/instructions.md"
+printf 'PROFILE_DEMO_INSTRUCTIONS\n' > "$BAZFRAME_HOME/profiles/demo/AGENTS.md"
 
 REPOSITORY="$(git rev-parse --show-toplevel)"
 node -e '

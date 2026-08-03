@@ -101,6 +101,47 @@ describe('experimental CLI vertical slice', () => {
     await expect(stat(capture.effectivePath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('installs the global adapter and manages external registration with status guidance', async () => {
+    const fixture = await createFixture(true);
+    const before = await snapshotFilesystem(fixture.repository);
+
+    expect((await runCli(['use', 'focused'], fixture.cwd, fixture.environment)).status).toBe(0);
+    const installed = await runCli(
+      ['adapter', 'install', 'pi'],
+      fixture.cwd,
+      fixture.environment
+    );
+    expect(installed).toMatchObject({ status: 0, stderr: '' });
+    expect(installed.stdout).toContain('Pi adapter: installed');
+
+    const initialized = await runCli(['init'], fixture.cwd, fixture.environment);
+    expect(initialized).toMatchObject({ status: 0, stderr: '' });
+    expect(initialized.stdout).toContain('Repository registration: registered');
+    expect(initialized.stdout).toContain('Run `pi -nc`');
+
+    const healthy = await runCli(['status'], fixture.cwd, fixture.environment);
+    expect(healthy.status).toBe(0);
+    expect(healthy.stdout).toContain('Pi adapter: current');
+    expect(healthy.stdout).toContain('Registration: registered');
+    expect(healthy.stdout).toContain('Corrective actions:\n  (none)');
+
+    const uninitialized = await runCli(['uninit'], fixture.cwd, fixture.environment);
+    expect(uninitialized.status).toBe(0);
+    expect(uninitialized.stdout).toContain('Repository registration: unregistered');
+    const attention = await runCli(['status'], fixture.cwd, fixture.environment);
+    expect(attention.status).toBe(3);
+    expect(attention.stdout).toContain('Register this worktree with `bazframe init`');
+
+    const uninstalled = await runCli(
+      ['adapter', 'uninstall', 'pi'],
+      fixture.cwd,
+      fixture.environment
+    );
+    expect(uninstalled.status).toBe(0);
+    expect(uninstalled.stdout).toContain('Pi adapter: uninstalled');
+    expect(await snapshotFilesystem(fixture.repository)).toEqual(before);
+  });
+
   it('propagates the child exit code and still cleans the effective file', async () => {
     const fixture = await createFixture(true);
     await runCli(['use', 'focused'], fixture.directory.root, fixture.environment);
@@ -201,13 +242,13 @@ async function createFixture(withRepositoryInstructions: boolean): Promise<Fixtu
   temporaryDirectories.push(directory);
   const home = directory.path('home with spaces');
   const profileRoot = 'home with spaces/profiles/focused';
-  await directory.write(`${profileRoot}/instructions.md`, 'PROFILE-INSTRUCTIONS-Ω\n');
+  await directory.write(`${profileRoot}/AGENTS.md`, 'PROFILE-INSTRUCTIONS-Ω\n');
   const skillA = directory.path(`${profileRoot}/skills/a-skill`);
   const skillZ = directory.path(`${profileRoot}/skills/z-skill`);
   await directory.write(`${profileRoot}/skills/z-skill/SKILL.md`, skill('z-skill'));
   await directory.write(`${profileRoot}/skills/a-skill/SKILL.md`, skill('a-skill'));
   const reviewerRoot = 'home with spaces/profiles/reviewer';
-  await directory.write(`${reviewerRoot}/instructions.md`, 'REVIEWER-INSTRUCTIONS\n');
+  await directory.write(`${reviewerRoot}/AGENTS.md`, 'REVIEWER-INSTRUCTIONS\n');
   await directory.write(
     `${reviewerRoot}/skills/review-skill/SKILL.md`,
     skill('review-skill')
@@ -234,6 +275,7 @@ async function createFixture(withRepositoryInstructions: boolean): Promise<Fixtu
     environment: {
       ...process.env,
       BAZFRAME_HOME: home,
+      PI_CODING_AGENT_DIR: directory.path('pi-agent'),
       PI_CAPTURE: capturePath,
       PATH: `${bin}${delimiter}${process.env.PATH ?? ''}`
     },

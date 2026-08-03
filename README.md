@@ -1,12 +1,17 @@
 # Bazframe 2
 
-> **Experimental prototype.** This vertical slice validates one profile-specific Pi launch flow. Its filesystem model, instruction ordering, and TypeScript stack are reversible prototype assumptions—not settled product decisions. See the concise [prototype contract and limitations](docs/prototype.md).
+> **First production adapter slice implemented.** Adapter lifecycle, registration, status, adaptive context, and profile skills are validated for Pi 0.82.x. The earlier `bazframe pi` launcher is deprecated and documented in the [prototype migration contract](docs/prototype.md).
 
-The accepted first [Pi integration boundary](experiments/pi-no-launcher-adapter/REPORT.md) is adaptive and launcher-free: plain `pi` keeps native context and adds the profile, while `pi -nc` restores global Pi instructions plus the profile after native context is disabled. The adapter checks only whether Pi's structured context list is empty—no prompt or path parsing. Other native project resources remain Pi-owned; complete harness replacement is not claimed.
+The accepted first [Pi integration boundary](docs/pi-adaptive-context-adapter.md) uses a global extension with direct Pi invocation: plain `pi` keeps native context and adds the profile, while `pi -nc` restores global Pi instructions and adds the profile. The adapter responds to Pi's structured context list and leaves native project resources under Pi's ownership.
 
-Bazframe 2 treats a coding-agent harness as a portable, first-class object. The implemented slice is intentionally only:
+Bazframe 2 treats a coding-agent harness as a portable, first-class object. The checkout contains the validated launcher prototype and the production Pi-adapter installation lifecycle:
 
 ```text
+bazframe adapter install pi [--force]
+bazframe adapter uninstall pi
+bazframe init
+bazframe uninit
+bazframe status
 bazframe use <profile>
 bazframe pi [--dry-run] [-- <pi args>]
 ```
@@ -23,6 +28,34 @@ node ./dist/cli.js --help
 
 The package exposes a `bazframe` bin when installed or linked. A real launch also requires `pi` on `PATH`.
 
+## Pi adapter lifecycle
+
+`bazframe adapter install pi` is a one-time, explicit setup step. It copies the packaged extension artifact to `$PI_CODING_AGENT_DIR/extensions/bazframe.ts` and records its hash under `BAZFRAME_HOME/adapters/pi.json`. Pi auto-discovers that global extension, allowing users to invoke `pi` directly. Installation stays separate from `init` so repository registration never silently changes Pi's global configuration. Both environment variables accept absolute paths; their defaults are `~/.pi/agent` and `~/.bazframe`.
+
+Installation is idempotent and updates an older artifact that still matches its ownership manifest. A changed managed artifact is preserved and reported as drift. `--force` explicitly restores that destination from the packaged artifact. An occupied destination without Bazframe ownership stays with its existing owner.
+
+```bash
+bazframe adapter install pi
+bazframe adapter install pi --force  # explicit drift repair
+bazframe adapter uninstall pi
+```
+
+Uninstall verifies the artifact hash, removes the ownership manifest, and clears generated Pi alias cache.
+
+After selecting an existing profile, register a Git worktree externally and inspect the resulting state:
+
+```bash
+bazframe use focused
+cd my-project
+bazframe init
+bazframe status
+pi       # native Pi context + active profile
+pi -nc   # global Pi context + active profile
+bazframe uninit
+```
+
+`status` performs a read-only inspection. Exit status `3` indicates an incomplete or drifted setup and prints corrective commands. Registration files live under `BAZFRAME_HOME/projects`; worktree content and Git status stay stable.
+
 ## Prototype profile layout
 
 `BAZFRAME_HOME` defaults to `~/.bazframe`; an override must be an absolute path.
@@ -32,7 +65,7 @@ The package exposes a `bazframe` bin when installed or linked. A real launch als
 ├── active-profile
 └── profiles/
     └── focused/
-        ├── instructions.md       # required UTF-8
+        ├── AGENTS.md             # required UTF-8
         └── skills/               # optional
             └── demo-profile/
                 └── SKILL.md
@@ -85,7 +118,7 @@ A dry run writes its report to stdout: selected profile, Git root, exact caller 
 
 `bazframe pi`:
 
-1. Opens the active profile's `instructions.md` once with read-only, nonblocking filesystem flags, verifies the opened handle is a regular file, performs a bounded read, and validates UTF-8 without NUL bytes.
+1. Opens the active profile's `AGENTS.md` once with read-only, nonblocking filesystem flags, verifies the opened handle is a regular file, performs a bounded read, and validates UTF-8 without NUL bytes.
 2. Requires the canonical caller cwd to be inside a canonical Git worktree root; discovery clears inherited Git repository-selection variables.
 3. Reads only `<git-root>/AGENTS.md`; that file may be absent.
 4. Composes visibly labeled profile instructions first and root repository instructions second.
@@ -125,23 +158,21 @@ In the default and recommended layout, `BAZFRAME_HOME` and the temporary prompt 
 
 | Code | Meaning |
 |---:|---|
-| `0` | Help/version/use/dry-run success, or Pi exited 0 |
-| `1` | Configuration, profile, filesystem, Git, launch, or temporary cleanup failure |
-| `2` | Bazframe command-line usage error or rejected Pi session/RPC option |
-| other | Pi's numeric exit code is propagated; SIGINT maps to 130 and SIGTERM to 143 |
+| `0` | Command completed successfully; status reports a healthy setup |
+| `1` | Malformed or unsafe configuration, filesystem, Git, adapter, launch, or cleanup failure |
+| `2` | Bazframe command-line usage error or rejected launcher session/RPC option |
+| `3` | `bazframe status` found incomplete or drifted state and printed corrective actions |
+| other | The deprecated launcher's Pi exit code is propagated; SIGINT maps to 130 and SIGTERM to 143 |
 
 If Bazframe cannot remove the temporary effective file, the launch returns Bazframe failure `1`, superseding Pi's status because sensitive generated content remains on disk.
 
 ## Development validation
 
+The standard gate covers build, typecheck, lint, unit, fake-Pi integration, and packed-package lifecycle checks. The real-Pi gate packs and installs the package, then validates both context modes through Pi 0.82 with an isolated probe provider.
+
 ```bash
-npm run build
-npm run typecheck
-npm run lint
-npm run test:unit
-npm run test:integration
-npm run test:pack
 npm test
+npm run test:real-pi
 ```
 
-See [`docs/prototype.md`](docs/prototype.md) for this slice's reversible contract and limitations, [`docs/design.md`](docs/design.md) for the broader concept, and [`docs/no-launcher-harness-override.md`](docs/no-launcher-harness-override.md) for the current narrowed direction. Earlier evidence remains in the [alternatives comparison](docs/research/prototype-alternatives.md), [MTG skill-refactor experiment](experiments/mtg-skill-refactor/REPORT.md), and broader [skill-first/external-harness problem frame](docs/research/skill-first-projects-and-external-harnesses.md).
+See [`docs/prototype.md`](docs/prototype.md) for this slice's reversible contract and limitations, [`docs/design.md`](docs/design.md) for the product direction, and [`docs/pi-adaptive-context-adapter.md`](docs/pi-adaptive-context-adapter.md) for the accepted Pi behavior. Earlier evidence remains in the [alternatives comparison](docs/research/prototype-alternatives.md), [MTG skill-refactor experiment](experiments/mtg-skill-refactor/REPORT.md), and broader [skill-first/external-harness problem frame](docs/research/skill-first-projects-and-external-harnesses.md).

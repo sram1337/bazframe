@@ -1,17 +1,10 @@
-import { randomUUID } from 'node:crypto';
-import { homedir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
-import {
-  mkdir,
-  readFile,
-  readdir,
-  rename,
-  rm,
-  stat,
-  writeFile
-} from 'node:fs/promises';
+import { join } from 'node:path';
+import { readFile, readdir, stat } from 'node:fs/promises';
 import { readUtf8InstructionFile } from '../core/content.js';
 import { BazframeError, errorCode } from '../core/errors.js';
+import { writeFileAtomic } from '../state/atomic-file.js';
+import { withStateLock } from '../state/lock.js';
+export { resolveBazframeHome } from '../state/paths.js';
 import { assertSafeProfileId } from './profile-id.js';
 
 const ACTIVE_PROFILE_FILE = 'active-profile';
@@ -23,29 +16,6 @@ export interface Profile {
   instructionsPath: string;
   instructions: string;
   skillDirectories: string[];
-}
-
-export function resolveBazframeHome(
-  environment: NodeJS.ProcessEnv,
-  userHome = homedir()
-): string {
-  const configured = environment.BAZFRAME_HOME;
-  if (configured === undefined) {
-    return join(userHome, '.bazframe');
-  }
-  if (configured.length === 0 || configured.includes('\0')) {
-    throw new BazframeError(
-      'INVALID_BAZFRAME_HOME',
-      'BAZFRAME_HOME must be a non-empty absolute path without NUL bytes.'
-    );
-  }
-  if (!isAbsolute(configured)) {
-    throw new BazframeError(
-      'INVALID_BAZFRAME_HOME',
-      `BAZFRAME_HOME must be an absolute path: ${configured}`
-    );
-  }
-  return resolve(configured);
 }
 
 export function profileDirectory(bazframeHome: string, profileId: string): string {
@@ -81,7 +51,7 @@ export async function loadProfile(
     );
   }
 
-  const instructionsPath = join(directory, 'instructions.md');
+  const instructionsPath = join(directory, 'AGENTS.md');
   const instructions = await readUtf8InstructionFile(
     instructionsPath,
     `Profile ${JSON.stringify(profileId)} instructions`
@@ -207,24 +177,13 @@ export async function writeActiveProfile(
   profileId: string
 ): Promise<void> {
   assertSafeProfileId(profileId);
-  await mkdir(bazframeHome, { recursive: true });
-
   const statePath = join(bazframeHome, ACTIVE_PROFILE_FILE);
-  const temporaryPath = join(
-    bazframeHome,
-    `.${ACTIVE_PROFILE_FILE}.${process.pid}.${randomUUID()}.tmp`
+  await withStateLock(
+    join(bazframeHome, 'locks', 'state.lock'),
+    { command: 'bazframe use', target: statePath },
+    () => writeFileAtomic(statePath, `${profileId}\n`, { managedRoot: bazframeHome }),
+    { managedRoot: bazframeHome }
   );
-  try {
-    await writeFile(temporaryPath, `${profileId}\n`, { flag: 'wx', mode: 0o600 });
-    await rename(temporaryPath, statePath);
-  } catch (error) {
-    await rm(temporaryPath, { force: true });
-    throw new BazframeError(
-      'STATE_WRITE_FAILED',
-      `Could not atomically record active profile at ${statePath}${formatErrorCode(error)}`,
-      { cause: error }
-    );
-  }
 }
 
 function stateReadError(statePath: string, error: unknown): BazframeError {

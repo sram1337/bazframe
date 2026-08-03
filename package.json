@@ -11,6 +11,7 @@
     "bazframe": "./dist/cli.js"
   },
   "files": [
+    "artifacts/",
     "dist/",
     "docs/",
     "examples/",
@@ -24,6 +25,7 @@
     "test:unit": "vitest run --config vitest.config.ts",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:pack": "node ./scripts/test-pack.mjs",
+    "test:real-pi": "node ./scripts/test-real-pi.mjs",
     "test": "npm run build && npm run typecheck && npm run lint && npm run test:unit && npm run test:integration && npm run test:pack",
     "prepack": "npm run build"
   },

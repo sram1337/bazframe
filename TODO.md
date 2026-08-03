@@ -2,11 +2,16 @@
 
 ## Product definition
 
-- [ ] Define the first-class harness/profile data model.
-- [ ] Define which skill-management responsibilities Bazframe owns.
-- [ ] Define library, profile, project, and effective-harness ownership boundaries.
-- [ ] Define command semantics for `use`, `scan`, `add`, `remove`, and `lift`.
-- [ ] Define instruction and skill conflict resolution.
+- [x] Define the first-class profile and effective-harness data model, including profile-local `AGENTS.md`, for the first production slice (`docs/design.md`).
+- [x] Define first-slice skill responsibilities: profile discovery, validation, runtime exposure, collision projection, and diagnostics.
+- [x] Keep skill acquisition, versioning, updating, and publication provider-owned; Bazframe consumes configured Agent Skills-compatible roots.
+- [x] Define profile, project, runtime, and effective-harness ownership for the first Pi slice (`docs/design.md`).
+- [x] Define Bazframe as the manager of skill packs, profiles, and profile application without coupling it to a skill-library provider.
+- [x] Define and implement `use` semantics for global active-profile selection.
+- [ ] Define provider-neutral skill-root resolution and collision behavior.
+- [ ] Define pack/profile storage and provenance-preserving add/remove command semantics.
+- [x] Define first-slice Pi context ordering and native/profile skill-collision aliases.
+- [ ] Define semantic instruction conflicts and cross-runtime skill conflicts.
 - [ ] Define referenced versus self-contained profile export.
 
 ## Research
@@ -15,17 +20,24 @@
 - [x] Document the skill-first refactoring and external-harness problem frame (`docs/research/skill-first-projects-and-external-harnesses.md`).
 - [ ] **Deferred:** Map the MTG skills' cross-skill dependencies and test one transferable bundle through an external live library.
 
-## No-launcher override experiment
+## Pi adaptive context adapter
 
-- [x] Establish that full project-resource replacement is unavailable through the Pi 0.82 extension API and reject project trust as harness selection.
-- [x] Prototype an adaptive global extension without a launcher, shim, repository write, prompt parser, context-path comparison, or Pi modification (`experiments/pi-no-launcher-adapter/REPORT.md`).
-- [x] When Pi's structured context list is empty, restore global Pi context and append the profile; otherwise append only the profile.
-- [x] Validate `pi -nc` replacement mode, plain-`pi` additive mode without duplicate global context, active-profile reload, additive skills, `-x-bazframe` collision aliases, native project resources, unregistered repositories, and repository immutability.
-- [x] Accept bounded adaptive instruction-context behavior as the first Pi adapter boundary.
-- [x] Draft the Pi adapter production-design outline for review (`docs/pi-adapter-production-design.md`).
-- [ ] Review and approve the Pi adapter command surface, install/init relationship, registration profile policy, and drift-repair UX.
-- [ ] Settle adapter artifact packaging, ownership metadata, atomic external writes, cache pruning, compatibility, and repository identity.
-- [ ] Convert the approved Pi adapter design into implementation milestones and verification gates.
+- [x] Map the Pi 0.82 extension API boundary and keep project trust as Pi's security decision.
+- [x] Prototype a global extension driven by structured Pi context and resource events (`experiments/pi-no-launcher-adapter/REPORT.md`).
+- [x] Restore global Pi context and append the profile when Pi reports an empty context list; otherwise append the profile to native context.
+- [x] Validate `pi -nc` replacement mode, plain-`pi` additive mode with one global context copy, active-profile reload, additive skills, `-x-bazframe` collision aliases, native project resources, registration gating, and stable repository state.
+- [x] Accept bounded adaptive instruction-context behavior as the first Pi adapter boundary (`docs/pi-adaptive-context-adapter.md`).
+- [x] Approve the production command surface, explicit adapter installation, global active-profile registrations, and manifest-gated `--force` repair.
+- [x] Settle self-contained artifact packaging, ownership metadata, atomic external writes, cache lifecycle, compatibility, and canonical-path repository identity.
+- [x] Convert the production design into implementation milestones and verification gates (`docs/pi-adapter-production-design.md`).
+
+## Pi adapter production implementation
+
+- [x] Milestone 1: implement and test external-state foundations, codecs, locks, atomic writes, and ownership comparison.
+- [x] Milestone 2: package the extension artifact and implement safe adapter install, update, repair, and uninstall.
+- [x] Milestone 3: implement external `init`, `uninit`, and production `status`.
+- [x] Milestone 4: productionize adaptive context, skills, aliases, reload, explanation, and compatibility handling.
+- [x] Milestone 5: pass packed-package and real-Pi acceptance gates, then deprecate the launcher prototype.
 
 ## Prototype vertical slice
 

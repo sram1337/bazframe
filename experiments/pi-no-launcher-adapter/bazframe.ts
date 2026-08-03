@@ -162,7 +162,7 @@ function loadProfile(bazframeHome: string): ProfileState {
 	if (!isWithin(directory, expectedProfilesRoot)) {
 		throw new Error(`Active profile resolves outside the profile store: ${directory}`);
 	}
-	const instructionsPath = join(directory, "instructions.md");
+	const instructionsPath = join(directory, "AGENTS.md");
 	const instructions = readInstructions(instructionsPath);
 	const skillsRoot = join(directory, "skills");
 	let skills: Skill[] = [];

@@ -25,7 +25,7 @@ describe('profile store', () => {
   it('loads required instructions and immediate skills in lexical order', async () => {
     const directory = await temporary();
     const home = directory.path('home');
-    await directory.write('home/profiles/focused/instructions.md', 'profile instructions');
+    await directory.write('home/profiles/focused/AGENTS.md', 'profile instructions');
     await directory.write('home/profiles/focused/skills/z-last/SKILL.md', 'z');
     await directory.write('home/profiles/focused/skills/a-first/SKILL.md', 'a');
     await directory.write('home/profiles/focused/skills/no-definition/readme.md', 'ignored');
@@ -56,9 +56,9 @@ describe('profile store', () => {
     await expect(loadProfile(home, 'missing')).rejects.toThrow(/does not exist/u);
     await directory.mkdir('home/profiles/focused');
     await expect(loadProfile(home, 'focused')).rejects.toThrow(/instructions/u);
-    await directory.write('home/profiles/focused/instructions.md', Uint8Array.from([0xff]));
+    await directory.write('home/profiles/focused/AGENTS.md', Uint8Array.from([0xff]));
     await expect(loadProfile(home, 'focused')).rejects.toThrow(/valid UTF-8/u);
-    await directory.write('home/profiles/focused/instructions.md', 'bad\0instructions');
+    await directory.write('home/profiles/focused/AGENTS.md', 'bad\0instructions');
     await expect(loadProfile(home, 'focused')).rejects.toThrow(/NUL/u);
   });
 

@@ -203,7 +203,7 @@ BAZFRAME_HOME/
 ├── config                       # configured library/provider locations
 ├── profiles/
 │   └── loam/
-│       ├── instructions.md
+│       ├── AGENTS.md
 │       └── profile manifest     # references library skill/bundle IDs
 └── projects/
     └── <stable-project-id>/

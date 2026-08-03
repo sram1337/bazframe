@@ -46,13 +46,13 @@ async function registerRepository(bazframeHome, repository) {
 	const projectId = createHash("sha256").update(canonicalRepository).digest("hex");
 	await write(
 		join(bazframeHome, "projects", `${projectId}.json`),
-		`${JSON.stringify({ repository: canonicalRepository, mode: "adaptive-context", profile: "active" }, null, 2)}\n`,
+		`${JSON.stringify({ schemaVersion: 1, repository: canonicalRepository, mode: "adaptive-context", profile: "active" }, null, 2)}\n`,
 	);
 }
 
 async function createProfile(bazframeHome, id, instructionMarker, skillName) {
 	const profile = join(bazframeHome, "profiles", id);
-	await write(join(profile, "instructions.md"), `${instructionMarker}\n`);
+	await write(join(profile, "AGENTS.md"), `${instructionMarker}\n`);
 	await write(
 		join(profile, "skills", skillName, "SKILL.md"),
 		`---\nname: ${skillName}\ndescription: Probe skill for ${id}.\n---\n\n# ${skillName}\n`,
@@ -245,7 +245,10 @@ async function main() {
 	const agentDirectory = join(root, "pi-agent");
 	const capturePath = join(root, "probe-captures.jsonl");
 	await mkdir(join(agentDirectory, "extensions"), { recursive: true });
-	await copyFile(join(experimentDirectory, "bazframe.ts"), join(agentDirectory, "extensions", "00-bazframe.ts"));
+	await copyFile(
+		process.env.BAZFRAME_ADAPTER_SOURCE ?? join(experimentDirectory, "bazframe.ts"),
+		join(agentDirectory, "extensions", "00-bazframe.ts"),
+	);
 	await copyFile(join(experimentDirectory, "probe-provider.ts"), join(agentDirectory, "extensions", "99-probe-provider.ts"));
 	await write(join(agentDirectory, "settings.json"), `${JSON.stringify({ quietStartup: true, enableInstallTelemetry: false })}\n`);
 	await write(join(agentDirectory, "AGENTS.md"), "GLOBAL_PI_CONTEXT_RESTORED\n");
