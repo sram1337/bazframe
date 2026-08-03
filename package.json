@@ -1,0 +1,40 @@
+{
+  "name": "bazframe-2-prototype",
+  "version": "0.0.0-prototype.0",
+  "private": true,
+  "description": "Experimental profile-specific Bazframe 2 prototype",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "bin": {
+    "bazframe": "./dist/cli.js"
+  },
+  "files": [
+    "dist/",
+    "docs/",
+    "examples/",
+    "README.md",
+    "TODO.md"
+  ],
+  "scripts": {
+    "build": "node ./scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test:unit": "vitest run --config vitest.config.ts",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:pack": "node ./scripts/test-pack.mjs",
+    "test": "npm run build && npm run typecheck && npm run lint && npm run test:unit && npm run test:integration && npm run test:pack",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.65.0",
+    "@typescript-eslint/parser": "^8.65.0",
+    "eslint": "^10.0.0",
+    "globals": "^17.0.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  }
+}

@@ -1,0 +1,25 @@
+# Dependencies and build output
+node_modules/
+dist/
+coverage/
+
+# Local environment
+.env
+.env.*
+!.env.example
+.DS_Store
+
+# Experiment workspaces are independent repositories; keep reports/profiles visible.
+experiments/*/project/
+experiments/test-repo/
+*.swp
+*.swo
+
+# Agent-local state
+.pi/npm/
+.pi-subagents/
+.claude/settings.local.json
+.claude/worktrees/
+
+# Session artifacts
+logs/sessions.md
