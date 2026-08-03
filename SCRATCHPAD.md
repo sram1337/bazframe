@@ -3,8 +3,8 @@
 ## Current state
 
 - `docs/design.md` is the current positive product specification for portable profiles, external repository registration, and the first Pi adapter.
-- Bazframe 2 manages skill packs, profiles composed from direct skills and packs, and application of resolved profiles to coding agents.
-- Skill artifacts remain provider-owned. Bazframe consumes configured Agent Skills-compatible roots without depending on Skillbook or another particular acquisition, versioning, update, or publication provider.
+- Bazframe 2 manages profiles, direct skill membership, and application of resolved profiles to coding agents. Skill packs are deferred.
+- Skillbook owns skill acquisition, library copies, versioning, updates, publication, deletion, and lock state. Bazframe must not mutate those artifacts.
 - The implementation uses TypeScript/Node ESM with no Bazframe runtime dependencies. The stack remains provisional at the broader product level.
 - The production Pi flow now covers adapter install/update/repair/uninstall, active-profile selection, profile-local `AGENTS.md`, external `init`/`uninit`, read-only `status`, direct `pi`/`pi -nc` context behavior, reload, explanation, profile skills, and collision aliases.
 - [`docs/prototype.md`](docs/prototype.md) records migration from the deprecated `bazframe pi` launcher and preserves that slice's historical contract.
@@ -18,18 +18,25 @@
 
 ## Current focus
 
-Define the provider-neutral skill-root, skill-pack, and profile-reference data model, including provenance-preserving add/remove behavior. Then settle referenced versus self-contained profile and pack export. The implemented slice already assigns skill discovery, validation, exposure, collision projection, and diagnostics to Bazframe while source providers own artifact acquisition and lifecycle.
+Implement `bazframe add <skill>` and `bazframe remove <skill>` against the active profile. Resolve Skillbook through `SKILLBOOK_LIBRARY`, deprecated `SKILLBOOK_LOCK_LIBRARY`, then `~/.skillbook`; represent membership as an absolute directory symlink under the profile's existing `skills/` directory. Add/remove must be idempotent, validate matching skill IDs/frontmatter names, refuse physical or foreign entries, and never mutate Skillbook artifacts or lock state.
 
 ## Deferred questions
 
-- Generalized dependency-aware skill refactoring and transferable bundle design beyond collection-only skill packs.
+- Skill packs, dependency-aware bundle behavior, and transferable bundle design.
+- Referenced or self-contained profile export.
 - Semantic composition between personal and repository-recommended harnesses.
 
 ## Product questions after the Pi slice
 
 The first Pi integration now commits to one global active profile, external canonical-path registrations, immediate Agent Skills-compatible profile children, lowercase hyphenated profile IDs, a 1 MiB instruction cap, additive native/profile skills, and deterministic Pi collision aliases.
 
-Semantic conflict resolution, broader cross-runtime alias behavior, pack/profile representation, provider-neutral root resolution, export form, and pack/profile command lifecycles remain open.
+Semantic conflict resolution and broader cross-runtime alias behavior remain open. Direct Skillbook-backed membership semantics are settled for the next slice; packs and export are deferred.
+
+## Latest planning evidence
+
+- A fresh `scout` and `context-builder` pass confirmed that current profile and Pi loaders already follow immediate directory symlinks, so direct membership needs no adapter format change.
+- The approved CLI is `bazframe add <skill>` / `bazframe remove <skill>` against the active profile.
+- The global `pi-subagents` package was enabled and updated to 0.40.0 outside this repository. One parallel context run was marked failed because `context-builder` requested unavailable `web_search`, but both read-only handoffs completed and agreed on the symlink slice.
 
 ## Latest prototype validation
 

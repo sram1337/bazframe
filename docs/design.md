@@ -2,7 +2,7 @@
 
 > Status: current product source of truth
 
-Bazframe composes Agent Skills-compatible capabilities into reusable skill packs and profiles, then applies profiles to coding agents. A profile carries personal instructions, direct skills, and skill packs across registered repositories. Runtime adapters compose that profile with each agent's native project behavior.
+Bazframe composes Agent Skills-compatible capabilities into profiles, then applies profiles to coding agents. A profile carries personal instructions and direct skill memberships across registered repositories. Runtime adapters compose that profile with each agent's native project behavior.
 
 ## Product direction
 
@@ -29,13 +29,13 @@ The user continues to invoke Pi directly. Bazframe's global extension recognizes
 
 A skill is an Agent Skills-compatible directory supplied through a configured skill root. Bazframe consumes this standard filesystem interface without depending on Skillbook, Git, npm, or any other particular acquisition and versioning provider.
 
-### Skill pack
+### Skill packs
 
-A skill pack is a named, reusable collection of skill references. Packs contain skills rather than other packs. Bazframe manages pack definitions and membership so a pack can be added to or removed from a profile as one entity.
+Skill packs are deferred. Bazframe will not introduce pack behavior unless a later product decision expands its responsibility beyond direct profile composition.
 
 ### Profile
 
-A profile combines personal instructions, direct skill references, and skill-pack references. Bazframe manages profile definitions, membership, selection, and application to supported coding agents.
+A profile combines personal instructions and direct skill memberships. Bazframe manages profile definitions, membership, selection, and application to supported coding agents.
 
 The implemented first slice stores a profile as a user-owned directory:
 
@@ -48,7 +48,7 @@ profiles/<id>/
 
 The profile-local `AGENTS.md` contains personal coding-agent instructions. Each materialized skill is an Agent Skills-compatible directory, including any supporting files used by its `SKILL.md`.
 
-The first slice has one global active profile selected by `bazframe use <profile>`. Pack definitions, provider-neutral skill roots, and direct skill and pack references are product direction beyond the implemented profile-directory baseline.
+The first slice has one global active profile selected by `bazframe use <profile>`. Direct membership commands are the next approved profile capability; packs are outside the current scope.
 
 ### Repository registration
 
@@ -114,7 +114,11 @@ This structured signal gives the adapter one bounded rule for both invocations. 
 
 For the first production slice, Bazframe discovers profile membership from the profile directory, validates skill resources through Pi's Agent Skills loader, exposes them to the runtime, projects collision aliases, and reports diagnostics.
 
-The broader product resolves direct skills and pack members from configured Agent Skills-compatible roots. Skill acquisition, versioning, updating, and publication remain the responsibility of the user or an external source provider. Bazframe retains provenance while resolving a profile so removing one pack does not remove a skill still supplied directly or by another pack.
+Skillbook owns skill acquisition, copying into its library, versioning, updating, publication, and deletion. Bazframe owns only profile membership. The approved first membership slice resolves Skillbook's library from `SKILLBOOK_LIBRARY`, then the deprecated `SKILLBOOK_LOCK_LIBRARY`, then `~/.skillbook`.
+
+`bazframe add <skill>` adds the named Skillbook skill to the active profile as an absolute directory symlink under `profiles/<id>/skills/`. `bazframe remove <skill>` removes only that verified membership symlink. Both commands are idempotent and must preserve Skillbook's skill directory and lockfile. Bazframe refuses physical entries, foreign or mismatched symlinks, replacement, copy fallback, and unsafe names. The Skillbook directory ID must match the skill's declared Agent Skills name.
+
+Existing physical profile skill directories remain readable for compatibility but are not managed by these commands. Packs, manifests, export, and Windows link fallback are outside this slice.
 
 Profile skills enter Pi through `resources_discover`.
 
@@ -130,9 +134,9 @@ The alias points to the original skill file and base directory. Diagnostics repo
 
 | Owner | Resources |
 |---|---|
-| User | profile and pack content, profile instructions, configured skill roots, and source-provider choices |
-| Skill source provider | skill acquisition, versioning, updating, publication, and Agent Skills-compatible directories |
-| Bazframe | pack and profile membership semantics, profile selection and resolution, active-profile state, repository registrations, adapter manifest, installed adapter artifact, and generated alias cache |
+| User | profile content, profile instructions, configured skill roots, and source-provider choices |
+| Skillbook | skill acquisition, library copies, versioning, updating, publication, deletion, lockfile, and Agent Skills-compatible source directories |
+| Bazframe | direct profile membership links, profile selection and resolution, active-profile state, repository registrations, adapter manifest, installed adapter artifact, and generated alias cache |
 | Repository | worktree files and project instructions |
 | Pi | settings, trust decisions, tools, models, extensions, packages, prompts, themes, system-prompt files, and native skills |
 
@@ -148,10 +152,12 @@ bazframe adapter uninstall pi
 bazframe init
 bazframe uninit
 bazframe use <profile>
+bazframe add <skill>
+bazframe remove <skill>
 bazframe status
 ```
 
-Adapter installation is explicit. `init` focuses on repository registration and prints the installation command when the adapter needs attention. Registrations follow the global active profile.
+Adapter installation is explicit. `init` focuses on repository registration and prints the installation command when the adapter needs attention. Registrations follow the global active profile. `add` and `remove` mutate only direct skill membership in that active profile; they never mutate Skillbook artifacts.
 
 `--force` repairs a drifted artifact only when a valid Bazframe ownership manifest identifies the destination. Files outside that ownership record require manual resolution.
 
@@ -174,13 +180,14 @@ A registered session applies a complete valid profile or reports an actionable e
 
 ## Research agenda
 
-Product research now focuses on:
+Product work now focuses on:
 
-- provider-neutral skill-root discovery and deterministic skill resolution;
-- pack and profile storage, commands, provenance, and add/remove semantics;
+- implementing safe active-profile `add` and `remove` against the live Skillbook library;
+- preserving Skillbook and legacy physical profile entries during membership changes;
 - semantic composition between personal and repository-recommended profiles;
-- portable profile and pack export with references to live skill sources;
 - instruction and skill conflict policy across multiple runtimes.
+
+Skill packs, profile export, and Bazframe-owned skill artifact lifecycle remain deferred.
 
 ## Implementation plan
 

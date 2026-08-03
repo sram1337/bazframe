@@ -6,13 +6,13 @@
 - [x] Define first-slice skill responsibilities: profile discovery, validation, runtime exposure, collision projection, and diagnostics.
 - [x] Keep skill acquisition, versioning, updating, and publication provider-owned; Bazframe consumes configured Agent Skills-compatible roots.
 - [x] Define profile, project, runtime, and effective-harness ownership for the first Pi slice (`docs/design.md`).
-- [x] Define Bazframe as the manager of skill packs, profiles, and profile application without coupling it to a skill-library provider.
+- [x] Define Bazframe as the manager of profiles, direct skill membership, and profile application while Skillbook owns skill artifacts and lifecycle.
 - [x] Define and implement `use` semantics for global active-profile selection.
-- [ ] Define provider-neutral skill-root resolution and collision behavior.
-- [ ] Define pack/profile storage and provenance-preserving add/remove command semantics.
+- [x] Define the first Skillbook-root resolution order and safe direct-membership representation (`docs/design.md`).
+- [ ] Implement active-profile `add <skill>` and `remove <skill>` with verified symlink-only membership semantics.
 - [x] Define first-slice Pi context ordering and native/profile skill-collision aliases.
 - [ ] Define semantic instruction conflicts and cross-runtime skill conflicts.
-- [ ] Define referenced versus self-contained profile export.
+- [ ] **Deferred:** Revisit skill packs or profile export only after an explicit product decision.
 
 ## Research
 
