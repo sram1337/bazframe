@@ -12,15 +12,14 @@ The production path uses direct Pi invocation through the global adapter:
 bazframe adapter install pi
 bazframe use <profile>
 cd <worktree>
-bazframe init
 bazframe status
 pi       # native context + profile
 pi -nc   # global context + profile
 ```
 
-This replaces `bazframe pi` and its temporary composed instruction file. Profiles use a profile-local `AGENTS.md` plus immediate Agent Skills-compatible skill directories. Rename an earlier prototype profile's `instructions.md` to `AGENTS.md` when migrating. Repository registration lives under `BAZFRAME_HOME/projects`.
+This replaces `bazframe pi` and its temporary composed instruction file. Profiles use a profile-local `AGENTS.md` plus immediate Agent Skills-compatible skill directories. Rename an earlier prototype profile's `instructions.md` to `AGENTS.md` when migrating. Git worktrees resolve project override before global policy; absent global state means enabled.
 
-Use `bazframe uninit` to remove a worktree registration and `bazframe adapter uninstall pi` to remove the verified extension artifact. The deprecated launcher remains available during this migration window.
+Use `bazframe global enable|disable` for global policy and `bazframe project enable|disable` for a worktree override. Old init/uninit forms now return migration guidance. Use `bazframe adapter uninstall pi` to remove the verified extension artifact. The deprecated launcher remains available during this migration window.
 
 ## Implemented launcher contract
 

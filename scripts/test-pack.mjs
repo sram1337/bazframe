@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -32,7 +32,13 @@ try {
   );
 
   const packageRoot = join(temporaryRoot, 'node_modules', 'bazframe-2-prototype');
-  assertExists(join(packageRoot, 'dist', 'cli.js'));
+  const packagedCli = join(packageRoot, 'dist', 'cli.js');
+  assertExists(packagedCli);
+  if (process.platform !== 'win32' && (statSync(packagedCli).mode & 0o111) === 0) {
+    throw new Error(`Expected packaged CLI to be executable: ${packagedCli}`);
+  }
+  assertExists(join(packageRoot, 'dist', 'tui', 'run-tui.js'));
+  assertExists(join(packageRoot, 'dist', 'application', 'tui-service.js'));
   assertExists(join(packageRoot, 'artifacts', 'pi', 'bazframe.ts'));
   assertExists(join(packageRoot, 'README.md'));
   assertExists(join(packageRoot, 'docs', 'prototype.md'));
@@ -52,6 +58,9 @@ try {
   if (manifest.bin?.bazframe !== './dist/cli.js') {
     throw new Error(`Unexpected packaged bin target: ${manifest.bin?.bazframe}`);
   }
+  if (manifest.dependencies?.ink !== '7.1.1' || manifest.dependencies?.react !== '19.2.8') {
+    throw new Error('Expected exact packaged Ink and React runtime dependencies.');
+  }
 
   const executable = process.platform === 'win32'
     ? join(temporaryRoot, 'node_modules', '.bin', 'bazframe.cmd')
@@ -61,6 +70,52 @@ try {
     throw new Error(
       `Installed CLI version check failed (${result.status}).\nstdout: ${result.stdout}\nstderr: ${result.stderr}`
     );
+  }
+
+  const nonInteractiveTui = spawnSync(executable, ['tui'], {
+    encoding: 'utf8',
+    shell: false,
+    env: { ...process.env, BAZFRAME_HOME: join(temporaryRoot, 'unused-tui-home') }
+  });
+  if (
+    nonInteractiveTui.status !== 1
+    || nonInteractiveTui.stdout !== ''
+    || !nonInteractiveTui.stderr.includes('requires interactive stdin and stdout')
+    || nonInteractiveTui.stderr.includes('\u001B')
+  ) {
+    throw new Error(
+      `Packed non-interactive TUI check failed (${nonInteractiveTui.status}).\nstdout: ${nonInteractiveTui.stdout}\nstderr: ${nonInteractiveTui.stderr}`
+    );
+  }
+  assertMissing(join(temporaryRoot, 'unused-tui-home'));
+
+  if (
+    process.platform !== 'win32'
+    && spawnSync('sh', ['-c', 'command -v script >/dev/null 2>&1']).status === 0
+  ) {
+    const scriptCommand = process.platform === 'darwin'
+      ? `script -q /dev/null ${shellQuote(executable)} tui`
+      : `script -q -e -c ${shellQuote(`${shellQuote(executable)} tui`)} /dev/null`;
+    const packedTui = spawnSync('sh', ['-c', `(sleep 0.5; printf q) | ${scriptCommand}`], {
+      encoding: 'utf8',
+      shell: false,
+      timeout: 8_000,
+      env: {
+        ...process.env,
+        BAZFRAME_HOME: join(temporaryRoot, 'packed-tui-home'),
+        SKILLBOOK_LIBRARY: join(temporaryRoot, 'packed-skillbook'),
+        NO_COLOR: '1'
+      }
+    });
+    if (
+      packedTui.status !== 0
+      || !packedTui.stdout.includes('\u001B[?1049h')
+      || !packedTui.stdout.includes('\u001B[?1049l')
+    ) {
+      throw new Error(
+        `Packed interactive TUI check failed (${packedTui.status}).\nstdout: ${packedTui.stdout}\nstderr: ${packedTui.stderr}`
+      );
+    }
   }
 
   const lifecycleEnvironment = {
@@ -95,6 +150,10 @@ try {
 } finally {
   if (tarballPath !== undefined && existsSync(tarballPath)) unlinkSync(tarballPath);
   rmSync(temporaryRoot, { recursive: true, force: true });
+}
+
+function shellQuote(value) {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function assertExists(path) {

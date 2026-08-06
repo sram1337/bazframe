@@ -1,10 +1,11 @@
-import { readdir, symlink } from 'node:fs/promises';
+import { readdir, rm, symlink } from 'node:fs/promises';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   discoverSkillDirectories,
   loadProfile,
   readActiveProfile,
   resolveBazframeHome,
+  selectProfile,
   writeActiveProfile
 } from '../../../src/profiles/profile-store.js';
 import { createTempDirectory, type TempDirectory } from '../../helpers/temp-directory.js';
@@ -74,7 +75,20 @@ describe('profile store', () => {
     expect((await readdir(home)).filter((name) => name.includes('.tmp'))).toEqual([]);
   });
 
-  it('rejects missing and malformed active state', async () => {
+  it('validates and selects a profile under the shared state lock', async () => {
+    const directory = await temporary();
+    const home = directory.path('home');
+    await directory.write('home/profiles/focused/AGENTS.md', 'focused');
+    await directory.mkdir('home/profiles/focused/skills');
+    await expect(selectProfile(home, 'focused')).resolves.toMatchObject({ id: 'focused' });
+    expect(await readActiveProfile(home)).toBe('focused');
+
+    await directory.mkdir('home/profiles/broken/skills');
+    await expect(selectProfile(home, 'broken')).rejects.toThrow(/instructions/u);
+    expect(await readActiveProfile(home)).toBe('focused');
+  });
+
+  it('rejects missing, malformed, and symlinked active state', async () => {
     const directory = await temporary();
     const home = directory.path('home');
     await expect(readActiveProfile(home)).rejects.toThrow(/bazframe use/u);
@@ -84,6 +98,16 @@ describe('profile store', () => {
     await expect(readActiveProfile(home)).rejects.toThrow(/valid UTF-8/u);
     await directory.write('home/active-profile', 'focused\0\n');
     await expect(readActiveProfile(home)).rejects.toThrow(/NUL/u);
+
+    if (process.platform !== 'win32') {
+      await directory.write('selection.txt', 'focused\n');
+      await rm(directory.path('home/active-profile'));
+      await symlink(
+        directory.path('selection.txt'),
+        directory.path('home/active-profile')
+      );
+      await expect(readActiveProfile(home)).rejects.toThrow(/regular UTF-8 file/u);
+    }
   });
 });
 

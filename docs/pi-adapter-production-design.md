@@ -10,14 +10,14 @@
 
 ## 1. Product boundary
 
-Bazframe's first Pi integration is a global Pi extension. Pi remains the session entrypoint, and Bazframe supplies the active profile for registered Git worktrees.
+Bazframe's first Pi integration is a global Pi extension. Pi remains the session entrypoint. Absent global state means enabled in Git and non-Git directories. In Git worktrees, explicit project policy overrides global policy; effective-disabled sessions remain native.
 
 ```bash
 pi       # Pi native context + active Bazframe profile
 pi -nc   # restored global Pi context + active Bazframe profile
 ```
 
-Pi owns runtime settings and resources. Bazframe owns profile selection, repository registration, adapter installation, and generated profile-skill aliases.
+Pi owns runtime settings and resources. Bazframe owns profile lifecycle, selection, membership links, global policy, project overrides, adapter installation, and generated aliases. Profile content remains user-owned; `profile remove --force` is explicit authorization to delete the named non-active physical profile.
 
 ## 2. User journeys
 
@@ -29,18 +29,19 @@ bazframe adapter install pi
 bazframe status
 ```
 
-Adapter installation is explicit. The command places one self-contained Bazframe artifact in Pi's effective global extension directory and records its identity under the Bazframe home. Pi auto-discovers the extension, which lets the user invoke `pi` directly; separating installation from `init` prevents repository registration from silently changing Pi's global configuration.
+Adapter installation is explicit. The command places one self-contained Bazframe artifact in Pi's effective global extension directory and records its identity under the Bazframe home. Pi auto-discovers the extension, which lets the user invoke `pi` directly. Absent global state enables Bazframe without a policy file. Project overrides take precedence.
 
-### 2.2 Register a repository
+### 2.2 Configure defaults
 
-From any directory inside a Git worktree:
+From any directory, configure the global active profile:
 
 ```bash
-bazframe use focused
-bazframe init
+bazframe profile add focused
+$EDITOR ~/.bazframe/profiles/focused/AGENTS.md
+bazframe profile use focused
 ```
 
-`init` validates the active profile and records the canonical worktree root externally. The final summary explains the two Pi context modes.
+`profile add` creates the empty physical profile shape without selecting it. `profile use` validates and selects it; top-level `bazframe use focused` remains a supported alias. Every working directory that inherits enabled global policy uses that profile.
 
 ### 2.3 Run and reload
 
@@ -50,7 +51,7 @@ pi
 pi -nc
 ```
 
-A running session uses `/bzf-reload` to reload profile instructions, skills, and aliases as one operation.
+A running session uses `/bazframe reload` to await Pi's reload of policy, profile instructions, skills, and aliases.
 
 ### 2.4 Inspect
 
@@ -63,46 +64,64 @@ bazframe status
 Inside Pi:
 
 ```text
-/bzf-explain
+/bazframe info
+/bazframe reload
 ```
 
-### 2.5 Remove
+### 2.5 Global and project policy
 
 ```bash
-bazframe uninit
-bazframe adapter uninstall pi
+bazframe global enable|disable
+bazframe project enable|disable
 ```
 
-`uninit` removes the current worktree's registration. Adapter uninstall removes the verified installed artifact, ownership manifest, and generated adapter cache. User profiles and active-profile selection persist.
+Within Git worktrees, project override wins over global policy. Project commands remain Git-only. Non-Git directories inherit global policy. Disable operations need neither adapter nor profile. Global enable validates runtime setup before removing disabled state; project enable validates because it activates the current worktree. Adapter lifecycle remains orthogonal and preserves policy.
 
 ## 3. Command decisions
 
 | Command | Responsibility |
 |---|---|
+| `bazframe adapter` / `adapters` | Show supported adapters, current state, and commands. |
 | `bazframe adapter install pi [--force]` | Install, update, or explicitly repair the global Pi extension. |
 | `bazframe adapter uninstall pi` | Remove the verified Bazframe-owned Pi extension. |
-| `bazframe init` | Register the canonical current Git worktree against the global active profile. |
-| `bazframe uninit` | Remove the canonical current worktree's registration. |
-| `bazframe use <profile>` | Atomically select the global active profile. |
-| `bazframe status` | Report adapter, registration, profile, and actionable problems. |
+| `bazframe global` | Show global policy and state. |
+| `bazframe global enable` / `disable` | Remove disabled global state or write it atomically. |
+| `bazframe project` / `projects` | List overrides and show project-over-global effective behavior. |
+| `bazframe project enable` / `disable` | In a Git worktree, set effective project behavior using an override only when it differs from global policy. |
+| `bazframe profile` / `profiles` | List profiles, mark the active selection, and show commands. |
+| `bazframe profile add <profile>` | Create an empty physical profile without selecting it. |
+| `bazframe profile duplicate <source> <new>` | Copy all physical profile content without following symlinks or changing selection. |
+| `bazframe profile remove <profile> [--force]` | Remove a non-active generated-empty profile, or explicitly delete its physical contents with `--force`. |
+| `bazframe profile rename <old> <new>` | Rename a physical profile and update matching active selection. |
+| `bazframe profile use <profile>` | Atomically validate and select the global active profile. |
+| `bazframe profile list` | Print runtime-valid physical profile IDs in lexical order for scripts. |
+| `bazframe profile current` | Print only the selected profile ID for scripts. |
+| `bazframe skill` / `skills` | List valid skills in the resolved Skillbook library. |
+| `bazframe profile skills` | List immediate skill entries discovered in the active profile; Pi performs full runtime validation. |
+| `bazframe profile skills add <skill>` | Add a Skillbook-backed link to the active profile. |
+| `bazframe profile skills remove <skill>` | Remove only the verified active-profile membership link. |
+| `bazframe status` | Report adapter, effective project behavior, required profile state, and actionable problems. |
+
+Top-level `use`, `add`, and `remove` remain compatibility aliases. Old `init`/`uninit` forms return migration guidance. Bare resource overviews are human-readable; `profile list` and `profile current` retain concise scripting output.
 
 Decisions:
 
 - Adapter installation is a separate explicit command.
-- Every first-slice registration follows the global active profile.
+- A Git-worktree project override wins over global policy; absent global state is enabled everywhere, absent Git project state inherits, and non-Git directories inherit without project state.
 - Plain `pi` is the additive-context mode; `pi -nc` is instruction-context replacement.
 - `adapter install pi --force` repairs a drifted destination only when a valid ownership manifest identifies that destination.
 - Pi is invoked directly by the user.
+- CLI color is terminal-aware presentation only: pipes remain plain, `NO_COLOR` disables it, and nonzero `FORCE_COLOR` explicitly enables it when `NO_COLOR` is absent.
 
 ## 4. Runtime behavior
 
-The extension activates when the canonical Git root matches an external registration.
+The extension activates when project-over-global policy resolves enabled.
 
-At startup and `/bzf-reload`, it:
+At startup and reload, it:
 
-1. resolves the canonical Git root with repository-selection environment variables cleared;
-2. resolves and validates the external registration;
-3. resolves and validates the active profile;
+1. attempts to resolve a canonical Git root with repository-selection environment variables cleared;
+2. resolves exact bounded global policy in every directory and optional project state when a Git root exists;
+3. applies an available Git-worktree project override before global policy, bypassing Bazframe when disabled;
 4. inspects Pi's loaded skill commands and provenance;
 5. projects colliding profile skills as `<name>-x-bazframe` in external cache;
 6. contributes profile and alias skill paths through `resources_discover`;
@@ -124,8 +143,9 @@ Default layout:
 │   └── <profile>/
 │       ├── AGENTS.md
 │       └── skills/
-├── projects/
-│   └── <sha256-canonical-root>.json
+├── global.json                       # present only when globally disabled
+├── projects/                         # absent/empty when projects inherit
+│   └── <sha256-canonical-root>.json  # enabled/disabled overrides or legacy records
 ├── adapters/
 │   └── pi.json
 ├── adapter-cache/
@@ -142,8 +162,8 @@ $PI_CODING_AGENT_DIR/extensions/
 
 Ownership categories:
 
-- **User-owned:** profiles, profile instructions, and source skills.
-- **Bazframe-managed:** selection state, registrations, adapter manifest, installed artifact, locks, and alias cache.
+- **User-owned:** profile content and instructions, configured skill roots, and source skills; `profile remove --force` explicitly authorizes deletion of the named non-active physical profile content.
+- **Bazframe-managed:** profile lifecycle operations, direct membership links, selection state, exceptional project overrides, adapter manifest, installed artifact, locks, and alias cache.
 - **Repository-owned:** the Git worktree and its project instructions.
 - **Pi-owned:** runtime settings, trust, tools, models, packages, extensions, prompts, themes, system prompts, and native skills.
 
@@ -164,18 +184,9 @@ Ownership categories:
 
 The manifest path is `adapters/pi.json`. Paths are absolute and normalized. The hash and byte count identify the exact installed artifact.
 
-### 6.2 Repository registration
+### 6.2 Global policy and project override
 
-```json
-{
-  "schemaVersion": 1,
-  "repository": "/canonical/path/to/repo",
-  "mode": "adaptive-context",
-  "profile": "active"
-}
-```
-
-The registration filename is the SHA-256 of the canonical repository path. The extension validates both the key and stored path.
+Absent `global.json` means enabled. Its only stored form is exact schema-v1 disabled state. No project record means inherit global. Exact schema-v1 project records remain legacy inherit state; schema-v2 disables and schema-v3 enables. Extra, malformed, mismatched, unsupported, or symlinked state is rejected. Project filenames remain the SHA-256 of canonical repository paths.
 
 ## 7. Filesystem and concurrency policy
 
@@ -191,9 +202,11 @@ Bazframe-managed writes follow one shared policy:
 
 A lock records PID, creation time, command, and target. A live lock produces an actionable busy result. A stale lock whose PID is absent can be replaced by the next owning command after reporting the recovery.
 
-Bazframe-managed directories reject symlinked state and adapter destinations. User-owned profile entries may use symlinks; validation follows them as trusted profile content and applies regular-file, UTF-8, NUL, and size checks to the resolved targets.
+Bazframe-managed state, including `active-profile`, rejects symlinks. Profile lifecycle requires a physical profile root, while runtime validation follows user-owned `AGENTS.md`, `skills/`, and immediate skill-entry symlinks as trusted profile content and applies the existing file and skill checks to resolved targets. Duplicate and rename intentionally validate only the source physical root so broken provider references do not prevent copying or preserving profile content. Duplication preserves symlinks verbatim, stages the full copy under the physical profiles directory, cleans failed staging, and publishes with a final rename.
 
-The CLI performs state mutations. Runtime cache materialization uses atomic writes to deterministic profile/alias paths. Old alias files are inert because `resources_discover` returns only aliases selected for the current load. Adapter uninstall clears the full Pi alias cache.
+The CLI performs state mutations. Profile add/duplicate/remove/rename/select share the global state lock; membership takes it before a profile-specific lock. Actual create, duplicate, remove, and identity-changing rename clear affected alias cache, while idempotent add and same-ID rename preserve it. Runtime cache materialization uses atomic writes to deterministic profile/alias paths. Old alias files are inert because `resources_discover` returns only aliases selected for the current load. Adapter uninstall clears the full Pi alias cache.
+
+Locks coordinate Bazframe writers. A non-cooperating external process can still race profile check/create/duplicate/rename/remove pathnames or final membership unlink after verification because portable Node APIs do not provide every conditional pathname operation needed to exclude such writers.
 
 ## 8. Adapter installation lifecycle
 
@@ -225,31 +238,30 @@ Install flow:
 
 An exact desired artifact found without a manifest can be adopted because its bytes are reconstructably Bazframe's packaged artifact. Other occupied files stay under their current owner.
 
-Upgrade preserves profiles, registrations, and alias cache. A package migration runs only after validating the source schema and writing a recoverable destination.
+Upgrade preserves profiles, global policy, project overrides and legacy records, and alias cache. A package migration runs only after validating the source schema and writing a recoverable destination.
 
 Uninstall verifies the installed hash against the manifest, removes the artifact, removes the manifest, and clears the Pi alias cache. Drift remains visible for `--force` repair or manual recovery.
 
-## 9. Repository registration lifecycle
+## 9. Global and project policy lifecycle
 
-`init` requirements:
+`global disable` writes exact schema-v1 disabled state atomically and idempotently without requiring adapter/profile. `global enable` validates current adapter and profile before removing disabled state. Invalid state is preserved.
 
-- resolve a Git worktree from the caller's exact working directory;
-- clear inherited `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`, and related repository selectors;
-- canonicalize the worktree root;
-- require a current Pi adapter installation;
-- validate the active profile;
-- compute the registration key from the canonical root;
-- write the schema-v1 registration atomically;
-- treat an identical registration as success;
-- report both Pi context modes in the final summary.
+Project commands resolve the canonical Git root and global policy. `project enable` validates adapter/profile, writes schema-v3 enabled override when global is disabled, and otherwise removes valid current state to inherit enabled. `project disable` requires no runtime setup, writes schema-v2 disabled override when global is enabled, and otherwise removes valid state to inherit disabled. Existing opposite overrides survive global policy changes. Invalid current state is preserved.
 
-`uninit` resolves the same canonical root and removes its matching registration. Canonical local path is the first-slice identity, so a moved worktree is initialized at its new location.
-
-Registration acceptance captures a content snapshot and Git status before and after each lifecycle operation.
+Lifecycle acceptance captures a content snapshot and Git status before and after each operation.
 
 ## 10. Profiles and skills
 
 Profile IDs contain 1–64 lowercase ASCII letters or digits separated by single hyphens.
+
+Lifecycle behavior:
+
+- `profile add` creates zero-byte physical `AGENTS.md` and an empty physical `skills/` directory without selecting it; an existing runtime-valid physical-root profile is `current`;
+- `profile list` reports runtime-valid physical-root profiles and warns on invalid neighbors without contaminating stdout;
+- bare `profile` and `profiles` render the human profile overview, while `profile list` and `profile current` remain concise scripting commands;
+- duplicate copies all child content without resolving provider targets, preserves symlinks verbatim, refuses replacement and profile-root symlinks, publishes only after a complete staged copy, and leaves active selection unchanged;
+- rename preserves all child content without resolving provider targets, refuses replacement and profile-root symlinks, and updates active selection with rollback on pre-commit write failure;
+- remove always refuses the selected ID, including a selected-but-missing profile; without `--force` it accepts only the exact generated-empty shape, and force-removal unlinks symlink entries without following targets.
 
 Instruction requirements:
 
@@ -260,7 +272,9 @@ Instruction requirements:
 
 Skill requirements:
 
-- immediate children of `skills/` are loaded in lexical directory-name order;
+- bare `skills` lists valid physical skills from the one resolved Skillbook root, warns about invalid neighbors, and does not claim provider lifecycle ownership;
+- missing add targets use bounded edit-distance matching to suggest valid available skills;
+- immediate children of profile `skills/` are loaded in lexical directory-name order;
 - Pi's public Agent Skills loader parses each skill;
 - duplicate profile skill names are profile errors;
 - available profile names remain unchanged;
@@ -279,9 +293,9 @@ Status reads existing state and reports:
 
 - Bazframe home;
 - Pi agent directory and adapter path;
-- adapter state, version, hash, and drift;
-- canonical current Git root;
-- registration state;
+- adapter state, version, installed path, and drift;
+- canonical current Git root when one exists, otherwise explicit non-Git state;
+- current project state and effective default/disabled behavior;
 - active-profile ID and validation;
 - instruction source and skill count;
 - aliases present in cache;
@@ -290,21 +304,20 @@ Status reads existing state and reports:
 
 Status returns success for a healthy setup, a distinct attention status for incomplete setup or drift, and Bazframe failure for malformed or unsafe state.
 
-### 11.2 `/bzf-explain`
+### 11.2 `/bazframe info`
 
-The runtime command reports:
+The runtime command reports only:
 
-- additive or instruction-context replacement mode;
-- global-context source;
-- context files reported by Pi;
-- profile ID and instruction source;
-- profile skills and collision aliases;
-- registration and canonical repository paths;
-- Pi-owned resource categories.
+- `Profile: <effective-id>` or `Profile: (none)`;
+- effective context entries in Pi order, each labeled `(pi)` or `(bazframe)`, or `Context: (none)`;
+- `Skills:` followed by deduplicated, lexically sorted names from Pi's effective `skill:` commands, or `(none)`;
+- a deterministic comma-separated `Collisions: original -> alias` line only when aliases exist.
+
+An active error-free profile contributes its instructions after Pi context. If Pi context is empty, the restored global context is listed first when present. Error, disabled, and unresolved states do not claim an effective profile or Bazframe context. The notification may use error severity without adding an error-detail line.
 
 ### 11.3 Failure policy
 
-A registered session applies the complete validated profile. Malformed registration, invalid selection, invalid instructions, unreadable skills, duplicate names, alias collision, or unsafe paths produce a visible error before an agent turn. Ordinary Pi behavior applies when the current worktree has no matching registration.
+A default-enabled session applies the complete validated profile in Git and non-Git directories. Malformed global or applicable project state, invalid selection, invalid instructions, unreadable skills, duplicate names, alias collision, or unsafe paths produce a visible error before an agent turn. A valid effective-disabled state retains ordinary Pi behavior.
 
 ## 12. Security and compatibility
 
@@ -312,7 +325,7 @@ A registered session applies the complete validated profile. Malformed registrat
 - Profiles and skills are trusted user-controlled instructions and code.
 - External writes are confined to validated Bazframe-managed state and the installed extension destination.
 - Ownership hashes protect modified and independently owned extension files.
-- Locking and atomic rename protect concurrent CLI operations.
+- Locking and atomic operations coordinate concurrent Bazframe CLI operations; non-cooperating external pathname races remain a documented boundary.
 - Runtime Git discovery uses an argument array, sanitized environment, captured output, and timeout.
 - The initial verified platform is macOS with Node `>=22.19.0` and Pi `0.82.x`.
 - Adapter startup checks the Pi APIs required for `resources_discover`, command provenance, reload, and structured system-prompt options.
@@ -323,15 +336,16 @@ A registered session applies the complete validated profile. Malformed registrat
 A production-ready slice proves:
 
 1. clean install, idempotent reinstall, managed update, explicit drift repair, clean uninstall, and preservation of occupied files;
-2. init, status, and uninit with stable repository content and Git status;
+2. file-free enabled defaults in Git and non-Git directories plus global/project enable-disable precedence with stable repository content and Git status;
 3. plain `pi` loads native context once and appends the active profile;
 4. `pi -nc` restores global context once, excludes ancestor/repository context, and appends the profile;
-5. `/bzf-reload` observes active-profile instruction and skill changes;
+5. `/bazframe reload` observes policy, active-profile instruction, and skill changes;
 6. native project resources follow Pi's project-trust behavior;
 7. skill collisions produce deterministic `-x-bazframe` aliases and diagnostics;
-8. other repositories retain native Pi behavior;
-9. broken registration, profile, cache, adapter, and lock states produce corrective diagnostics;
-10. packed-package tests exercise the installed CLI and a supported Pi executable in isolated user state.
+8. global disable, enabled-project override, disabled-project override, and non-Git global inheritance follow precedence;
+9. broken project state, profile, cache, adapter, and lock states produce corrective diagnostics;
+10. profile lifecycle tests cover guarded deletion, force preservation of symlink targets, staged duplication with verbatim symlinks and unchanged selection, active rename/rollback, provider-independent rename, selection, listing, cache cleanup/no-op preservation, and state symlink rejection;
+11. packed-package tests exercise the installed CLI and executable mode plus a supported Pi executable in isolated user state.
 
 ## 14. Implementation milestones
 
@@ -341,7 +355,7 @@ Deliver:
 
 - shared Bazframe-home and Pi-agent-directory resolution;
 - atomic file writes, permissions, locks, hashing, and ownership comparison;
-- schema-v1 adapter manifest and registration codecs;
+- schema-v1 adapter/global policy plus legacy-inherit/schema-v2-disabled/schema-v3-enabled project codecs;
 - focused unit tests for path, symlink, lock, codec, and drift states.
 
 Gate: unit tests cover every filesystem state transition and leave fixtures stable after failure.
@@ -357,11 +371,11 @@ Deliver:
 
 Gate: isolated install, idempotent reinstall, update, drift, occupied destination, force repair, and uninstall tests pass against the packed package.
 
-### Milestone 3: registration and status
+### Milestone 3: project state and status
 
 Deliver:
 
-- `init` and `uninit`;
+- `global enable/disable` and `project enable/disable`;
 - production `status` output and exit semantics;
 - active-profile validation shared by CLI and adapter.
 
@@ -373,11 +387,11 @@ Deliver:
 
 - adaptive context composition;
 - profile skill discovery and collision aliases;
-- `/bzf-explain` and `/bzf-reload`;
+- the single `/bazframe info | reload` namespace;
 - compatibility and visible failure handling;
 - bounded asynchronous Git discovery and file operations where startup latency benefits.
 
-Gate: isolated Pi 0.82 tests pass for both context modes, reload, collisions, trust-owned resources, malformed state, and other repositories.
+Gate: isolated Pi 0.82 tests pass for both context modes, reload, collisions, trust-owned resources, malformed state, file-free defaults, disabled sessions, and enabled/disabled non-Git directories.
 
 ### Milestone 5: package and migration gate
 
@@ -394,17 +408,18 @@ Gate: install/build/typecheck/lint/unit/integration/pack/real-Pi checks pass fro
 
 | Area | Evidence |
 |---|---|
-| External state and codecs | Unit coverage for paths, symlinks, permissions, atomic replacement, locks, stale recovery, manifests, registrations, hashing, and every adapter ownership state. |
+| External state and codecs | Unit coverage for paths, symlinks, atomic replacement, locks, manifests, exact global policy, legacy inherit, disabled/enabled project state, hashing, and adapter ownership. |
 | Adapter lifecycle | Unit and packed-package checks cover install, idempotence, managed update, adoption, drift preservation, manifest-gated repair, occupied destinations, uninstall, and cache cleanup. |
-| Registration and status | Unit and fake-CLI integration checks cover canonical registration, read-only status, exit status 3, corrective actions, malformed state, and stable worktree snapshots. |
-| Runtime adapter | The isolated Pi 0.82 suite covers additive and replacement context, one global-context copy, reload, native resources, profile skills, collision aliases, explanation, registration gating, and stable repositories. |
-| Packed real-Pi flow | `npm run test:real-pi` packs and installs Bazframe, uses the installed CLI for adapter lifecycle and registration, and probes both Pi context modes with profile instructions and a profile skill. |
+| Policy and status | Unit and fake-CLI integration cover global/project precedence, file-free defaults, enabled/disabled overrides, legacy compatibility, read-only status, malformed-state preservation, and stable worktrees. |
+| Profile and membership lifecycle | Unit and built-CLI integration cover create/duplicate/list/current/use/rename/remove, force guards, active and missing-active refusal, selection rollback, staged-copy cleanup, symlink policy, broken provider references, alias-cache cleanup/no-op preservation, Skillbook preservation, and strict CLI parsing. |
+| Runtime adapter | Packed Pi 0.82 probes cover context modes, profile skills, global disable, project enable/disable precedence, and stable repositories. Deterministic current-artifact tests cover the exact compact `/bazframe info` projection, context restoration reporting, effective skills and collisions, command registration, strict argument dispatch, awaited reload, and fail-closed behavior. The packed real-Pi gate does not claim live slash-command coverage. |
+| Packed real-Pi flow | `npm run test:real-pi` proves file-free defaults, global disable, project-enabled override, project-disabled override, both Pi context modes, provider preservation, and stable Git status. |
 
-The repeatable gates are:
+The repeatable production gates are:
 
 ```bash
 npm test
 npm run test:real-pi
-BAZFRAME_ADAPTER_SOURCE="$PWD/artifacts/pi/bazframe.ts" \
-  node experiments/pi-no-launcher-adapter/run-spike.mjs
 ```
+
+The earlier registration-gated spike remains historical evidence for the adaptive Pi API boundary; its activation assumptions are superseded by project-over-global policy.

@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { readFile, readdir, stat } from 'node:fs/promises';
+import { lstat, readFile, readdir, stat } from 'node:fs/promises';
 import { readUtf8InstructionFile } from '../core/content.js';
 import { BazframeError, errorCode } from '../core/errors.js';
 import { writeFileAtomic } from '../state/atomic-file.js';
@@ -116,17 +116,17 @@ export async function readActiveProfile(bazframeHome: string): Promise<string> {
   const statePath = join(bazframeHome, ACTIVE_PROFILE_FILE);
   let metadata;
   try {
-    metadata = await stat(statePath);
+    metadata = await lstat(statePath);
   } catch (error) {
     if (errorCode(error) === 'ENOENT') {
       throw new BazframeError(
         'NO_ACTIVE_PROFILE',
-        'No active profile. Run `bazframe use <profile>` first.'
+        'No active profile. Run `bazframe profile use <profile>` (or `bazframe use <profile>`) first.'
       );
     }
     throw stateReadError(statePath, error);
   }
-  if (!metadata.isFile() || metadata.size > MAX_STATE_BYTES) {
+  if (metadata.isSymbolicLink() || !metadata.isFile() || metadata.size > MAX_STATE_BYTES) {
     throw new BazframeError(
       'INVALID_ACTIVE_PROFILE_STATE',
       `Active-profile state must be a regular UTF-8 file no larger than ${MAX_STATE_BYTES} bytes: ${statePath}`
@@ -172,6 +172,24 @@ export async function readActiveProfile(bazframeHome: string): Promise<string> {
   return profileId;
 }
 
+export async function selectProfile(
+  bazframeHome: string,
+  profileId: string
+): Promise<Profile> {
+  assertSafeProfileId(profileId);
+  const statePath = join(bazframeHome, ACTIVE_PROFILE_FILE);
+  return withStateLock(
+    join(bazframeHome, 'locks', 'state.lock'),
+    { command: 'bazframe profile use', target: statePath },
+    async () => {
+      const profile = await loadProfile(bazframeHome, profileId);
+      await writeFileAtomic(statePath, `${profileId}\n`, { managedRoot: bazframeHome });
+      return profile;
+    },
+    { managedRoot: bazframeHome }
+  );
+}
+
 export async function writeActiveProfile(
   bazframeHome: string,
   profileId: string
@@ -180,7 +198,7 @@ export async function writeActiveProfile(
   const statePath = join(bazframeHome, ACTIVE_PROFILE_FILE);
   await withStateLock(
     join(bazframeHome, 'locks', 'state.lock'),
-    { command: 'bazframe use', target: statePath },
+    { command: 'bazframe profile use', target: statePath },
     () => writeFileAtomic(statePath, `${profileId}\n`, { managedRoot: bazframeHome }),
     { managedRoot: bazframeHome }
   );

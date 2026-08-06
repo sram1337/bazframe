@@ -2,19 +2,34 @@ import { createHash } from 'node:crypto';
 import { isAbsolute, join, resolve } from 'node:path';
 import { BazframeError } from '../core/errors.js';
 
-export interface RepositoryRegistration {
+export interface LegacyRepositoryRegistration {
   schemaVersion: 1;
   repository: string;
   mode: 'adaptive-context';
   profile: 'active';
 }
 
+export interface DisabledRepositoryOverride {
+  schemaVersion: 2;
+  repository: string;
+  disabled: true;
+}
+
+export interface EnabledRepositoryOverride {
+  schemaVersion: 3;
+  repository: string;
+  enabled: true;
+}
+
+export type RepositoryProjectState =
+  | LegacyRepositoryRegistration
+  | DisabledRepositoryOverride
+  | EnabledRepositoryOverride;
+
 export function createRepositoryRegistration(
   canonicalRepository: string
-): RepositoryRegistration {
-  if (!isNormalizedAbsolutePath(canonicalRepository)) {
-    throw invalidRegistration('Repository registration');
-  }
+): LegacyRepositoryRegistration {
+  assertCanonicalRepository(canonicalRepository, 'Repository registration');
   return {
     schemaVersion: 1,
     repository: canonicalRepository,
@@ -23,11 +38,33 @@ export function createRepositoryRegistration(
   };
 }
 
+export function createDisabledRepositoryOverride(
+  canonicalRepository: string
+): DisabledRepositoryOverride {
+  assertCanonicalRepository(canonicalRepository, 'Repository override');
+  return {
+    schemaVersion: 2,
+    repository: canonicalRepository,
+    disabled: true
+  };
+}
+
+export function createEnabledRepositoryOverride(
+  canonicalRepository: string
+): EnabledRepositoryOverride {
+  assertCanonicalRepository(canonicalRepository, 'Repository override');
+  return {
+    schemaVersion: 3,
+    repository: canonicalRepository,
+    enabled: true
+  };
+}
+
 export function decodeRepositoryRegistration(
   text: string,
-  source = 'repository registration',
+  source = 'repository project state',
   expectedRepository?: string
-): RepositoryRegistration {
+): RepositoryProjectState {
   let value: unknown;
   try {
     value = JSON.parse(text);
@@ -39,39 +76,64 @@ export function decodeRepositoryRegistration(
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw invalidRegistration(source);
   }
-  const candidate = value as Partial<RepositoryRegistration>;
+  const candidate = value as Partial<RepositoryProjectState> & Record<string, unknown>;
   if (
-    candidate.schemaVersion !== 1
-    || typeof candidate.repository !== 'string'
+    typeof candidate.repository !== 'string'
     || !isNormalizedAbsolutePath(candidate.repository)
-    || candidate.mode !== 'adaptive-context'
-    || candidate.profile !== 'active'
     || (expectedRepository !== undefined && candidate.repository !== expectedRepository)
   ) {
     throw invalidRegistration(source);
   }
-  return {
-    schemaVersion: 1,
-    repository: candidate.repository,
-    mode: 'adaptive-context',
-    profile: 'active'
-  };
+  if (
+    candidate.schemaVersion === 1
+    && candidate.mode === 'adaptive-context'
+    && candidate.profile === 'active'
+    && hasExactKeys(candidate, ['schemaVersion', 'repository', 'mode', 'profile'])
+  ) {
+    return {
+      schemaVersion: 1,
+      repository: candidate.repository,
+      mode: 'adaptive-context',
+      profile: 'active'
+    };
+  }
+  if (
+    candidate.schemaVersion === 2
+    && candidate.disabled === true
+    && hasExactKeys(candidate, ['schemaVersion', 'repository', 'disabled'])
+  ) {
+    return {
+      schemaVersion: 2,
+      repository: candidate.repository,
+      disabled: true
+    };
+  }
+  if (
+    candidate.schemaVersion === 3
+    && candidate.enabled === true
+    && hasExactKeys(candidate, ['schemaVersion', 'repository', 'enabled'])
+  ) {
+    return {
+      schemaVersion: 3,
+      repository: candidate.repository,
+      enabled: true
+    };
+  }
+  throw invalidRegistration(source);
 }
 
 export function encodeRepositoryRegistration(
-  registration: RepositoryRegistration
+  registration: RepositoryProjectState
 ): string {
   const validated = decodeRepositoryRegistration(
     JSON.stringify(registration),
-    'repository registration'
+    'repository project state'
   );
   return `${JSON.stringify(validated, null, 2)}\n`;
 }
 
 export function repositoryRegistrationId(canonicalRepository: string): string {
-  if (!isNormalizedAbsolutePath(canonicalRepository)) {
-    throw invalidRegistration('Repository registration');
-  }
+  assertCanonicalRepository(canonicalRepository, 'Repository project state');
   return createHash('sha256').update(canonicalRepository).digest('hex');
 }
 
@@ -86,6 +148,17 @@ export function repositoryRegistrationPath(
   );
 }
 
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length
+    && actual.every((key, index) => key === expected[index]);
+}
+
+function assertCanonicalRepository(repository: string, source: string): void {
+  if (!isNormalizedAbsolutePath(repository)) throw invalidRegistration(source);
+}
+
 function isNormalizedAbsolutePath(path: string): boolean {
   return path.length > 0
     && !path.includes('\0')
@@ -96,6 +169,6 @@ function isNormalizedAbsolutePath(path: string): boolean {
 function invalidRegistration(source: string): BazframeError {
   return new BazframeError(
     'REGISTRATION_INVALID',
-    `${source} must identify a canonical repository in adaptive-context mode with the active profile.`
+    `${source} must be an exact legacy inherit record, disabled override, or enabled override for a canonical repository.`
   );
 }

@@ -1,20 +1,39 @@
 # Bazframe 2
 
-> **First production adapter slice implemented.** Adapter lifecycle, registration, status, adaptive context, and profile skills are validated for Pi 0.82.x. The earlier `bazframe pi` launcher is deprecated and documented in the [prototype migration contract](docs/prototype.md).
+> **First production adapter slice implemented; first TUI management slice in progress.** Adapter lifecycle, profile lifecycle, project-over-global policy, status, adaptive context, profile skills, and direct Skillbook-backed membership are validated for Pi 0.82.x. `bazframe tui` now manages profiles and selected-profile membership while broader terminal validation continues. The earlier `bazframe pi` launcher is deprecated and documented in the [prototype migration contract](docs/prototype.md).
 
 The accepted first [Pi integration boundary](docs/pi-adaptive-context-adapter.md) uses a global extension with direct Pi invocation: plain `pi` keeps native context and adds the profile, while `pi -nc` restores global Pi instructions and adds the profile. The adapter responds to Pi's structured context list and leaves native project resources under Pi's ownership.
 
-Bazframe 2 treats a coding-agent harness as a portable, first-class object. The checkout contains the validated launcher prototype and the production Pi-adapter installation lifecycle:
+Bazframe 2 treats a coding-agent harness as a portable, first-class object. Its CLI is organized around resources: a bare singular or plural resource shows a human overview, while a scoped verb changes that resource.
 
-```text
-bazframe adapter install pi [--force]
-bazframe adapter uninstall pi
-bazframe init
-bazframe uninit
-bazframe status
-bazframe use <profile>
-bazframe pi [--dry-run] [-- <pi args>]
+## CLI at a glance
+
+| Resource | Overview | Common actions |
+|---|---|---|
+| Profiles | `bazframe profile` or `bazframe profiles` | `profile add`, `duplicate`, `use`, `rename`, `remove`, `list`, `current` |
+| Available skills | `bazframe skill` or `bazframe skills` | Browse the resolved Skillbook library |
+| Active-profile skills | `bazframe profile skills` | `profile skills add`, `profile skills remove` |
+| Global policy | `bazframe global` | `global enable`, `global disable` |
+| Project overrides | `bazframe project` or `bazframe projects` | `project enable`, `project disable` |
+| Adapters | `bazframe adapter` or `bazframe adapters` | `adapter install pi`, `adapter uninstall pi` |
+| Diagnostics | `bazframe status` | Read-only health and corrective actions |
+| Interactive manager | `bazframe tui` | Manage profiles and direct skill membership |
+
+The overview commands list current resources, mark active/current state where applicable, and show the available commands. Detailed reference help stays contextual:
+
+```bash
+bazframe --help                  # minimal top-level help and suggestions
+bazframe help profiles           # profile reference
+bazframe profile skills --help   # active-profile skill reference
 ```
+
+Top-level `use`, `add`, and `remove` remain compatibility aliases. The old `init`/`uninit` forms report migration guidance to `project enable`/`disable`. `profile list` and `profile current` retain concise output for scripts. The deprecated `bazframe pi [--dry-run] [-- <pi args>]` launcher remains available only for migration.
+
+Color is enabled automatically for terminal output and never carries meaning by itself. Pipes and redirected output remain plain text. Set `NO_COLOR` to disable color or `FORCE_COLOR=1` to enable it explicitly; `NO_COLOR` wins when both are present.
+
+`bazframe tui` opens the keyboard-first Ink interface when both stdin and stdout are interactive terminals. The TUI runtime pins `ink@7.1.1` and `react@19.2.8`; the CLI loads them lazily only after dispatching this command. The interface provides `Profiles`, `Skills`, and `Settings` tabs; profile create, duplicate, activation, rename, and guarded removal; direct membership editing for the selected profile without silently changing active selection; a read-only Skillbook source browser; and structured read-only setup status with corrective actions. Provider-owned skill move/rename, settings writes, and editor launch remain unavailable. Press `?` for keys, use arrows or Vim `h`/`j`/`k`/`l` for directional navigation, uppercase `J`/`K` to jump between profile-editor panes, `1`–`3` for tabs, and `q` to exit. Non-interactive invocation fails plainly and points back to ordinary CLI commands.
+
+This is not a production-ready TUI. Automated coverage includes separate top-tab focus, persistent viewport offsets, compact and below-minimum layouts, resize state preservation, graceful and forced exit paths, non-color markers, screen-reader output, and CLI/TUI state agreement across profile lifecycle and inactive-profile membership. A real macOS pseudo-terminal smoke verifies alternate-screen entry/restoration, and the packed-package gate runs an interactive TUI smoke when the host provides `script`. Deeper source trees, canonical identity and broken-root behavior for symlinked skill sources, editor launch, settings writes, additional real sources, provider move/rename, and Linux/Windows Terminal/SSH/tmux/manual assistive-technology validation remain open.
 
 ## Install for development
 
@@ -23,14 +42,14 @@ Requires Node.js >=22.19.0 and Git. Real launches are validated against Pi 0.82.
 ```bash
 npm install
 npm run build
-node ./dist/cli.js --help
+./dist/cli.js --help
 ```
 
-The package exposes a `bazframe` bin when installed or linked. A real launch also requires `pi` on `PATH`.
+The build marks `dist/cli.js` executable. Run `npm link` to expose the `bazframe` bin globally from this checkout; rebuild after source changes. A real launch also requires `pi` on `PATH`.
 
 ## Pi adapter lifecycle
 
-`bazframe adapter install pi` is a one-time, explicit setup step. It copies the packaged extension artifact to `$PI_CODING_AGENT_DIR/extensions/bazframe.ts` and records its hash under `BAZFRAME_HOME/adapters/pi.json`. Pi auto-discovers that global extension, allowing users to invoke `pi` directly. Installation stays separate from `init` so repository registration never silently changes Pi's global configuration. Both environment variables accept absolute paths; their defaults are `~/.pi/agent` and `~/.bazframe`.
+`bazframe adapter install pi` is a one-time, explicit setup step. It copies the packaged extension artifact to `$PI_CODING_AGENT_DIR/extensions/bazframe.ts` and records its hash under `BAZFRAME_HOME/adapters/pi.json`. Pi auto-discovers that global extension, allowing users to invoke `pi` directly. Bazframe is globally enabled by default without a policy file; project overrides take precedence over that global policy. Both environment variables accept absolute paths; their defaults are `~/.pi/agent` and `~/.bazframe`.
 
 Installation is idempotent and updates an older artifact that still matches its ownership manifest. A changed managed artifact is preserved and reported as drift. `--force` explicitly restores that destination from the packaged artifact. An occupied destination without Bazframe ownership stays with its existing owner.
 
@@ -42,19 +61,39 @@ bazframe adapter uninstall pi
 
 Uninstall verifies the artifact hash, removes the ownership manifest, and clears generated Pi alias cache.
 
-After selecting an existing profile, register a Git worktree externally and inspect the resulting state:
+Inside Pi, use `/bazframe info` for a compact view of the effective profile, supplier-labeled context, sorted effective skills, and collision mappings when present. Use `/bazframe reload` to reload the adapter and profile resources. These are the adapter's only slash-command subcommands; invalid forms print `Usage: /bazframe info | /bazframe reload`.
+
+Create and select a profile, then enter any working directory:
 
 ```bash
-bazframe use focused
+bazframe profile add focused
+$EDITOR "$HOME/.bazframe/profiles/focused/AGENTS.md"
+bazframe profile use focused
+bazframe skills                         # browse available skills
+bazframe profile skills add my-skill
+bazframe profile skills                 # inspect included skills
 cd my-project
-bazframe init
 bazframe status
 pi       # native Pi context + active profile
 pi -nc   # global Pi context + active profile
-bazframe uninit
+bazframe profile skills remove my-skill
 ```
 
-`status` performs a read-only inspection. Exit status `3` indicates an incomplete or drifted setup and prints corrective commands. Registration files live under `BAZFRAME_HOME/projects`; worktree content and Git status stay stable.
+`status` performs a read-only inspection. Exit status `3` indicates an incomplete or drifted setup and prints corrective commands. Default behavior writes no project state. Git-worktree overrides preserve worktree content and Git status.
+
+### Project defaults and overrides
+
+Bazframe is globally enabled by default in both Git and non-Git directories. `bazframe global disable` writes exact bounded state to `BAZFRAME_HOME/global.json`; `global enable` validates runtime setup and removes that file. Non-Git directories inherit global policy without a per-directory override.
+
+```bash
+bazframe global disable       # native Pi unless a project is explicitly enabled
+bazframe project enable       # enabled override when global policy is disabled
+bazframe project disable      # disabled override when global policy is enabled
+bazframe global enable        # restore file-free global defaults
+bazframe projects             # inspect overrides and effective precedence
+```
+
+Inside a Git worktree, project policy wins over global policy. No project state means inherit global policy. Exact schema-v1 records remain compatible redundant inherit records; schema-v2 records are disabled overrides; schema-v3 records are enabled overrides. When a project command requests the same behavior as global policy, Bazframe removes valid current project state and inherits without a file. `bazframe project enable/disable` remains Git-only in this slice; non-Git directories inherit global policy. Malformed or unsupported policy state fails visibly and is preserved.
 
 ## Prototype profile layout
 
@@ -63,17 +102,32 @@ bazframe uninit
 ```text
 ~/.bazframe/
 ├── active-profile
+├── global.json                    # optional disabled global policy
+├── projects/                      # optional per-worktree overrides
 └── profiles/
     └── focused/
         ├── AGENTS.md             # required UTF-8
-        └── skills/               # optional
-            └── demo-profile/
-                └── SKILL.md
+        └── skills/
+            └── demo-profile -> /absolute/path/.skillbook/skills/demo-profile
 ```
 
-Profile IDs provisionally use 1–64 lowercase ASCII letters/digits separated by single hyphens. `active-profile` is plain text and is replaced atomically. Profiles are pre-existing, live directories; this prototype has no creation or editing UI.
+Profile IDs provisionally use 1–64 lowercase ASCII letters/digits separated by single hyphens. `active-profile` is plain text and is replaced atomically.
 
-Each immediate child of `skills/` that contains a regular `SKILL.md` is passed in lexical directory-name order. Supporting files remain in that directory for normal Agent Skills behavior.
+### Profile lifecycle
+
+`bazframe profile add <id>` creates a physical profile with a zero-byte `AGENTS.md` and empty physical `skills/` directory without activating it. `profile use <id>` validates and selects it; top-level `bazframe use <id>` remains an equivalent alias. Bare `profile` and `profiles` list valid profiles, mark the active one, and show profile commands. `profile list` prints valid physical IDs one per line and `profile current` prints only the selected ID for scripts.
+
+`profile duplicate <source> <new>` copies all profile content, including membership symlinks, without following or rewriting symlink targets. It requires a physical source profile, refuses an occupied destination, leaves the active profile unchanged, and exposes the new profile only after the copy completes. `profile rename <old> <new>` preserves profile content without resolving its children or provider targets, refuses replacement and profile-root symlinks, and updates the active selection when necessary. `profile remove <id>` always refuses the active profile, even when its directory is missing, and removes only the exact generated-empty shape. `profile remove <id> --force` explicitly authorizes permanent recursive deletion of a non-active physical profile; membership symlinks are unlinked without touching their Skillbook targets. Actual create/duplicate/remove/identity-changing rename clears affected alias cache; idempotent add and same-ID rename preserve live cache. Lifecycle changes apply on the next Pi startup or `/reload`.
+
+Each immediate child of `skills/` that contains a regular `SKILL.md` is passed in lexical directory-name order. Supporting files remain in that directory for normal Agent Skills behavior. Existing physical skill directories remain readable for compatibility, but `add` and `remove` do not manage them.
+
+### Direct Skillbook membership
+
+`bazframe skills` lists all valid skills in the resolved Skillbook library, identifies that source path, and warns about invalid neighboring entries. It does not list Pi-native skills or skills that exist only inside a profile. `bazframe profile skills` separately lists immediate skill entries discovered in the active profile; Pi remains authoritative for full Agent Skills validation at runtime.
+
+`bazframe profile skills add <skill> [--profile <profile>]` and `bazframe profile skills remove <skill> [--profile <profile>]` do not require a Git worktree. Without `--profile`, they operate on the global active profile. An explicit profile target changes that profile without changing or requiring active selection. The profile and its physical `skills/` directory must already exist. Bazframe resolves the Skillbook library root from `SKILLBOOK_LIBRARY`, then the deprecated `SKILLBOOK_LOCK_LIBRARY`, then `~/.skillbook`; the source skill is `<root>/skills/<skill>`. Top-level `add` and `remove` remain active-profile-only aliases.
+
+Add requires a safe lowercase hyphenated ID and a regular `SKILL.md` whose frontmatter `name` matches that ID. This is an identity check, not a complete Agent Skills schema validation; Pi's loader validates the full skill when it enters a session. A misspelled missing ID offers close valid matches with `Did you mean ...?` and otherwise points to `bazframe skills`. Add creates one absolute directory symlink. Re-adding the exact link and re-removing an absent link are successful no-ops. Bazframe refuses to replace or remove physical, relative, foreign, or mismatched entries. It never copies, edits, locks, updates, or deletes Skillbook skill content or `skillbook.lock.json`.
 
 Two visibly different profiles are in [`examples/profiles/focused`](examples/profiles/focused) and [`examples/profiles/reviewer`](examples/profiles/reviewer).
 
@@ -91,7 +145,7 @@ mkdir -p "$BAZFRAME_HOME/profiles"
 cp -R ./examples/profiles/focused "$BAZFRAME_HOME/profiles/focused"
 cp -R ./examples/profiles/reviewer "$BAZFRAME_HOME/profiles/reviewer"
 
-node "$BAZFRAME_CLI" use focused
+"$BAZFRAME_CLI" profile use focused
 
 DEMO_REPO="$(mktemp -d)/repository with spaces"
 mkdir -p "$DEMO_REPO/packages/api"
@@ -103,7 +157,7 @@ printf '%s\n' 'Keep the repository demo rule.' > "$DEMO_REPO/AGENTS.md"
   node "$BAZFRAME_CLI" pi --dry-run -- -p "Describe the effective harness"
 )
 
-node "$BAZFRAME_CLI" use reviewer
+"$BAZFRAME_CLI" profile use reviewer
 (
   cd "$DEMO_REPO/packages/api"
   node "$BAZFRAME_CLI" pi --dry-run -- -p "Describe the effective harness"
@@ -145,8 +199,9 @@ In the default and recommended layout, `BAZFRAME_HOME` and the temporary prompt 
 - Profile-first/repository-second concatenation is a transport experiment, **not** a precedence or conflict-resolution policy.
 - `--no-context-files` prevents duplicate root loading but also disables Pi's normal global, ancestor, nested, and `CLAUDE.md` context discovery. This slice restores only root `AGENTS.md`.
 - Pi's native user/project/settings/package skill discovery **deliberately stays enabled for this prototype**; explicit profile skills are additive, not an exclusive Bazframe-owned set. Project resources still follow Pi's project-trust rules. A user-forwarded Pi option can alter native behavior.
-- Skill collisions are not resolved by Bazframe. Pi currently warns and keeps its first-discovered skill.
+- The deprecated `bazframe pi` launcher does not resolve skill collisions. Pi currently warns and keeps its first-discovered skill; the production adapter instead projects deterministic `-x-bazframe` aliases.
 - Profiles, repository instructions, and skills are trusted local content. Skills may instruct the model to run arbitrary code; Bazframe does not audit or sandbox them. Trusted symlinks are followed.
+- Locks coordinate Bazframe writers. A non-cooperating external process can still race profile check/create/duplicate/rename/remove pathnames or the final verified membership unlink; portable Node filesystem APIs do not provide every conditional pathname operation needed to exclude such writers.
 - Interactive `/resume` or `/import` can switch repositories while retaining stale effective instructions and **must not be used** during a Bazframe launch.
 - In Pi 0.82, explicit `--append-system-prompt` suppresses automatic `APPEND_SYSTEM.md` discovery. Pi extensions, prompt templates, themes, settings, packages, and other native resources remain Pi-managed, so launches are not hermetic.
 - Instruction sources and the composed prompt are capped at 1 MiB. Non-UTF-8 and NUL-containing instruction files fail before launch.
@@ -168,7 +223,7 @@ If Bazframe cannot remove the temporary effective file, the launch returns Bazfr
 
 ## Development validation
 
-The standard gate covers build, typecheck, lint, unit, fake-Pi integration, and packed-package lifecycle checks. The real-Pi gate packs and installs the package, then validates both context modes through Pi 0.82 with an isolated probe provider.
+The standard gate covers build, typecheck, lint, deterministic TUI reducer/component/service tests, fake-Pi integration, and packed-package lifecycle and interactive-TUI smoke checks. The real-Pi gate packs and installs the package, then validates both context modes through Pi 0.82 with an isolated probe provider. Passing these gates does not replace the open cross-platform and manual accessibility validation.
 
 ```bash
 npm test

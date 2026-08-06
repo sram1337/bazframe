@@ -45,12 +45,45 @@ const GIT_ENVIRONMENT_VARIABLES = [
 	"GIT_DISCOVERY_ACROSS_FILESYSTEM",
 ];
 
-interface Registration {
+interface LegacyRegistration {
 	schemaVersion: 1;
 	repository: string;
 	mode: "adaptive-context";
 	profile: "active";
 }
+
+interface DisabledOverride {
+	schemaVersion: 2;
+	repository: string;
+	disabled: true;
+}
+
+interface EnabledOverride {
+	schemaVersion: 3;
+	repository: string;
+	enabled: true;
+}
+
+interface DisabledGlobalPolicy {
+	schemaVersion: 1;
+	disabled: true;
+}
+
+type ProjectState = LegacyRegistration | DisabledOverride | EnabledOverride;
+type GlobalPolicy = "enabled" | "disabled" | "unresolved";
+type ProjectStateResolution =
+	| "absent"
+	| "legacy-inherit"
+	| "disabled-override"
+	| "enabled-override"
+	| "unresolved";
+type ProjectBehavior =
+	| "outside-git"
+	| "enabled-global"
+	| "enabled-project"
+	| "disabled-global"
+	| "disabled-project"
+	| "error";
 
 interface InstructionFile {
 	path: string;
@@ -77,9 +110,13 @@ interface AdapterState {
 	cwd: string;
 	bazframeHome: string;
 	initialized: boolean;
+	projectBehavior: ProjectBehavior;
+	globalPolicy: GlobalPolicy;
+	globalPolicyPath?: string;
 	repository?: string;
-	registrationPath?: string;
-	registration?: Registration;
+	projectStatePath?: string;
+	projectStateResolution?: ProjectStateResolution;
+	projectState?: ProjectState;
 	profile?: ProfileState;
 	globalContext?: InstructionFile;
 	skillAliases: SkillAlias[];
@@ -88,6 +125,7 @@ interface AdapterState {
 
 interface GitResult {
 	stdout: Uint8Array;
+	stderr: Uint8Array;
 	error?: Error;
 }
 
@@ -118,7 +156,7 @@ function resolveBazframeHome(): string {
 }
 
 function runGit(cwd: string): Promise<GitResult> {
-	const environment = { ...process.env };
+	const environment = { ...process.env, LANG: "C", LC_ALL: "C" };
 	for (const variable of GIT_ENVIRONMENT_VARIABLES) delete environment[variable];
 	return new Promise((resolveResult) => {
 		execFile(
@@ -131,9 +169,10 @@ function runGit(cwd: string): Promise<GitResult> {
 				maxBuffer: 64 * 1024,
 				timeout: 5000,
 			},
-			(error, stdout) => {
+			(error, stdout, stderr) => {
 				resolveResult({
 					stdout: Uint8Array.from(stdout),
+					stderr: Uint8Array.from(stderr),
 					...(error === null ? {} : { error }),
 				});
 			},
@@ -141,20 +180,62 @@ function runGit(cwd: string): Promise<GitResult> {
 	});
 }
 
+function isConfirmedOutsideGit(result: GitResult): boolean {
+	if (result.error === undefined || !("code" in result.error) || result.error.code !== 128) {
+		return false;
+	}
+	let diagnostic: string;
+	try {
+		diagnostic = decodeUtf8(result.stderr, "Git diagnostic").trim();
+	} catch {
+		return false;
+	}
+	return diagnostic.startsWith("fatal: not a git repository (or any of the parent directories): .git");
+}
+
+function gitFailureMessage(cwd: string, result: GitResult): string {
+	const error = result.error;
+	const details: string[] = [];
+	if (error !== undefined && "code" in error && error.code !== undefined) {
+		details.push(`code ${String(error.code)}`);
+	}
+	if (error !== undefined && "signal" in error && error.signal !== undefined) {
+		details.push(`signal ${String(error.signal)}`);
+	}
+	if (error !== undefined && "killed" in error && error.killed === true) {
+		details.push("killed");
+	}
+	try {
+		const diagnostic = decodeUtf8(result.stderr, "Git diagnostic").trim();
+		if (diagnostic.length > 0) details.push(diagnostic);
+	} catch {
+		details.push("Git diagnostic was not valid UTF-8");
+	}
+	return `Git worktree discovery failed in ${cwd}${details.length === 0 ? "" : ` (${details.join("; ")})`}.`;
+}
+
 async function findRepository(cwd: string): Promise<string | undefined> {
 	let canonicalCwd: string;
 	try {
 		canonicalCwd = await realpath(cwd);
-	} catch {
-		return undefined;
+	} catch (error) {
+		throw new Error(`Could not canonicalize working directory: ${cwd}`, { cause: error });
 	}
 	const result = await runGit(canonicalCwd);
-	if (result.error !== undefined) return undefined;
+	if (isConfirmedOutsideGit(result)) return undefined;
+	if (result.error !== undefined) {
+		throw new Error(gitFailureMessage(canonicalCwd, result), { cause: result.error });
+	}
 	const output = decodeUtf8(result.stdout, "Git worktree root").replace(/\r?\n$/, "");
 	if (output.length === 0 || output.includes("\0") || !isAbsolute(output)) {
 		throw new Error(`Git returned an invalid worktree root: ${JSON.stringify(output)}`);
 	}
-	const repository = await realpath(output);
+	let repository: string;
+	try {
+		repository = await realpath(output);
+	} catch (error) {
+		throw new Error(`Could not canonicalize Git worktree root: ${output}`, { cause: error });
+	}
 	if (!isWithin(canonicalCwd, repository)) {
 		throw new Error(`Git worktree root does not contain the working directory: ${repository}`);
 	}
@@ -164,6 +245,10 @@ async function findRepository(cwd: string): Promise<string | undefined> {
 function registrationPath(bazframeHome: string, repository: string): string {
 	const projectId = createHash("sha256").update(repository).digest("hex");
 	return join(bazframeHome, "projects", `${projectId}.json`);
+}
+
+function globalStatePath(bazframeHome: string): string {
+	return join(bazframeHome, "global.json");
 }
 
 async function pathKind(path: string): Promise<"absent" | "file" | "directory" | "other"> {
@@ -208,37 +293,84 @@ function decodeUtf8(bytes: Uint8Array, label: string): string {
 	}
 }
 
-async function parseRegistration(path: string, repository: string): Promise<Registration> {
+async function parseGlobalPolicy(path: string): Promise<DisabledGlobalPolicy> {
 	let value: unknown;
 	try {
 		value = JSON.parse(decodeUtf8(
-			await readManagedFile(path, "Repository registration", MAX_REGISTRATION_BYTES),
-			"Repository registration",
+			await readManagedFile(path, "Global policy", MAX_STATE_BYTES),
+			"Global policy",
 		));
 	} catch (error) {
 		if (error instanceof SyntaxError) {
-			throw new Error(`Invalid JSON in repository registration: ${path}`, { cause: error });
+			throw new Error(`Invalid JSON in global policy: ${path}`, { cause: error });
+		}
+		throw error;
+	}
+	if (
+		value === null
+		|| typeof value !== "object"
+		|| Array.isArray(value)
+		|| !hasExactKeys(value as Record<string, unknown>, ["schemaVersion", "disabled"])
+	) {
+		throw new Error(`Invalid Bazframe global policy: ${path}`);
+	}
+	const candidate = value as Record<string, unknown>;
+	if (candidate.schemaVersion !== 1 || candidate.disabled !== true) {
+		throw new Error(`Unsupported Bazframe global policy: ${path}`);
+	}
+	return { schemaVersion: 1, disabled: true };
+}
+
+async function parseProjectState(path: string, repository: string): Promise<ProjectState> {
+	let value: unknown;
+	try {
+		value = JSON.parse(decodeUtf8(
+			await readManagedFile(path, "Repository project state", MAX_REGISTRATION_BYTES),
+			"Repository project state",
+		));
+	} catch (error) {
+		if (error instanceof SyntaxError) {
+			throw new Error(`Invalid JSON in repository project state: ${path}`, { cause: error });
 		}
 		throw error;
 	}
 	if (value === null || typeof value !== "object" || Array.isArray(value)) {
-		throw new Error(`Invalid Bazframe repository registration: ${path}`);
+		throw new Error(`Invalid Bazframe repository project state: ${path}`);
 	}
-	const candidate = value as Partial<Registration>;
+	const candidate = value as Record<string, unknown>;
+	if (candidate.repository !== repository) {
+		throw new Error(`Bazframe repository project state does not match repository ${repository}: ${path}`);
+	}
 	if (
-		candidate.schemaVersion !== 1
-		|| candidate.repository !== repository
-		|| candidate.mode !== "adaptive-context"
-		|| candidate.profile !== "active"
+		candidate.schemaVersion === 1
+		&& candidate.mode === "adaptive-context"
+		&& candidate.profile === "active"
+		&& hasExactKeys(candidate, ["schemaVersion", "repository", "mode", "profile"])
 	) {
-		throw new Error(`Unsupported Bazframe repository registration: ${path}`);
+		return { schemaVersion: 1, repository, mode: "adaptive-context", profile: "active" };
 	}
-	return {
-		schemaVersion: 1,
-		repository,
-		mode: "adaptive-context",
-		profile: "active",
-	};
+	if (
+		candidate.schemaVersion === 2
+		&& candidate.disabled === true
+		&& hasExactKeys(candidate, ["schemaVersion", "repository", "disabled"])
+	) {
+		return { schemaVersion: 2, repository, disabled: true };
+	}
+	if (
+		candidate.schemaVersion === 3
+		&& candidate.enabled === true
+		&& hasExactKeys(candidate, ["schemaVersion", "repository", "enabled"])
+	) {
+		return { schemaVersion: 3, repository, enabled: true };
+	}
+	throw new Error(`Unsupported Bazframe repository project state: ${path}`);
+}
+
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+	const actual = Object.keys(value).sort();
+	const expected = [...keys].sort();
+	return actual.length === expected.length
+		&& actual.every((key, index) => key === expected[index]);
 }
 
 async function readActiveProfileId(bazframeHome: string): Promise<string> {
@@ -351,43 +483,99 @@ async function resolveState(cwd: string): Promise<AdapterState> {
 			cwd,
 			bazframeHome: process.env.BAZFRAME_HOME ?? "(invalid)",
 			initialized: true,
+			projectBehavior: "error",
+			globalPolicy: "unresolved",
 			skillAliases: [],
 			error: error instanceof Error ? error.message : String(error),
 		};
 	}
-	const base: AdapterState = { cwd, bazframeHome, initialized: false, skillAliases: [] };
+	const base: AdapterState = {
+		cwd,
+		bazframeHome,
+		initialized: false,
+		projectBehavior: "outside-git",
+		globalPolicy: "enabled",
+		skillAliases: [],
+	};
 	let repository: string | undefined;
 	try {
 		repository = await findRepository(cwd);
 	} catch (error) {
-		return { ...base, initialized: true, error: error instanceof Error ? error.message : String(error) };
-	}
-	if (repository === undefined) return base;
-	const projectRegistrationPath = registrationPath(bazframeHome, repository);
-	let kind: Awaited<ReturnType<typeof pathKind>>;
-	try {
-		kind = await pathKind(projectRegistrationPath);
-	} catch (error) {
 		return {
 			...base,
 			initialized: true,
-			repository,
-			registrationPath: projectRegistrationPath,
+			projectBehavior: "error",
 			error: error instanceof Error ? error.message : String(error),
 		};
 	}
-	if (kind === "absent") return { ...base, repository };
+	const policyPath = globalStatePath(bazframeHome);
+	const projectStatePath = repository === undefined
+		? undefined
+		: registrationPath(bazframeHome, repository);
+	let globalPolicy: GlobalPolicy = "unresolved";
+	let globalPolicyPath: string | undefined;
+	let projectStateResolution: ProjectStateResolution = "unresolved";
+	let projectState: ProjectState | undefined;
+	let projectBehavior: ProjectBehavior = "error";
 	try {
-		if (kind !== "file") throw new Error(`Invalid repository registration path: ${projectRegistrationPath}`);
+		const policyKind = await pathKind(policyPath);
+		if (policyKind !== "absent" && policyKind !== "file") {
+			throw new Error(`Invalid global policy path: ${policyPath}`);
+		}
+		if (policyKind === "file") {
+			globalPolicyPath = policyPath;
+			await parseGlobalPolicy(policyPath);
+			globalPolicy = "disabled";
+		} else {
+			globalPolicy = "enabled";
+		}
+
+		if (projectStatePath !== undefined && repository !== undefined) {
+			const kind = await pathKind(projectStatePath);
+			if (kind === "absent") {
+				projectStateResolution = "absent";
+			} else {
+				if (kind !== "file") throw new Error(`Invalid repository project-state path: ${projectStatePath}`);
+				projectState = await parseProjectState(projectStatePath, repository);
+				projectStateResolution = projectState.schemaVersion === 3
+					? "enabled-override"
+					: projectState.schemaVersion === 2
+						? "disabled-override"
+						: "legacy-inherit";
+			}
+		}
+
+		const enabled = projectState?.schemaVersion === 3
+			|| (projectState?.schemaVersion !== 2 && globalPolicy === "enabled");
+		projectBehavior = projectState?.schemaVersion === 3
+			? "enabled-project"
+			: projectState?.schemaVersion === 2
+				? "disabled-project"
+				: globalPolicy === "enabled" ? "enabled-global" : "disabled-global";
+		if (!enabled) {
+			return {
+				...base,
+				globalPolicy,
+				...(globalPolicyPath === undefined ? {} : { globalPolicyPath }),
+				projectBehavior,
+				...(repository === undefined ? {} : { repository }),
+				...(projectStatePath === undefined ? {} : { projectStatePath }),
+				...(repository === undefined ? {} : { projectStateResolution }),
+				...(projectState === undefined ? {} : { projectState }),
+			};
+		}
 		const compatibilityError = compatibilityFailure();
 		if (compatibilityError !== undefined) throw new Error(compatibilityError);
-		const registration = await parseRegistration(projectRegistrationPath, repository);
 		return {
 			...base,
 			initialized: true,
-			repository,
-			registrationPath: projectRegistrationPath,
-			registration,
+			globalPolicy,
+			...(globalPolicyPath === undefined ? {} : { globalPolicyPath }),
+			projectBehavior,
+			...(repository === undefined ? {} : { repository }),
+			...(projectStatePath === undefined ? {} : { projectStatePath }),
+			...(repository === undefined ? {} : { projectStateResolution }),
+			...(projectState === undefined ? {} : { projectState }),
 			profile: await loadProfile(bazframeHome),
 			globalContext: await loadGlobalContext(),
 		};
@@ -395,8 +583,13 @@ async function resolveState(cwd: string): Promise<AdapterState> {
 		return {
 			...base,
 			initialized: true,
-			repository,
-			registrationPath: projectRegistrationPath,
+			projectBehavior,
+			globalPolicy,
+			...(globalPolicyPath === undefined ? {} : { globalPolicyPath }),
+			...(repository === undefined ? {} : { repository }),
+			...(projectStatePath === undefined ? {} : { projectStatePath }),
+			...(repository === undefined ? {} : { projectStateResolution }),
+			...(projectState === undefined ? {} : { projectState }),
 			error: error instanceof Error ? error.message : String(error),
 		};
 	}
@@ -530,45 +723,42 @@ function contextPaths(options: BuildSystemPromptOptions): string[] {
 	return options.contextFiles.map((file) => file.path);
 }
 
-function formatList(paths: readonly string[]): string[] {
-	return paths.length === 0 ? ["  (none)"] : paths.map((path) => `  - ${path}`);
-}
-
-function explain(state: AdapterState, ctx: ExtensionCommandContext): string {
-	if (!state.initialized) {
-		return [
-			"Bazframe Pi adapter",
-			"Status: inactive (repository is not registered)",
-			`Working directory: ${state.cwd}`,
-		].join("\n");
-	}
-	let loadedContext: string[] = [];
-	let contextError: string | undefined;
+function info(state: AdapterState, pi: ExtensionAPI, ctx: ExtensionCommandContext): string {
+	let piContext: string[] = [];
+	let structuredContextAvailable = true;
 	try {
-		loadedContext = contextPaths(ctx.getSystemPromptOptions());
-	} catch (error) {
-		contextError = error instanceof Error ? error.message : String(error);
+		piContext = contextPaths(ctx.getSystemPromptOptions());
+	} catch {
+		structuredContextAvailable = false;
 	}
-	const restoresGlobalContext = loadedContext.length === 0;
-	const reason = state.error ?? contextError;
-	const activeMode = restoresGlobalContext ? "instruction-context replacement" : "additive context";
+
+	const active = structuredContextAvailable && state.error === undefined && state.profile !== undefined;
+	const contextEntries = piContext.map((path) => `  (pi) ${path}`);
+	if (active) {
+		if (piContext.length === 0 && state.globalContext !== undefined) {
+			contextEntries.push(`  (bazframe) ${state.globalContext.path}`);
+		}
+		contextEntries.push(`  (bazframe) ${state.profile!.instructionsPath}`);
+	}
+
+	const skillNames = new Set(
+		pi.getCommands()
+			.filter((command) => command.source === "skill" && command.name.startsWith("skill:"))
+			.map((command) => command.name.slice("skill:".length)),
+	);
+	const skills = [...skillNames].sort();
+	const collisions = active
+		? state.skillAliases
+			.filter((alias) => skillNames.has(alias.aliasName))
+			.map((alias) => `${alias.originalName} -> ${alias.aliasName}`)
+			.sort()
+		: [];
+
 	return [
-		"Bazframe Pi adapter",
-		`Status: ${reason === undefined ? `active (${activeMode})` : "error"}`,
-		`Repository: ${state.repository ?? "(none)"}`,
-		`Registration: ${state.registrationPath ?? "(none)"}`,
-		`Profile: ${state.profile?.id ?? "(unresolved)"}`,
-		`Profile instructions: ${state.profile?.instructionsPath ?? "(unresolved)"}`,
-		`Global context handling: ${restoresGlobalContext ? `restored by adapter from ${state.globalContext?.path ?? "(none)"}` : "left to Pi"}`,
-		"Profile skills:",
-		...formatList(state.profile?.skillDirectories ?? []),
-		"Skill collision aliases:",
-		...formatList(state.skillAliases.map((alias) => `${alias.originalName} -> ${alias.aliasName} (${alias.aliasPath})`)),
-		"Native context files loaded by Pi:",
-		...formatList(loadedContext),
-		"Pi-owned resources: settings, trust, tools, models, packages, extensions, prompts, themes, system prompts, and native skills.",
-		...(state.profile?.warnings.length ? ["Profile skill warnings:", ...formatList(state.profile.warnings)] : []),
-		...(reason === undefined ? [] : ["Failure:", reason]),
+		`Profile: ${active ? state.profile!.id : "(none)"}`,
+		...(contextEntries.length === 0 ? ["Context: (none)"] : ["Context:", ...contextEntries]),
+		`Skills: ${skills.length === 0 ? "(none)" : skills.join(", ")}`,
+		...(collisions.length === 0 ? [] : [`Collisions: ${collisions.join(", ")}`]),
 	].join("\n");
 }
 
@@ -610,6 +800,8 @@ export default function bazframePiAdapter(pi: ExtensionAPI): void {
 		cwd: process.cwd(),
 		bazframeHome: process.env.BAZFRAME_HOME ?? join(homedir(), ".bazframe"),
 		initialized: false,
+		projectBehavior: "outside-git",
+		globalPolicy: "enabled",
 		skillAliases: [],
 	};
 	let contextModeNotified = false;
@@ -685,19 +877,27 @@ export default function bazframePiAdapter(pi: ExtensionAPI): void {
 		};
 	});
 
-	pi.registerCommand("bzf-explain", {
-		description: "Explain the active Bazframe context and profile resources",
-		handler: (_args, ctx) => {
-			const report = explain(state, ctx);
-			ctx.ui.notify(report, report.includes("Status: error") ? "error" : "info");
+	pi.registerCommand("bazframe", {
+		description: "Inspect Bazframe or reload its Pi integration",
+		getArgumentCompletions: (prefix) => {
+			const argument = prefix.trimStart();
+			if (argument.includes(" ")) return null;
+			return ["info", "reload"]
+				.filter((value) => value.startsWith(argument))
+				.map((value) => ({ value, label: value }));
 		},
-	});
-
-	pi.registerCommand("bzf-reload", {
-		description: "Reload Pi and re-resolve the active Bazframe profile",
-		handler: async (_args, ctx) => {
-			await ctx.reload();
-			return;
+		handler: async (args, ctx) => {
+			switch (args.trim()) {
+				case "info":
+					ctx.ui.notify(info(state, pi, ctx), state.error === undefined ? "info" : "error");
+					return;
+				case "reload":
+					await ctx.reload();
+					return;
+				default:
+					ctx.ui.notify("Usage: /bazframe info | /bazframe reload", "warning");
+					return;
+			}
 		},
 	});
 }

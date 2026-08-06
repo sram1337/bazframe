@@ -4,9 +4,14 @@ import { inspectPiAdapter } from '../adapters/pi/installer.js';
 import type { PiAdapterInstallState } from '../adapters/pi/ownership.js';
 import { BazframeError, errorCode } from '../core/errors.js';
 import { EXIT_STATUS } from '../core/exit-status.js';
+import {
+  resolveEffectivePolicy,
+  type EffectivePolicyReason
+} from '../policy/effective-policy.js';
+import { globalPolicyPath, readGlobalPolicy } from '../policy/global-policy.js';
 import { loadProfile, readActiveProfile } from '../profiles/profile-store.js';
 import { findGitRoot } from '../project/git-root.js';
-import { readRepositoryRegistration } from '../project/registration-store.js';
+import { readRepositoryProjectState } from '../project/registration-store.js';
 import { resolvePiAgentDirectory } from '../state/paths.js';
 
 export interface StatusOptions {
@@ -18,14 +23,77 @@ export interface StatusOptions {
   artifactUrl?: URL;
 }
 
+export type StatusProjectState =
+  | 'inherit'
+  | 'enabled-override'
+  | 'disabled-override'
+  | 'legacy-inherit';
+
+export type StatusRepository =
+  | { kind: 'outside-git' }
+  | { kind: 'git-worktree'; root: string; projectState: StatusProjectState };
+
+export type StatusEffectiveBehavior =
+  | {
+      kind: 'outside-git' | 'git-worktree';
+      enabled: true;
+      reason: Extract<EffectivePolicyReason, 'project-enabled-override' | 'global-enabled'>;
+    }
+  | {
+      kind: 'outside-git' | 'git-worktree';
+      enabled: false;
+      reason: Extract<EffectivePolicyReason, 'project-disabled-override' | 'global-disabled'>;
+    };
+
+export type StatusProfile =
+  | {
+      state: 'not-used';
+      reason: Extract<
+        EffectivePolicyReason,
+        'project-disabled-override' | 'global-disabled'
+      >;
+    }
+  | { state: 'unselected' }
+  | { state: 'missing'; id: string }
+  | {
+      state: 'ready';
+      id: string;
+      instructionsPath: string;
+      skillCount: number;
+    };
+
+export interface StatusCorrectiveAction {
+  id: 'adapter' | 'active-profile';
+  message: string;
+}
+
+export type StatusGlobalPolicy =
+  | { policy: 'enabled' }
+  | { policy: 'disabled'; statePath: string };
+
+export interface StatusInspection {
+  bazframeHome: string;
+  piAgentDirectory: string;
+  adapter: {
+    state: PiAdapterInstallState;
+    targetPath: string;
+    installedBazframeVersion?: string;
+  };
+  globalPolicy: StatusGlobalPolicy;
+  repository: StatusRepository;
+  effectiveBehavior: StatusEffectiveBehavior;
+  profile: StatusProfile;
+  cachedCollisionAliasCount: number;
+  correctiveActions: readonly StatusCorrectiveAction[];
+}
+
 export interface StatusResult {
   exitStatus: number;
   text: string;
 }
 
-export async function buildStatus(options: StatusOptions): Promise<StatusResult> {
-  const corrections = new Set<string>();
-  let attention = false;
+export async function inspectStatus(options: StatusOptions): Promise<StatusInspection> {
+  const corrections = new Map<StatusCorrectiveAction['id'], StatusCorrectiveAction>();
   const adapter = await inspectPiAdapter({
     bazframeHome: options.bazframeHome,
     bazframeVersion: options.bazframeVersion,
@@ -33,89 +101,197 @@ export async function buildStatus(options: StatusOptions): Promise<StatusResult>
     ...(options.userHome === undefined ? {} : { userHome: options.userHome }),
     ...(options.artifactUrl === undefined ? {} : { artifactUrl: options.artifactUrl })
   });
-  if (adapter.state !== 'current') {
-    attention = true;
-    corrections.add(adapterCorrection(adapter.state, adapter.targetPath));
-  }
+  const globalPolicy = await readGlobalPolicy(options.bazframeHome);
 
-  let activeProfile = '(none)';
-  let instructionSource = '(none)';
-  let skillCount = 0;
-  let profileReady = false;
+  let repository: StatusRepository = { kind: 'outside-git' };
+  let effectiveBehavior: StatusEffectiveBehavior = globalPolicy === 'enabled'
+    ? { kind: 'outside-git', enabled: true, reason: 'global-enabled' }
+    : { kind: 'outside-git', enabled: false, reason: 'global-disabled' };
   try {
-    const profileId = await readActiveProfile(options.bazframeHome);
-    activeProfile = profileId;
-    try {
-      const profile = await loadProfile(options.bazframeHome, profileId);
-      instructionSource = profile.instructionsPath;
-      skillCount = profile.skillDirectories.length;
-      profileReady = true;
-    } catch (error) {
-      if (error instanceof BazframeError && error.code === 'PROFILE_NOT_FOUND') {
-        attention = true;
-        corrections.add('Select an existing profile with `bazframe use <profile>`.');
-      } else {
-        throw error;
-      }
-    }
-  } catch (error) {
-    if (error instanceof BazframeError && error.code === 'NO_ACTIVE_PROFILE') {
-      attention = true;
-      corrections.add('Select a profile with `bazframe use <profile>`.');
-    } else {
-      throw error;
-    }
-  }
-
-  let repository = '(outside a Git worktree)';
-  let registration = 'not applicable';
-  let registered = false;
-  try {
-    repository = await findGitRoot(options.cwd, options.environment);
-    const record = await readRepositoryRegistration(options.bazframeHome, repository);
-    if (record === undefined) {
-      registration = 'unregistered';
-      attention = true;
-      corrections.add('Register this worktree with `bazframe init`.');
-    } else {
-      registration = 'registered (adaptive-context, active profile)';
-      registered = true;
-    }
+    const root = await findGitRoot(options.cwd, options.environment);
+    const state = await readRepositoryProjectState(options.bazframeHome, root);
+    repository = {
+      kind: 'git-worktree',
+      root,
+      projectState: state === undefined
+        ? 'inherit'
+        : state.schemaVersion === 3
+          ? 'enabled-override'
+          : state.schemaVersion === 2
+            ? 'disabled-override'
+            : 'legacy-inherit'
+    };
+    const effective = resolveEffectivePolicy(globalPolicy, state);
+    effectiveBehavior = effective.enabled
+      ? {
+          kind: 'git-worktree',
+          enabled: true,
+          reason: effective.reason === 'project-enabled-override'
+            ? 'project-enabled-override'
+            : 'global-enabled'
+        }
+      : {
+          kind: 'git-worktree',
+          enabled: false,
+          reason: effective.reason === 'project-disabled-override'
+            ? 'project-disabled-override'
+            : 'global-disabled'
+        };
   } catch (error) {
     if (!(error instanceof BazframeError && error.code === 'NOT_GIT_WORKTREE')) throw error;
   }
 
-  const aliasCount = await countAliasCache(options.bazframeHome);
-  const launchReady = adapter.state === 'current' && registered && profileReady;
+  let profile: StatusProfile;
+  if (!effectiveBehavior.enabled) {
+    profile = { state: 'not-used', reason: effectiveBehavior.reason };
+  } else {
+    if (adapter.state !== 'current') {
+      corrections.set('adapter', {
+        id: 'adapter',
+        message: adapterCorrection(adapter.state, adapter.targetPath)
+      });
+    }
+    try {
+      const profileId = await readActiveProfile(options.bazframeHome);
+      try {
+        const loaded = await loadProfile(options.bazframeHome, profileId);
+        profile = {
+          state: 'ready',
+          id: profileId,
+          instructionsPath: loaded.instructionsPath,
+          skillCount: loaded.skillDirectories.length
+        };
+      } catch (error) {
+        if (error instanceof BazframeError && error.code === 'PROFILE_NOT_FOUND') {
+          profile = { state: 'missing', id: profileId };
+          corrections.set('active-profile', {
+            id: 'active-profile',
+            message: 'Select an existing profile with `bazframe profile use <profile>`.'
+          });
+        } else {
+          throw error;
+        }
+      }
+    } catch (error) {
+      if (error instanceof BazframeError && error.code === 'NO_ACTIVE_PROFILE') {
+        profile = { state: 'unselected' };
+        corrections.set('active-profile', {
+          id: 'active-profile',
+          message: 'Create a profile with `bazframe profile add <profile>` if needed, then select it with `bazframe profile use <profile>`.'
+        });
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  return {
+    bazframeHome: options.bazframeHome,
+    piAgentDirectory: resolvePiAgentDirectory(options.environment, options.userHome),
+    adapter: {
+      state: adapter.state,
+      targetPath: adapter.targetPath,
+      ...(adapter.manifest === undefined
+        ? {}
+        : { installedBazframeVersion: adapter.manifest.bazframeVersion })
+    },
+    globalPolicy: globalPolicy === 'enabled'
+      ? { policy: 'enabled' }
+      : {
+          policy: 'disabled',
+          statePath: globalPolicyPath(options.bazframeHome)
+        },
+    repository,
+    effectiveBehavior,
+    profile,
+    cachedCollisionAliasCount: await countAliasCache(options.bazframeHome),
+    correctiveActions: [...corrections.values()]
+  };
+}
+
+export function formatStatus(status: StatusInspection): string {
+  const repository = status.repository.kind === 'outside-git'
+    ? '(outside a Git worktree)'
+    : status.repository.root;
+  const projectState = status.repository.kind === 'outside-git'
+    ? 'not applicable'
+    : status.repository.projectState === 'inherit'
+      ? 'none (inherits global policy)'
+      : status.repository.projectState === 'enabled-override'
+        ? 'enabled override'
+        : status.repository.projectState === 'disabled-override'
+          ? 'disabled override'
+          : 'legacy redundant inherit record';
+  const behavior = status.effectiveBehavior.enabled
+    ? `enabled (${status.effectiveBehavior.reason})`
+    : `disabled (${status.effectiveBehavior.reason}; native Pi behavior)`;
+  const notUsedReason = status.profile.state === 'not-used'
+    ? `disabled: ${status.profile.reason}`
+    : undefined;
+  const activeProfile = status.profile.state === 'ready' || status.profile.state === 'missing'
+    ? status.profile.id
+    : status.profile.state === 'unselected'
+      ? '(none)'
+      : `(not used: ${notUsedReason})`;
+  const instructionSource = status.profile.state === 'ready'
+    ? status.profile.instructionsPath
+    : status.profile.state === 'not-used'
+      ? `(not used: ${notUsedReason})`
+      : '(none)';
+  const skillCount: number | string = status.profile.state === 'ready'
+    ? status.profile.skillCount
+    : status.profile.state === 'not-used'
+      ? `(not used: ${notUsedReason})`
+      : 0;
+  const runtimeReady = status.adapter.state === 'current' && status.profile.state === 'ready';
+  const globalState = status.globalPolicy.policy === 'enabled'
+    ? 'none (enabled default)'
+    : status.globalPolicy.statePath;
   const lines = [
     'Bazframe status',
-    `Bazframe home: ${options.bazframeHome}`,
-    `Pi agent directory: ${resolvePiAgentDirectory(options.environment, options.userHome)}`,
-    `Pi adapter: ${adapter.state}`,
-    `Pi adapter version: ${adapter.manifest?.bazframeVersion ?? '(none)'}`,
-    `Pi extension: ${adapter.targetPath}`,
+    `Bazframe home: ${status.bazframeHome}`,
+    `Pi agent directory: ${status.piAgentDirectory}`,
+    `Pi adapter: ${status.adapter.state}`,
+    `Pi adapter version: ${status.adapter.installedBazframeVersion ?? '(none)'}`,
+    `Pi extension: ${status.adapter.targetPath}`,
+    `Global policy: ${status.globalPolicy.policy}`,
+    `Global state: ${globalState}`,
     `Repository: ${repository}`,
-    `Registration: ${registration}`,
+    `Project state: ${projectState}`,
+    `Effective behavior: ${behavior}`,
     `Active profile: ${activeProfile}`,
     `Profile instructions: ${instructionSource}`,
     `Profile skills: ${skillCount}`,
-    `Cached collision aliases: ${aliasCount}`,
+    `Cached collision aliases: ${status.cachedCollisionAliasCount}`,
     'Launch:',
-    ...(launchReady
-      ? [
-          '  pi       # native Pi context + active profile',
-          '  pi -nc   # global Pi context + active profile'
-        ]
-      : ['  Complete the corrective actions below.']),
+    ...(!status.effectiveBehavior.enabled
+      ? ['  pi       # native Pi behavior (Bazframe disabled by effective policy)']
+      : runtimeReady
+        ? [
+            '  pi       # native Pi context + active profile',
+            '  pi -nc   # global Pi context + active profile'
+          ]
+        : ['  Complete the corrective actions below.']),
     'Corrective actions:',
-    ...(corrections.size === 0
+    ...(status.correctiveActions.length === 0
       ? ['  (none)']
-      : [...corrections].map((correction) => `  - ${correction}`)),
+      : status.correctiveActions.map((correction) => `  - ${correction.message}`)),
     ''
   ];
+  return lines.join('\n');
+}
+
+export function statusExitStatus(status: StatusInspection): number {
+  return status.correctiveActions.length === 0
+    ? EXIT_STATUS.success
+    : EXIT_STATUS.attention;
+}
+
+export async function buildStatus(options: StatusOptions): Promise<StatusResult> {
+  const status = await inspectStatus(options);
   return {
-    exitStatus: attention ? EXIT_STATUS.attention : EXIT_STATUS.success,
-    text: lines.join('\n')
+    exitStatus: statusExitStatus(status),
+    text: formatStatus(status)
   };
 }
 

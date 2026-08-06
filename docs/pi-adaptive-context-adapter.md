@@ -4,7 +4,7 @@
 
 ## Decision
 
-Bazframe applies an active personal profile to registered Git worktrees through a globally discovered Pi extension. Users invoke Pi directly in either of two modes:
+Bazframe applies an active personal profile through a globally discovered Pi extension. Absent global state means enabled in Git and non-Git directories. In Git worktrees, project override takes precedence over global policy; non-Git directories inherit global policy. Users invoke Pi directly in either of two modes:
 
 ```bash
 pi       # native Pi context followed by the active profile
@@ -63,7 +63,7 @@ The adapter changes two session inputs:
 1. instruction context, according to the adaptive rule;
 2. profile skill paths, through `resources_discover`.
 
-Pi continues to own settings, extensions, packages, prompt templates, themes, system-prompt files, tools, models, native skills, and project trust. This ownership split is part of `/bzf-explain` diagnostics.
+Pi continues to own settings, extensions, packages, prompt templates, themes, system-prompt files, tools, models, native skills, and project trust. `/bazframe info` identifies only effective context suppliers, skills, and collisions rather than restating the full ownership model.
 
 ## External state
 
@@ -76,41 +76,31 @@ The validated prototype uses:
 │   └── <profile>/
 │       ├── AGENTS.md
 │       └── skills/
-├── projects/
-│   └── <sha256-canonical-root>.json
+├── global.json                       # present only when globally disabled
+├── projects/                         # absent/empty when projects inherit
+│   └── <sha256-canonical-root>.json  # enabled or disabled overrides
 └── adapter-cache/
     └── pi/skill-aliases/<profile>/<alias>/SKILL.md
 ```
 
-A registration records the canonical worktree root, `adaptive-context` mode, and the global active-profile selector:
-
-```json
-{
-  "schemaVersion": 1,
-  "repository": "/canonical/path/to/repo",
-  "mode": "adaptive-context",
-  "profile": "active"
-}
-```
-
-Canonical path identity is sufficient for the first local production slice. Repository moves and clones receive their own registrations.
+Absent `global.json` means globally enabled; its exact schema-v1 disabled form is `{ "schemaVersion": 1, "disabled": true }`. No project state means inherit global policy. Exact schema-v1 project records are legacy inherit records, schema-v2 records disable, and schema-v3 records enable. Project override wins over global policy. Canonical path identity is sufficient for the first local production slice; moves and clones do not inherit overrides.
 
 ## Adapter flow
 
 At startup and reload, the extension:
 
-1. resolves the current canonical Git root;
-2. hashes that root to find its external registration;
-3. validates the registration and active profile;
-4. loads bounded UTF-8 profile instructions;
-5. loads profile skills with Pi's public Agent Skills loader;
-6. compares profile skill names with Pi's current skill commands;
-7. materializes deterministic collision aliases in Bazframe's external cache;
-8. contributes skill paths through `resources_discover`;
-9. applies the adaptive context rule during `before_agent_start`;
-10. reports mode and alias decisions once per load.
+1. attempts to resolve the current canonical Git root when one exists;
+2. reads bounded exact global policy in every working directory and optional hashed project state when a Git root exists;
+3. resolves an available Git-worktree project override before global policy;
+4. leaves Pi native when effective-disabled and otherwise validates the active profile;
+5. loads bounded UTF-8 profile instructions;
+6. loads profile skills with Pi's public Agent Skills loader;
+7. compares profile skill names with Pi's current skill commands;
+8. materializes deterministic collision aliases in Bazframe's external cache;
+9. contributes skill paths through `resources_discover`;
+10. applies the adaptive context rule during `before_agent_start` and reports precedence.
 
-A repository with a matching registration activates the adapter. Other working directories use their native Pi behavior.
+Globally disabled Git worktrees remain native unless an enabled project override exists. A disabled project override wins over global enable. Non-Git directories inherit global enabled or disabled behavior without a project override. Malformed applicable policy state fails visibly.
 
 ## Skill collisions
 
@@ -126,11 +116,11 @@ This policy preserves Agent Skills naming rules and gives each loaded skill a de
 
 ## Safety and diagnostics
 
-- Registrations and generated aliases live under the user's Bazframe home.
+- Global policy, exceptional project overrides, and generated aliases live under the user's Bazframe home.
 - Instruction sources are bounded regular UTF-8 files and reject NUL bytes.
 - Canonical Git roots are resolved with inherited repository-selection environment variables cleared.
 - Project trust stays with Pi's trust flow.
-- `/bzf-explain` reports context mode, context sources, profile sources, skills, aliases, registration, and repository paths.
+- `/bazframe info` reports only the effective profile, supplier-labeled context, sorted effective skills, and deterministic collisions when present; `/bazframe reload` awaits Pi reload.
 - Validation compares repository snapshots and Git status before and after adapter activity.
 
 ## Validation
@@ -142,13 +132,13 @@ The isolated Pi 0.82 suite demonstrated:
 - `pi -nc` produces an empty native context list, restores global instructions once, and excludes ancestor/repository context;
 - plain `pi` keeps native global, ancestor, and repository context with one copy of global instructions;
 - both modes append the active profile;
-- `/bzf-reload` observes active-profile instruction and skill changes;
+- the historical prototype's reload command observed active-profile instruction and skill changes; production now exposes reload as `/bazframe reload`;
 - profile skills are additive;
 - native/profile collisions produce deterministic `-x-bazframe` aliases;
 - native project settings, extensions, prompts, themes, and skills follow Pi's trust behavior;
-- registration gates activation by canonical worktree root;
+- the historical prototype's registration gate worked as recorded; production now uses project-over-global policy with file-free enabled defaults;
 - repository snapshots and Git status stay stable.
 
 ## Production gate
 
-[`pi-adapter-production-design.md`](pi-adapter-production-design.md) defines installation, ownership, registration, status, runtime packaging, and acceptance milestones for this behavior.
+[`pi-adapter-production-design.md`](pi-adapter-production-design.md) defines installation, ownership, global/project policy, status, runtime packaging, and acceptance milestones for this behavior.

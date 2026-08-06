@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { rm } from 'node:fs/promises';
+import { chmod, rm } from 'node:fs/promises';
 
 await rm(new URL('../dist', import.meta.url), { recursive: true, force: true });
 
@@ -9,4 +9,8 @@ const result = spawnSync(
   { stdio: 'inherit' }
 );
 
-process.exit(typeof result.status === 'number' ? result.status : 1);
+if (result.status !== 0) {
+  process.exit(typeof result.status === 'number' ? result.status : 1);
+}
+
+await chmod(new URL('../dist/cli.js', import.meta.url), 0o755);

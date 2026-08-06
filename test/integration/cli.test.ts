@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmod, readFile, realpath, stat } from 'node:fs/promises';
 import { delimiter, isAbsolute, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -101,7 +102,7 @@ describe('experimental CLI vertical slice', () => {
     await expect(stat(capture.effectivePath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it('installs the global adapter and manages external registration with status guidance', async () => {
+  it('uses file-free policy defaults and manages an explicit disabled override', async () => {
     const fixture = await createFixture(true);
     const before = await snapshotFilesystem(fixture.repository);
 
@@ -113,24 +114,58 @@ describe('experimental CLI vertical slice', () => {
     );
     expect(installed).toMatchObject({ status: 0, stderr: '' });
     expect(installed.stdout).toContain('Pi adapter: installed');
+    const adapters = await runCli(['adapters'], fixture.cwd, fixture.environment);
+    expect(adapters).toMatchObject({ status: 0, stderr: '' });
+    expect(adapters.stdout).toContain('  - pi (current)');
+    expect(adapters.stdout).toContain('bazframe adapter uninstall pi');
 
-    const initialized = await runCli(['init'], fixture.cwd, fixture.environment);
-    expect(initialized).toMatchObject({ status: 0, stderr: '' });
-    expect(initialized.stdout).toContain('Repository registration: registered');
-    expect(initialized.stdout).toContain('Run `pi -nc`');
+    const healthyDefault = await runCli(['status'], fixture.cwd, fixture.environment);
+    expect(healthyDefault.status).toBe(0);
+    expect(healthyDefault.stdout).toContain('Global policy: enabled');
+    expect(healthyDefault.stdout).toContain('Project state: none (inherits global policy)');
+    expect(healthyDefault.stdout).toContain('Effective behavior: enabled (global-enabled)');
+    expect(healthyDefault.stdout).toContain('Corrective actions:\n  (none)');
+    await expect(stat(`${fixture.home}/projects`)).rejects.toMatchObject({ code: 'ENOENT' });
 
-    const healthy = await runCli(['status'], fixture.cwd, fixture.environment);
-    expect(healthy.status).toBe(0);
-    expect(healthy.stdout).toContain('Pi adapter: current');
-    expect(healthy.stdout).toContain('Registration: registered');
-    expect(healthy.stdout).toContain('Corrective actions:\n  (none)');
+    const outsideGit = await fixture.directory.mkdir('outside-git');
+    const nonGitStatus = await runCli(['status'], outsideGit, fixture.environment);
+    expect(nonGitStatus.status).toBe(0);
+    expect(nonGitStatus.stdout).toContain('Repository: (outside a Git worktree)');
+    expect(nonGitStatus.stdout).toContain('Project state: not applicable');
+    expect(nonGitStatus.stdout).toContain('Effective behavior: enabled (global-enabled)');
+    expect(nonGitStatus.stdout).toContain('Active profile: focused');
+    const nonGitProjectOverride = await runCli(
+      ['project', 'disable'],
+      outsideGit,
+      fixture.environment
+    );
+    expect(nonGitProjectOverride.status).toBe(1);
+    expect(nonGitProjectOverride.stderr).toContain('not inside a Git worktree');
 
-    const uninitialized = await runCli(['uninit'], fixture.cwd, fixture.environment);
-    expect(uninitialized.status).toBe(0);
-    expect(uninitialized.stdout).toContain('Repository registration: unregistered');
-    const attention = await runCli(['status'], fixture.cwd, fixture.environment);
-    expect(attention.status).toBe(3);
-    expect(attention.stdout).toContain('Register this worktree with `bazframe init`');
+    const projectsDefault = await runCli(['projects'], fixture.cwd, fixture.environment);
+    expect(projectsDefault).toMatchObject({ status: 0, stderr: '' });
+    expect(projectsDefault.stdout).toContain('Project overrides\nGlobal policy: enabled\n  (none)');
+    expect(projectsDefault.stdout).toContain('(enabled; global-enabled)');
+
+    const disabled = await runCli(['project', 'disable'], fixture.cwd, fixture.environment);
+    expect(disabled).toMatchObject({ status: 0, stderr: '' });
+    expect(disabled.stdout).toContain('Project policy: disabled');
+    expect(disabled.stdout).toContain('Project state: override-added');
+    const oldUninit = await runCli(['uninit'], fixture.cwd, fixture.environment);
+    expect(oldUninit.status).toBe(2);
+    expect(oldUninit.stderr).toContain('bazframe project disable');
+    const disabledStatus = await runCli(['status'], fixture.cwd, fixture.environment);
+    expect(disabledStatus.status).toBe(0);
+    expect(disabledStatus.stdout).toContain('Project state: disabled override');
+    expect(disabledStatus.stdout).toContain('native Pi behavior');
+
+    const enabled = await runCli(['project', 'enable'], fixture.cwd, fixture.environment);
+    expect(enabled).toMatchObject({ status: 0, stderr: '' });
+    expect(enabled.stdout).toContain('Project policy: enabled');
+    expect(enabled.stdout).toContain('Project state: override-removed');
+    expect(enabled.stdout).toContain('Run `pi -nc`');
+    await expect(stat(`${fixture.home}/projects/${projectStateFilename(await realpath(fixture.repository))}`))
+      .rejects.toMatchObject({ code: 'ENOENT' });
 
     const uninstalled = await runCli(
       ['adapter', 'uninstall', 'pi'],
@@ -140,6 +175,71 @@ describe('experimental CLI vertical slice', () => {
     expect(uninstalled.status).toBe(0);
     expect(uninstalled.stdout).toContain('Pi adapter: uninstalled');
     expect(await snapshotFilesystem(fixture.repository)).toEqual(before);
+  });
+
+  it('allows project opt-out without an adapter or active profile', async () => {
+    const fixture = await createFixture(true);
+    const before = await snapshotFilesystem(fixture.repository);
+
+    const disabled = await runCli(['project', 'disable'], fixture.cwd, fixture.environment);
+    expect(disabled).toMatchObject({ status: 0, stderr: '' });
+    expect(disabled.stdout).toContain('Project policy: disabled');
+
+    const enableWithoutSetup = await runCli(['project', 'enable'], fixture.cwd, fixture.environment);
+    expect(enableWithoutSetup.status).toBe(1);
+    expect(enableWithoutSetup.stderr).toContain('adapter install pi');
+    const projects = await runCli(['projects'], fixture.cwd, fixture.environment);
+    expect(projects.stdout).toContain('(disabled override)');
+    expect(await snapshotFilesystem(fixture.repository)).toEqual(before);
+  });
+
+  it('lets an enabled project override global disable and minimizes matching state', async () => {
+    const fixture = await createFixture(true);
+    expect((await runCli(['use', 'focused'], fixture.cwd, fixture.environment)).status).toBe(0);
+    expect((await runCli(['adapter', 'install', 'pi'], fixture.cwd, fixture.environment)).status)
+      .toBe(0);
+
+    const globallyDisabled = await runCli(['global', 'disable'], fixture.cwd, fixture.environment);
+    expect(globallyDisabled).toMatchObject({ status: 0, stderr: '' });
+    expect(globallyDisabled.stdout).toContain('Global policy: disabled');
+    const inheritedDisabled = await runCli(['status'], fixture.cwd, fixture.environment);
+    expect(inheritedDisabled.status).toBe(0);
+    expect(inheritedDisabled.stdout).toContain('Effective behavior: disabled (global-disabled');
+
+    const projectEnabled = await runCli(['project', 'enable'], fixture.cwd, fixture.environment);
+    expect(projectEnabled).toMatchObject({ status: 0, stderr: '' });
+    expect(projectEnabled.stdout).toContain('Precedence: enabled project override');
+    const overrideStatus = await runCli(['status'], fixture.cwd, fixture.environment);
+    expect(overrideStatus.stdout).toContain('Project state: enabled override');
+    expect(overrideStatus.stdout).toContain('Effective behavior: enabled (project-enabled-override)');
+
+    const inheritedAgain = await runCli(['project', 'disable'], fixture.cwd, fixture.environment);
+    expect(inheritedAgain.stdout).toContain('Project state: override-removed');
+    const globallyEnabled = await runCli(['global', 'enable'], fixture.cwd, fixture.environment);
+    expect(globallyEnabled.stdout).toContain('Global policy: enabled');
+    await expect(stat(`${fixture.home}/global.json`)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(stat(`${fixture.home}/projects/${projectStateFilename(await realpath(fixture.repository))}`))
+      .rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('makes global disable a recovery path and validates global enable before mutation', async () => {
+    const fixture = await createFixture(true);
+    const disabled = await runCli(['global', 'disable'], fixture.cwd, fixture.environment);
+    expect(disabled).toMatchObject({ status: 0, stderr: '' });
+    const enable = await runCli(['global', 'enable'], fixture.cwd, fixture.environment);
+    expect(enable.status).toBe(1);
+    expect(enable.stderr).toContain('adapter install pi');
+    expect(JSON.parse(await readFile(`${fixture.home}/global.json`, 'utf8')))
+      .toEqual({ schemaVersion: 1, disabled: true });
+  });
+
+  it('refuses the deprecated launcher when effective policy is disabled', async () => {
+    const fixture = await createFixture(true);
+    await runCli(['global', 'disable'], fixture.cwd, fixture.environment);
+    const result = await runCli(['pi', '--dry-run'], fixture.cwd, fixture.environment);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('Invoke `pi` directly');
+    expect(result.stderr).toContain('bazframe project enable');
   });
 
   it('propagates the child exit code and still cleans the effective file', async () => {
@@ -304,6 +404,10 @@ writeFileSync(process.env.PI_CAPTURE, JSON.stringify({
 if (process.env.FAKE_PI_STDOUT) process.stdout.write(process.env.FAKE_PI_STDOUT);
 process.exit(Number(process.env.FAKE_PI_EXIT || '0'));
 `;
+}
+
+function projectStateFilename(repository: string): string {
+  return `${createHash('sha256').update(repository).digest('hex')}.json`;
 }
 
 function extractEffectiveInstructions(stdout: string): string {
