@@ -1,4 +1,4 @@
-import { lstat, mkdir, readlink, readdir, stat, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readlink, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   addProfile,
@@ -11,6 +11,7 @@ import {
 import { captureProfileRemovalIdentity } from '../../../src/profiles/profile-removal-identity.js';
 import { writeActiveProfile } from '../../../src/profiles/profile-store.js';
 import { snapshotFilesystem } from '../../helpers/filesystem-snapshot.js';
+import { measureProviderOperation } from '../../helpers/provider-manifest.js';
 import { createTempDirectory, type TempDirectory } from '../../helpers/temp-directory.js';
 
 const temporaryDirectories: TempDirectory[] = [];
@@ -107,20 +108,95 @@ describe('profile management', () => {
     );
     await directory.write('home/adapter-cache/pi/skill-aliases/focused/alias/SKILL.md', 'live');
     await directory.write('home/adapter-cache/pi/skill-aliases/reviewer/alias/SKILL.md', 'stale');
-    const sourceBefore = await snapshotFilesystem(directory.path('home/profiles/focused'));
-    const providerBefore = await snapshotFilesystem(directory.path('provider'));
+    const focusedProfile = directory.path('home/profiles/focused');
+    const reviewerProfile = directory.path('home/profiles/reviewer');
+    const focusedAlias = directory.path('home/adapter-cache/pi/skill-aliases/focused');
+    const reviewerAlias = directory.path('home/adapter-cache/pi/skill-aliases/reviewer');
+    const sourceBefore = await snapshotFilesystem(focusedProfile);
+    const measured = await measureProviderOperation(
+      [directory.path('provider')],
+      [focusedProfile, reviewerProfile, focusedAlias, reviewerAlias],
+      () => duplicateProfile(home, 'focused', 'reviewer')
+    );
 
-    await duplicateProfile(home, 'focused', 'reviewer');
-
-    expect(await snapshotFilesystem(directory.path('home/profiles/focused'))).toEqual(sourceBefore);
-    expect(await snapshotFilesystem(directory.path('home/profiles/reviewer'))).toEqual(sourceBefore);
-    expect(await snapshotFilesystem(directory.path('provider'))).toEqual(providerBefore);
+    expect(measured.providerAfter).toEqual(measured.providerBefore);
+    expect(measured.ownedAfter).not.toEqual(measured.ownedBefore);
+    if (!measured.outcome.ok) throw measured.outcome.error;
+    expect(await snapshotFilesystem(focusedProfile)).toEqual(sourceBefore);
+    expect(await snapshotFilesystem(reviewerProfile)).toEqual(sourceBefore);
     expect(await readlink(directory.path('home/profiles/reviewer/broken-relative-link')))
       .toBe('../missing-target');
     expect((await lstat(directory.path('home/adapter-cache/pi/skill-aliases/focused'))).isDirectory())
       .toBe(true);
     await expect(lstat(directory.path('home/adapter-cache/pi/skill-aliases/reviewer')))
       .rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('copies, moves, and removes descriptor bytes without traversing a broken provider root', async () => {
+    const directory = await temporary();
+    const home = directory.path('home');
+    const provider = await directory.mkdir('provider');
+    await directory.write('provider/nested/SKILL.md', 'provider bytes\n');
+    await addProfile(home, 'focused');
+    const descriptor = `${JSON.stringify({
+      schemaVersion: 1,
+      providerId: 'provider',
+      sourceId: 'source',
+      sourceRoot: provider
+    }, null, 2)}\n`;
+    await directory.write(
+      'home/profiles/focused/source-units/provider/source.json',
+      descriptor
+    );
+    await rm(provider, { recursive: true });
+
+    const focusedProfile = directory.path('home/profiles/focused');
+    const reviewerProfile = directory.path('home/profiles/reviewer');
+    const duplicate = await measureProviderOperation(
+      [provider],
+      [focusedProfile, reviewerProfile],
+      () => duplicateProfile(home, 'focused', 'reviewer')
+    );
+    expect(duplicate.providerAfter).toEqual(duplicate.providerBefore);
+    expect(duplicate.ownedAfter).not.toEqual(duplicate.ownedBefore);
+    if (!duplicate.outcome.ok) throw duplicate.outcome.error;
+    expect(await directory.readText(
+      'home/profiles/reviewer/source-units/provider/source.json'
+    )).toBe(descriptor);
+
+    const renamedProfile = directory.path('home/profiles/renamed');
+    const renamed = await measureProviderOperation(
+      [provider],
+      [reviewerProfile, renamedProfile],
+      () => renameProfile(home, 'reviewer', 'renamed')
+    );
+    expect(renamed.providerAfter).toEqual(renamed.providerBefore);
+    expect(renamed.ownedAfter).not.toEqual(renamed.ownedBefore);
+    if (!renamed.outcome.ok) throw renamed.outcome.error;
+    expect(await directory.readText(
+      'home/profiles/renamed/source-units/provider/source.json'
+    )).toBe(descriptor);
+
+    const refusal = await measureProviderOperation(
+      [provider],
+      [renamedProfile],
+      () => removeProfile(home, 'renamed', false)
+    );
+    expect(refusal.providerAfter).toEqual(refusal.providerBefore);
+    expect(refusal.ownedAfter).toEqual(refusal.ownedBefore);
+    expect(refusal.outcome).toMatchObject({ ok: false, error: expect.any(Error) });
+    if (refusal.outcome.ok) throw new Error('Expected profile removal refusal.');
+    expect((refusal.outcome.error as Error).message).toMatch(/--force/u);
+
+    const forced = await measureProviderOperation(
+      [provider],
+      [renamedProfile],
+      () => removeProfile(home, 'renamed', true)
+    );
+    expect(forced.providerAfter).toEqual(forced.providerBefore);
+    expect(forced.ownedAfter).not.toEqual(forced.ownedBefore);
+    if (!forced.outcome.ok) throw forced.outcome.error;
+    await expect(lstat(renamedProfile)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('refuses invalid duplicate endpoints and cleans failed or nonphysical staging', async () => {
@@ -199,16 +275,23 @@ describe('profile management', () => {
     await addProfile(home, 'focused');
     await directory.write('provider/demo/SKILL.md', 'provider');
     const provider = directory.path('provider');
-    const before = await snapshotFilesystem(provider);
+    const profile = directory.path('home/profiles/focused');
     await symlink(
       directory.path('provider/demo'),
       directory.path('home/profiles/focused/skills/demo'),
       'dir'
     );
     await directory.write('home/profiles/focused/notes.txt', 'delete');
-    await expect(removeProfile(home, 'focused', true)).resolves.toMatchObject({ action: 'removed' });
-    await expect(lstat(directory.path('home/profiles/focused'))).rejects.toMatchObject({ code: 'ENOENT' });
-    expect(await snapshotFilesystem(provider)).toEqual(before);
+    const measured = await measureProviderOperation(
+      [provider],
+      [profile],
+      () => removeProfile(home, 'focused', true)
+    );
+    expect(measured.providerAfter).toEqual(measured.providerBefore);
+    expect(measured.ownedAfter).not.toEqual(measured.ownedBefore);
+    if (!measured.outcome.ok) throw measured.outcome.error;
+    expect(measured.outcome.value).toMatchObject({ action: 'removed' });
+    await expect(lstat(profile)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('validates snapshot-bound recursive authorization inside removal and preserves changes', async () => {
@@ -271,10 +354,17 @@ describe('profile management', () => {
 
     await directory.write('provider/demo/SKILL.md', 'changed provider\n');
 
-    await expect(captureProfileRemovalIdentity(directory.path('home/profiles/reviewer')))
-      .resolves.toEqual(expectedIdentity);
-    await expect(removeProfile(home, 'reviewer', true, { expectedIdentity }))
-      .resolves.toMatchObject({ action: 'removed' });
+    const profile = directory.path('home/profiles/reviewer');
+    await expect(captureProfileRemovalIdentity(profile)).resolves.toEqual(expectedIdentity);
+    const measured = await measureProviderOperation(
+      [directory.path('provider')],
+      [profile],
+      () => removeProfile(home, 'reviewer', true, { expectedIdentity })
+    );
+    expect(measured.providerAfter).toEqual(measured.providerBefore);
+    expect(measured.ownedAfter).not.toEqual(measured.ownedBefore);
+    if (!measured.outcome.ok) throw measured.outcome.error;
+    expect(measured.outcome.value).toMatchObject({ action: 'removed' });
     expect(await directory.readText('provider/demo/SKILL.md')).toBe('changed provider\n');
   });
 
@@ -312,9 +402,17 @@ describe('profile management', () => {
       'dir'
     );
 
-    await expect(renameProfile(home, 'focused', 'reviewer')).resolves.toMatchObject({
-      action: 'renamed'
-    });
+    const focusedProfile = directory.path('home/profiles/focused');
+    const reviewerProfile = directory.path('home/profiles/reviewer');
+    const measured = await measureProviderOperation(
+      [directory.path('missing-provider')],
+      [focusedProfile, reviewerProfile],
+      () => renameProfile(home, 'focused', 'reviewer')
+    );
+    expect(measured.providerAfter).toEqual(measured.providerBefore);
+    expect(measured.ownedAfter).not.toEqual(measured.ownedBefore);
+    if (!measured.outcome.ok) throw measured.outcome.error;
+    expect(measured.outcome.value).toMatchObject({ action: 'renamed' });
     expect(await readlink(directory.path('home/profiles/reviewer/skills/demo')))
       .toBe(missingTarget);
   });

@@ -33,6 +33,9 @@ const MAX_REGISTRATION_BYTES = 64 * 1024;
 const PROFILE_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const SKILL_ALIAS_SUFFIX = "-x-bazframe";
+const SOURCE_LIMITS = { depth: 8, entries: 256, skills: 64 } as const;
+const UNKNOWN_PROVIDER_ID = "<unknown-provider>";
+const UNKNOWN_SOURCE_ID = "<unknown-source>";
 const CONTEXT_FILE_NAMES = ["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"];
 const GIT_ENVIRONMENT_VARIABLES = [
 	"GIT_DIR",
@@ -90,11 +93,50 @@ interface InstructionFile {
 	content: string;
 }
 
+interface SourceDescriptor {
+	schemaVersion: 1;
+	providerId: string;
+	sourceId: string;
+	sourceRoot: string;
+}
+
+interface DirectSourceUnit extends SourceDescriptor {
+	descriptorPath: string;
+}
+
+interface DerivedSkill {
+	name: string;
+	baseDir: string;
+	definitionPath: string;
+	providerId: string;
+	sourceId: string;
+	sourceRoot: string;
+	relativePath: string;
+	skill: Skill;
+}
+
+interface SourceDiagnostic {
+	category: "invalid-descriptor" | "broken-root" | "limit-exceeded" | "internal-symlink"
+		| "unsupported-entry" | "mixed-root" | "invalid-definition" | "duplicate-name"
+		| "pi-loader" | "io-error";
+	providerId: string;
+	sourceId: string;
+	path: string;
+	limit?: "depth" | "entries" | "skills";
+	name?: string;
+	diagnosticIndex?: number;
+	message?: string;
+}
+
 interface ProfileState {
 	id: string;
 	directory: string;
 	instructionsPath: string;
 	instructions: string;
+	flatSkills: Skill[];
+	directSourceUnits: DirectSourceUnit[];
+	derivedSkills: DerivedSkill[];
+	sourceDiagnostics: SourceDiagnostic[];
 	skills: Skill[];
 	skillDirectories: string[];
 	warnings: string[];
@@ -431,6 +473,446 @@ async function loadProfileSkills(skillsRoot: string): Promise<{ skills: Skill[];
 	return { skills, warnings };
 }
 
+class SourceResolutionFailure extends Error {
+	constructor(readonly diagnostics: SourceDiagnostic[]) {
+		super("source resolution failed");
+	}
+}
+
+function safeSourceId(value: string): boolean {
+	return value.length >= 1 && value.length <= 64 && SKILL_NAME.test(value);
+}
+
+function sourceDiagnostic(
+	category: SourceDiagnostic["category"],
+	providerId: string,
+	sourceId: string,
+	path: string,
+	extra: Partial<SourceDiagnostic> = {},
+): SourceDiagnostic {
+	return { category, providerId, sourceId, path, ...extra };
+}
+
+function failSource(diagnostic: SourceDiagnostic | SourceDiagnostic[]): never {
+	throw new SourceResolutionFailure(Array.isArray(diagnostic) ? diagnostic : [diagnostic]);
+}
+
+function sourceDescriptorId(name: string): string | undefined {
+	if (!name.endsWith(".json")) return undefined;
+	const id = name.slice(0, -5);
+	return safeSourceId(id) ? id : undefined;
+}
+
+async function readSourceDescriptor(
+	path: string,
+	providerId: string,
+	sourceId: string,
+): Promise<SourceDescriptor> {
+	let handle: FileHandle | undefined;
+	try {
+		handle = await open(
+			path,
+			constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+		);
+		const metadata = await handle.stat({ bigint: true });
+		if (!metadata.isFile()) throw new Error("descriptor is not a physical regular file");
+		const bytes = await handle.readFile();
+		let value: unknown;
+		try {
+			value = JSON.parse(decodeUtf8(bytes, "Source-unit descriptor"));
+		} catch (error) {
+			throw new Error(`Invalid source-unit descriptor: ${path}`, { cause: error });
+		}
+		if (value === null || typeof value !== "object" || Array.isArray(value)) {
+			throw new Error(`Invalid source-unit descriptor: ${path}`);
+		}
+		const candidate = value as Record<string, unknown>;
+		if (!hasExactKeys(candidate, ["schemaVersion", "providerId", "sourceId", "sourceRoot"])
+			|| candidate.schemaVersion !== 1
+			|| candidate.providerId !== providerId
+			|| candidate.sourceId !== sourceId
+			|| typeof candidate.sourceRoot !== "string"
+			|| !isAbsolute(candidate.sourceRoot)
+			|| candidate.sourceRoot.includes("\0")
+			|| resolve(candidate.sourceRoot) !== candidate.sourceRoot) {
+			throw new Error(`Invalid source-unit descriptor: ${path}`);
+		}
+		return {
+			schemaVersion: 1,
+			providerId,
+			sourceId,
+			sourceRoot: candidate.sourceRoot,
+		};
+	} finally {
+		await handle?.close().catch(() => undefined);
+	}
+}
+
+interface SourcePhysicalIdentity {
+	device: bigint;
+	inode: bigint;
+}
+
+interface SourceOpenDirectory {
+	path: string;
+	handle: FileHandle;
+	identity: SourcePhysicalIdentity;
+}
+
+async function sourceNamespace(profileDirectory: string): Promise<{
+	descriptors: { providerId: string; sourceId: string; path: string }[];
+	diagnostics: SourceDiagnostic[];
+}> {
+	const rootPath = join(profileDirectory, "source-units");
+	let rootMetadata;
+	try {
+		rootMetadata = await lstat(rootPath, { bigint: true });
+	} catch (error) {
+		if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+			return { descriptors: [], diagnostics: [] };
+		}
+		return invalidSourceNamespaceRoot();
+	}
+	if (rootMetadata.isSymbolicLink() || !rootMetadata.isDirectory()) return invalidSourceNamespaceRoot();
+
+	let root: SourceOpenDirectory | undefined;
+	try {
+		root = await openSourceDirectory(rootPath, sourceIdentity(rootMetadata));
+		const providerNames = await enumerateSourceDirectory(root);
+		const diagnostics: SourceDiagnostic[] = [];
+		const providers: Array<{ id: string; identity: SourcePhysicalIdentity }> = [];
+		for (const name of providerNames) {
+			let child;
+			try { child = await lstat(join(rootPath, name), { bigint: true }); } catch {
+				diagnostics.push(sourceDiagnostic(
+					"invalid-descriptor",
+					safeSourceId(name) ? name : UNKNOWN_PROVIDER_ID,
+					UNKNOWN_SOURCE_ID,
+					name,
+				));
+				continue;
+			}
+			if (!safeSourceId(name) || child.isSymbolicLink() || !child.isDirectory()) {
+				diagnostics.push(sourceDiagnostic(
+					"invalid-descriptor",
+					safeSourceId(name) ? name : UNKNOWN_PROVIDER_ID,
+					UNKNOWN_SOURCE_ID,
+					name,
+				));
+				continue;
+			}
+			providers.push({ id: name, identity: sourceIdentity(child) });
+		}
+
+		const descriptors: { providerId: string; sourceId: string; path: string }[] = [];
+		const descriptorIdentities = new Map<string, SourcePhysicalIdentity>();
+		for (const provider of providers) {
+			const providerPath = join(rootPath, provider.id);
+			let openedProvider: SourceOpenDirectory | undefined;
+			try {
+				openedProvider = await openSourceDirectory(providerPath, provider.identity);
+				for (const name of await enumerateSourceDirectory(openedProvider)) {
+					const sourceId = sourceDescriptorId(name);
+					const childPath = join(providerPath, name);
+					let child;
+					try { child = await lstat(childPath, { bigint: true }); } catch {
+						diagnostics.push(sourceDiagnostic(
+							"invalid-descriptor",
+							provider.id,
+							sourceId ?? UNKNOWN_SOURCE_ID,
+							`${provider.id}/${name}`,
+						));
+						continue;
+					}
+					if (sourceId === undefined || child.isSymbolicLink() || !child.isFile()) {
+						diagnostics.push(sourceDiagnostic(
+							"invalid-descriptor",
+							provider.id,
+							sourceId ?? UNKNOWN_SOURCE_ID,
+							`${provider.id}/${name}`,
+						));
+						continue;
+					}
+					descriptors.push({ providerId: provider.id, sourceId, path: childPath });
+					descriptorIdentities.set(childPath, sourceIdentity(child));
+				}
+				await assertSourceDirectoryStable(openedProvider);
+			} catch {
+				diagnostics.push(sourceDiagnostic("invalid-descriptor", provider.id, UNKNOWN_SOURCE_ID, provider.id));
+			} finally {
+				await openedProvider?.handle.close().catch(() => undefined);
+			}
+		}
+		for (const descriptor of descriptors) {
+			try {
+				const metadata = await lstat(descriptor.path, { bigint: true });
+				if (metadata.isSymbolicLink() || !metadata.isFile()
+					|| !sameSourceIdentity(sourceIdentity(metadata), descriptorIdentities.get(descriptor.path))) {
+					throw new Error("descriptor namespace entry changed");
+				}
+			} catch {
+				diagnostics.push(sourceDiagnostic(
+					"invalid-descriptor",
+					descriptor.providerId,
+					descriptor.sourceId,
+					`${descriptor.providerId}/${descriptor.sourceId}.json`,
+				));
+			}
+		}
+		await assertSourceDirectoryStable(root);
+		return { descriptors, diagnostics };
+	} catch {
+		return invalidSourceNamespaceRoot();
+	} finally {
+		await root?.handle.close().catch(() => undefined);
+	}
+}
+
+function invalidSourceNamespaceRoot(): {
+	descriptors: { providerId: string; sourceId: string; path: string }[];
+	diagnostics: SourceDiagnostic[];
+} {
+	return {
+		descriptors: [],
+		diagnostics: [sourceDiagnostic("invalid-descriptor", UNKNOWN_PROVIDER_ID, UNKNOWN_SOURCE_ID, ".")],
+	};
+}
+
+async function openSourceDirectory(
+	path: string,
+	expectedIdentity: SourcePhysicalIdentity,
+): Promise<SourceOpenDirectory> {
+	const handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+	try {
+		const metadata = await handle.stat({ bigint: true });
+		if (!metadata.isDirectory() || !sameSourceIdentity(sourceIdentity(metadata), expectedIdentity)) {
+			throw new Error("directory identity changed");
+		}
+		const directory = { path, handle, identity: expectedIdentity };
+		await assertSourceDirectoryStable(directory);
+		return directory;
+	} catch (error) {
+		await handle.close().catch(() => undefined);
+		throw error;
+	}
+}
+
+async function enumerateSourceDirectory(directory: SourceOpenDirectory): Promise<string[]> {
+	await assertSourceDirectoryStable(directory);
+	const names = (await readdir(directory.path)).sort(codeUnitCompare);
+	await assertSourceDirectoryStable(directory);
+	return names;
+}
+
+async function assertSourceDirectoryStable(directory: SourceOpenDirectory): Promise<void> {
+	const [openedMetadata, pathMetadata] = await Promise.all([
+		directory.handle.stat({ bigint: true }),
+		lstat(directory.path, { bigint: true }),
+	]);
+	if (!openedMetadata.isDirectory() || pathMetadata.isSymbolicLink() || !pathMetadata.isDirectory()
+		|| !sameSourceIdentity(sourceIdentity(openedMetadata), directory.identity)
+		|| !sameSourceIdentity(sourceIdentity(pathMetadata), directory.identity)) {
+		throw new Error("directory identity changed");
+	}
+}
+
+function sourceIdentity(metadata: { dev: bigint; ino: bigint }): SourcePhysicalIdentity {
+	return { device: metadata.dev, inode: metadata.ino };
+}
+
+function sameSourceIdentity(
+	left: SourcePhysicalIdentity | undefined,
+	right: SourcePhysicalIdentity | undefined,
+): boolean {
+	return left !== undefined && right !== undefined
+		&& left.device === right.device && left.inode === right.inode;
+}
+
+function sourcePathWithin(path: string, root: string): boolean {
+	const fromRoot = relative(root, path);
+	return fromRoot === ""
+		|| (fromRoot !== ".." && !fromRoot.startsWith(`..${sep}`) && !isAbsolute(fromRoot));
+}
+
+async function resolveDirectSource(direct: DirectSourceUnit): Promise<DerivedSkill[]> {
+	const root = direct.sourceRoot;
+	try {
+		const metadata = await lstat(root);
+		if (metadata.isSymbolicLink() || !metadata.isDirectory() || await realpath(root) !== root) {
+			failSource(sourceDiagnostic("broken-root", direct.providerId, direct.sourceId, "."));
+		}
+	} catch (error) {
+		if (error instanceof SourceResolutionFailure) throw error;
+		failSource(sourceDiagnostic("broken-root", direct.providerId, direct.sourceId, "."));
+	}
+	let entryCount = 0;
+	let skillCount = 0;
+	const rootDefinition = await physicalSourceRootDefinition(direct);
+	const derived: DerivedSkill[] = [];
+	const diagnostic = (category: SourceDiagnostic["category"], path: string, extra = {}) =>
+		sourceDiagnostic(category, direct.providerId, direct.sourceId, path, extra);
+
+	async function visit(directory: string, relativeDirectory: string, depth: number): Promise<void> {
+		let names: string[];
+		try { names = (await readdir(directory)).sort(); } catch {
+			failSource(diagnostic("io-error", relativeDirectory));
+		}
+		for (const name of names) {
+			const path = relativeDirectory === "." ? name : `${relativeDirectory}/${name}`;
+			const absolute = join(directory, name);
+			let metadata;
+			try { metadata = await lstat(absolute); } catch {
+				failSource(diagnostic("io-error", path));
+			}
+			if ((name === ".git" || name === "node_modules")
+				&& (metadata.isDirectory() || metadata.isSymbolicLink())) continue;
+			entryCount += 1;
+			if (entryCount > SOURCE_LIMITS.entries) {
+				failSource(diagnostic("limit-exceeded", path, { limit: "entries" }));
+			}
+			if (metadata.isDirectory() && depth + 1 > SOURCE_LIMITS.depth) {
+				failSource(diagnostic("limit-exceeded", path, { limit: "depth" }));
+			}
+			if (metadata.isSymbolicLink()) failSource(diagnostic("internal-symlink", path));
+			if (!metadata.isDirectory() && !metadata.isFile()) {
+				failSource(diagnostic("unsupported-entry", path));
+			}
+			try {
+				const canonical = await realpath(absolute);
+				if (canonical !== resolve(absolute) || !sourcePathWithin(canonical, root)) {
+					failSource(diagnostic("io-error", path));
+				}
+			} catch (error) {
+				if (error instanceof SourceResolutionFailure) throw error;
+				failSource(diagnostic("io-error", path));
+			}
+			if (metadata.isDirectory()) {
+				await visit(absolute, path, depth + 1);
+				continue;
+			}
+			if (name !== "SKILL.md") continue;
+			skillCount += 1;
+			if (skillCount > SOURCE_LIMITS.skills) {
+				failSource(diagnostic("limit-exceeded", path, { limit: "skills" }));
+			}
+			if (relativeDirectory !== "." && rootDefinition) {
+				failSource(diagnostic("mixed-root", path));
+			}
+			const loaded = loadSkillsFromDir({ dir: directory, source: "bazframe-source-unit" });
+			const errors = loaded.diagnostics.filter((item) => item.type === "error");
+			const matching = loaded.skills.filter((skill) =>
+				skill.baseDir === directory && skill.filePath === absolute);
+			const exact = matching.length === 1 && safeSourceId(matching[0]?.name ?? "");
+			if (errors.length > 0 || !exact) {
+				const returned = loaded.diagnostics.length === 0
+					? [{ message: "Pi loader rejected definition without a diagnostic" }]
+					: loaded.diagnostics;
+				failSource(returned.map((item, diagnosticIndex) => diagnostic("pi-loader", path, {
+					diagnosticIndex,
+					message: item.message,
+				})));
+			}
+			const skill = matching[0];
+			derived.push({
+				name: skill.name,
+				baseDir: skill.baseDir,
+				definitionPath: skill.filePath,
+				providerId: direct.providerId,
+				sourceId: direct.sourceId,
+				sourceRoot: root,
+				relativePath: path,
+				skill,
+			});
+		}
+	}
+	await visit(root, ".", 0);
+	const descendant = derived.find((skill) => skill.relativePath !== "SKILL.md");
+	if (rootDefinition && descendant !== undefined) {
+		failSource(diagnostic("mixed-root", descendant.relativePath));
+	}
+	return derived;
+}
+
+function codeUnitCompare(left: string, right: string): number {
+	return left < right ? -1 : left > right ? 1 : 0;
+}
+
+async function physicalSourceRootDefinition(direct: DirectSourceUnit): Promise<boolean> {
+	try {
+		const metadata = await lstat(join(direct.sourceRoot, "SKILL.md"));
+		return !metadata.isSymbolicLink() && metadata.isFile();
+	} catch (error) {
+		if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
+		failSource(sourceDiagnostic("io-error", direct.providerId, direct.sourceId, "SKILL.md"));
+	}
+}
+
+function sortSourceDiagnostics(diagnostics: SourceDiagnostic[]): SourceDiagnostic[] {
+	return diagnostics.sort((left, right) => codeUnitCompare(left.providerId, right.providerId)
+		|| codeUnitCompare(left.sourceId, right.sourceId)
+		|| codeUnitCompare(left.path, right.path)
+		|| codeUnitCompare(left.category, right.category)
+		|| (left.diagnosticIndex ?? 0) - (right.diagnosticIndex ?? 0)
+		|| codeUnitCompare(left.message ?? "", right.message ?? ""));
+}
+
+async function loadProfileSources(
+	profileDirectory: string,
+	flatSkills: Skill[],
+): Promise<{
+	directSourceUnits: DirectSourceUnit[];
+	derivedSkills: DerivedSkill[];
+	diagnostics: SourceDiagnostic[];
+}> {
+	const namespace = await sourceNamespace(profileDirectory);
+	if (namespace.diagnostics.length > 0) {
+		return { directSourceUnits: [], derivedSkills: [], diagnostics: sortSourceDiagnostics(namespace.diagnostics) };
+	}
+	const directSourceUnits: DirectSourceUnit[] = [];
+	const candidates: { direct: DirectSourceUnit; skills: DerivedSkill[] }[] = [];
+	const diagnostics: SourceDiagnostic[] = [];
+	for (const item of namespace.descriptors) {
+		let descriptor: SourceDescriptor;
+		try { descriptor = await readSourceDescriptor(item.path, item.providerId, item.sourceId); } catch {
+			diagnostics.push(sourceDiagnostic(
+				"invalid-descriptor",
+				item.providerId,
+				item.sourceId,
+				`${item.providerId}/${item.sourceId}.json`,
+			));
+			continue;
+		}
+		const direct = { ...descriptor, descriptorPath: item.path };
+		directSourceUnits.push(direct);
+		try { candidates.push({ direct, skills: await resolveDirectSource(direct) }); } catch (error) {
+			if (error instanceof SourceResolutionFailure) diagnostics.push(...error.diagnostics);
+			else diagnostics.push(sourceDiagnostic("io-error", item.providerId, item.sourceId, "."));
+		}
+	}
+	const names = new Map<string, DerivedSkill[]>();
+	for (const candidate of candidates) for (const skill of candidate.skills) {
+		const group = names.get(skill.name) ?? [];
+		group.push(skill);
+		names.set(skill.name, group);
+	}
+	const flatNames = new Set(flatSkills.map((skill) => skill.name));
+	const duplicateUnits = new Set<string>();
+	for (const [name, skills] of [...names.entries()].sort(([left], [right]) => codeUnitCompare(left, right))) {
+		if (!flatNames.has(name) && skills.length < 2) continue;
+		for (const skill of skills) {
+			duplicateUnits.add(`${skill.providerId}\0${skill.sourceId}`);
+			diagnostics.push(sourceDiagnostic("duplicate-name", skill.providerId, skill.sourceId, skill.relativePath, { name }));
+		}
+	}
+	return {
+		directSourceUnits,
+		derivedSkills: candidates
+			.filter(({ direct }) => !duplicateUnits.has(`${direct.providerId}\0${direct.sourceId}`))
+			.flatMap((candidate) => candidate.skills),
+		diagnostics: sortSourceDiagnostics(diagnostics),
+	};
+}
+
 async function loadProfile(bazframeHome: string): Promise<ProfileState> {
 	const id = await readActiveProfileId(bazframeHome);
 	const directory = join(bazframeHome, "profiles", id);
@@ -447,13 +929,19 @@ async function loadProfile(bazframeHome: string): Promise<ProfileState> {
 		if (names.has(skill.name)) throw new Error(`Duplicate profile skill name: ${skill.name}`);
 		names.add(skill.name);
 	}
+	const sources = await loadProfileSources(directory, loaded.skills);
+	const combined = [...loaded.skills, ...sources.derivedSkills.map((derived) => derived.skill)];
 	return {
 		id,
 		directory,
 		instructionsPath,
 		instructions,
-		skills: loaded.skills,
-		skillDirectories: [...new Set(loaded.skills.map((skill) => skill.baseDir))].sort(),
+		flatSkills: loaded.skills,
+		directSourceUnits: sources.directSourceUnits,
+		derivedSkills: sources.derivedSkills,
+		sourceDiagnostics: sources.diagnostics,
+		skills: combined,
+		skillDirectories: [...new Set(combined.map((skill) => skill.baseDir))].sort(),
 		warnings: loaded.warnings,
 	};
 }
@@ -723,6 +1211,20 @@ function contextPaths(options: BuildSystemPromptOptions): string[] {
 	return options.contextFiles.map((file) => file.path);
 }
 
+function formatSourceFailure(diagnostic: SourceDiagnostic): string {
+	const identity = `${diagnostic.providerId}/${diagnostic.sourceId}:${diagnostic.path}`;
+	if (diagnostic.category === "limit-exceeded") {
+		return `${identity} ${diagnostic.category} (${diagnostic.limit})`;
+	}
+	if (diagnostic.category === "duplicate-name") {
+		return `${identity} ${diagnostic.category} (${diagnostic.name})`;
+	}
+	if (diagnostic.category === "pi-loader") {
+		return `${identity} ${diagnostic.category}[${diagnostic.diagnosticIndex}]: ${diagnostic.message}`;
+	}
+	return `${identity} ${diagnostic.category}`;
+}
+
 function info(state: AdapterState, pi: ExtensionAPI, ctx: ExtensionCommandContext): string {
 	let piContext: string[] = [];
 	let structuredContextAvailable = true;
@@ -754,11 +1256,30 @@ function info(state: AdapterState, pi: ExtensionAPI, ctx: ExtensionCommandContex
 			.sort()
 		: [];
 
+	const profile = active ? state.profile : undefined;
 	return [
-		`Profile: ${active ? state.profile!.id : "(none)"}`,
+		`Profile: ${profile?.id ?? "(none)"}`,
 		...(contextEntries.length === 0 ? ["Context: (none)"] : ["Context:", ...contextEntries]),
+		`Flat direct skills: ${profile?.flatSkills.length ?? 0}`,
+		...(profile === undefined || profile.flatSkills.length === 0
+			? ["  (none)"]
+			: profile.flatSkills.map((skill) => `  - ${skill.name} (${skill.filePath})`)),
+		`Direct source units: ${profile?.directSourceUnits.length ?? 0}`,
+		...(profile === undefined || profile.directSourceUnits.length === 0
+			? ["  (none)"]
+			: profile.directSourceUnits.map((source) =>
+				`  - ${source.providerId}/${source.sourceId} -> ${source.sourceRoot}`)),
+		`Derived effective skills: ${profile?.derivedSkills.length ?? 0}`,
+		...(profile === undefined || profile.derivedSkills.length === 0
+			? ["  (none)"]
+			: profile.derivedSkills.map((skill) =>
+				`  - ${skill.name} (${skill.providerId}/${skill.sourceId}:${skill.relativePath})`)),
+		`Source failures: ${profile?.sourceDiagnostics.length ?? 0}`,
+		...(profile === undefined || profile.sourceDiagnostics.length === 0
+			? ["  (none)"]
+			: profile.sourceDiagnostics.map((diagnostic) => `  - ${formatSourceFailure(diagnostic)}`)),
 		`Skills: ${skills.length === 0 ? "(none)" : skills.join(", ")}`,
-		...(collisions.length === 0 ? [] : [`Collisions: ${collisions.join(", ")}`]),
+		...(collisions.length === 0 ? [] : [`Aliases: ${collisions.join(", ")}`]),
 	].join("\n");
 }
 
@@ -828,6 +1349,12 @@ export default function bazframePiAdapter(pi: ExtensionAPI): void {
 			}
 			for (const warning of state.profile.warnings) {
 				if (ctx.hasUI) ctx.ui.notify(`Bazframe profile skill warning: ${warning}`, "warning");
+			}
+			for (const diagnostic of state.profile.sourceDiagnostics) {
+				if (ctx.hasUI) ctx.ui.notify(
+					`Bazframe source-unit failure: ${formatSourceFailure(diagnostic)}`,
+					"warning",
+				);
 			}
 			return prepared.paths.length === 0 ? undefined : { skillPaths: prepared.paths };
 		} catch (error) {

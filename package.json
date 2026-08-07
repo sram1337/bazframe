@@ -42,6 +42,7 @@
     "vitest": "^4.1.0"
   },
   "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.82.0",
     "ink": "7.1.1",
     "react": "19.2.8"
   }

@@ -39,6 +39,8 @@ try {
   }
   assertExists(join(packageRoot, 'dist', 'tui', 'run-tui.js'));
   assertExists(join(packageRoot, 'dist', 'application', 'tui-service.js'));
+  assertExists(join(packageRoot, 'dist', 'profiles', 'profile-source-membership.js'));
+  assertExists(join(packageRoot, 'dist', 'source-units', 'source-unit-resolver.js'));
   assertExists(join(packageRoot, 'artifacts', 'pi', 'bazframe.ts'));
   assertExists(join(packageRoot, 'README.md'));
   assertExists(join(packageRoot, 'docs', 'prototype.md'));
@@ -58,8 +60,12 @@ try {
   if (manifest.bin?.bazframe !== './dist/cli.js') {
     throw new Error(`Unexpected packaged bin target: ${manifest.bin?.bazframe}`);
   }
-  if (manifest.dependencies?.ink !== '7.1.1' || manifest.dependencies?.react !== '19.2.8') {
-    throw new Error('Expected exact packaged Ink and React runtime dependencies.');
+  if (
+    manifest.dependencies?.['@earendil-works/pi-coding-agent'] !== '0.82.0'
+    || manifest.dependencies?.ink !== '7.1.1'
+    || manifest.dependencies?.react !== '19.2.8'
+  ) {
+    throw new Error('Expected exact packaged Pi 0.82.0, Ink, and React runtime dependencies.');
   }
 
   const executable = process.platform === 'win32'

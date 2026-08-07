@@ -14,6 +14,9 @@
 - [x] Standardize the resource-oriented CLI overviews/help, available/profile skill listing, and missing-skill suggestions.
 - [x] Add accessible terminal-aware color without changing piped or `NO_COLOR` output.
 - [x] Define first-slice Pi context ordering and native/profile skill-collision aliases.
+- [x] Approve the provider-neutral source-unit production contract: profile-local versioned descriptors, bounded live derivation, CLI-only membership, atomic source failures, and provider-owned lifecycle (`docs/design.md`).
+- [x] Implement source-unit descriptor persistence and `bazframe profile sources` add/remove/overview without changing flat Skillbook membership, including no-follow descriptor reads, substitution revalidation, and retry pruning.
+- [x] Implement no-follow, identity-checked bounded source-unit discovery, Pi 0.82-authoritative validation, complete-profile-set duplicate rejection, individual Pi projection, and separated status/`/bazframe info` reporting with acceptance coverage.
 - [x] Replace redundant per-project opt-in registrations with project-over-global enable/disable policy and file-free enabled defaults.
 - [x] Apply global policy and the active profile in non-Git directories while keeping per-project overrides Git-only.
 - [ ] Define semantic instruction conflicts and cross-runtime skill conflicts.
@@ -23,8 +26,8 @@
 
 - [x] Capture the initial no-sidebar, top-tab TUI interaction design (`docs/tui-design.md`).
 - [ ] Resolve the provider-ownership contract for skill move/rename, including writable roots, cross-root moves, frontmatter IDs, provider lock state, rollback, and destructive recovery.
-- [ ] Define a provider-neutral skill-source registry that supports zero, one, or many roots while preserving the current Skillbook resolution behavior.
-- [ ] Settle canonical source identity for symlinked/retargeted Skillbook roots without losing safe removal of an expected broken membership when provider content is absent.
+- [x] Define profile-local provider-neutral source-unit descriptors supporting zero or many direct memberships while preserving current Skillbook resolution; defer a global registry as unnecessary for the first slice.
+- [x] Settle canonical source-unit identity and broken-root removal through strict versioned descriptors without following provider roots.
 - [x] Settle the first Settings-tab scope as structured read-only setup status.
 - [ ] Define writable Settings scope, ownership, persistence, validation, and CLI interoperability.
 - [x] Pin Ink 7.1.1 with React 19.2.8 and load the TUI framework only from the lazy `bazframe tui` entry path (`docs/tui-framework-research.md`).
@@ -52,7 +55,12 @@
 
 - [x] Research the likely origin and scope pressure behind Bazframe 2 (`docs/research/origin-and-rationale.md`).
 - [x] Document the skill-first refactoring and external-harness problem frame (`docs/research/skill-first-projects-and-external-harnesses.md`).
-- [ ] **Deferred:** Map the MTG skills' cross-skill dependencies and test one transferable bundle through an external live library.
+- [x] Draft a provider-neutral nested source-unit composition proposal, compare it with the current implementation, and enumerate the experiment decisions (`docs/research/provider-neutral-nested-source-unit-composition.md`).
+- [x] Approve the experiment-only Stage 1 parameters, fixture-preparer boundary, validation split, counting/error semantics, and isolated allowed write root (`docs/research/provider-neutral-nested-source-unit-composition.md`).
+- [x] Complete Stage 1: structural and Pi 0.82 composition mechanics passed; bounded-wrapper evidence did not demonstrate Bazframe-exclusive necessity (`experiments/provider-neutral-nested-source-unit-composition/REPORT.md`).
+- [x] Complete the reopened experiment-only Stage 2 sanitized MTG source-tree/runtime proof with two provider-prepared children and two unrelated callers; exclusive necessity was not demonstrated (`experiments/provider-neutral-nested-source-unit-composition/stage2-mtg/REPORT.md`).
+- [x] Record the later user-approved narrow production composition seam while retaining bounded-wrapper evidence and provider ownership (`docs/design.md`).
+- [ ] **Deferred:** Map the broader MTG skills' cross-skill dependencies or test a production transferable bundle through an external live library; the two-child Stage 2 proof and narrow composition approval do not expand into packs or provider lifecycle.
 
 ## Pi adaptive context adapter
 

@@ -1,7 +1,8 @@
-import { readFile, realpath } from 'node:fs/promises';
+import { readFile, readdir, realpath } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import ts from 'typescript';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { captureProviderManifest } from '../../helpers/provider-manifest.js';
 import { createTempDirectory, type TempDirectory } from '../../helpers/temp-directory.js';
 
 const temporaryDirectories: TempDirectory[] = [];
@@ -73,6 +74,7 @@ describe('packaged Pi adapter command', () => {
         '  (pi) /pi/global/AGENTS.md',
         '  (pi) /repo/AGENTS.md',
         `  (bazframe) ${fixture.profileInstructions}`,
+        ...sourceInfoLines(),
         'Skills: alpha, zeta'
       ].join('\n'),
       level: 'info'
@@ -83,7 +85,12 @@ describe('packaged Pi adapter command', () => {
       getSystemPromptOptions: () => { throw new Error('missing structured context'); },
       ui: { notify: (message: string) => { incompatibleMessage = message; } }
     });
-    expect(incompatibleMessage).toBe('Profile: (none)\nContext: (none)\nSkills: alpha, zeta');
+    expect(incompatibleMessage).toBe([
+      'Profile: (none)',
+      'Context: (none)',
+      ...sourceInfoLines(),
+      'Skills: alpha, zeta'
+    ].join('\n'));
   });
 
   it('shows restored global context for an empty Pi context list', async () => {
@@ -97,9 +104,10 @@ describe('packaged Pi adapter command', () => {
       'Context:',
       `  (bazframe) ${fixture.globalInstructions}`,
       `  (bazframe) ${fixture.profileInstructions}`,
+      ...sourceInfoLines(),
       'Skills: (none)'
     ].join('\n'));
-    expect(notification.message).not.toContain('Collisions:');
+    expect(notification.message).not.toContain('Aliases:');
   });
 
   it('loads profile context and skill resources outside Git under global enable', async () => {
@@ -107,10 +115,17 @@ describe('packaged Pi adapter command', () => {
     const harness = register(await loadArtifact(fixture.directory, true), []);
 
     await required(harness.events, 'session_start')({}, sessionContext(fixture.repository));
+    const profileRoot = fixture.directory.path('bazframe-home/profiles/focused');
+    const ownedBeforeProjection = await captureProviderManifest([profileRoot]);
+    const providerBeforeProjection = await captureProviderManifest([]);
     const resources = await required(harness.events, 'resources_discover')(
       { cwd: fixture.repository },
       { hasUI: false, ui: { notify: () => undefined } }
     );
+    const providerAfterProjection = await captureProviderManifest([]);
+    const ownedAfterProjection = await captureProviderManifest([profileRoot]);
+    expect(providerAfterProjection).toEqual(providerBeforeProjection);
+    expect(ownedAfterProjection).toEqual(ownedBeforeProjection);
     const beforeAgent = required(harness.events, 'before_agent_start')(
       {
         systemPrompt: 'native prompt',
@@ -129,6 +144,249 @@ describe('packaged Pi adapter command', () => {
       .toContain('Profile: focused');
   });
 
+  it('projects live derived definitions individually without passing a grouping root', async () => {
+    const fixture = await activeFixture('source-projection');
+    const provider = await realpath(await fixture.directory.mkdir('provider-root'));
+    const alphaDefinition = await fixture.directory.write(
+      'provider-root/nested/alpha/SKILL.md',
+      '---\nname: alpha\ndescription: alpha\n---\n\nalpha\n'
+    );
+    await fixture.directory.write(
+      'bazframe-home/profiles/focused/source-units/provider/source.json',
+      `${JSON.stringify({
+        schemaVersion: 1,
+        providerId: 'provider',
+        sourceId: 'source',
+        sourceRoot: provider
+      })}\n`
+    );
+    const descriptorPath = fixture.directory.path(
+      'bazframe-home/profiles/focused/source-units/provider/source.json'
+    );
+    const harness = register(await loadArtifact(fixture.directory, true), []);
+    const ownedBeforeFirst = await captureProviderManifest([descriptorPath]);
+    const beforeFirst = await captureProviderManifest([provider]);
+
+    const first = await required(harness.events, 'resources_discover')(
+      { cwd: fixture.repository },
+      { hasUI: false, ui: { notify: () => undefined } }
+    );
+    const afterFirst = await captureProviderManifest([provider]);
+    const ownedAfterFirst = await captureProviderManifest([descriptorPath]);
+    expect(afterFirst).toEqual(beforeFirst);
+    expect(ownedAfterFirst).toEqual(ownedBeforeFirst);
+    expect(first).toEqual({ skillPaths: [await realpath(alphaDefinition)] });
+    expect((first as { skillPaths: string[] }).skillPaths).not.toContain(provider);
+
+    const infoNotification = await runCommand(required(harness.commands, 'bazframe'), 'info', []);
+    expect(infoNotification.message).toContain('Flat direct skills: 0');
+    expect(infoNotification.message).toContain('Direct source units: 1');
+    expect(infoNotification.message).toContain('Derived effective skills: 1');
+    expect(infoNotification.message).toContain('alpha (provider/source:nested/alpha/SKILL.md)');
+    expect(infoNotification.message).toContain('Source failures: 0');
+
+    const betaDefinition = await fixture.directory.write(
+      'provider-root/beta/SKILL.md',
+      '---\nname: beta\ndescription: beta\n---\n\nbeta\n'
+    );
+    const ownedBeforeReload = await captureProviderManifest([descriptorPath]);
+    const changedBeforeReload = await captureProviderManifest([provider]);
+    const reloaded = await required(harness.events, 'resources_discover')(
+      { cwd: fixture.repository },
+      { hasUI: false, ui: { notify: () => undefined } }
+    );
+    const changedAfterReload = await captureProviderManifest([provider]);
+    const ownedAfterReload = await captureProviderManifest([descriptorPath]);
+    expect(changedAfterReload).toEqual(changedBeforeReload);
+    expect(ownedAfterReload).toEqual(ownedBeforeReload);
+    expect(reloaded).toEqual({
+      skillPaths: [await realpath(betaDefinition), await realpath(alphaDefinition)]
+    });
+  });
+
+  it('uses Pi-loaded folded and directory-fallback names in the artifact projection', async () => {
+    const fixture = await activeFixture('source-name-parity');
+    const provider = await realpath(await fixture.directory.mkdir('provider-root'));
+    const fallbackDefinition = await fixture.directory.write(
+      'provider-root/directory-fallback/SKILL.md',
+      '---\ndescription: fallback\n---\n\nfallback\n'
+    );
+    const foldedDefinition = await fixture.directory.write(
+      'provider-root/folded-directory/SKILL.md',
+      '---\nname: >-\n  folded-name\ndescription: folded\n---\n\nfolded\n'
+    );
+    const descriptorPath = await fixture.directory.write(
+      'bazframe-home/profiles/focused/source-units/provider/source.json',
+      `${JSON.stringify({
+        schemaVersion: 1,
+        providerId: 'provider',
+        sourceId: 'source',
+        sourceRoot: provider
+      })}\n`
+    );
+    const harness = register(await loadArtifact(fixture.directory, 'parity'), []);
+    const ownedBefore = await captureProviderManifest([descriptorPath]);
+    const providerBefore = await captureProviderManifest([provider]);
+
+    const resources = await required(harness.events, 'resources_discover')(
+      { cwd: fixture.repository },
+      { hasUI: false, ui: { notify: () => undefined } }
+    );
+    const providerAfter = await captureProviderManifest([provider]);
+    const ownedAfter = await captureProviderManifest([descriptorPath]);
+
+    expect(providerAfter).toEqual(providerBefore);
+    expect(ownedAfter).toEqual(ownedBefore);
+    expect(resources).toEqual({
+      skillPaths: [await realpath(fallbackDefinition), await realpath(foldedDefinition)]
+    });
+    const infoNotification = await runCommand(required(harness.commands, 'bazframe'), 'info', []);
+    expect(infoNotification.message).toContain(
+      'directory-fallback (provider/source:directory-fallback/SKILL.md)'
+    );
+    expect(infoNotification.message).toContain(
+      'folded-name (provider/source:folded-directory/SKILL.md)'
+    );
+  });
+
+  it('withholds an artifact source and normalizes every rejecting Pi diagnostic exactly', async () => {
+    const fixture = await activeFixture('source-pi-rejection');
+    const provider = await realpath(await fixture.directory.mkdir('provider-root'));
+    await fixture.directory.write(
+      'provider-root/rejected/SKILL.md',
+      '---\nname: rejected\ndescription: rejected\n---\n\nrejected\n'
+    );
+    await fixture.directory.write(
+      'bazframe-home/profiles/focused/source-units/provider/source.json',
+      `${JSON.stringify({
+        schemaVersion: 1,
+        providerId: 'provider',
+        sourceId: 'source',
+        sourceRoot: provider
+      })}\n`
+    );
+    const harness = register(await loadArtifact(fixture.directory, 'reject'), []);
+    const descriptorPath = fixture.directory.path(
+      'bazframe-home/profiles/focused/source-units/provider/source.json'
+    );
+    const ownedBeforeProjection = await captureProviderManifest([descriptorPath]);
+    const beforeProjection = await captureProviderManifest([provider]);
+
+    const resources = await required(harness.events, 'resources_discover')(
+      { cwd: fixture.repository },
+      { hasUI: false, ui: { notify: () => undefined } }
+    );
+    const afterProjection = await captureProviderManifest([provider]);
+    const ownedAfterProjection = await captureProviderManifest([descriptorPath]);
+
+    expect(afterProjection).toEqual(beforeProjection);
+    expect(ownedAfterProjection).toEqual(ownedBeforeProjection);
+    expect(resources).toBeUndefined();
+    const infoNotification = await runCommand(required(harness.commands, 'bazframe'), 'info', []);
+    expect(infoNotification.message).toContain('Derived effective skills: 0');
+    expect(infoNotification.message).toContain('Source failures: 2');
+    expect(infoNotification.message).toContain(
+      'provider/source:rejected/SKILL.md pi-loader[0]: first Pi diagnostic'
+    );
+    expect(infoNotification.message).toContain(
+      'provider/source:rejected/SKILL.md pi-loader[1]: second Pi diagnostic'
+    );
+  });
+
+  it('aliases a native collision from the derived skill original base and definition', async () => {
+    const fixture = await activeFixture('source-alias');
+    const provider = await realpath(await fixture.directory.mkdir('provider-root'));
+    const definition = await fixture.directory.write(
+      'provider-root/alpha/SKILL.md',
+      '---\nname: alpha\ndescription: derived alpha\n---\n\nalpha\n'
+    );
+    await fixture.directory.write(
+      'bazframe-home/profiles/focused/source-units/provider/source.json',
+      `${JSON.stringify({
+        schemaVersion: 1,
+        providerId: 'provider',
+        sourceId: 'source',
+        sourceRoot: provider
+      })}\n`
+    );
+    const runtimeCommands = [{ name: 'skill:alpha', source: 'skill' }];
+    const harness = register(await loadArtifact(fixture.directory, true), runtimeCommands);
+    const descriptorPath = fixture.directory.path(
+      'bazframe-home/profiles/focused/source-units/provider/source.json'
+    );
+    const aliasRoot = fixture.directory.path(
+      'bazframe-home/adapter-cache/pi/skill-aliases/focused'
+    );
+    const ownedBefore = await captureProviderManifest([descriptorPath, aliasRoot]);
+    const before = await captureProviderManifest([provider]);
+
+    const resources = await required(harness.events, 'resources_discover')(
+      { cwd: fixture.repository },
+      { hasUI: false, ui: { notify: () => undefined } }
+    ) as { skillPaths: string[] };
+    const after = await captureProviderManifest([provider]);
+    const ownedAfter = await captureProviderManifest([descriptorPath, aliasRoot]);
+    expect(after).toEqual(before);
+    expect(ownedAfter).not.toEqual(ownedBefore);
+    expect(resources.skillPaths).toHaveLength(1);
+    expect(resources.skillPaths[0]).toContain('alpha-x-bazframe/SKILL.md');
+    const alias = await readFile(resources.skillPaths[0], 'utf8');
+    expect(alias).toContain(JSON.stringify(await realpath(definition)));
+    expect(alias).toContain(JSON.stringify(await realpath(fixture.directory.path('provider-root/alpha'))));
+  });
+
+  it('fails a generated-alias collision visibly without replacing cache bytes or adding an alias', async () => {
+    const fixture = await activeFixture('source-alias-collision');
+    const provider = await realpath(await fixture.directory.mkdir('provider-root'));
+    await fixture.directory.write(
+      'provider-root/alpha/SKILL.md',
+      '---\nname: alpha\ndescription: derived alpha\n---\n\nalpha\n'
+    );
+    await fixture.directory.write(
+      'bazframe-home/profiles/focused/source-units/provider/source.json',
+      `${JSON.stringify({
+        schemaVersion: 1,
+        providerId: 'provider',
+        sourceId: 'source',
+        sourceRoot: provider
+      })}\n`
+    );
+    const cachedAlias = await fixture.directory.write(
+      'bazframe-home/adapter-cache/pi/skill-aliases/focused/alpha-x-bazframe/SKILL.md',
+      'preserve existing cache\n'
+    );
+    const runtimeCommands = [
+      { name: 'skill:alpha', source: 'skill' },
+      { name: 'skill:alpha-x-bazframe', source: 'skill' }
+    ];
+    const harness = register(await loadArtifact(fixture.directory, true), runtimeCommands);
+    let notification = '';
+    const descriptorPath = fixture.directory.path(
+      'bazframe-home/profiles/focused/source-units/provider/source.json'
+    );
+    const ownedBeforeProjection = await captureProviderManifest([descriptorPath, cachedAlias]);
+    const beforeProjection = await captureProviderManifest([provider]);
+
+    const resources = await required(harness.events, 'resources_discover')(
+      { cwd: fixture.repository },
+      { hasUI: true, ui: { notify: (message: string) => { notification = message; } } }
+    );
+    const afterProjection = await captureProviderManifest([provider]);
+    const ownedAfterProjection = await captureProviderManifest([descriptorPath, cachedAlias]);
+
+    expect(afterProjection).toEqual(beforeProjection);
+    expect(ownedAfterProjection).toEqual(ownedBeforeProjection);
+    expect(resources).toBeUndefined();
+    expect(notification).toContain(
+      'Bazframe skill preparation failed: Bazframe skill alias also collides: alpha -> alpha-x-bazframe'
+    );
+    expect(await readFile(cachedAlias, 'utf8')).toBe('preserve existing cache\n');
+    expect(await readdir(
+      fixture.directory.path('bazframe-home/adapter-cache/pi/skill-aliases/focused')
+    )).toEqual(['alpha-x-bazframe']);
+    expect(runtimeCommands).toHaveLength(2);
+  });
+
   it('keeps globally disabled non-Git directories native', async () => {
     const fixture = await activeFixture('outside-disabled', ['profile-skill'], false);
     await fixture.directory.write(
@@ -138,10 +396,18 @@ describe('packaged Pi adapter command', () => {
     const harness = register(await loadArtifact(fixture.directory, true), []);
 
     await required(harness.events, 'session_start')({}, sessionContext(fixture.repository));
-    expect(await required(harness.events, 'resources_discover')(
+    const profileRoot = fixture.directory.path('bazframe-home/profiles/focused');
+    const ownedBeforeProjection = await captureProviderManifest([profileRoot]);
+    const providerBeforeProjection = await captureProviderManifest([]);
+    const resources = await required(harness.events, 'resources_discover')(
       { cwd: fixture.repository },
       { hasUI: false, ui: { notify: () => undefined } }
-    )).toBeUndefined();
+    );
+    const providerAfterProjection = await captureProviderManifest([]);
+    const ownedAfterProjection = await captureProviderManifest([profileRoot]);
+    expect(providerAfterProjection).toEqual(providerBeforeProjection);
+    expect(ownedAfterProjection).toEqual(ownedBeforeProjection);
+    expect(resources).toBeUndefined();
     expect(required(harness.events, 'before_agent_start')(
       {
         systemPrompt: 'native prompt',
@@ -150,7 +416,13 @@ describe('packaged Pi adapter command', () => {
       { hasUI: false, ui: { notify: () => undefined } }
     )).toBeUndefined();
     expect((await runCommand(required(harness.commands, 'bazframe'), 'info', ['/pi/AGENTS.md'])).message)
-      .toBe('Profile: (none)\nContext:\n  (pi) /pi/AGENTS.md\nSkills: (none)');
+      .toBe([
+        'Profile: (none)',
+        'Context:',
+        '  (pi) /pi/AGENTS.md',
+        ...sourceInfoLines(),
+        'Skills: (none)'
+      ].join('\n'));
   });
 
   it('keeps globally disabled Git worktrees native', async () => {
@@ -162,7 +434,13 @@ describe('packaged Pi adapter command', () => {
     const disabledHarness = register(await loadArtifact(disabled.directory), []);
     await required(disabledHarness.events, 'session_start')({}, sessionContext(disabled.repository));
     expect((await runCommand(required(disabledHarness.commands, 'bazframe'), 'info', ['/pi/AGENTS.md'])).message)
-      .toBe('Profile: (none)\nContext:\n  (pi) /pi/AGENTS.md\nSkills: (none)');
+      .toBe([
+        'Profile: (none)',
+        'Context:',
+        '  (pi) /pi/AGENTS.md',
+        ...sourceInfoLines(),
+        'Skills: (none)'
+      ].join('\n'));
   });
 
   it('reports malformed global policy outside Git before an agent turn', async () => {
@@ -197,10 +475,19 @@ describe('packaged Pi adapter command', () => {
     ];
     const harness = register(await loadArtifact(fixture.directory, true), runtimeCommands);
     await required(harness.events, 'session_start')({}, sessionContext(fixture.repository));
+    const aliasRoot = fixture.directory.path(
+      'bazframe-home/adapter-cache/pi/skill-aliases/focused'
+    );
+    const ownedBeforeProjection = await captureProviderManifest([aliasRoot]);
+    const providerBeforeProjection = await captureProviderManifest([]);
     await required(harness.events, 'resources_discover')(
       { cwd: fixture.repository },
       { hasUI: false, ui: { notify: () => undefined } }
     );
+    const providerAfterProjection = await captureProviderManifest([]);
+    const ownedAfterProjection = await captureProviderManifest([aliasRoot]);
+    expect(providerAfterProjection).toEqual(providerBeforeProjection);
+    expect(ownedAfterProjection).not.toEqual(ownedBeforeProjection);
     runtimeCommands.push(
       { name: 'skill:zeta-x-bazframe', source: 'skill' },
       { name: 'skill:alpha-x-bazframe', source: 'skill' }
@@ -212,8 +499,12 @@ describe('packaged Pi adapter command', () => {
       'Context:',
       `  (bazframe) ${fixture.globalInstructions}`,
       `  (bazframe) ${fixture.profileInstructions}`,
+      ...sourceInfoLines([
+        ['alpha', fixture.directory.path('bazframe-home/profiles/focused/skills/alpha/SKILL.md')],
+        ['zeta', fixture.directory.path('bazframe-home/profiles/focused/skills/zeta/SKILL.md')]
+      ]),
       'Skills: alpha, alpha-x-bazframe, zeta, zeta-x-bazframe',
-      'Collisions: alpha -> alpha-x-bazframe, zeta -> zeta-x-bazframe'
+      'Aliases: alpha -> alpha-x-bazframe, zeta -> zeta-x-bazframe'
     ].join('\n'));
   });
 
@@ -256,7 +547,13 @@ describe('packaged Pi adapter command', () => {
     await required(harness.events, 'session_start')({}, sessionContext(cwd));
     const notification = await runCommand(required(harness.commands, 'bazframe'), 'info', ['/pi/AGENTS.md']);
     expect(notification).toEqual({
-      message: 'Profile: (none)\nContext:\n  (pi) /pi/AGENTS.md\nSkills: (none)',
+      message: [
+        'Profile: (none)',
+        'Context:',
+        '  (pi) /pi/AGENTS.md',
+        ...sourceInfoLines(),
+        'Skills: (none)'
+      ].join('\n'),
       level: 'error'
     });
     expect(notification.message).not.toContain('Error:');
@@ -280,7 +577,12 @@ describe('packaged Pi adapter command', () => {
     );
     const notification = await runCommand(required(harness.commands, 'bazframe'), 'info', []);
     expect(notification).toEqual({
-      message: 'Profile: (none)\nContext: (none)\nSkills: (none)',
+      message: [
+        'Profile: (none)',
+        'Context: (none)',
+        ...sourceInfoLines(),
+        'Skills: (none)'
+      ].join('\n'),
       level: 'error'
     });
     expect(required(harness.events, 'input')({}, { hasUI: true, ui: { notify: () => undefined } }))
@@ -332,7 +634,10 @@ function register(adapter: LoadedAdapter, runtimeCommands: RuntimeCommand[]): Ha
   return { events, commands };
 }
 
-async function loadArtifact(directory: TempDirectory, loadSkills = false): Promise<LoadedAdapter> {
+async function loadArtifact(
+  directory: TempDirectory,
+  loadSkills: false | true | 'reject' | 'parity' = false
+): Promise<LoadedAdapter> {
   const source = await readFile(
     new URL('../../../artifacts/pi/bazframe.ts', import.meta.url),
     'utf8'
@@ -348,23 +653,51 @@ async function loadArtifact(directory: TempDirectory, loadSkills = false): Promi
   );
   await directory.write(
     'runtime/node_modules/@earendil-works/pi-coding-agent/index.js',
-    loadSkills
+    loadSkills === 'reject'
       ? [
-          'import { basename, join } from "node:path";',
           'export const VERSION = "0.82.0";',
           'export const getAgentDir = () => process.env.PI_CODING_AGENT_DIR;',
-          'export const loadSkillsFromDir = ({ dir: directory }) => ({',
-          '  skills: [{ name: basename(directory), filePath: join(directory, "SKILL.md"), baseDir: directory }],',
-          '  diagnostics: []',
+          'export const loadSkillsFromDir = () => ({',
+          '  skills: [],',
+          '  diagnostics: [',
+          '    { type: "warning", message: "first Pi diagnostic" },',
+          '    { type: "warning", message: "second Pi diagnostic" }',
+          '  ]',
           '});',
           ''
         ].join('\n')
-      : [
-          'export const VERSION = "0.82.0";',
-          'export const getAgentDir = () => process.env.PI_CODING_AGENT_DIR;',
-          'export const loadSkillsFromDir = () => ({ skills: [], diagnostics: [] });',
-          ''
-        ].join('\n')
+      : loadSkills === 'parity'
+        ? [
+            'import { basename, join } from "node:path";',
+            'export const VERSION = "0.82.0";',
+            'export const getAgentDir = () => process.env.PI_CODING_AGENT_DIR;',
+            'export const loadSkillsFromDir = ({ dir: directory }) => ({',
+            '  skills: [{',
+            '    name: basename(directory) === "folded-directory" ? "folded-name" : basename(directory),',
+            '    filePath: join(directory, "SKILL.md"),',
+            '    baseDir: directory',
+            '  }],',
+            '  diagnostics: []',
+            '});',
+            ''
+          ].join('\n')
+        : loadSkills
+          ? [
+            'import { basename, join } from "node:path";',
+            'export const VERSION = "0.82.0";',
+            'export const getAgentDir = () => process.env.PI_CODING_AGENT_DIR;',
+            'export const loadSkillsFromDir = ({ dir: directory }) => ({',
+            '  skills: [{ name: basename(directory), filePath: join(directory, "SKILL.md"), baseDir: directory }],',
+            '  diagnostics: []',
+            '});',
+            ''
+          ].join('\n')
+          : [
+            'export const VERSION = "0.82.0";',
+            'export const getAgentDir = () => process.env.PI_CODING_AGENT_DIR;',
+            'export const loadSkillsFromDir = () => ({ skills: [], diagnostics: [] });',
+            ''
+          ].join('\n')
   );
   const artifactPath = await directory.write('runtime/bazframe.mjs', compiled);
   return import(`${pathToFileURL(artifactPath).href}?test=${Date.now()}-${Math.random()}`) as Promise<LoadedAdapter>;
@@ -388,6 +721,21 @@ async function runCommand(
     }
   });
   return notification;
+}
+
+function sourceInfoLines(flatSkills: readonly (readonly [string, string])[] = []): string[] {
+  return [
+    `Flat direct skills: ${flatSkills.length}`,
+    ...(flatSkills.length === 0
+      ? ['  (none)']
+      : flatSkills.map(([name, path]) => `  - ${name} (${path})`)),
+    'Direct source units: 0',
+    '  (none)',
+    'Derived effective skills: 0',
+    '  (none)',
+    'Source failures: 0',
+    '  (none)'
+  ];
 }
 
 function required<T>(map: Map<string, T>, name: string): T {

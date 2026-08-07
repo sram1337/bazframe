@@ -100,6 +100,55 @@ describe('parseArgv', () => {
     }
   });
 
+  it('parses only the canonical profile source-unit grammar', () => {
+    expect(parseArgv(['profile', 'sources'])).toEqual({
+      kind: 'command', command: { name: 'profile-sources-overview' }
+    });
+    expect(parseArgv(['profile', 'sources', 'add', 'provider', 'source', '/absolute/root']))
+      .toEqual({
+        kind: 'command',
+        command: {
+          name: 'profile-sources-add',
+          providerId: 'provider',
+          sourceId: 'source',
+          sourceRoot: '/absolute/root'
+        }
+      });
+    expect(parseArgv([
+      'profile', 'sources', 'add', 'provider', 'source', '/absolute/root',
+      '--profile', 'reviewer'
+    ])).toMatchObject({
+      kind: 'command',
+      command: { name: 'profile-sources-add', profileId: 'reviewer' }
+    });
+    expect(parseArgv([
+      'profile', 'sources', 'remove', 'provider', 'source', '--profile', 'reviewer'
+    ])).toEqual({
+      kind: 'command',
+      command: {
+        name: 'profile-sources-remove',
+        providerId: 'provider',
+        sourceId: 'source',
+        profileId: 'reviewer'
+      }
+    });
+    expect(parseArgv(['help', 'profile', 'sources'])).toEqual({
+      kind: 'help', topic: 'profile-sources'
+    });
+    expect(parseArgv(['profile', 'sources', 'add', '--help'])).toEqual({
+      kind: 'help', topic: 'profile-sources-add'
+    });
+    for (const argv of [
+      ['sources'],
+      ['profile', 'sources', 'add', 'provider', 'source', 'relative'],
+      ['profile', 'sources', 'add', 'Bad', 'source', '/root'],
+      ['profile', 'sources', 'remove', 'provider'],
+      ['profile', 'sources', 'remove', 'provider', 'source', '--profile'],
+      ['profile', 'sources', 'remove', 'provider', 'source', '--profile', 'Bad'],
+      ['profile', 'sources', 'remove', 'provider', 'source', 'extra']
+    ]) expect(parseArgv(argv)).toMatchObject({ kind: 'usage-error' });
+  });
+
   it('rejects malformed profile lifecycle arguments without changing skill commands', () => {
     for (const argv of [
       ['profile', 'wat'],

@@ -1,3 +1,4 @@
+import { realpath } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { installPiAdapter } from '../../../src/adapters/pi/installer.js';
@@ -14,6 +15,7 @@ import {
   type StatusInspection,
   type StatusOptions
 } from '../../../src/status/status.js';
+import { captureProviderManifest } from '../../helpers/provider-manifest.js';
 import { createTempDirectory, type TempDirectory } from '../../helpers/temp-directory.js';
 
 const temporaryDirectories: TempDirectory[] = [];
@@ -63,7 +65,12 @@ describe('Bazframe status', () => {
         'Effective behavior: enabled (global-enabled)',
         'Active profile: focused',
         `Profile instructions: ${directory.path('bazframe-home/profiles/focused/AGENTS.md')}`,
-        'Profile skills: 1',
+        'Flat direct skills: 1',
+        'Direct source units: 0',
+        'Derived effective skills: 0',
+        '  (none)',
+        'Source failures:',
+        '  (none)',
         'Cached collision aliases: 0',
         'Launch:',
         '  pi       # native Pi context + active profile',
@@ -101,7 +108,12 @@ describe('Bazframe status', () => {
         'Effective behavior: disabled (project-disabled-override; native Pi behavior)',
         'Active profile: (not used: disabled: project-disabled-override)',
         'Profile instructions: (not used: disabled: project-disabled-override)',
-        'Profile skills: (not used: disabled: project-disabled-override)',
+        'Flat direct skills: (not used: disabled: project-disabled-override)',
+        'Direct source units: (not used: disabled: project-disabled-override)',
+        'Derived effective skills: (not used: disabled: project-disabled-override)',
+        '  (none)',
+        'Source failures:',
+        '  (none)',
         'Cached collision aliases: 0',
         'Launch:',
         '  pi       # native Pi behavior (Bazframe disabled by effective policy)',
@@ -167,7 +179,12 @@ describe('Bazframe status', () => {
         'Effective behavior: enabled (global-enabled)',
         'Active profile: focused',
         `Profile instructions: ${directory.path('bazframe-home/profiles/focused/AGENTS.md')}`,
-        'Profile skills: 1',
+        'Flat direct skills: 1',
+        'Direct source units: 0',
+        'Derived effective skills: 0',
+        '  (none)',
+        'Source failures:',
+        '  (none)',
         'Cached collision aliases: 0',
         'Launch:',
         '  pi       # native Pi context + active profile',
@@ -177,6 +194,97 @@ describe('Bazframe status', () => {
         ''
       ].join('\n')
     });
+  });
+
+  it('uses Pi directory fallback for flat duplicate analysis and withholds the derived source', async () => {
+    const directory = await temporary();
+    const options = await statusOptions(directory);
+    await readyProfile(directory, options);
+    await directory.write(
+      'bazframe-home/profiles/focused/skills/review/SKILL.md',
+      '---\ndescription: fallback flat name\n---\n'
+    );
+    const provider = await realpath(await directory.mkdir('provider'));
+    await directory.write(
+      'provider/derived/SKILL.md',
+      '---\nname: review\ndescription: derived\n---\n'
+    );
+    const descriptorPath = await directory.write(
+      'bazframe-home/profiles/focused/source-units/provider/source.json',
+      `${JSON.stringify({
+        schemaVersion: 1,
+        providerId: 'provider',
+        sourceId: 'source',
+        sourceRoot: provider
+      })}\n`
+    );
+
+    const ownedBefore = await captureProviderManifest([descriptorPath]);
+    const providerBefore = await captureProviderManifest([provider]);
+    const inspection = await inspectStatus(options);
+    const providerAfter = await captureProviderManifest([provider]);
+    const ownedAfter = await captureProviderManifest([descriptorPath]);
+
+    expect(providerAfter).toEqual(providerBefore);
+    expect(ownedAfter).toEqual(ownedBefore);
+    expect(inspection.profile).toMatchObject({
+      state: 'ready',
+      flatSkillCount: 1,
+      directSourceUnitCount: 1,
+      derivedSkillCount: 0,
+      sourceDiagnostics: [{
+        category: 'duplicate-name',
+        providerId: 'provider',
+        sourceId: 'source',
+        path: 'derived/SKILL.md',
+        name: 'review'
+      }]
+    });
+  });
+
+  it('keeps flat status ready while reporting a scoped source-unit failure', async () => {
+    const directory = await temporary();
+    const options = await statusOptions(directory);
+    await readyProfile(directory, options);
+    await installPiAdapter(options);
+    const missingRoot = directory.path('missing-provider');
+    await directory.write(
+      'bazframe-home/profiles/focused/source-units/provider/source.json',
+      `${JSON.stringify({
+        schemaVersion: 1,
+        providerId: 'provider',
+        sourceId: 'source',
+        sourceRoot: missingRoot
+      })}\n`
+    );
+
+    const descriptorPath = directory.path(
+      'bazframe-home/profiles/focused/source-units/provider/source.json'
+    );
+    const ownedBefore = await captureProviderManifest([descriptorPath]);
+    const before = await captureProviderManifest([missingRoot]);
+    const inspection = await inspectStatus(options);
+    const after = await captureProviderManifest([missingRoot]);
+    const ownedAfter = await captureProviderManifest([descriptorPath]);
+    expect(after).toEqual(before);
+    expect(ownedAfter).toEqual(ownedBefore);
+    expect(inspection.profile).toMatchObject({
+      state: 'ready',
+      flatSkillCount: 1,
+      directSourceUnitCount: 1,
+      derivedSkillCount: 0,
+      sourceDiagnostics: [{
+        category: 'broken-root',
+        providerId: 'provider',
+        sourceId: 'source',
+        path: '.'
+      }]
+    });
+    expect(statusExitStatus(inspection)).toBe(3);
+    expect(formatStatus(inspection)).toContain('Source failures:\n  - provider/source:. broken-root');
+    expect(formatStatus(inspection)).toContain(
+      'Inspect source-unit failures with `bazframe profile sources`.'
+    );
   });
 
   it('reports incomplete globally enabled setup outside Git', async () => {
@@ -252,7 +360,12 @@ describe('Bazframe status', () => {
         'Effective behavior: enabled (global-enabled)',
         'Active profile: focused',
         `Profile instructions: ${directory.path('bazframe-home/profiles/focused/AGENTS.md')}`,
-        'Profile skills: 1',
+        'Flat direct skills: 1',
+        'Direct source units: 0',
+        'Derived effective skills: 0',
+        '  (none)',
+        'Source failures:',
+        '  (none)',
         'Cached collision aliases: 0',
         'Launch:',
         '  Complete the corrective actions below.',
@@ -310,7 +423,12 @@ describe('Bazframe status', () => {
       'Effective behavior: enabled (global-enabled)',
       'Active profile: (none)',
       'Profile instructions: (none)',
-      'Profile skills: 0',
+      'Flat direct skills: 0',
+      'Direct source units: 0',
+      'Derived effective skills: 0',
+      '  (none)',
+      'Source failures:',
+      '  (none)',
       'Cached collision aliases: 2',
       'Launch:',
       '  Complete the corrective actions below.',
@@ -325,7 +443,10 @@ describe('Bazframe status', () => {
 
 async function readyProfile(directory: TempDirectory, options: StatusOptions): Promise<void> {
   await directory.write('bazframe-home/profiles/focused/AGENTS.md', 'profile\n');
-  await directory.write('bazframe-home/profiles/focused/skills/review/SKILL.md', 'skill\n');
+  await directory.write(
+    'bazframe-home/profiles/focused/skills/review/SKILL.md',
+    '---\nname: review\ndescription: review\n---\n\nskill\n'
+  );
   await writeActiveProfile(options.bazframeHome, 'focused');
 }
 

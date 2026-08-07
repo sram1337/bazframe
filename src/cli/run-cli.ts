@@ -31,6 +31,13 @@ import {
   type ProfileRenameResult
 } from '../profiles/profile-management.js';
 import {
+  addActiveProfileSource,
+  addProfileSource,
+  removeActiveProfileSource,
+  removeProfileSource,
+  type ProfileSourceMembershipResult
+} from '../profiles/profile-source-membership.js';
+import {
   addActiveProfileSkill,
   addProfileSkill,
   removeActiveProfileSkill,
@@ -53,6 +60,12 @@ import {
 import type { RepositoryProjectState } from '../project/registration.js';
 import { loadRootRepositoryInstructions } from '../project/repository-instructions.js';
 import { listAvailableSkills } from '../skills/skill-library.js';
+import {
+  formatSourceDiagnostic,
+  loadFlatSkillIdentities,
+  resolveProfileSourceUnits,
+  type ProfileSourceComposition
+} from '../source-units/source-unit-resolver.js';
 import { buildStatus } from '../status/status.js';
 import {
   colorizeHelp,
@@ -76,6 +89,9 @@ import {
   PROFILE_SKILLS_ADD_HELP,
   PROFILE_SKILLS_HELP,
   PROFILE_SKILLS_REMOVE_HELP,
+  PROFILE_SOURCES_ADD_HELP,
+  PROFILE_SOURCES_HELP,
+  PROFILE_SOURCES_REMOVE_HELP,
   PROFILE_USE_HELP,
   PROJECT_HELP,
   REMOVE_HELP,
@@ -285,6 +301,14 @@ async function runCommand(
     ));
     return EXIT_STATUS.success;
   }
+  if (command.name === 'profile-sources-overview') {
+    const profileId = await readActiveProfile(bazframeHome);
+    const profile = await loadProfile(bazframeHome, profileId);
+    const flatSkills = loadFlatSkillIdentities(profile.skillDirectories);
+    const composition = await resolveProfileSourceUnits(profile.directory, flatSkills);
+    writeStdout(formatProfileSourcesOverview(profileId, composition, stdoutColors));
+    return EXIT_STATUS.success;
+  }
   if (command.name === 'use' || command.name === 'profile-use') {
     const profile = await selectProfile(bazframeHome, command.profileId);
     writeStdout([
@@ -330,6 +354,29 @@ async function runCommand(
   }
   if (command.name === 'profile-current') {
     writeStdout(`${await currentProfile(bazframeHome)}\n`);
+    return EXIT_STATUS.success;
+  }
+  if (command.name === 'profile-sources-add' || command.name === 'profile-sources-remove') {
+    const options = { bazframeHome };
+    const result = command.name === 'profile-sources-add'
+      ? command.profileId === undefined
+        ? await addActiveProfileSource(
+            options,
+            command.providerId,
+            command.sourceId,
+            command.sourceRoot
+          )
+        : await addProfileSource(
+            options,
+            command.profileId,
+            command.providerId,
+            command.sourceId,
+            command.sourceRoot
+          )
+      : command.profileId === undefined
+        ? await removeActiveProfileSource(options, command.providerId, command.sourceId)
+        : await removeProfileSource(options, command.profileId, command.providerId, command.sourceId);
+    writeStdout(formatSourceMembershipResult(result, command.profileId !== undefined));
     return EXIT_STATUS.success;
   }
   if (command.name === 'add' || command.name === 'remove') {
@@ -594,6 +641,7 @@ function formatProfilesOverview(
     colors.command('  bazframe profile rename <old> <new>'),
     colors.command('  bazframe profile remove <profile> [--force]'),
     colors.command('  bazframe profile skills'),
+    colors.command('  bazframe profile sources'),
     colors.command('  bazframe profile list'),
     colors.command('  bazframe profile current'),
     ''
@@ -635,6 +683,37 @@ function formatProfileSkillsOverview(
     colors.heading('Commands:'),
     colors.command('  bazframe profile skills add <skill> [--profile <profile>]'),
     colors.command('  bazframe profile skills remove <skill> [--profile <profile>]'),
+    ''
+  ].join('\n');
+}
+
+function formatProfileSourcesOverview(
+  profileId: string,
+  composition: ProfileSourceComposition,
+  colors: CliColors
+): string {
+  return [
+    colors.heading('Profile source units'),
+    colors.success(`Active profile: ${profileId}`),
+    colors.heading('Direct source units:'),
+    ...(composition.directSourceUnits.length === 0
+      ? [colors.muted('  (none)')]
+      : composition.directSourceUnits.map((source) =>
+          `  - ${source.providerId}/${source.sourceId} -> ${source.sourceRoot}`)),
+    colors.heading('Derived effective skills:'),
+    ...(composition.derivedSkills.length === 0
+      ? [colors.muted('  (none)')]
+      : composition.derivedSkills.map((skill) =>
+          `  - ${skill.name} (${skill.providerId}/${skill.sourceId}:${skill.relativePath})`)),
+    colors.heading('Source failures:'),
+    ...(composition.diagnostics.length === 0
+      ? [colors.muted('  (none)')]
+      : composition.diagnostics.map((diagnostic) =>
+          colors.warning(`  - ${formatSourceDiagnostic(diagnostic)}`))),
+    '',
+    colors.heading('Commands:'),
+    colors.command('  bazframe profile sources add <provider> <source> <absolute-root> [--profile <profile>]'),
+    colors.command('  bazframe profile sources remove <provider> <source> [--profile <profile>]'),
     ''
   ].join('\n');
 }
@@ -744,6 +823,21 @@ function formatMembershipResult(
   ].join('\n');
 }
 
+function formatSourceMembershipResult(
+  result: ProfileSourceMembershipResult,
+  explicitlyTargeted: boolean
+): string {
+  return [
+    `Profile source membership: ${result.action}`,
+    `${explicitlyTargeted ? 'Profile' : 'Active profile'}: ${result.profileId}`,
+    `Provider: ${result.providerId}`,
+    `Source unit: ${result.sourceId}`,
+    `Provider root: ${result.sourceRoot}`,
+    `Descriptor: ${result.descriptorPath}`,
+    ''
+  ].join('\n');
+}
+
 function formatHarnessSummary(
   dryRun: boolean,
   profileId: string,
@@ -789,6 +883,9 @@ function helpFor(topic: HelpTopic): string {
     case 'profile-skills': return PROFILE_SKILLS_HELP;
     case 'profile-skills-add': return PROFILE_SKILLS_ADD_HELP;
     case 'profile-skills-remove': return PROFILE_SKILLS_REMOVE_HELP;
+    case 'profile-sources': return PROFILE_SOURCES_HELP;
+    case 'profile-sources-add': return PROFILE_SOURCES_ADD_HELP;
+    case 'profile-sources-remove': return PROFILE_SOURCES_REMOVE_HELP;
     case 'skills': return SKILLS_HELP;
     case 'project': return PROJECT_HELP;
     case 'pi': return PI_HELP;

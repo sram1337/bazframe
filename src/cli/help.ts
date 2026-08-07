@@ -99,6 +99,9 @@ export const PROFILE_HELP = [
   '  bazframe profile',
   '  bazframe profiles',
   '  bazframe profile skills',
+  '  bazframe profile sources',
+  '  bazframe profile sources add <provider> <source> <absolute-root> [--profile <profile>]',
+  '  bazframe profile sources remove <provider> <source> [--profile <profile>]',
   '  bazframe profile add <profile>',
   '  bazframe profile duplicate <source> <new>',
   '  bazframe profile remove <profile> [--force]',
@@ -204,6 +207,35 @@ export const PROFILE_SKILLS_REMOVE_HELP = [
   '',
   'Remove only the verified Skillbook membership symlink from the active or explicitly targeted profile.',
   'Physical and foreign profile entries and all Skillbook content are preserved.',
+  ''
+].join('\n');
+
+export const PROFILE_SOURCES_HELP = [
+  'Usage:',
+  '  bazframe profile sources',
+  '  bazframe profile sources add <provider> <source> <absolute-root> [--profile <profile>]',
+  '  bazframe profile sources remove <provider> <source> [--profile <profile>]',
+  '',
+  'With no command, inspect direct source-unit descriptors and live derived skills for the active profile.',
+  'Provider roots are provider-owned and read-only to Bazframe.',
+  'Use --profile on add or remove to target a profile without changing the active selection.',
+  ''
+].join('\n');
+
+export const PROFILE_SOURCES_ADD_HELP = [
+  'Usage: bazframe profile sources add <provider> <source> <absolute-root> [--profile <profile>]',
+  '',
+  'Add a strict profile-owned descriptor for an existing physical provider root.',
+  'The canonical provider root remains provider-owned and is never copied or changed.',
+  'An exact existing descriptor is current; occupied invalid or retargeted entries are refused.',
+  ''
+].join('\n');
+
+export const PROFILE_SOURCES_REMOVE_HELP = [
+  'Usage: bazframe profile sources remove <provider> <source> [--profile <profile>]',
+  '',
+  'Remove only the verified profile-owned descriptor.',
+  'The provider root is never resolved or changed, so removal works when that root is broken or missing.',
   ''
 ].join('\n');
 

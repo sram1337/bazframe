@@ -1,0 +1,10 @@
+{
+  "name": "Synthetic Shared-Module Proof",
+  "cards": [
+    { "name": "Arcane Signet", "quantity": 1, "categories": ["Ramp"] },
+    { "name": "Harmonize", "quantity": 1, "categories": ["Card Advantage"] },
+    { "name": "Llanowar Elves", "quantity": 1, "categories": ["Ramp", "Elf"] },
+    { "name": "Murder", "quantity": 1, "categories": ["Targeted Interaction"] },
+    { "name": "Wrath of God", "quantity": 1, "categories": ["Mass Interaction"] }
+  ]
+}

@@ -1,4 +1,5 @@
 import { assertSafeForwardedPiArgs } from '../agents/pi-args.js';
+import { isAbsolute } from 'node:path';
 import { BazframeError } from '../core/errors.js';
 import { isSafeProfileId } from '../profiles/profile-id.js';
 import { isSafeSkillId } from '../skills/skill-id.js';
@@ -7,11 +8,15 @@ export type HelpTopic =
   | 'root' | 'use' | 'add' | 'remove' | 'pi' | 'adapter' | 'status' | 'global'
   | 'profile' | 'profile-add' | 'profile-duplicate' | 'profile-remove' | 'profile-rename'
   | 'profile-use' | 'profile-list' | 'profile-current' | 'profile-skills'
-  | 'profile-skills-add' | 'profile-skills-remove' | 'skills' | 'project' | 'tui';
+  | 'profile-skills-add' | 'profile-skills-remove' | 'profile-sources'
+  | 'profile-sources-add' | 'profile-sources-remove' | 'skills' | 'project' | 'tui';
 export type Command =
   | { name: 'profiles-overview' }
   | { name: 'skills-overview' }
   | { name: 'profile-skills-overview' }
+  | { name: 'profile-sources-overview' }
+  | { name: 'profile-sources-add'; providerId: string; sourceId: string; sourceRoot: string; profileId?: string }
+  | { name: 'profile-sources-remove'; providerId: string; sourceId: string; profileId?: string }
   | { name: 'projects-overview' }
   | { name: 'global-overview' }
   | { name: 'adapters-overview' }
@@ -85,6 +90,9 @@ function parseHelp(args: readonly string[]): ParseResult {
   const topic = new Map<string, HelpTopic>([
     ['profile', 'profile'], ['profiles', 'profile'],
     ['profile skills', 'profile-skills'],
+    ['profile sources', 'profile-sources'],
+    ['profile sources add', 'profile-sources-add'],
+    ['profile sources remove', 'profile-sources-remove'],
     ['skill', 'skills'], ['skills', 'skills'],
     ['project', 'project'], ['projects', 'project'],
     ['global', 'global'],
@@ -143,9 +151,10 @@ function parseProfile(args: readonly string[]): ParseResult {
   }
   const [subcommand, ...rest] = args;
   if (subcommand === 'skills') return parseProfileSkills(rest);
+  if (subcommand === 'sources') return parseProfileSources(rest);
   if (!new Set(['add', 'duplicate', 'remove', 'rename', 'use', 'list', 'current']).has(subcommand)) {
     return usageError(
-      'profile requires `skills`, `add`, `duplicate`, `remove`, `rename`, `use`, `list`, or `current`.',
+      'profile requires `skills`, `sources`, `add`, `duplicate`, `remove`, `rename`, `use`, `list`, or `current`.',
       'profile'
     );
   }
@@ -217,6 +226,66 @@ function parseProfileSkills(args: readonly string[]): ParseResult {
     return usageError('profile skills requires `add` or `remove`.', 'profile-skills');
   }
   return parseMembership(subcommand, rest, `profile-skills-${subcommand}`, true);
+}
+
+function parseProfileSources(args: readonly string[]): ParseResult {
+  if (args.length === 0) {
+    return { kind: 'command', command: { name: 'profile-sources-overview' } };
+  }
+  if (args.length === 1 && HELP_FLAGS.has(args[0])) {
+    return { kind: 'help', topic: 'profile-sources' };
+  }
+  const [subcommand, ...rest] = args;
+  if (subcommand !== 'add' && subcommand !== 'remove') {
+    return usageError('profile sources requires `add` or `remove`.', 'profile-sources');
+  }
+  const topic: HelpTopic = `profile-sources-${subcommand}`;
+  if (rest.length === 1 && HELP_FLAGS.has(rest[0])) return { kind: 'help', topic };
+  const required = subcommand === 'add' ? 3 : 2;
+  const hasExplicitProfile = rest.length === required + 2
+    && rest[required] === '--profile';
+  if (!(rest.length === required || hasExplicitProfile)) {
+    return usageError(
+      `profile sources ${subcommand} requires ${subcommand === 'add'
+        ? '<provider> <source> <absolute-root>'
+        : '<provider> <source>'} followed only by optional --profile <profile>.`,
+      topic
+    );
+  }
+  const [providerId, sourceId] = rest;
+  if (!isSafeSkillId(providerId) || !isSafeSkillId(sourceId)) {
+    return usageError(
+      'Provider and source IDs must be 1-64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen.',
+      topic
+    );
+  }
+  const profileId = hasExplicitProfile ? rest[required + 1] : undefined;
+  if (profileId !== undefined && !isSafeProfileId(profileId)) return invalidProfileId(topic);
+  if (subcommand === 'add') {
+    const sourceRoot = rest[2];
+    if (!isAbsolute(sourceRoot) || sourceRoot.includes('\0')) {
+      return usageError('Source root must be a non-empty absolute path without NUL bytes.', topic);
+    }
+    return {
+      kind: 'command',
+      command: {
+        name: 'profile-sources-add',
+        providerId,
+        sourceId,
+        sourceRoot,
+        ...(profileId === undefined ? {} : { profileId })
+      }
+    };
+  }
+  return {
+    kind: 'command',
+    command: {
+      name: 'profile-sources-remove',
+      providerId,
+      sourceId,
+      ...(profileId === undefined ? {} : { profileId })
+    }
+  };
 }
 
 function invalidProfileId(topic: HelpTopic): ParseResult {

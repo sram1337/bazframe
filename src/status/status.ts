@@ -12,6 +12,13 @@ import { globalPolicyPath, readGlobalPolicy } from '../policy/global-policy.js';
 import { loadProfile, readActiveProfile } from '../profiles/profile-store.js';
 import { findGitRoot } from '../project/git-root.js';
 import { readRepositoryProjectState } from '../project/registration-store.js';
+import {
+  formatSourceDiagnostic,
+  loadFlatSkillIdentities,
+  resolveProfileSourceUnits,
+  type DerivedSkill,
+  type SourceDiagnostic
+} from '../source-units/source-unit-resolver.js';
 import { resolvePiAgentDirectory } from '../state/paths.js';
 
 export interface StatusOptions {
@@ -59,11 +66,17 @@ export type StatusProfile =
       state: 'ready';
       id: string;
       instructionsPath: string;
+      /** Compatibility alias for the flat direct skill count. */
       skillCount: number;
+      flatSkillCount?: number;
+      directSourceUnitCount?: number;
+      derivedSkillCount?: number;
+      derivedSkills?: DerivedSkill[];
+      sourceDiagnostics?: SourceDiagnostic[];
     };
 
 export interface StatusCorrectiveAction {
-  id: 'adapter' | 'active-profile';
+  id: 'adapter' | 'active-profile' | 'source-units';
   message: string;
 }
 
@@ -155,12 +168,25 @@ export async function inspectStatus(options: StatusOptions): Promise<StatusInspe
       const profileId = await readActiveProfile(options.bazframeHome);
       try {
         const loaded = await loadProfile(options.bazframeHome, profileId);
+        const flatSkills = loadFlatSkillIdentities(loaded.skillDirectories);
+        const sources = await resolveProfileSourceUnits(loaded.directory, flatSkills);
         profile = {
           state: 'ready',
           id: profileId,
           instructionsPath: loaded.instructionsPath,
-          skillCount: loaded.skillDirectories.length
+          skillCount: loaded.skillDirectories.length,
+          flatSkillCount: loaded.skillDirectories.length,
+          directSourceUnitCount: sources.directSourceUnits.length,
+          derivedSkillCount: sources.derivedSkills.length,
+          derivedSkills: sources.derivedSkills,
+          sourceDiagnostics: sources.diagnostics
         };
+        if (sources.diagnostics.length > 0) {
+          corrections.set('source-units', {
+            id: 'source-units',
+            message: 'Inspect source-unit failures with `bazframe profile sources`.'
+          });
+        }
       } catch (error) {
         if (error instanceof BazframeError && error.code === 'PROFILE_NOT_FOUND') {
           profile = { state: 'missing', id: profileId };
@@ -238,11 +264,24 @@ export function formatStatus(status: StatusInspection): string {
     : status.profile.state === 'not-used'
       ? `(not used: ${notUsedReason})`
       : '(none)';
-  const skillCount: number | string = status.profile.state === 'ready'
-    ? status.profile.skillCount
-    : status.profile.state === 'not-used'
-      ? `(not used: ${notUsedReason})`
-      : 0;
+  const unavailableCount = status.profile.state === 'not-used'
+    ? `(not used: ${notUsedReason})`
+    : 0;
+  const flatSkillCount: number | string = status.profile.state === 'ready'
+    ? status.profile.flatSkillCount ?? status.profile.skillCount
+    : unavailableCount;
+  const directSourceUnitCount: number | string = status.profile.state === 'ready'
+    ? status.profile.directSourceUnitCount ?? 0
+    : unavailableCount;
+  const derivedSkillCount: number | string = status.profile.state === 'ready'
+    ? status.profile.derivedSkillCount ?? 0
+    : unavailableCount;
+  const derivedSkills = status.profile.state === 'ready'
+    ? status.profile.derivedSkills ?? []
+    : [];
+  const sourceDiagnostics = status.profile.state === 'ready'
+    ? status.profile.sourceDiagnostics ?? []
+    : [];
   const runtimeReady = status.adapter.state === 'current' && status.profile.state === 'ready';
   const globalState = status.globalPolicy.policy === 'enabled'
     ? 'none (enabled default)'
@@ -261,7 +300,17 @@ export function formatStatus(status: StatusInspection): string {
     `Effective behavior: ${behavior}`,
     `Active profile: ${activeProfile}`,
     `Profile instructions: ${instructionSource}`,
-    `Profile skills: ${skillCount}`,
+    `Flat direct skills: ${flatSkillCount}`,
+    `Direct source units: ${directSourceUnitCount}`,
+    `Derived effective skills: ${derivedSkillCount}`,
+    ...(derivedSkills.length === 0
+      ? ['  (none)']
+      : derivedSkills.map((skill) =>
+          `  - ${skill.name} (${skill.providerId}/${skill.sourceId}:${skill.relativePath})`)),
+    'Source failures:',
+    ...(sourceDiagnostics.length === 0
+      ? ['  (none)']
+      : sourceDiagnostics.map((diagnostic) => `  - ${formatSourceDiagnostic(diagnostic)}`)),
     `Cached collision aliases: ${status.cachedCollisionAliasCount}`,
     'Launch:',
     ...(!status.effectiveBehavior.enabled

@@ -1,0 +1,49 @@
+[
+  {
+    "name": "Arcane Signet",
+    "oracleText": "Add one mana of any color in your commander's color identity.",
+    "typeLine": "Artifact",
+    "manaCost": "{2}",
+    "cmc": 2,
+    "keywords": [],
+    "colorIdentity": []
+  },
+  {
+    "name": "Harmonize",
+    "oracleText": "Draw three cards.",
+    "typeLine": "Sorcery",
+    "manaCost": "{2}{G}{G}",
+    "cmc": 4,
+    "keywords": [],
+    "colorIdentity": ["G"]
+  },
+  {
+    "name": "Llanowar Elves",
+    "oracleText": "{T}: Add {G}.",
+    "typeLine": "Creature — Elf Druid",
+    "manaCost": "{G}",
+    "cmc": 1,
+    "keywords": [],
+    "colorIdentity": ["G"],
+    "power": "1",
+    "toughness": "1"
+  },
+  {
+    "name": "Murder",
+    "oracleText": "Destroy target creature.",
+    "typeLine": "Instant",
+    "manaCost": "{1}{B}{B}",
+    "cmc": 3,
+    "keywords": [],
+    "colorIdentity": ["B"]
+  },
+  {
+    "name": "Wrath of God",
+    "oracleText": "Destroy all creatures. They can't be regenerated.",
+    "typeLine": "Sorcery",
+    "manaCost": "{2}{W}{W}",
+    "cmc": 4,
+    "keywords": [],
+    "colorIdentity": ["W"]
+  }
+]
