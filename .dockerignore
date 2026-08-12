@@ -1,0 +1,5 @@
+.git
+.pi-subagents
+node_modules
+dist
+*.tgz

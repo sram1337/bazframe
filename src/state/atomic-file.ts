@@ -19,6 +19,9 @@ export interface AtomicWriteOptions {
   managedRoot: string;
   mode?: number;
   chmodExistingDirectories?: boolean;
+  /** A rename is the commit point; a later directory-sync failure is reported only when false. */
+  commitOnRename?: boolean;
+  directorySync?: (path: string) => Promise<void>;
 }
 
 export interface ManagedDirectoryOptions {
@@ -61,7 +64,12 @@ export async function writeFileAtomic(
     handle = undefined;
     await rename(temporaryPath, target);
     renamed = true;
-    await syncDirectory(parent);
+    try {
+      await (options.directorySync ?? syncDirectory)(parent);
+    } catch (error) {
+      if (options.commitOnRename === true) return;
+      throw error;
+    }
   } catch (error) {
     if (handle !== undefined) {
       try {

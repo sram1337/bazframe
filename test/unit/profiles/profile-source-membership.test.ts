@@ -1,4 +1,4 @@
-import { lstat, readFile, realpath, rename, rm, symlink } from 'node:fs/promises';
+import { lstat, readFile, readdir, realpath, rename, rm, symlink } from 'node:fs/promises';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   measureProviderOperation,
@@ -8,8 +8,12 @@ import { createTempDirectory, type TempDirectory } from '../../helpers/temp-dire
 import {
   addActiveProfileSource,
   addProfileSource,
+  buildActiveProfileSource,
+  decodeSourceDescriptor,
+  readSourceDescriptor,
   removeActiveProfileSource
 } from '../../../src/profiles/profile-source-membership.js';
+import { publishSourceSnapshot } from '../../../src/source-units/source-snapshot.js';
 
 const directories: TempDirectory[] = [];
 
@@ -20,7 +24,7 @@ async function fixture(): Promise<{ directory: TempDirectory; home: string; prov
   directories.push(directory);
   const home = directory.path('home');
   const provider = await directory.mkdir('provider');
-  await directory.write('provider/SKILL.md', '---\nname: provider\n---\n');
+  await directory.write('provider/SKILL.md', '---\nname: provider\ndescription: provider\n---\n');
   await directory.write('home/active-profile', 'focused\n');
   await directory.write('home/profiles/focused/AGENTS.md', 'instructions\n');
   await directory.mkdir('home/profiles/focused/skills');
@@ -62,6 +66,13 @@ function operationError<T>(measured: MeasuredProviderOperation<T>): unknown {
 }
 
 describe('profile source membership', () => {
+  it('decodes exact schema-v2 identity and rejects malformed snapshot fields', () => {
+    const valid = { schemaVersion: 2, providerId: 'provider', sourceId: 'source', sourceRoot: '/canonical', snapshotDigest: 'a'.repeat(64), sourceUnitRoot: 'source-unit' };
+    expect(decodeSourceDescriptor(valid, 'provider', 'source')).toEqual(valid);
+    expect(() => decodeSourceDescriptor({ ...valid, snapshotDigest: 'A'.repeat(64) })).toThrow(/snapshotDigest/u);
+    expect(() => decodeSourceDescriptor({ ...valid, sourceUnitRoot: '../escape' })).toThrow(/sourceUnitRoot/u);
+    expect(() => decodeSourceDescriptor({ ...valid, extra: true })).toThrow(/exactly/u);
+  });
   it('adds an exact descriptor, is idempotent, and preserves provider bytes', async () => {
     const { directory, home, provider } = await fixture();
     const descriptorPath = directory.path(
@@ -96,11 +107,13 @@ describe('profile source membership', () => {
     expect(measuredIdempotentAdd.ownedAfter).toEqual(measuredIdempotentAdd.ownedBefore);
     const current = operationValue(measuredIdempotentAdd);
     expect(current.action).toBe('current');
-    expect(JSON.parse(await readFile(added.descriptorPath, 'utf8'))).toEqual({
-      schemaVersion: 1,
+    expect(JSON.parse(await readFile(added.descriptorPath, 'utf8'))).toMatchObject({
+      schemaVersion: 2,
       providerId: 'provider',
       sourceId: 'source',
-      sourceRoot: await realpath(provider)
+      sourceRoot: await realpath(provider),
+      snapshotDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      sourceUnitRoot: '.'
     });
     expect(await lstat(directory.path('home/profiles/focused/source-units/provider')))
       .toMatchObject({});
@@ -237,6 +250,7 @@ describe('profile source membership', () => {
     expect(await readFile(first.descriptorPath)).toEqual(firstBytes);
     expect(await readFile(saved)).toEqual(firstBytes);
 
+    await directory.write('provider/SKILL.md', '---\nname: provider-second\ndescription: provider second\n---\n');
     const second = await addSourceWithManifest(home, provider, 'second');
     const savedSecond = directory.path('saved-second.json');
     const symlinkSwap = await measureProviderOperation(
@@ -261,7 +275,7 @@ describe('profile source membership', () => {
   });
 
   it('accepts valid descriptors larger than 64 KiB', async () => {
-    const { directory, home, provider } = await fixture();
+    const { directory, provider } = await fixture();
     const canonical = await realpath(provider);
     await directory.write(
       'home/profiles/focused/source-units/provider/source.json',
@@ -275,14 +289,94 @@ describe('profile source membership', () => {
     const descriptorPath = directory.path(
       'home/profiles/focused/source-units/provider/source.json'
     );
-    const measured = await measureProviderOperation(
-      [provider],
-      [descriptorPath],
-      () => addActiveProfileSource({ bazframeHome: home }, 'provider', 'source', provider)
+    await expect(readSourceDescriptor(descriptorPath, 'provider', 'source')).resolves.toMatchObject({
+      schemaVersion: 1,
+      sourceRoot: canonical
+    });
+  });
+
+  it('runs an explicit literal build, activates output, and rebuilds only on command', async () => {
+    const { directory, home, provider } = await fixture();
+    await rm(directory.path('provider/SKILL.md'));
+    await directory.write('provider/build.mjs', [
+      'import { mkdir, writeFile } from "node:fs/promises";',
+      'await mkdir("dist/source-unit", { recursive: true });',
+      'await writeFile("dist/source-unit/SKILL.md", `---\\nname: ${process.env.TEST_SKILL}\\ndescription: built\\n---\\n`);'
+    ].join('\n'));
+    await directory.write('provider/bazframe-source.json', JSON.stringify({ schemaVersion: 1, build: [process.execPath, 'build.mjs'], artifactRoot: 'dist', sourceUnitRoot: 'source-unit' }));
+    const added = await addActiveProfileSource({ bazframeHome: home, environment: { ...process.env, TEST_SKILL: 'first-built' } }, 'provider', 'built', provider);
+    expect(added).toMatchObject({ action: 'added', schemaVersion: 2, sourceUnitRoot: 'source-unit' });
+    expect(await readdir(directory.path('home/tmp/source-descriptors'))).toEqual([]);
+    const firstDigest = added.schemaVersion === 2 ? added.snapshotDigest : '';
+    await directory.write('provider/unrelated.txt', 'changed');
+    const current = await addActiveProfileSource({ bazframeHome: home, environment: { ...process.env, TEST_SKILL: 'ignored' } }, 'provider', 'built', provider);
+    expect(current).toMatchObject({ action: 'current', snapshotDigest: firstDigest });
+    const rebuilt = await buildActiveProfileSource({ bazframeHome: home, environment: { ...process.env, TEST_SKILL: 'second-built' } }, 'provider', 'built');
+    expect(rebuilt).toMatchObject({ action: 'built', schemaVersion: 2 });
+    expect(rebuilt.schemaVersion === 2 && rebuilt.snapshotDigest).not.toBe(firstDigest);
+  });
+
+  it('does not report failure when temporary cleanup fails after descriptor activation', async () => {
+    const { home, provider } = await fixture();
+    const cleanupError = Object.assign(new Error('injected cleanup failure'), { code: 'EACCES' });
+    const added = await addActiveProfileSource(
+      { bazframeHome: home },
+      'provider',
+      'cleanup-commit',
+      provider,
+      { removeTemporaryDescriptor: async () => { throw cleanupError; } }
     );
-    expectProviderPreserved(measured);
-    expect(measured.ownedAfter).toEqual(measured.ownedBefore);
-    expect(operationValue(measured)).toMatchObject({ action: 'current' });
+    expect(added).toMatchObject({ action: 'added', schemaVersion: 2 });
+    await expect(readSourceDescriptor(added.descriptorPath, 'provider', 'cleanup-commit'))
+      .resolves.toMatchObject({ schemaVersion: 2, sourceId: 'cleanup-commit' });
+  });
+
+  it('rejects a candidate conflict with a valid existing source despite malformed namespace neighbors', async () => {
+    const { directory, home, provider } = await fixture();
+    await rm(directory.path('provider/SKILL.md'));
+    for (const id of ['first', 'second']) {
+      const root = await directory.mkdir(id);
+      await directory.write(`${id}/SKILL.md`, '---\nname: shared\ndescription: shared\n---\n');
+      const snapshot = await publishSourceSnapshot(home, root);
+      await directory.write(`home/profiles/focused/source-units/provider/${id}.json`, `${JSON.stringify({
+        schemaVersion: 2, providerId: 'provider', sourceId: id, sourceRoot: await realpath(root),
+        snapshotDigest: snapshot.digest, sourceUnitRoot: '.'
+      })}\n`);
+    }
+    await directory.write('home/profiles/focused/source-units/malformed-neighbor', 'not a provider directory\n');
+    await directory.write('provider/SKILL.md', '---\nname: shared\ndescription: candidate\n---\n');
+    await expect(addActiveProfileSource({ bazframeHome: home }, 'provider', 'candidate', provider))
+      .rejects.toMatchObject({ code: 'SOURCE_CANDIDATE_DUPLICATE' });
+    const candidatePath = directory.path('home/profiles/focused/source-units/provider/candidate.json');
+    await expect(lstat(candidatePath)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    await directory.write('provider/SKILL.md', '---\nname: unique\ndescription: candidate\n---\n');
+    const uniqueSnapshot = await publishSourceSnapshot(home, provider);
+    await directory.write('home/profiles/focused/source-units/provider/candidate.json', `${JSON.stringify({
+      schemaVersion: 2, providerId: 'provider', sourceId: 'candidate', sourceRoot: await realpath(provider),
+      snapshotDigest: uniqueSnapshot.digest, sourceUnitRoot: '.'
+    })}\n`);
+    const before = await readFile(candidatePath);
+    await directory.write('provider/SKILL.md', '---\nname: shared\ndescription: candidate\n---\n');
+    await expect(buildActiveProfileSource({ bazframeHome: home }, 'provider', 'candidate'))
+      .rejects.toMatchObject({ code: 'SOURCE_CANDIDATE_DUPLICATE' });
+    expect(await readFile(candidatePath)).toEqual(before);
+  });
+
+  it('preserves the active descriptor when a rebuild fails', async () => {
+    const { directory, home, provider } = await fixture();
+    const added = await addActiveProfileSource({ bazframeHome: home }, 'provider', 'rollback', provider);
+    const before = await readFile(added.descriptorPath);
+    await directory.write('provider/bazframe-source.json', JSON.stringify({ schemaVersion: 1, build: [process.execPath, '-e', 'process.exit(7)'], artifactRoot: '.', sourceUnitRoot: '.' }));
+    await expect(buildActiveProfileSource({ bazframeHome: home }, 'provider', 'rollback')).rejects.toMatchObject({ code: 'SOURCE_BUILD_FAILED' });
+    expect(await readFile(added.descriptorPath)).toEqual(before);
+  });
+
+  it('upgrades schema-v1 only through explicit build', async () => {
+    const { directory, home, provider } = await fixture(); const canonical = await realpath(provider);
+    await directory.write('home/profiles/focused/source-units/provider/legacy.json', `${JSON.stringify({ schemaVersion: 1, providerId: 'provider', sourceId: 'legacy', sourceRoot: canonical })}\n`);
+    await expect(addActiveProfileSource({ bazframeHome: home }, 'provider', 'legacy', provider)).rejects.toMatchObject({ code: 'SOURCE_BUILD_REQUIRED' });
+    await expect(buildActiveProfileSource({ bazframeHome: home }, 'provider', 'legacy')).resolves.toMatchObject({ action: 'built', schemaVersion: 2 });
   });
 
   it('prunes empty owned directories on absent retry and reports post-remove prune failure honestly', async () => {

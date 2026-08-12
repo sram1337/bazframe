@@ -1,7 +1,8 @@
-import { mkdir, realpath, rename, symlink } from 'node:fs/promises';
+import { chmod, mkdir, readFile, realpath, rename, symlink, writeFile } from 'node:fs/promises';
 import { afterEach, describe, expect, it } from 'vitest';
 import { measureProviderOperation } from '../../helpers/provider-manifest.js';
 import { createTempDirectory, type TempDirectory } from '../../helpers/temp-directory.js';
+import { publishSourceSnapshot } from '../../../src/source-units/source-snapshot.js';
 import {
   loadFlatSkillIdentities,
   resolveProfileSourceUnits,
@@ -27,13 +28,17 @@ async function descriptor(
   sourceId: string,
   root: string
 ): Promise<void> {
+  const sourceRoot = await realpath(root);
+  const snapshot = await publishSourceSnapshot(directory.root, sourceRoot);
   await directory.write(
     `profile/source-units/${providerId}/${sourceId}.json`,
     `${JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: 2,
       providerId,
       sourceId,
-      sourceRoot: await realpath(root)
+      sourceRoot,
+      snapshotDigest: snapshot.digest,
+      sourceUnitRoot: '.'
     }, null, 2)}\n`
   );
 }
@@ -153,28 +158,12 @@ describe('source-unit resolver', () => {
       () => resolveProfileSourceUnits(profile, [])
     );
 
-    const fallbackBase = await realpath(directory.path('pi-name-parity/directory-fallback'));
-    const foldedBase = await realpath(directory.path('pi-name-parity/folded-directory'));
     expect(result.diagnostics).toEqual([]);
-    expect(result.derivedSkills.map((item) => ({
-      name: item.name,
-      baseDir: item.baseDir,
-      definitionPath: item.definitionPath,
-      relativePath: item.relativePath
-    }))).toEqual([
-      {
-        name: 'directory-fallback',
-        baseDir: fallbackBase,
-        definitionPath: `${fallbackBase}/SKILL.md`,
-        relativePath: 'directory-fallback/SKILL.md'
-      },
-      {
-        name: 'folded-name',
-        baseDir: foldedBase,
-        definitionPath: `${foldedBase}/SKILL.md`,
-        relativePath: 'folded-directory/SKILL.md'
-      }
+    expect(result.derivedSkills.map((item) => [item.name, item.relativePath])).toEqual([
+      ['directory-fallback', 'directory-fallback/SKILL.md'],
+      ['folded-name', 'folded-directory/SKILL.md']
     ]);
+    expect(result.derivedSkills.every((item) => item.baseDir.includes('/source-snapshots/sha256/'))).toBe(true);
   });
 
   it('reports exact placeholders for malformed source-units roots', async () => {
@@ -335,7 +324,7 @@ describe('source-unit resolver', () => {
     }
     await descriptor(directory, 'provider', 'depth-at', depthAt);
     await descriptor(directory, 'provider', 'deep', deep);
-    await descriptor(directory, 'provider', 'linked', linked);
+    await expect(descriptor(directory, 'provider', 'linked', linked)).rejects.toThrow(/symbolic link/u);
     const roots = [deep, depthAt, linked];
 
     const result = await discoverPreservingProvider(
@@ -354,12 +343,6 @@ describe('source-unit resolver', () => {
         sourceId: 'deep',
         path: 'd1/d2/d3/d4/d5/d6/d7/d8/d9',
         limit: 'depth'
-      },
-      {
-        category: 'internal-symlink',
-        providerId: 'provider',
-        sourceId: 'linked',
-        path: 'link'
       }
     ]);
   });
@@ -369,14 +352,8 @@ describe('source-unit resolver', () => {
     const root = await directory.mkdir('skipped-links');
     await directory.mkdir('skipped-links/.git/deep');
     await directory.mkdir('skipped-links/node_modules/pkg');
-    await symlink(
-      directory.path('missing-git-target'),
-      directory.path('skipped-links/.git/deep/link')
-    );
-    await symlink(
-      directory.path('missing-module-target'),
-      directory.path('skipped-links/node_modules/pkg/link')
-    );
+    await directory.write('skipped-links/.git/deep/ignored', 'ignored');
+    await directory.write('skipped-links/node_modules/pkg/ignored', 'ignored');
     await directory.write('skipped-links/valid/SKILL.md', skill('valid'));
     await descriptor(directory, 'provider', 'source', root);
 
@@ -436,7 +413,7 @@ describe('source-unit resolver', () => {
         limit: 'skills'
       }
     ]);
-  });
+  }, 15_000);
 
   it('reports invalid-definition when definition loading throws', async () => {
     const { directory, profile } = await fixture();
@@ -492,8 +469,8 @@ describe('source-unit resolver', () => {
     await directory.write('second/SKILL.md', skill('second'));
     await descriptor(directory, 'provider', 'first', first);
     await descriptor(directory, 'provider', 'second', second);
-    const canonicalFirst = await realpath(first);
-    const loader: DefinitionLoader = (baseDir) => baseDir === canonicalFirst
+    let loaderCalls = 0;
+    const loader: DefinitionLoader = () => loaderCalls++ === 0
       ? {
           skills: [],
           diagnostics: [
@@ -571,7 +548,19 @@ describe('source-unit resolver', () => {
     ]);
   });
 
-  it('reports an actual stored-root symlink retarget as broken without following it', async () => {
+  it('fails closed when an activated snapshot is corrupt', async () => {
+    const { directory, profile } = await fixture(); const root = await directory.mkdir('corrupt'); await directory.write('corrupt/SKILL.md', skill('corrupt'));
+    await descriptor(directory, 'provider', 'corrupt', root);
+    const stored = JSON.parse(await readFile(directory.path('profile/source-units/provider/corrupt.json'), 'utf8')) as { snapshotDigest: string };
+    const artifact = directory.path('source-snapshots/sha256', stored.snapshotDigest, 'artifact', 'SKILL.md');
+    await chmod(artifact, 0o600); await writeFile(artifact, 'changed');
+    const result = await resolveProfileSourceUnits(profile, []);
+    expect(result.derivedSkills).toEqual([]);
+    expect(result.diagnostics).toEqual([{ category: 'broken-snapshot', providerId: 'provider', sourceId: 'corrupt', path: '.' }]);
+    expect(result.directSourceUnits[0]).toMatchObject({ preparationState: 'failed' });
+  });
+
+  it('keeps an activated snapshot usable after the provider root is retargeted', async () => {
     const { directory, profile } = await fixture();
     const root = await directory.mkdir('retargeted');
     await directory.write('retargeted/SKILL.md', skill('retargeted'));
@@ -587,16 +576,12 @@ describe('source-unit resolver', () => {
       () => resolveProfileSourceUnits(profile, [])
     );
 
-    expect(result.derivedSkills).toEqual([]);
-    expect(result.diagnostics).toEqual([{
-      category: 'broken-root',
-      providerId: 'provider',
-      sourceId: 'source',
-      path: '.'
-    }]);
+    expect(result.derivedSkills.map((skill) => skill.name)).toEqual(['retargeted']);
+    expect(result.directSourceUnits[0]).toMatchObject({ preparationState: 'ready', rebuildAvailability: 'unavailable' });
+    expect(result.diagnostics).toEqual([]);
   });
 
-  it('allows a zero-child grouping source and reports a retargeted or missing root as broken', async () => {
+  it('allows a zero-child snapshot and reports schema-v1 as build-required', async () => {
     const { directory, profile } = await fixture();
     const empty = await directory.mkdir('empty');
     await descriptor(directory, 'provider', 'empty', empty);
@@ -619,7 +604,7 @@ describe('source-unit resolver', () => {
     expect(result.directSourceUnits).toHaveLength(2);
     expect(result.derivedSkills).toEqual([]);
     expect(result.diagnostics).toEqual([{
-      category: 'broken-root',
+      category: 'build-required',
       providerId: 'provider',
       sourceId: 'missing',
       path: '.'

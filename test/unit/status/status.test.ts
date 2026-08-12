@@ -15,6 +15,7 @@ import {
   type StatusInspection,
   type StatusOptions
 } from '../../../src/status/status.js';
+import { publishSourceSnapshot } from '../../../src/source-units/source-snapshot.js';
 import { captureProviderManifest } from '../../helpers/provider-manifest.js';
 import { createTempDirectory, type TempDirectory } from '../../helpers/temp-directory.js';
 
@@ -209,14 +210,10 @@ describe('Bazframe status', () => {
       'provider/derived/SKILL.md',
       '---\nname: review\ndescription: derived\n---\n'
     );
+    const snapshot = await publishSourceSnapshot(directory.path('bazframe-home'), provider);
     const descriptorPath = await directory.write(
       'bazframe-home/profiles/focused/source-units/provider/source.json',
-      `${JSON.stringify({
-        schemaVersion: 1,
-        providerId: 'provider',
-        sourceId: 'source',
-        sourceRoot: provider
-      })}\n`
+      `${JSON.stringify({ schemaVersion: 2, providerId: 'provider', sourceId: 'source', sourceRoot: provider, snapshotDigest: snapshot.digest, sourceUnitRoot: '.' })}\n`
     );
 
     const ownedBefore = await captureProviderManifest([descriptorPath]);
@@ -257,6 +254,10 @@ describe('Bazframe status', () => {
         sourceRoot: missingRoot
       })}\n`
     );
+    await directory.write(
+      'bazframe-home/profiles/focused/source-units/provider/another.json',
+      `${JSON.stringify({ schemaVersion: 1, providerId: 'provider', sourceId: 'another', sourceRoot: missingRoot })}\n`
+    );
 
     const descriptorPath = directory.path(
       'bazframe-home/profiles/focused/source-units/provider/source.json'
@@ -271,19 +272,18 @@ describe('Bazframe status', () => {
     expect(inspection.profile).toMatchObject({
       state: 'ready',
       flatSkillCount: 1,
-      directSourceUnitCount: 1,
+      directSourceUnitCount: 2,
       derivedSkillCount: 0,
       sourceDiagnostics: [{
-        category: 'broken-root',
-        providerId: 'provider',
-        sourceId: 'source',
-        path: '.'
+        category: 'build-required', providerId: 'provider', sourceId: 'another', path: '.'
+      }, {
+        category: 'build-required', providerId: 'provider', sourceId: 'source', path: '.'
       }]
     });
     expect(statusExitStatus(inspection)).toBe(3);
-    expect(formatStatus(inspection)).toContain('Source failures:\n  - provider/source:. broken-root');
+    expect(formatStatus(inspection)).toContain('Source failures:\n  - provider/another:. build-required\n  - provider/source:. build-required');
     expect(formatStatus(inspection)).toContain(
-      'Inspect source-unit failures with `bazframe profile sources`.'
+      'Build the sources with: `bazframe profile sources build provider another`, `bazframe profile sources build provider source`.'
     );
   });
 

@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -14,6 +14,13 @@ export interface TempDirectory {
   readText: (relativePath: string) => Promise<string>;
   initGit: (relativePath?: string) => Promise<string>;
   cleanup: () => Promise<void>;
+}
+
+async function makeWritable(path: string): Promise<void> {
+  let metadata; try { metadata = await lstat(path); } catch { return; }
+  if (metadata.isSymbolicLink()) return;
+  await chmod(path, metadata.isDirectory() ? 0o700 : 0o600).catch(() => undefined);
+  if (metadata.isDirectory()) for (const name of await readdir(path)) await makeWritable(join(path, name));
 }
 
 export async function createTempDirectory(prefix = 'bazframe-2-test-'): Promise<TempDirectory> {
@@ -41,8 +48,9 @@ export async function createTempDirectory(prefix = 'bazframe-2-test-'): Promise<
       await execFileAsync('git', ['init', '--quiet'], { cwd: path });
       return path;
     },
-    cleanup() {
-      return rm(root, { recursive: true, force: true });
+    async cleanup() {
+      await makeWritable(root);
+      await rm(root, { recursive: true, force: true });
     }
   };
 }

@@ -1,9 +1,10 @@
-import { readFile, readdir, realpath } from 'node:fs/promises';
+import { chmod, readFile, readdir, realpath } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import ts from 'typescript';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { captureProviderManifest } from '../../helpers/provider-manifest.js';
 import { createTempDirectory, type TempDirectory } from '../../helpers/temp-directory.js';
+import { publishSourceSnapshot } from '../../../src/source-units/source-snapshot.js';
 
 const temporaryDirectories: TempDirectory[] = [];
 const originalBazframeHome = process.env.BAZFRAME_HOME;
@@ -110,6 +111,105 @@ describe('packaged Pi adapter command', () => {
     expect(notification.message).not.toContain('Aliases:');
   });
 
+  it('composes the exact Pi 0.82 prompt order and reports each mode once per load', async () => {
+    const fixture = await activeFixture('exact-prompt-order');
+    const harness = register(await loadArtifact(fixture.directory), []);
+    await required(harness.events, 'session_start')({}, sessionContext(fixture.repository));
+    const notifications: Array<{ message: string; level: string }> = [];
+    const uiContext = {
+      hasUI: true,
+      ui: {
+        notify: (message: string, level: string) => { notifications.push({ message, level }); }
+      }
+    };
+
+    const nativeContext = {
+      systemPrompt: 'native prompt',
+      systemPromptOptions: { contextFiles: [{ path: '/pi/AGENTS.md' }] }
+    };
+    const additive = required(harness.events, 'before_agent_start')(
+      nativeContext,
+      uiContext
+    ) as { systemPrompt: string };
+    expect(additive.systemPrompt).toBe([
+      'native prompt',
+      '',
+      `<bazframe_profile_instructions path="${fixture.profileInstructions}">`,
+      'profile instructions',
+      '',
+      '</bazframe_profile_instructions>'
+    ].join('\n'));
+    required(harness.events, 'before_agent_start')(nativeContext, uiContext);
+    expect(notifications).toEqual([{
+      message: 'Bazframe: Pi owns native global/project context; appended profile instructions only.',
+      level: 'info'
+    }]);
+
+    await required(harness.events, 'session_start')({}, sessionContext(fixture.repository));
+    notifications.length = 0;
+    const replacementContext = {
+      systemPrompt: 'native prompt',
+      systemPromptOptions: { contextFiles: [] }
+    };
+    const replacement = required(harness.events, 'before_agent_start')(
+      replacementContext,
+      uiContext
+    ) as { systemPrompt: string };
+    expect(replacement.systemPrompt).toBe([
+      'native prompt',
+      '',
+      `<bazframe_global_instructions path="${fixture.globalInstructions}">`,
+      'global instructions',
+      '',
+      '</bazframe_global_instructions>',
+      '',
+      `<bazframe_profile_instructions path="${fixture.profileInstructions}">`,
+      'profile instructions',
+      '',
+      '</bazframe_profile_instructions>'
+    ].join('\n'));
+    required(harness.events, 'before_agent_start')(replacementContext, uiContext);
+    expect(notifications).toEqual([{
+      message: 'Bazframe: Pi supplied no native context; restored global context and appended profile instructions.',
+      level: 'info'
+    }]);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'escapes instruction source attributes while preserving opaque bodies exactly',
+    async () => {
+      const fixture = await activeFixture('prompt-&"<>', [], false);
+      await fixture.directory.write(
+        'pi-agent/AGENTS.md',
+        'global <opaque attr="&"> body\n'
+      );
+      await fixture.directory.write(
+        'bazframe-home/profiles/focused/AGENTS.md',
+        'profile <opaque attr="&"> body\n'
+      );
+      const harness = register(await loadArtifact(fixture.directory), []);
+      await required(harness.events, 'session_start')({}, sessionContext(fixture.repository));
+
+      const composed = required(harness.events, 'before_agent_start')(
+        { systemPrompt: 'native prompt', systemPromptOptions: { contextFiles: [] } },
+        { hasUI: false, ui: { notify: () => undefined } }
+      ) as { systemPrompt: string };
+      expect(composed.systemPrompt).toBe([
+        'native prompt',
+        '',
+        `<bazframe_global_instructions path="${escapedAttribute(fixture.globalInstructions)}">`,
+        'global <opaque attr="&"> body',
+        '',
+        '</bazframe_global_instructions>',
+        '',
+        `<bazframe_profile_instructions path="${escapedAttribute(fixture.profileInstructions)}">`,
+        'profile <opaque attr="&"> body',
+        '',
+        '</bazframe_profile_instructions>'
+      ].join('\n'));
+    }
+  );
+
   it('loads profile context and skill resources outside Git under global enable', async () => {
     const fixture = await activeFixture('outside-enabled', ['profile-skill'], false);
     const harness = register(await loadArtifact(fixture.directory, true), []);
@@ -144,22 +244,14 @@ describe('packaged Pi adapter command', () => {
       .toContain('Profile: focused');
   });
 
-  it('projects live derived definitions individually without passing a grouping root', async () => {
+  it('projects activated snapshot definitions individually without passing a grouping root', async () => {
     const fixture = await activeFixture('source-projection');
     const provider = await realpath(await fixture.directory.mkdir('provider-root'));
-    const alphaDefinition = await fixture.directory.write(
+    await fixture.directory.write(
       'provider-root/nested/alpha/SKILL.md',
       '---\nname: alpha\ndescription: alpha\n---\n\nalpha\n'
     );
-    await fixture.directory.write(
-      'bazframe-home/profiles/focused/source-units/provider/source.json',
-      `${JSON.stringify({
-        schemaVersion: 1,
-        providerId: 'provider',
-        sourceId: 'source',
-        sourceRoot: provider
-      })}\n`
-    );
+    const activated = await writeSnapshotDescriptor(fixture.directory, provider);
     const descriptorPath = fixture.directory.path(
       'bazframe-home/profiles/focused/source-units/provider/source.json'
     );
@@ -175,7 +267,7 @@ describe('packaged Pi adapter command', () => {
     const ownedAfterFirst = await captureProviderManifest([descriptorPath]);
     expect(afterFirst).toEqual(beforeFirst);
     expect(ownedAfterFirst).toEqual(ownedBeforeFirst);
-    expect(first).toEqual({ skillPaths: [await realpath(alphaDefinition)] });
+    expect(first).toEqual({ skillPaths: [`${activated.artifactRoot}/nested/alpha/SKILL.md`] });
     expect((first as { skillPaths: string[] }).skillPaths).not.toContain(provider);
 
     const infoNotification = await runCommand(required(harness.commands, 'bazframe'), 'info', []);
@@ -199,31 +291,50 @@ describe('packaged Pi adapter command', () => {
     const ownedAfterReload = await captureProviderManifest([descriptorPath]);
     expect(changedAfterReload).toEqual(changedBeforeReload);
     expect(ownedAfterReload).toEqual(ownedBeforeReload);
-    expect(reloaded).toEqual({
-      skillPaths: [await realpath(betaDefinition), await realpath(alphaDefinition)]
-    });
+    expect(reloaded).toEqual({ skillPaths: [`${activated.artifactRoot}/nested/alpha/SKILL.md`] });
+    expect((reloaded as { skillPaths: string[] }).skillPaths).not.toContain(await realpath(betaDefinition));
+  });
+
+  it('reports schema-v1 correction and rejects writable snapshot mode drift', async () => {
+    const fixture = await activeFixture('source-state-parity');
+    const provider = await realpath(await fixture.directory.mkdir('provider-root'));
+    await fixture.directory.write('provider-root/alpha/SKILL.md', '---\nname: alpha\ndescription: alpha\n---\n');
+    const activated = await writeSnapshotDescriptor(fixture.directory, provider);
+    if (process.platform !== 'win32') await chmod(`${activated.snapshotRoot}/manifest.json`, 0o600);
+    const legacyRoot = fixture.directory.path('missing-legacy');
+    await fixture.directory.write('bazframe-home/profiles/focused/source-units/provider/legacy.json', `${JSON.stringify({
+      schemaVersion: 1, providerId: 'provider', sourceId: 'legacy', sourceRoot: legacyRoot
+    })}\n`);
+    const harness = register(await loadArtifact(fixture.directory, true), []);
+    const resources = await required(harness.events, 'resources_discover')(
+      { cwd: fixture.repository }, { hasUI: false, ui: { notify: () => undefined } }
+    );
+    if (process.platform !== 'win32') expect(resources).toBeUndefined();
+    const message = (await runCommand(required(harness.commands, 'bazframe'), 'info', [])).message;
+    expect(message).toContain('provider/legacy ->');
+    expect(message).toContain('(build-required; rebuild:unavailable)');
+    expect(message).toContain('bazframe profile sources build provider legacy');
+    if (process.platform !== 'win32') {
+      expect(message).toContain('provider/source ->');
+      expect(message).toContain('(failed; rebuild:available;');
+      expect(message).toContain('provider/source:. broken-snapshot');
+      expect(message).toContain('bazframe profile sources build provider source');
+    }
   });
 
   it('uses Pi-loaded folded and directory-fallback names in the artifact projection', async () => {
     const fixture = await activeFixture('source-name-parity');
     const provider = await realpath(await fixture.directory.mkdir('provider-root'));
-    const fallbackDefinition = await fixture.directory.write(
+    await fixture.directory.write(
       'provider-root/directory-fallback/SKILL.md',
       '---\ndescription: fallback\n---\n\nfallback\n'
     );
-    const foldedDefinition = await fixture.directory.write(
+    await fixture.directory.write(
       'provider-root/folded-directory/SKILL.md',
       '---\nname: >-\n  folded-name\ndescription: folded\n---\n\nfolded\n'
     );
-    const descriptorPath = await fixture.directory.write(
-      'bazframe-home/profiles/focused/source-units/provider/source.json',
-      `${JSON.stringify({
-        schemaVersion: 1,
-        providerId: 'provider',
-        sourceId: 'source',
-        sourceRoot: provider
-      })}\n`
-    );
+    const activated = await writeSnapshotDescriptor(fixture.directory, provider);
+    const descriptorPath = activated.descriptorPath;
     const harness = register(await loadArtifact(fixture.directory, 'parity'), []);
     const ownedBefore = await captureProviderManifest([descriptorPath]);
     const providerBefore = await captureProviderManifest([provider]);
@@ -238,7 +349,7 @@ describe('packaged Pi adapter command', () => {
     expect(providerAfter).toEqual(providerBefore);
     expect(ownedAfter).toEqual(ownedBefore);
     expect(resources).toEqual({
-      skillPaths: [await realpath(fallbackDefinition), await realpath(foldedDefinition)]
+      skillPaths: [`${activated.artifactRoot}/directory-fallback/SKILL.md`, `${activated.artifactRoot}/folded-directory/SKILL.md`]
     });
     const infoNotification = await runCommand(required(harness.commands, 'bazframe'), 'info', []);
     expect(infoNotification.message).toContain(
@@ -256,15 +367,7 @@ describe('packaged Pi adapter command', () => {
       'provider-root/rejected/SKILL.md',
       '---\nname: rejected\ndescription: rejected\n---\n\nrejected\n'
     );
-    await fixture.directory.write(
-      'bazframe-home/profiles/focused/source-units/provider/source.json',
-      `${JSON.stringify({
-        schemaVersion: 1,
-        providerId: 'provider',
-        sourceId: 'source',
-        sourceRoot: provider
-      })}\n`
-    );
+    await writeSnapshotDescriptor(fixture.directory, provider);
     const harness = register(await loadArtifact(fixture.directory, 'reject'), []);
     const descriptorPath = fixture.directory.path(
       'bazframe-home/profiles/focused/source-units/provider/source.json'
@@ -296,19 +399,11 @@ describe('packaged Pi adapter command', () => {
   it('aliases a native collision from the derived skill original base and definition', async () => {
     const fixture = await activeFixture('source-alias');
     const provider = await realpath(await fixture.directory.mkdir('provider-root'));
-    const definition = await fixture.directory.write(
+    await fixture.directory.write(
       'provider-root/alpha/SKILL.md',
       '---\nname: alpha\ndescription: derived alpha\n---\n\nalpha\n'
     );
-    await fixture.directory.write(
-      'bazframe-home/profiles/focused/source-units/provider/source.json',
-      `${JSON.stringify({
-        schemaVersion: 1,
-        providerId: 'provider',
-        sourceId: 'source',
-        sourceRoot: provider
-      })}\n`
-    );
+    const activated = await writeSnapshotDescriptor(fixture.directory, provider);
     const runtimeCommands = [{ name: 'skill:alpha', source: 'skill' }];
     const harness = register(await loadArtifact(fixture.directory, true), runtimeCommands);
     const descriptorPath = fixture.directory.path(
@@ -331,8 +426,8 @@ describe('packaged Pi adapter command', () => {
     expect(resources.skillPaths).toHaveLength(1);
     expect(resources.skillPaths[0]).toContain('alpha-x-bazframe/SKILL.md');
     const alias = await readFile(resources.skillPaths[0], 'utf8');
-    expect(alias).toContain(JSON.stringify(await realpath(definition)));
-    expect(alias).toContain(JSON.stringify(await realpath(fixture.directory.path('provider-root/alpha'))));
+    expect(alias).toContain(JSON.stringify(`${activated.artifactRoot}/alpha/SKILL.md`));
+    expect(alias).toContain(JSON.stringify(`${activated.artifactRoot}/alpha`));
   });
 
   it('fails a generated-alias collision visibly without replacing cache bytes or adding an alias', async () => {
@@ -342,15 +437,7 @@ describe('packaged Pi adapter command', () => {
       'provider-root/alpha/SKILL.md',
       '---\nname: alpha\ndescription: derived alpha\n---\n\nalpha\n'
     );
-    await fixture.directory.write(
-      'bazframe-home/profiles/focused/source-units/provider/source.json',
-      `${JSON.stringify({
-        schemaVersion: 1,
-        providerId: 'provider',
-        sourceId: 'source',
-        sourceRoot: provider
-      })}\n`
-    );
+    await writeSnapshotDescriptor(fixture.directory, provider);
     const cachedAlias = await fixture.directory.write(
       'bazframe-home/adapter-cache/pi/skill-aliases/focused/alpha-x-bazframe/SKILL.md',
       'preserve existing cache\n'
@@ -508,6 +595,63 @@ describe('packaged Pi adapter command', () => {
     ].join('\n'));
   });
 
+  it('truncates a 64-character colliding flat name to one free 64-character Pi alias', async () => {
+    const originalName = 'a'.repeat(64);
+    const aliasName = `${'a'.repeat(53)}-x-bazframe`;
+    expect(aliasName).toHaveLength(64);
+    const fixture = await activeFixture('long-flat-alias', [originalName]);
+    const runtimeCommands: RuntimeCommand[] = [{ name: `skill:${originalName}`, source: 'skill' }];
+    const harness = register(await loadArtifact(fixture.directory, true), runtimeCommands);
+    let notification = '';
+
+    const resources = await required(harness.events, 'resources_discover')(
+      { cwd: fixture.repository },
+      { hasUI: true, ui: { notify: (message: string) => { notification = message; } } }
+    ) as { skillPaths: string[] };
+
+    const expectedAliasPath = fixture.directory.path(
+      `bazframe-home/adapter-cache/pi/skill-aliases/focused/${aliasName}/SKILL.md`
+    );
+    expect(resources).toEqual({ skillPaths: [expectedAliasPath] });
+    expect(notification).toBe(`Bazframe skill aliases: ${originalName} -> ${aliasName}`);
+    expect(await readFile(expectedAliasPath, 'utf8')).toContain(`name: ${aliasName}\n`);
+    runtimeCommands.push({ name: `skill:${aliasName}`, source: 'skill' });
+    expect((await runCommand(required(harness.commands, 'bazframe'), 'info', [])).message)
+      .toContain(`Aliases: ${originalName} -> ${aliasName}`);
+  });
+
+  it('fails a truncation-induced flat alias collision visibly with no fallback', async () => {
+    const originalName = `${'a'.repeat(52)}-bbbbbbbbbbb`;
+    const aliasName = `${'a'.repeat(52)}-x-bazframe`;
+    expect(originalName).toHaveLength(64);
+    const fixture = await activeFixture('long-flat-alias-collision', [originalName]);
+    const cachedAlias = await fixture.directory.write(
+      `bazframe-home/adapter-cache/pi/skill-aliases/focused/${aliasName}/SKILL.md`,
+      'preserve truncation collision cache\n'
+    );
+    const runtimeCommands: RuntimeCommand[] = [
+      { name: `skill:${originalName}`, source: 'skill' },
+      { name: `skill:${aliasName}`, source: 'skill' }
+    ];
+    const harness = register(await loadArtifact(fixture.directory, true), runtimeCommands);
+    let notification = '';
+
+    const resources = await required(harness.events, 'resources_discover')(
+      { cwd: fixture.repository },
+      { hasUI: true, ui: { notify: (message: string) => { notification = message; } } }
+    );
+
+    expect(resources).toBeUndefined();
+    expect(notification).toBe(
+      `Bazframe skill preparation failed: Bazframe skill alias also collides: ${originalName} -> ${aliasName}`
+    );
+    expect(await readFile(cachedAlias, 'utf8')).toBe('preserve truncation collision cache\n');
+    expect(await readdir(
+      fixture.directory.path('bazframe-home/adapter-cache/pi/skill-aliases/focused')
+    )).toEqual([aliasName]);
+    expect(runtimeCommands).toHaveLength(2);
+  });
+
   it('awaits trimmed reload and rejects bare, unknown, and extra arguments without reloading', async () => {
     const directory = await createTempDirectory('bazframe-pi-artifact-dispatch-');
     temporaryDirectories.push(directory);
@@ -589,6 +733,16 @@ describe('packaged Pi adapter command', () => {
       .toEqual({ action: 'handled' });
   });
 });
+
+
+async function writeSnapshotDescriptor(directory: TempDirectory, provider: string): Promise<{ descriptorPath: string; artifactRoot: string; snapshotRoot: string }> {
+  const snapshot = await publishSourceSnapshot(directory.path('bazframe-home'), provider);
+  const descriptorPath = await directory.write(
+    'bazframe-home/profiles/focused/source-units/provider/source.json',
+    `${JSON.stringify({ schemaVersion: 2, providerId: 'provider', sourceId: 'source', sourceRoot: provider, snapshotDigest: snapshot.digest, sourceUnitRoot: '.' })}\n`
+  );
+  return { descriptorPath, artifactRoot: snapshot.artifactRoot, snapshotRoot: snapshot.snapshotRoot };
+}
 
 async function activeFixture(
   name: string,
@@ -734,8 +888,18 @@ function sourceInfoLines(flatSkills: readonly (readonly [string, string])[] = []
     'Derived effective skills: 0',
     '  (none)',
     'Source failures: 0',
+    '  (none)',
+    'Corrective actions:',
     '  (none)'
   ];
+}
+
+function escapedAttribute(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('"', '&quot;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
 }
 
 function required<T>(map: Map<string, T>, name: string): T {

@@ -101,6 +101,7 @@ export const PROFILE_HELP = [
   '  bazframe profile skills',
   '  bazframe profile sources',
   '  bazframe profile sources add <provider> <source> <absolute-root> [--profile <profile>]',
+  '  bazframe profile sources build <provider> <source> [--profile <profile>]',
   '  bazframe profile sources remove <provider> <source> [--profile <profile>]',
   '  bazframe profile add <profile>',
   '  bazframe profile duplicate <source> <new>',
@@ -214,20 +215,30 @@ export const PROFILE_SOURCES_HELP = [
   'Usage:',
   '  bazframe profile sources',
   '  bazframe profile sources add <provider> <source> <absolute-root> [--profile <profile>]',
+  '  bazframe profile sources build <provider> <source> [--profile <profile>]',
   '  bazframe profile sources remove <provider> <source> [--profile <profile>]',
   '',
-  'With no command, inspect direct source-unit descriptors and live derived skills for the active profile.',
-  'Provider roots are provider-owned and read-only to Bazframe.',
-  'Use --profile on add or remove to target a profile without changing the active selection.',
+  'With no command, inspect direct memberships, activated snapshots, and derived skills for the active profile.',
+  'Add and build explicitly run a declared provider build and activate an immutable snapshot.',
+  'Inspection, Pi startup, reload, and skill invocation never run builds.',
+  'Use --profile to target a profile without changing the active selection.',
   ''
 ].join('\n');
 
 export const PROFILE_SOURCES_ADD_HELP = [
   'Usage: bazframe profile sources add <provider> <source> <absolute-root> [--profile <profile>]',
   '',
-  'Add a strict profile-owned descriptor for an existing physical provider root.',
-  'The canonical provider root remains provider-owned and is never copied or changed.',
-  'An exact existing descriptor is current; occupied invalid or retargeted entries are refused.',
+  'Explicitly prepare an existing physical provider input and activate its immutable snapshot.',
+  'A declared literal build runs with the provider input as CWD; an absent manifest snapshots the input directly.',
+  'An exact existing schema-v2 descriptor is current; occupied invalid or retargeted entries are refused.',
+  ''
+].join('\n');
+
+export const PROFILE_SOURCES_BUILD_HELP = [
+  'Usage: bazframe profile sources build <provider> <source> [--profile <profile>]',
+  '',
+  'Explicitly rebuild the recorded provider input and atomically activate a verified immutable snapshot.',
+  'A failure preserves the previously active descriptor and snapshot.',
   ''
 ].join('\n');
 

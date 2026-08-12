@@ -9,13 +9,14 @@ export type HelpTopic =
   | 'profile' | 'profile-add' | 'profile-duplicate' | 'profile-remove' | 'profile-rename'
   | 'profile-use' | 'profile-list' | 'profile-current' | 'profile-skills'
   | 'profile-skills-add' | 'profile-skills-remove' | 'profile-sources'
-  | 'profile-sources-add' | 'profile-sources-remove' | 'skills' | 'project' | 'tui';
+  | 'profile-sources-add' | 'profile-sources-build' | 'profile-sources-remove' | 'skills' | 'project' | 'tui';
 export type Command =
   | { name: 'profiles-overview' }
   | { name: 'skills-overview' }
   | { name: 'profile-skills-overview' }
   | { name: 'profile-sources-overview' }
   | { name: 'profile-sources-add'; providerId: string; sourceId: string; sourceRoot: string; profileId?: string }
+  | { name: 'profile-sources-build'; providerId: string; sourceId: string; profileId?: string }
   | { name: 'profile-sources-remove'; providerId: string; sourceId: string; profileId?: string }
   | { name: 'projects-overview' }
   | { name: 'global-overview' }
@@ -92,6 +93,7 @@ function parseHelp(args: readonly string[]): ParseResult {
     ['profile skills', 'profile-skills'],
     ['profile sources', 'profile-sources'],
     ['profile sources add', 'profile-sources-add'],
+    ['profile sources build', 'profile-sources-build'],
     ['profile sources remove', 'profile-sources-remove'],
     ['skill', 'skills'], ['skills', 'skills'],
     ['project', 'project'], ['projects', 'project'],
@@ -236,8 +238,8 @@ function parseProfileSources(args: readonly string[]): ParseResult {
     return { kind: 'help', topic: 'profile-sources' };
   }
   const [subcommand, ...rest] = args;
-  if (subcommand !== 'add' && subcommand !== 'remove') {
-    return usageError('profile sources requires `add` or `remove`.', 'profile-sources');
+  if (subcommand !== 'add' && subcommand !== 'build' && subcommand !== 'remove') {
+    return usageError('profile sources requires `add`, `build`, or `remove`.', 'profile-sources');
   }
   const topic: HelpTopic = `profile-sources-${subcommand}`;
   if (rest.length === 1 && HELP_FLAGS.has(rest[0])) return { kind: 'help', topic };
@@ -280,7 +282,7 @@ function parseProfileSources(args: readonly string[]): ParseResult {
   return {
     kind: 'command',
     command: {
-      name: 'profile-sources-remove',
+      name: subcommand === 'build' ? 'profile-sources-build' : 'profile-sources-remove',
       providerId,
       sourceId,
       ...(profileId === undefined ? {} : { profileId })

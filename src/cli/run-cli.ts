@@ -33,6 +33,8 @@ import {
 import {
   addActiveProfileSource,
   addProfileSource,
+  buildActiveProfileSource,
+  buildProfileSource,
   removeActiveProfileSource,
   removeProfileSource,
   type ProfileSourceMembershipResult
@@ -90,6 +92,7 @@ import {
   PROFILE_SKILLS_HELP,
   PROFILE_SKILLS_REMOVE_HELP,
   PROFILE_SOURCES_ADD_HELP,
+  PROFILE_SOURCES_BUILD_HELP,
   PROFILE_SOURCES_HELP,
   PROFILE_SOURCES_REMOVE_HELP,
   PROFILE_USE_HELP,
@@ -356,8 +359,8 @@ async function runCommand(
     writeStdout(`${await currentProfile(bazframeHome)}\n`);
     return EXIT_STATUS.success;
   }
-  if (command.name === 'profile-sources-add' || command.name === 'profile-sources-remove') {
-    const options = { bazframeHome };
+  if (command.name === 'profile-sources-add' || command.name === 'profile-sources-build' || command.name === 'profile-sources-remove') {
+    const options = { bazframeHome, environment };
     const result = command.name === 'profile-sources-add'
       ? command.profileId === undefined
         ? await addActiveProfileSource(
@@ -373,9 +376,13 @@ async function runCommand(
             command.sourceId,
             command.sourceRoot
           )
-      : command.profileId === undefined
-        ? await removeActiveProfileSource(options, command.providerId, command.sourceId)
-        : await removeProfileSource(options, command.profileId, command.providerId, command.sourceId);
+      : command.name === 'profile-sources-build'
+        ? command.profileId === undefined
+          ? await buildActiveProfileSource(options, command.providerId, command.sourceId)
+          : await buildProfileSource(options, command.profileId, command.providerId, command.sourceId)
+        : command.profileId === undefined
+          ? await removeActiveProfileSource(options, command.providerId, command.sourceId)
+          : await removeProfileSource(options, command.profileId, command.providerId, command.sourceId);
     writeStdout(formatSourceMembershipResult(result, command.profileId !== undefined));
     return EXIT_STATUS.success;
   }
@@ -699,7 +706,7 @@ function formatProfileSourcesOverview(
     ...(composition.directSourceUnits.length === 0
       ? [colors.muted('  (none)')]
       : composition.directSourceUnits.map((source) =>
-          `  - ${source.providerId}/${source.sourceId} -> ${source.sourceRoot}`)),
+          `  - ${source.providerId}/${source.sourceId} -> ${source.sourceRoot} (${source.preparationState}; rebuild:${source.rebuildAvailability}${source.schemaVersion === 2 ? `; sha256:${source.snapshotDigest}; root:${source.sourceUnitRoot}` : ''})`)),
     colors.heading('Derived effective skills:'),
     ...(composition.derivedSkills.length === 0
       ? [colors.muted('  (none)')]
@@ -713,6 +720,7 @@ function formatProfileSourcesOverview(
     '',
     colors.heading('Commands:'),
     colors.command('  bazframe profile sources add <provider> <source> <absolute-root> [--profile <profile>]'),
+    colors.command('  bazframe profile sources build <provider> <source> [--profile <profile>]'),
     colors.command('  bazframe profile sources remove <provider> <source> [--profile <profile>]'),
     ''
   ].join('\n');
@@ -833,6 +841,8 @@ function formatSourceMembershipResult(
     `Provider: ${result.providerId}`,
     `Source unit: ${result.sourceId}`,
     `Provider root: ${result.sourceRoot}`,
+    `Schema: ${result.schemaVersion}`,
+    ...(result.schemaVersion === 2 ? [`Snapshot: ${result.snapshotDigest}`, `Source-unit root: ${result.sourceUnitRoot}`] : []),
     `Descriptor: ${result.descriptorPath}`,
     ''
   ].join('\n');
@@ -885,6 +895,7 @@ function helpFor(topic: HelpTopic): string {
     case 'profile-skills-remove': return PROFILE_SKILLS_REMOVE_HELP;
     case 'profile-sources': return PROFILE_SOURCES_HELP;
     case 'profile-sources-add': return PROFILE_SOURCES_ADD_HELP;
+    case 'profile-sources-build': return PROFILE_SOURCES_BUILD_HELP;
     case 'profile-sources-remove': return PROFILE_SOURCES_REMOVE_HELP;
     case 'skills': return SKILLS_HELP;
     case 'project': return PROJECT_HELP;

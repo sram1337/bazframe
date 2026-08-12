@@ -140,8 +140,9 @@ describe('source-unit CLI', () => {
     const afterFirstAdd = await captureProviderManifest([first, second]);
     const ownedAfterFirstAdd = await captureProviderManifest([firstDescriptor]);
     expect(afterFirstAdd).toEqual(beforeFirstAdd);
-    expect(ownedAfterFirstAdd).not.toEqual(ownedBeforeFirstAdd);
-    expect(firstAdd).toMatchObject({ status: 0, stderr: '' });
+    expect(ownedAfterFirstAdd).toEqual(ownedBeforeFirstAdd);
+    expect(firstAdd).toMatchObject({ status: 1, stdout: '' });
+    expect(firstAdd.stderr).toContain('description is required');
 
     const ownedBeforeSecondAdd = await captureProviderManifest([secondDescriptor]);
     const beforeSecondAdd = await captureProviderManifest([first, second]);
@@ -151,8 +152,9 @@ describe('source-unit CLI', () => {
     const afterSecondAdd = await captureProviderManifest([first, second]);
     const ownedAfterSecondAdd = await captureProviderManifest([secondDescriptor]);
     expect(afterSecondAdd).toEqual(beforeSecondAdd);
-    expect(ownedAfterSecondAdd).not.toEqual(ownedBeforeSecondAdd);
-    expect(secondAdd).toMatchObject({ status: 0, stderr: '' });
+    expect(ownedAfterSecondAdd).toEqual(ownedBeforeSecondAdd);
+    expect(secondAdd).toMatchObject({ status: 1, stdout: '' });
+    expect(secondAdd.stderr).toContain('description is required');
 
     const ownedBeforeOverview = await captureProviderManifest([firstDescriptor, secondDescriptor]);
     const beforeOverview = await captureProviderManifest([first, second]);
@@ -163,12 +165,7 @@ describe('source-unit CLI', () => {
     expect(ownedAfterOverview).toEqual(ownedBeforeOverview);
     expect(overview).toMatchObject({ status: 0, stderr: '' });
     expect(overview.stdout).toContain('Derived effective skills:\n  (none)');
-    expect(overview.stdout).toContain(
-      'provider/first:SKILL.md pi-loader[0]: description is required'
-    );
-    expect(overview.stdout).toContain(
-      'provider/second:SKILL.md pi-loader[0]: description is required'
-    );
+    expect(overview.stdout).toContain('Direct source units:\n  (none)');
 
     const ownedBeforeStatus = await captureProviderManifest([firstDescriptor, secondDescriptor]);
     const beforeStatus = await captureProviderManifest([first, second]);
@@ -178,14 +175,8 @@ describe('source-unit CLI', () => {
     expect(afterStatus).toEqual(beforeStatus);
     expect(ownedAfterStatus).toEqual(ownedBeforeStatus);
     expect(status).toMatchObject({ status: 3, stderr: '' });
-    expect(status.stdout).toContain('Direct source units: 2');
+    expect(status.stdout).toContain('Direct source units: 0');
     expect(status.stdout).toContain('Derived effective skills: 0');
-    expect(status.stdout).toContain(
-      'provider/first:SKILL.md pi-loader[0]: description is required'
-    );
-    expect(status.stdout).toContain(
-      'provider/second:SKILL.md pi-loader[0]: description is required'
-    );
   });
 
   it('withholds a derived source that conflicts with Pi-resolved folded and fallback flat names', async () => {
@@ -226,7 +217,8 @@ describe('source-unit CLI', () => {
     );
     const afterAdd = await captureProviderManifest([provider]);
     expect(afterAdd).toEqual(beforeAdd);
-    expect(added).toMatchObject({ status: 0, stderr: '' });
+    expect(added).toMatchObject({ status: 1, stdout: '' });
+    expect(added.stderr).toContain('conflicts with the prospective profile');
 
     const ownedBeforeOverview = await captureProviderManifest([descriptorPath]);
     const beforeOverview = await captureProviderManifest([provider]);
@@ -237,12 +229,7 @@ describe('source-unit CLI', () => {
     expect(ownedAfterOverview).toEqual(ownedBeforeOverview);
     expect(overview).toMatchObject({ status: 0, stderr: '' });
     expect(overview.stdout).toContain('Derived effective skills:\n  (none)');
-    expect(overview.stdout).toContain(
-      'provider/source:fallback/SKILL.md duplicate-name (fallback-flat)'
-    );
-    expect(overview.stdout).toContain(
-      'provider/source:folded/SKILL.md duplicate-name (folded-flat)'
-    );
+    expect(overview.stdout).toContain('Direct source units:\n  (none)');
 
     const ownedBeforeStatus = await captureProviderManifest([descriptorPath]);
     const beforeStatus = await captureProviderManifest([provider]);
@@ -253,14 +240,8 @@ describe('source-unit CLI', () => {
     expect(ownedAfterStatus).toEqual(ownedBeforeStatus);
     expect(status).toMatchObject({ status: 3, stderr: '' });
     expect(status.stdout).toContain('Flat direct skills: 2');
-    expect(status.stdout).toContain('Direct source units: 1');
+    expect(status.stdout).toContain('Direct source units: 0');
     expect(status.stdout).toContain('Derived effective skills: 0');
-    expect(status.stdout).toContain(
-      'provider/source:fallback/SKILL.md duplicate-name (fallback-flat)'
-    );
-    expect(status.stdout).toContain(
-      'provider/source:folded/SKILL.md duplicate-name (folded-flat)'
-    );
   });
 
   it.skipIf(process.platform === 'win32')(

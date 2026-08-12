@@ -17,6 +17,7 @@ import {
   loadFlatSkillIdentities,
   resolveProfileSourceUnits,
   type DerivedSkill,
+  type DirectSourceUnit,
   type SourceDiagnostic
 } from '../source-units/source-unit-resolver.js';
 import { resolvePiAgentDirectory } from '../state/paths.js';
@@ -70,6 +71,7 @@ export type StatusProfile =
       skillCount: number;
       flatSkillCount?: number;
       directSourceUnitCount?: number;
+      directSourceUnits?: DirectSourceUnit[];
       derivedSkillCount?: number;
       derivedSkills?: DerivedSkill[];
       sourceDiagnostics?: SourceDiagnostic[];
@@ -177,14 +179,21 @@ export async function inspectStatus(options: StatusOptions): Promise<StatusInspe
           skillCount: loaded.skillDirectories.length,
           flatSkillCount: loaded.skillDirectories.length,
           directSourceUnitCount: sources.directSourceUnits.length,
+          directSourceUnits: sources.directSourceUnits,
           derivedSkillCount: sources.derivedSkills.length,
           derivedSkills: sources.derivedSkills,
           sourceDiagnostics: sources.diagnostics
         };
         if (sources.diagnostics.length > 0) {
+          const buildRequired = sources.directSourceUnits
+            .filter((source) => source.preparationState === 'build-required'
+              || (source.preparationState === 'failed' && source.rebuildAvailability === 'available'))
+            .map((source) => `bazframe profile sources build ${source.providerId} ${source.sourceId}`);
           corrections.set('source-units', {
             id: 'source-units',
-            message: 'Inspect source-unit failures with `bazframe profile sources`.'
+            message: buildRequired.length === 0
+              ? 'Inspect source-unit failures with `bazframe profile sources`.'
+              : `Build the sources with: ${buildRequired.map((command) => `\`${command}\``).join(', ')}.`
           });
         }
       } catch (error) {
@@ -273,6 +282,7 @@ export function formatStatus(status: StatusInspection): string {
   const directSourceUnitCount: number | string = status.profile.state === 'ready'
     ? status.profile.directSourceUnitCount ?? 0
     : unavailableCount;
+  const directSourceUnits = status.profile.state === 'ready' ? status.profile.directSourceUnits ?? [] : [];
   const derivedSkillCount: number | string = status.profile.state === 'ready'
     ? status.profile.derivedSkillCount ?? 0
     : unavailableCount;
@@ -302,6 +312,7 @@ export function formatStatus(status: StatusInspection): string {
     `Profile instructions: ${instructionSource}`,
     `Flat direct skills: ${flatSkillCount}`,
     `Direct source units: ${directSourceUnitCount}`,
+    ...directSourceUnits.map((source) => `  - ${source.providerId}/${source.sourceId}: ${source.preparationState}; rebuild ${source.rebuildAvailability}${source.schemaVersion === 2 ? `; sha256:${source.snapshotDigest}; root:${source.sourceUnitRoot}` : ''}`),
     `Derived effective skills: ${derivedSkillCount}`,
     ...(derivedSkills.length === 0
       ? ['  (none)']

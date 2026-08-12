@@ -1,11 +1,12 @@
 import { constants } from 'node:fs';
 import { lstat, open, readdir, realpath, type FileHandle } from 'node:fs/promises';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { loadSkillsFromDir, type Skill } from '@earendil-works/pi-coding-agent';
 import { BazframeError, errorCode } from '../core/errors.js';
 import { readSourceDescriptor, type SourceDescriptor } from '../profiles/profile-source-membership.js';
 import { isSafeSkillId } from '../skills/skill-id.js';
 import { SKILL_DEFINITION } from '../skills/skill-metadata.js';
+import { resolvePhysicalRelativeDirectory, verifySourceSnapshot } from './source-snapshot.js';
 
 export const SOURCE_UNIT_LIMITS = Object.freeze({
   depth: 8,
@@ -46,10 +47,12 @@ export function loadFlatSkillIdentities(
   });
 }
 
-export interface DirectSourceUnit extends SourceDescriptor {
+export type DirectSourceUnit = SourceDescriptor & {
   descriptorPath: string;
   relativeDescriptorPath: string;
-}
+  preparationState: 'ready' | 'build-required' | 'failed';
+  rebuildAvailability: 'available' | 'unavailable';
+};
 
 export interface DerivedSkill<T = unknown> {
   name: string;
@@ -92,7 +95,7 @@ export type SourceDiagnostic =
       path: string;
     }
   | {
-      category: 'broken-root' | 'internal-symlink' | 'unsupported-entry'
+      category: 'broken-root' | 'broken-snapshot' | 'build-required' | 'internal-symlink' | 'unsupported-entry'
         | 'mixed-root' | 'invalid-definition' | 'io-error';
       providerId: string;
       sourceId: string;
@@ -181,14 +184,20 @@ export async function resolveProfileSourceUnits<T = unknown>(
     const direct: DirectSourceUnit = {
       ...descriptor,
       descriptorPath: path.descriptorPath,
-      relativeDescriptorPath: path.relativeDescriptorPath
+      relativeDescriptorPath: path.relativeDescriptorPath,
+      preparationState: descriptor.schemaVersion === 1 ? 'build-required' : 'ready',
+      rebuildAvailability: await rebuildAvailability(descriptor.sourceRoot)
     };
     directSourceUnits.push(direct);
     try {
-      candidates.push({ direct, skills: await resolveOneSource(direct, definitionLoader) });
+      const profileParent = dirname(profileDirectory);
+      const bazframeHome = profileParent.endsWith(`${sep}profiles`) ? dirname(profileParent) : profileParent;
+      candidates.push({ direct, skills: await resolveOneSource(direct, definitionLoader, bazframeHome) });
     } catch (error) {
       if (error instanceof SourceFailure) {
-        diagnostics.push(...(Array.isArray(error.diagnostic) ? error.diagnostic : [error.diagnostic]));
+        const failures = Array.isArray(error.diagnostic) ? error.diagnostic : [error.diagnostic];
+        if (failures.some((failure) => failure.category === 'broken-snapshot')) direct.preparationState = 'failed';
+        diagnostics.push(...failures);
       } else {
         diagnostics.push(baseDiagnostic('io-error', direct, '.'));
       }
@@ -231,6 +240,72 @@ export async function resolveProfileSourceUnits<T = unknown>(
     derivedSkills,
     diagnostics: sortDiagnostics(diagnostics)
   };
+}
+
+async function rebuildAvailability(sourceRoot: string): Promise<'available' | 'unavailable'> {
+  try {
+    const metadata = await lstat(sourceRoot);
+    return !metadata.isSymbolicLink() && metadata.isDirectory() && await realpath(sourceRoot) === sourceRoot
+      ? 'available' : 'unavailable';
+  } catch { return 'unavailable'; }
+}
+
+export async function validateProspectiveSourceUnit<T = unknown>(
+  profileDirectory: string,
+  flatSkills: readonly FlatSkillIdentity[],
+  candidate: DirectSourceUnit,
+  definitionLoader: DefinitionLoader<T> = defaultDefinitionLoader as unknown as DefinitionLoader<T>
+): Promise<DerivedSkill<T>[]> {
+  const profileParent = dirname(profileDirectory);
+  const bazframeHome = profileParent.endsWith(`${sep}profiles`) ? dirname(profileParent) : profileParent;
+  let skills: DerivedSkill<T>[];
+  try { skills = await resolveOneSource(candidate, definitionLoader, bazframeHome); }
+  catch (error) {
+    if (error instanceof SourceFailure) throw new BazframeError('SOURCE_CANDIDATE_INVALID', formatSourceDiagnostic(Array.isArray(error.diagnostic) ? error.diagnostic[0]! : error.diagnostic));
+    throw error;
+  }
+  const ownNames = new Map<string, number>();
+  for (const skill of skills) ownNames.set(skill.name, (ownNames.get(skill.name) ?? 0) + 1);
+  const occupied = new Set(flatSkills.map((skill) => skill.name));
+  for (const skill of await structurallyValidExistingSkills(
+    profileDirectory,
+    candidate.providerId,
+    candidate.sourceId,
+    definitionLoader,
+    bazframeHome
+  )) occupied.add(skill.name);
+  const conflict = skills.find((skill) => (ownNames.get(skill.name) ?? 0) > 1 || occupied.has(skill.name));
+  if (conflict !== undefined) throw new BazframeError('SOURCE_CANDIDATE_DUPLICATE', `Candidate source skill name conflicts with the prospective profile: ${conflict.name}`);
+  return skills;
+}
+
+/** Returns every structurally/Pi-valid existing child before profile duplicate filtering. */
+async function structurallyValidExistingSkills<T>(
+  profileDirectory: string,
+  excludedProviderId: string,
+  excludedSourceId: string,
+  loader: DefinitionLoader<T>,
+  bazframeHome: string
+): Promise<DerivedSkill<T>[]> {
+  const namespace = await validateNamespace(join(profileDirectory, 'source-units'));
+  const skills: DerivedSkill<T>[] = [];
+  for (const path of namespace.descriptors) {
+    if (path.providerId === excludedProviderId && path.sourceId === excludedSourceId) continue;
+    try {
+      const descriptor = await readSourceDescriptor(path.descriptorPath, path.providerId, path.sourceId);
+      const direct: DirectSourceUnit = {
+        ...descriptor,
+        descriptorPath: path.descriptorPath,
+        relativeDescriptorPath: path.relativeDescriptorPath,
+        preparationState: descriptor.schemaVersion === 1 ? 'build-required' : 'ready',
+        rebuildAvailability: await rebuildAvailability(descriptor.sourceRoot)
+      };
+      skills.push(...await resolveOneSource(direct, loader, bazframeHome));
+    } catch {
+      // Unrelated malformed, unbuilt, or otherwise failing sources do not block activation.
+    }
+  }
+  return skills;
 }
 
 interface PhysicalIdentity {
@@ -428,9 +503,17 @@ function sameIdentity(
 
 async function resolveOneSource<T>(
   direct: DirectSourceUnit,
-  loader: DefinitionLoader<T>
+  loader: DefinitionLoader<T>,
+  bazframeHome: string
 ): Promise<DerivedSkill<T>[]> {
-  const root = direct.sourceRoot;
+  if (direct.schemaVersion === 1) fail(baseDiagnostic('build-required', direct, '.'));
+  let root: string;
+  try {
+    const snapshot = await verifySourceSnapshot(bazframeHome, direct.snapshotDigest);
+    root = await resolvePhysicalRelativeDirectory(snapshot.artifactRoot, direct.sourceUnitRoot);
+  } catch {
+    fail(baseDiagnostic('broken-snapshot', direct, '.'));
+  }
   let rootMetadata;
   try {
     rootMetadata = await lstat(root);
@@ -609,7 +692,7 @@ function invalidDescriptor(providerId: string, sourceId: string, path: string): 
 
 function baseDiagnostic(
   category: Extract<SourceDiagnostic['category'],
-    'broken-root' | 'internal-symlink' | 'unsupported-entry' | 'mixed-root'
+    'broken-root' | 'broken-snapshot' | 'build-required' | 'internal-symlink' | 'unsupported-entry' | 'mixed-root'
     | 'invalid-definition' | 'io-error'>,
   direct: DirectSourceUnit,
   path: string

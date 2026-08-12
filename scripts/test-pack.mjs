@@ -1,8 +1,9 @@
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
+const PACKED_TUI_DEADLINE_MS = 8_000;
 const projectRoot = process.cwd();
 const npmExecPath = process.env.npm_execpath;
 const temporaryRoot = mkdtempSync(join(tmpdir(), 'bazframe-2-pack-'));
@@ -49,6 +50,7 @@ try {
   assertExists(join(packageRoot, 'docs', 'pi-adapter-production-design.md'));
   assertExists(join(packageRoot, 'docs', 'research', 'origin-and-rationale.md'));
   assertExists(join(packageRoot, 'docs', 'research', 'prototype-alternatives.md'));
+  assertMissing(join(packageRoot, 'docs', 'reviews'));
   assertExists(join(packageRoot, 'TODO.md'));
   assertExists(join(packageRoot, 'examples', 'profiles', 'focused', 'AGENTS.md'));
   assertExists(join(packageRoot, 'examples', 'profiles', 'reviewer', 'AGENTS.md'));
@@ -99,25 +101,10 @@ try {
     process.platform !== 'win32'
     && spawnSync('sh', ['-c', 'command -v script >/dev/null 2>&1']).status === 0
   ) {
-    const scriptCommand = process.platform === 'darwin'
-      ? `script -q /dev/null ${shellQuote(executable)} tui`
-      : `script -q -e -c ${shellQuote(`${shellQuote(executable)} tui`)} /dev/null`;
-    const packedTui = spawnSync('sh', ['-c', `(sleep 0.5; printf q) | ${scriptCommand}`], {
-      encoding: 'utf8',
-      shell: false,
-      timeout: 8_000,
-      env: {
-        ...process.env,
-        BAZFRAME_HOME: join(temporaryRoot, 'packed-tui-home'),
-        SKILLBOOK_LIBRARY: join(temporaryRoot, 'packed-skillbook'),
-        NO_COLOR: '1'
-      }
-    });
-    if (
-      packedTui.status !== 0
+    const packedTui = await runPackedTui(executable, temporaryRoot);
+    if (packedTui.status !== 0
       || !packedTui.stdout.includes('\u001B[?1049h')
-      || !packedTui.stdout.includes('\u001B[?1049l')
-    ) {
+      || !packedTui.stdout.includes('\u001B[?1049l')) {
       throw new Error(
         `Packed interactive TUI check failed (${packedTui.status}).\nstdout: ${packedTui.stdout}\nstderr: ${packedTui.stderr}`
       );
@@ -156,6 +143,81 @@ try {
 } finally {
   if (tarballPath !== undefined && existsSync(tarballPath)) unlinkSync(tarballPath);
   rmSync(temporaryRoot, { recursive: true, force: true });
+}
+
+async function runPackedTui(executable, temporaryRoot) {
+  const deadline = Date.now() + PACKED_TUI_DEADLINE_MS;
+  const scriptCommand = process.platform === 'darwin'
+    ? `script -q /dev/null ${shellQuote(executable)} tui`
+    : `script -q -e -c ${shellQuote(`exec ${shellQuote(executable)} tui`)} /dev/null`;
+  // The shell pipeline gives BSD script a real pipe rather than Node's socketpair stdin.
+  const child = spawn('sh', ['-c', `cat | ${scriptCommand}`], {
+    detached: true,
+    shell: false,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      BAZFRAME_HOME: join(temporaryRoot, 'packed-tui-home'),
+      SKILLBOOK_LIBRARY: join(temporaryRoot, 'packed-skillbook'),
+      NO_COLOR: '1'
+    }
+  });
+  let stdout = ''; let stderr = ''; let quitSent = false; let timedOut = false;
+  const sendQuit = () => {
+    if (quitSent || !stdout.includes('Status: Ready')) return;
+    quitSent = true;
+    child.stdin.write('q');
+    child.stdin.end();
+  };
+  child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => { stdout += chunk; sendQuit(); });
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    killProcessTree(child.pid);
+  }, Math.max(0, deadline - Date.now()));
+  let status = 1; let runError;
+  try {
+    status = await new Promise((resolveResult, reject) => {
+      child.once('error', reject);
+      child.once('close', (code, signal) => resolveResult(signal === null ? (code ?? 1) : 1));
+    });
+  } catch (error) { runError = error; }
+  finally {
+    clearTimeout(timeout);
+    if (processGroupExists(child.pid)) killProcessTree(child.pid);
+    await waitForProcessGroupGone(child.pid, deadline);
+  }
+  if (processGroupExists(child.pid)) throw new Error(`Packed TUI process group ${child.pid} survived cleanup.`);
+  if (runError !== undefined) throw runError;
+  return { status: timedOut ? 1 : status, stdout, stderr };
+}
+
+function processGroupExists(pid) {
+  if (pid === undefined) return false;
+  try { process.kill(-pid, 0); return true; } catch (error) { return error?.code === 'EPERM'; }
+}
+
+async function waitForProcessGroupGone(pid, deadline) {
+  while (processGroupExists(pid) && Date.now() < deadline) {
+    await new Promise((resolveWait) => setImmediate(resolveWait));
+  }
+}
+
+function killProcessTree(pid) {
+  if (pid === undefined) return;
+  const rows = spawnSync('ps', ['-axo', 'pid=,ppid='], { encoding: 'utf8' }).stdout
+    .trim().split('\n').map((line) => line.trim().split(/\s+/u).map(Number));
+  const children = new Map();
+  for (const [childPid, parentPid] of rows) {
+    const list = children.get(parentPid) ?? [];
+    list.push(childPid); children.set(parentPid, list);
+  }
+  const descendants = [];
+  const visit = (parent) => { for (const child of children.get(parent) ?? []) { visit(child); descendants.push(child); } };
+  visit(pid);
+  for (const target of descendants) try { process.kill(target, 'SIGKILL'); } catch (error) { if (error?.code !== 'ESRCH') throw error; }
+  try { process.kill(-pid, 'SIGKILL'); } catch (error) { if (error?.code !== 'ESRCH') throw error; }
 }
 
 function shellQuote(value) {

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render } from 'ink-testing-library';
+import stringWidth from 'string-width';
 import type {
   BazframeTuiService,
   DashboardSnapshot
@@ -319,7 +320,7 @@ describe('TuiApp', () => {
   it('keeps compact destructive-dialog controls visible with long unbroken details', async () => {
     const service = fakeService();
     const dashboard = await service.loadDashboard();
-    const longSegment = 'x'.repeat(180);
+    const longSegment = unicodeWidthPath();
     dashboard.profiles[0]!.directory = `/home/${longSegment}/focused`;
     dashboard.profiles[0]!.memberships = [
       {
@@ -374,7 +375,7 @@ describe('TuiApp', () => {
   it('bounds full-size destructive target summaries with many long targets', async () => {
     const service = fakeService();
     const dashboard = await service.loadDashboard();
-    const longSegment = 'x'.repeat(240);
+    const longSegment = unicodeWidthPath();
     dashboard.profiles[0]!.directory = `/home/${longSegment}/focused`;
     dashboard.profiles[0]!.memberships = Array.from({ length: 24 }, (_, index) => {
       const skillId = `target-${String(index).padStart(2, '0')}`;
@@ -856,6 +857,38 @@ describe('TuiApp', () => {
     expect(service.createProfile).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [80, 24],
+    [60, 16]
+  ])('keeps Unicode, ANSI, and long source paths within %sx%s terminal cells', async (columns, rows) => {
+    expect(stringWidth('界')).toBe(2);
+    expect(stringWidth('e\u0301')).toBe(1);
+    expect(stringWidth('👩‍💻')).toBe(2);
+    expect(stringWidth('\u001B[31mANSI\u001B[0m')).toBe(4);
+
+    const service = fakeService();
+    const dashboard = await service.loadDashboard();
+    dashboard.sources[0]!.label = 'U';
+    dashboard.sources[0]!.root = unicodeWidthPath();
+    vi.mocked(service.loadDashboard).mockClear();
+    const view = render(<TuiApp service={service} dimensions={{ columns, rows }} />);
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+
+    view.stdin.write('2');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('路径'));
+    const frame = view.lastFrame()!;
+    const sourceLines = frame.split('\n').filter((line) => line.includes('路径'));
+    expect(sourceLines).toHaveLength(1);
+    expect(sourceLines[0]).toContain('Cafe\u0301');
+    expect(sourceLines[0]).toContain('👩‍💻');
+    expect(sourceLines[0]).toContain('ANSI');
+    expect(sourceLines[0]).toContain('\u001B[31m');
+    expect(sourceLines[0]).toContain('…');
+    expect(sourceLines[0]!.length).toBeGreaterThan(columns);
+    expect(frame).not.toContain(UNICODE_TAIL_SENTINEL);
+    assertFrameBounds(frame, columns, rows);
+  });
+
   it.each(['1', '2', '3'])('keeps bordered tab %s within compact bounds', async (tab) => {
     const service = fakeService();
     const view = render(
@@ -883,7 +916,7 @@ describe('TuiApp', () => {
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Warning: Skill source metadata'));
     expect(view.lastFrame()).toContain('* 1 Profiles');
     expect(view.lastFrame()).toContain('* focused');
-    expect(Math.max(...view.lastFrame()!.split('\n').map((line) => line.length))).toBeLessThanOrEqual(60);
+    expect(Math.max(...view.lastFrame()!.split('\n').map((line) => stringWidth(line)))).toBeLessThanOrEqual(60);
   });
 
   it('preserves route, active tab, and focused-tab cursor across inert resize', async () => {
@@ -958,7 +991,13 @@ function assertFrameBounds(
   expect(frame).toBeDefined();
   const lines = frame!.split('\n');
   expect(lines.length).toBeLessThanOrEqual(maximumRows);
-  expect(Math.max(...lines.map((line) => line.length))).toBeLessThanOrEqual(maximumColumns);
+  expect(Math.max(...lines.map((line) => stringWidth(line)))).toBeLessThanOrEqual(maximumColumns);
+}
+
+const UNICODE_TAIL_SENTINEL = 'TAIL-SENTINEL-9F4C';
+
+function unicodeWidthPath(): string {
+  return `/路径/Cafe\u0301/👩‍💻/\u001B[31mANSI\u001B[0m/${'x'.repeat(180)}-${UNICODE_TAIL_SENTINEL}`;
 }
 
 function removalIdentity(id: string): ProfileRemovalIdentity {

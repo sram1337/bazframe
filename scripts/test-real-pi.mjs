@@ -1,6 +1,7 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   lstatSync,
@@ -162,16 +163,13 @@ try {
   assert(ownedAfterSourceAdd !== ownedBeforeSourceAdd, 'Source add did not change descriptor state.');
   assert(sourceAdded.stdout.includes('Profile source membership: added'), 'Packed CLI did not add source membership.');
   assert(existsSync(sourceDescriptorPath), 'Source add did not create the Bazframe-owned descriptor.');
-  const expectedSourceDescriptor = {
-    schemaVersion: 1,
-    providerId: 'provider',
-    sourceId: 'source',
-    sourceRoot: realpathSync(sourceProvider)
-  };
-  assert(
-    JSON.stringify(JSON.parse(readFileSync(sourceDescriptorPath, 'utf8'))) === JSON.stringify(expectedSourceDescriptor),
-    'Source add wrote an unexpected descriptor.'
-  );
+  const expectedSourceDescriptor = JSON.parse(readFileSync(sourceDescriptorPath, 'utf8'));
+  assert(expectedSourceDescriptor.schemaVersion === 2
+    && expectedSourceDescriptor.providerId === 'provider'
+    && expectedSourceDescriptor.sourceId === 'source'
+    && expectedSourceDescriptor.sourceRoot === realpathSync(sourceProvider)
+    && /^[a-f0-9]{64}$/u.test(expectedSourceDescriptor.snapshotDigest)
+    && expectedSourceDescriptor.sourceUnitRoot === '.', 'Source add wrote an unexpected descriptor.');
   const ownedBeforeIdempotentAdd = providerManifest(sourceDescriptorPath);
   const sourceBeforeIdempotentAdd = providerManifest(sourceProvider);
   const sourceCurrent = run(
@@ -256,6 +254,18 @@ try {
   const nonGitEnabledRun = runPiPreservingProvider(
     sourceProvider, nonGitDirectory, environment, [], 'non-Git enabled probe'
   );
+  const rpcOwnedRoots = [
+    sourceDescriptorPath,
+    join(bazframeHome, 'adapter-cache', 'pi', 'skill-aliases', 'focused')
+  ];
+  rpcClient = startPiRpc(repository, environment);
+  const initialCommandsResponse = await rpcClient.request({ type: 'get_commands' });
+  assert(initialCommandsResponse.success === true, 'Initial RPC command query failed.');
+  const initialRpcCommands = rpcCommandNames(initialCommandsResponse);
+  assert(initialRpcCommands.includes('bazframe'), 'RPC process did not load /bazframe.');
+  assert(initialRpcCommands.includes('skill:source-probe'), 'RPC process omitted the initial source skill.');
+  assert(!initialRpcCommands.includes('skill:live-source'), 'RPC process saw a future provider change.');
+
   const liveSource = join(sourceProvider, 'live-source');
   mkdirSync(liveSource);
   writeFileSync(join(liveSource, 'SKILL.md'), [
@@ -267,31 +277,26 @@ try {
     '# Live source',
     ''
   ].join('\n'));
+  const beforeBuildCommands = rpcCommandNames(await rpcClient.request({ type: 'get_commands' }));
+  assert(!beforeBuildCommands.includes('skill:live-source'), 'The same Pi process saw provider mutation before explicit build.');
+  const nonRpcBeforeBuild = runPiPreservingProvider(sourceProvider, repository, environment, [], 'pre-build invisibility probe');
+  assert(!nonRpcBeforeBuild.stdout.includes('PACKED_LIVE_SOURCE'), 'A fresh non-RPC Pi run saw provider mutation before explicit build.');
 
-  const rpcOwnedRoots = [
-    sourceDescriptorPath,
-    join(bazframeHome, 'adapter-cache', 'pi', 'skill-aliases', 'focused')
-  ];
-  const ownedBeforeRpcProjection = ownedManifest(rpcOwnedRoots);
-  const providerBeforeRpcProjection = providerManifest(sourceProvider);
-  rpcClient = startPiRpc(repository, environment);
-  const initialCommandsResponse = await rpcClient.request({ type: 'get_commands' });
-  const providerAfterRpcProjection = providerManifest(sourceProvider);
-  const ownedAfterRpcProjection = ownedManifest(rpcOwnedRoots);
-  assert(
-    providerAfterRpcProjection === providerBeforeRpcProjection,
-    'Initial real-Pi RPC projection changed provider bytes.'
-  );
-  assert(
-    ownedAfterRpcProjection === ownedBeforeRpcProjection,
-    'Initial real-Pi RPC projection changed Bazframe-owned state.'
-  );
-  assert(initialCommandsResponse.success === true, 'Initial RPC command query failed.');
-  const initialRpcCommands = rpcCommandNames(initialCommandsResponse);
-  assert(initialRpcCommands.includes('bazframe'), 'RPC process did not load /bazframe.');
-  assert(initialRpcCommands.includes('skill:source-probe'), 'RPC process omitted the initial source skill.');
-  assert(initialRpcCommands.includes('skill:live-source'), 'RPC process omitted the live source skill.');
-  assert(!initialRpcCommands.includes('skill:rpc-reloaded-source'), 'RPC process saw a future source change.');
+  const sourceBeforeExplicitBuild = providerManifest(sourceProvider);
+  const rebuiltForLiveSource = run(executable, ['profile', 'sources', 'build', 'provider', 'source'], temporaryRoot, environment);
+  assert(rebuiltForLiveSource.stdout.includes('Profile source membership: built'), 'Explicit source build did not activate the provider change.');
+  assert(providerManifest(sourceProvider) === sourceBeforeExplicitBuild, 'Explicit snapshot-only build changed provider bytes.');
+  const afterBuildBeforeReload = rpcCommandNames(await rpcClient.request({ type: 'get_commands' }));
+  assert(!afterBuildBeforeReload.includes('skill:live-source'), 'The same Pi process saw the rebuilt snapshot before /bazframe reload.');
+
+  const ownedBeforeRpcReload = ownedManifest(rpcOwnedRoots);
+  const providerBeforeRpcReload = providerManifest(sourceProvider);
+  const reloadResponse = await rpcClient.request({ type: 'prompt', message: '/bazframe reload' });
+  assert(reloadResponse.success === true, 'RPC /bazframe reload did not return correlated success.');
+  assert(providerManifest(sourceProvider) === providerBeforeRpcReload, 'RPC /bazframe reload changed provider bytes.');
+  assert(ownedManifest(rpcOwnedRoots) === ownedBeforeRpcReload, 'RPC /bazframe reload changed Bazframe-owned state.');
+  const afterReloadCommands = rpcCommandNames(await rpcClient.request({ type: 'get_commands' }));
+  assert(afterReloadCommands.includes('skill:live-source'), 'The same Pi process did not expose the rebuilt source after /bazframe reload.');
 
   const rpcReloadSource = join(sourceProvider, 'rpc-reloaded-source');
   mkdirSync(rpcReloadSource);
@@ -304,37 +309,14 @@ try {
     '# RPC reloaded source',
     ''
   ].join('\n'));
-  const ownedBeforeRpcReload = ownedManifest(rpcOwnedRoots);
-  const providerBeforeRpcReload = providerManifest(sourceProvider);
-  const reloadResponse = await rpcClient.request({
-    type: 'prompt',
-    message: '/bazframe reload'
-  });
-  const providerAfterRpcReload = providerManifest(sourceProvider);
-  const ownedAfterRpcReload = ownedManifest(rpcOwnedRoots);
-  assert(providerAfterRpcReload === providerBeforeRpcReload, 'RPC /bazframe reload changed provider bytes.');
-  assert(ownedAfterRpcReload === ownedBeforeRpcReload, 'RPC /bazframe reload changed Bazframe-owned state.');
-  assert(reloadResponse.success === true, 'RPC /bazframe reload did not return correlated success.');
-
-  const ownedBeforeReloadedQuery = ownedManifest(rpcOwnedRoots);
-  const providerBeforeReloadedQuery = providerManifest(sourceProvider);
-  const reloadedCommandsResponse = await rpcClient.request({ type: 'get_commands' });
-  const providerAfterReloadedQuery = providerManifest(sourceProvider);
-  const ownedAfterReloadedQuery = ownedManifest(rpcOwnedRoots);
-  assert(
-    providerAfterReloadedQuery === providerBeforeReloadedQuery,
-    'Reloaded RPC command query changed provider bytes.'
-  );
-  assert(
-    ownedAfterReloadedQuery === ownedBeforeReloadedQuery,
-    'Reloaded RPC command query changed Bazframe-owned state.'
-  );
-  assert(reloadedCommandsResponse.success === true, 'Reloaded RPC command query failed.');
-  const reloadedRpcCommands = rpcCommandNames(reloadedCommandsResponse);
-  assert(
-    reloadedRpcCommands.includes('skill:rpc-reloaded-source'),
-    'The same Pi RPC process did not expose the changed source after /bazframe reload.'
-  );
+  assert(!rpcCommandNames(await rpcClient.request({ type: 'get_commands' })).includes('skill:rpc-reloaded-source'), 'RPC process saw a second provider mutation before build.');
+  const providerBeforeRpcBuild = providerManifest(sourceProvider);
+  const rpcBuilt = run(executable, ['profile', 'sources', 'build', 'provider', 'source'], temporaryRoot, environment);
+  assert(rpcBuilt.stdout.includes('Profile source membership: built'), 'Explicit RPC-era source build did not activate.');
+  assert(providerManifest(sourceProvider) === providerBeforeRpcBuild, 'RPC-era source build changed provider bytes.');
+  assert(!rpcCommandNames(await rpcClient.request({ type: 'get_commands' })).includes('skill:rpc-reloaded-source'), 'RPC process saw second rebuilt source before reload.');
+  assert((await rpcClient.request({ type: 'prompt', message: '/bazframe reload' })).success === true, 'Second RPC reload failed.');
+  assert(rpcCommandNames(await rpcClient.request({ type: 'get_commands' })).includes('skill:rpc-reloaded-source'), 'Second rebuilt source remained absent after reload.');
   assert(rpcClient.modelEvents.length === 0, 'RPC reload unexpectedly invoked the model.');
   await rpcClient.close();
   rpcClient = undefined;
@@ -398,11 +380,12 @@ try {
     .trim()
     .split('\n')
     .map((line) => JSON.parse(line));
-  assert(captures.length === 9, `Expected nine real-Pi captures; found ${captures.length}.`);
+  assert(captures.length === 10, `Expected ten real-Pi captures; found ${captures.length}.`);
   const [
     replacementCapture,
     additiveCapture,
     nonGitEnabledCapture,
+    preBuildCapture,
     legacyDefaultCapture,
     globalDisabledCapture,
     nonGitDisabledCapture,
@@ -420,6 +403,7 @@ try {
     replacementCapture,
     additiveCapture,
     nonGitEnabledCapture,
+    preBuildCapture,
     legacyDefaultCapture,
     projectEnabledCapture,
     restoredCapture
@@ -448,11 +432,36 @@ try {
   );
   assert(!replacementCapture.systemPrompt.includes('PACKED_REPOSITORY_CONTEXT'), 'Replacement mode retained repository context.');
   assert(additiveCapture.systemPrompt.includes('PACKED_REPOSITORY_CONTEXT'), 'Additive mode omitted repository context.');
+  assertMarkerOrder(
+    replacementCapture.systemPrompt,
+    ['PACKED_GLOBAL_CONTEXT', 'PACKED_PROFILE_INSTRUCTION'],
+    'Replacement prompt order'
+  );
+  assertMarkerOrder(
+    additiveCapture.systemPrompt,
+    ['PACKED_GLOBAL_CONTEXT', 'PACKED_REPOSITORY_CONTEXT', 'PACKED_PROFILE_INSTRUCTION'],
+    'Additive prompt order'
+  );
+  assert(
+    replacementCapture.systemPrompt.includes('<bazframe_global_instructions path="'),
+    'Replacement mode did not label restored global provenance.'
+  );
+  assert(
+    !additiveCapture.systemPrompt.includes('<bazframe_global_instructions path="'),
+    'Additive mode incorrectly relabeled Pi-native global provenance.'
+  );
+  for (const capture of [replacementCapture, additiveCapture]) {
+    assert(
+      capture.systemPrompt.includes('<bazframe_profile_instructions path="'),
+      'Enabled mode did not label profile provenance.'
+    );
+  }
   assert(!replacementCapture.systemPrompt.includes('PACKED_LIVE_SOURCE'), 'Replacement run saw a future provider change.');
   assert(!additiveCapture.systemPrompt.includes('PACKED_LIVE_SOURCE'), 'Additive run saw a future provider change.');
   assert(!nonGitEnabledCapture.systemPrompt.includes('PACKED_LIVE_SOURCE'), 'Initial non-Git run saw a future provider change.');
+  assert(!preBuildCapture.systemPrompt.includes('PACKED_LIVE_SOURCE'), 'Fresh Pi saw provider mutation before explicit build.');
   for (const capture of [legacyDefaultCapture, projectEnabledCapture, restoredCapture]) {
-    assert(capture.systemPrompt.includes('PACKED_LIVE_SOURCE'), 'A later enabled run did not see the live provider change.');
+    assert(capture.systemPrompt.includes('PACKED_LIVE_SOURCE'), 'A later enabled run did not see the explicitly activated snapshot change.');
   }
   assert(projectEnabledCapture.systemPrompt.includes('PACKED_PROFILE_INSTRUCTION'), 'Project enable did not override global disable.');
   assert(readdirSync(join(bazframeHome, 'projects')).length === 0, 'Default cleanup left project state.');
@@ -540,7 +549,7 @@ try {
     skillbookMembershipLifecycle: true,
     skillbookProviderPreserved: true,
     providerNeutralSourceProjection: true,
-    liveProviderReload: true,
+    explicitSnapshotRebuild: true,
     sameProcessRpcReload: true,
     sourceProviderPreserved: true,
     repositoryStable: true
@@ -548,7 +557,16 @@ try {
 } finally {
   await rpcClient?.close();
   if (tarballPath !== undefined && existsSync(tarballPath)) unlinkSync(tarballPath);
+  makeWritable(temporaryRoot);
   rmSync(temporaryRoot, { recursive: true, force: true });
+}
+
+function makeWritable(path) {
+  if (!existsSync(path)) return;
+  const metadata = lstatSync(path);
+  if (metadata.isSymbolicLink()) return;
+  try { chmodSync(path, metadata.isDirectory() ? 0o700 : 0o600); } catch { /* best-effort test cleanup */ }
+  if (metadata.isDirectory()) for (const name of readdirSync(path)) makeWritable(join(path, name));
 }
 
 function providerManifest(root) {
@@ -770,6 +788,16 @@ function runPi(cwd, environment, extraArgs, prompt) {
 
 function count(value, marker) {
   return value.split(marker).length - 1;
+}
+
+function assertMarkerOrder(value, markers, label) {
+  let previous = -1;
+  for (const marker of markers) {
+    const index = value.indexOf(marker);
+    assert(index >= 0, `${label} omitted ${marker}.`);
+    assert(index > previous, `${label} did not preserve ${markers.join(' < ')}.`);
+    previous = index;
+  }
 }
 
 function assert(condition, message) {

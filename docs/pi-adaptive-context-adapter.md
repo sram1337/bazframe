@@ -11,7 +11,7 @@ pi       # native Pi context followed by the active profile
 pi -nc   # global Pi context followed by the active profile
 ```
 
-`-nc` is Pi's native `--no-context-files` flag. Pi represents its resulting context choice in `systemPromptOptions.contextFiles`.
+`-nc` is Pi's native `--no-context-files` flag. Pi represents its resulting context choice in `systemPromptOptions.contextFiles`. Pi 0.82.x is the only supported and evidenced runtime version for this adapter.
 
 ## Adaptive rule
 
@@ -46,6 +46,32 @@ Pi system prompt
 ```
 
 Ancestor and repository context files stay out of the assembled prompt in this mode. They remain repository content available through the agent's tools.
+
+### Exact composition and semantic boundary
+
+Bazframe treats every instruction body as opaque. It does not parse, classify, merge, rank, reject, rewrite, diagnose, or resolve contradictory prose. Included layers remain included, and their deterministic position is a transport/provenance contract rather than a semantic winner or promise that later prose takes precedence. Repository omission under `pi -nc` is the effect of the user's Pi invocation, not Bazframe conflict resolution.
+
+For a non-empty `contextFiles` list, the exact return is the incoming `event.systemPrompt`, `\n\n`, then:
+
+```text
+<bazframe_profile_instructions path="ESCAPED_PROFILE_PATH">
+PROFILE_BODY_UNCHANGED
+</bazframe_profile_instructions>
+```
+
+For an empty list, Bazframe returns the incoming prompt, `\n\n`, the restored-global section when a supported global file exists, `\n\n` between sections, then the profile section:
+
+```text
+<bazframe_global_instructions path="ESCAPED_GLOBAL_PATH">
+GLOBAL_BODY_UNCHANGED
+</bazframe_global_instructions>
+
+<bazframe_profile_instructions path="ESCAPED_PROFILE_PATH">
+PROFILE_BODY_UNCHANGED
+</bazframe_profile_instructions>
+```
+
+The section constructor places one LF after the opening tag and one LF before the closing tag; instruction bodies otherwise retain their loaded bytes, including their own trailing LF. Path attributes replace `&`, `"`, `<`, and `>` with `&amp;`, `&quot;`, `&lt;`, and `&gt;` respectively. Bodies are not escaped, so these provenance markers are XML-like transport delimiters rather than a claim that arbitrary instruction text is XML.
 
 ## Why structured emptiness is sufficient
 
@@ -98,21 +124,25 @@ At startup and reload, the extension:
 7. compares profile skill names with Pi's current skill commands;
 8. materializes deterministic collision aliases in Bazframe's external cache;
 9. contributes skill paths through `resources_discover`;
-10. applies the adaptive context rule during `before_agent_start` and reports precedence.
+10. applies the adaptive context rule during `before_agent_start` and reports the selected composition mode without claiming semantic precedence.
 
 Globally disabled Git worktrees remain native unless an enabled project override exists. A disabled project override wins over global enable. Non-Git directories inherit global enabled or disabled behavior without a project override. Malformed applicable policy state fails visibly.
 
 ## Skill collisions
 
-A profile skill keeps its declared name when available. A collision with a previously loaded Pi skill becomes:
+Profile duplicates are handled before this runtime boundary and never receive aliases. Duplicate flat/flat Pi-loaded names invalidate the complete profile. Prospective source add/build duplicates reject activation. For already-active memberships, flat/derived duplication preserves the flat skill and withholds the complete derived source unit; source/source duplication withholds every involved source unit; unrelated valid resources remain effective.
+
+At runtime, any pre-existing Pi command with `source === "skill"` occupies its `skill:<name>` command; the adapter does not infer more specific ownership. A profile skill keeps its original name when free. When occupied, the pre-existing Pi skill command keeps the name and Bazframe attempts exactly one deterministic alias. The ordinary spelling is:
 
 ```text
 <original>-x-bazframe
 ```
 
-The alias is an Agent Skills-compatible wrapper that directs Pi to the original skill file and base directory. The native skill keeps its command name. A collision on the generated alias produces a visible profile error.
+The full alias is capped at 64 characters. Bazframe truncates the original base as needed to leave room for the suffix and strips trailing hyphens from that truncated base before appending `-x-bazframe`. The Agent Skills-compatible wrapper preserves description and `disable-model-invocation`, directs Pi to the original skill file and base directory, and exists only in the Pi adapter cache.
 
-This policy preserves Agent Skills naming rules and gives each loaded skill a deterministic invocation.
+Bazframe uses that alias only when it is absent from pre-existing Pi skill commands, all profile skills' original names, and aliases already generated in the projection. Occupation is a visible projection error with no fallback suffix, silent overwrite, or replacement. Successful aliases do not rename or mutate the stored profile skill.
+
+No semantic or dependency compatibility is inferred from skill prose, metadata, layout, or co-packaging. A future adapter must define and test its own ordering/provenance, loader, command namespace, duplicate, and collision behavior. It may expose both definitions under adapter-specific deterministic reported names or fail visibly, but it may not silently drop or overwrite a definition, mutate profile identity, or persist a runtime alias into the portable profile.
 
 ## Safety and diagnostics
 
@@ -120,7 +150,8 @@ This policy preserves Agent Skills naming rules and gives each loaded skill a de
 - Instruction sources are bounded regular UTF-8 files and reject NUL bytes.
 - Canonical Git roots are resolved with inherited repository-selection environment variables cleared.
 - Project trust stays with Pi's trust flow.
-- `/bazframe info` reports only the effective profile, supplier-labeled context, sorted effective skills, and deterministic collisions when present; `/bazframe reload` awaits Pi reload.
+- `/bazframe info` reports the effective profile, supplier-labeled context, sorted effective skills, and live `original -> alias` mappings only for alias commands present in Pi's current command set; `/bazframe reload` awaits Pi reload.
+- Static `bazframe status` cannot inspect Pi's live command namespace and reports only a physical cached Pi alias count; cached files may be stale or inert.
 - Validation compares repository snapshots and Git status before and after adapter activity.
 
 ## Validation
@@ -134,7 +165,7 @@ The isolated Pi 0.82 suite demonstrated:
 - both modes append the active profile;
 - the historical prototype's reload command observed active-profile instruction and skill changes; production now exposes reload as `/bazframe reload`;
 - profile skills are additive;
-- native/profile collisions produce deterministic `-x-bazframe` aliases;
+- pre-existing Pi skill-command/profile collisions produce deterministic `-x-bazframe` aliases when the generated alias is free;
 - native project settings, extensions, prompts, themes, and skills follow Pi's trust behavior;
 - the historical prototype's registration gate worked as recorded; production now uses project-over-global policy with file-free enabled defaults;
 - repository snapshots and Git status stay stable.

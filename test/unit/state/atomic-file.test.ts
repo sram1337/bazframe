@@ -30,6 +30,31 @@ describe('atomic managed writes', () => {
     expect(await readdir(directory.path('home/projects'))).toEqual(['registration.json']);
   });
 
+  it('treats rename as committed when an opted-in directory sync fails', async () => {
+    const directory = await temporary();
+    const root = directory.path('home');
+    const destination = directory.path('home/state.json');
+    await writeFileAtomic(destination, 'old\n', { managedRoot: root });
+
+    await expect(writeFileAtomic(destination, 'new\n', {
+      managedRoot: root,
+      commitOnRename: true,
+      directorySync: async () => { throw Object.assign(new Error('sync failed'), { code: 'EIO' }); }
+    })).resolves.toBeUndefined();
+    expect(await directory.readText('home/state.json')).toBe('new\n');
+  });
+
+  it('preserves strict post-rename sync reporting by default', async () => {
+    const directory = await temporary();
+    const root = directory.path('home');
+    const destination = directory.path('home/state.json');
+    await expect(writeFileAtomic(destination, 'new\n', {
+      managedRoot: root,
+      directorySync: async () => { throw Object.assign(new Error('sync failed'), { code: 'EIO' }); }
+    })).rejects.toMatchObject({ code: 'ATOMIC_WRITE_FAILED' });
+    expect(await directory.readText('home/state.json')).toBe('new\n');
+  });
+
   it('rejects destinations outside the managed root', async () => {
     const directory = await temporary();
     await expect(writeFileAtomic(

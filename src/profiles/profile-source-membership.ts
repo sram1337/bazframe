@@ -13,35 +13,50 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { readUtf8InstructionFile } from '../core/content.js';
 import { BazframeError, errorCode } from '../core/errors.js';
 import { assertSafeSkillId, isSafeSkillId } from '../skills/skill-id.js';
-import { ensureManagedDirectory } from '../state/atomic-file.js';
+import { ensureManagedDirectory, writeFileAtomic } from '../state/atomic-file.js';
 import { withStateLock } from '../state/lock.js';
 import { assertSafeProfileId } from './profile-id.js';
-import { profileDirectory, readActiveProfile } from './profile-store.js';
+import { isPortableSourceRelativePath } from '../source-units/source-build-manifest.js';
+import { prepareSourceUnit } from '../source-units/source-unit-preparation.js';
+import { loadFlatSkillIdentities, validateProspectiveSourceUnit } from '../source-units/source-unit-resolver.js';
+import { discoverSkillDirectories, profileDirectory, readActiveProfile } from './profile-store.js';
 
-const DESCRIPTOR_KEYS = ['providerId', 'schemaVersion', 'sourceId', 'sourceRoot'] as const;
+const DESCRIPTOR_V1_KEYS = ['providerId', 'schemaVersion', 'sourceId', 'sourceRoot'] as const;
+const DESCRIPTOR_V2_KEYS = ['providerId', 'schemaVersion', 'snapshotDigest', 'sourceId', 'sourceRoot', 'sourceUnitRoot'] as const;
 
-export interface SourceDescriptor {
+export interface SourceDescriptorV1 {
   schemaVersion: 1;
   providerId: string;
   sourceId: string;
   sourceRoot: string;
 }
+export interface SourceDescriptorV2 {
+  schemaVersion: 2;
+  providerId: string;
+  sourceId: string;
+  sourceRoot: string;
+  snapshotDigest: string;
+  sourceUnitRoot: string;
+}
+export type SourceDescriptor = SourceDescriptorV1 | SourceDescriptorV2;
 
-export type ProfileSourceMembershipAction = 'added' | 'current' | 'removed' | 'absent';
+export type ProfileSourceMembershipAction = 'added' | 'built' | 'current' | 'removed' | 'absent';
 
-export interface ProfileSourceMembershipResult extends SourceDescriptor {
+export type ProfileSourceMembershipResult = SourceDescriptor & {
   action: ProfileSourceMembershipAction;
   profileId: string;
   descriptorPath: string;
-}
+};
 
 export interface ProfileSourceMembershipOptions {
   bazframeHome: string;
+  environment?: NodeJS.ProcessEnv;
 }
 
 export interface ProfileSourceMembershipDependencies {
   beforeRemoveRevalidation?: (descriptorPath: string) => Promise<void>;
   removeDirectory?: (path: string) => Promise<void>;
+  removeTemporaryDescriptor?: (path: string) => Promise<void>;
 }
 
 export function encodeSourceDescriptor(descriptor: SourceDescriptor): string {
@@ -58,12 +73,12 @@ export function decodeSourceDescriptor(
   }
   const candidate = value as Record<string, unknown>;
   const keys = Object.keys(candidate).sort();
-  if (keys.length !== DESCRIPTOR_KEYS.length
-    || !keys.every((key, index) => key === DESCRIPTOR_KEYS[index])) {
-    throw invalidDescriptor('descriptor must contain exactly the schema-v1 fields');
-  }
-  if (candidate.schemaVersion !== 1) {
-    throw invalidDescriptor('unsupported schemaVersion');
+  const expectedKeys = candidate.schemaVersion === 1 ? DESCRIPTOR_V1_KEYS
+    : candidate.schemaVersion === 2 ? DESCRIPTOR_V2_KEYS : undefined;
+  if (expectedKeys === undefined) throw invalidDescriptor('unsupported schemaVersion');
+  if (keys.length !== expectedKeys.length
+    || !keys.every((key, index) => key === expectedKeys[index])) {
+    throw invalidDescriptor(`descriptor must contain exactly the schema-v${candidate.schemaVersion} fields`);
   }
   if (typeof candidate.providerId !== 'string' || !isSafeSkillId(candidate.providerId)) {
     throw invalidDescriptor('providerId is invalid');
@@ -83,11 +98,25 @@ export function decodeSourceDescriptor(
   if (expectedSourceId !== undefined && candidate.sourceId !== expectedSourceId) {
     throw invalidDescriptor('sourceId does not match the descriptor path');
   }
-  return {
+  if (candidate.schemaVersion === 1) return {
     schemaVersion: 1,
     providerId: candidate.providerId,
     sourceId: candidate.sourceId,
     sourceRoot: candidate.sourceRoot
+  };
+  if (typeof candidate.snapshotDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(candidate.snapshotDigest)) {
+    throw invalidDescriptor('snapshotDigest must be lowercase SHA-256');
+  }
+  if (typeof candidate.sourceUnitRoot !== 'string' || !isPortableSourceRelativePath(candidate.sourceUnitRoot)) {
+    throw invalidDescriptor('sourceUnitRoot is invalid');
+  }
+  return {
+    schemaVersion: 2,
+    providerId: candidate.providerId,
+    sourceId: candidate.sourceId,
+    sourceRoot: candidate.sourceRoot,
+    snapshotDigest: candidate.snapshotDigest,
+    sourceUnitRoot: candidate.sourceUnitRoot
   };
 }
 
@@ -162,9 +191,10 @@ export async function addActiveProfileSource(
   options: ProfileSourceMembershipOptions,
   providerId: string,
   sourceId: string,
-  sourceRoot: string
+  sourceRoot: string,
+  dependencies: ProfileSourceMembershipDependencies = {}
 ): Promise<ProfileSourceMembershipResult> {
-  return addProfileSourceFor(options, undefined, providerId, sourceId, sourceRoot);
+  return addProfileSourceFor(options, undefined, providerId, sourceId, sourceRoot, dependencies);
 }
 
 export async function addProfileSource(
@@ -172,10 +202,11 @@ export async function addProfileSource(
   profileId: string,
   providerId: string,
   sourceId: string,
-  sourceRoot: string
+  sourceRoot: string,
+  dependencies: ProfileSourceMembershipDependencies = {}
 ): Promise<ProfileSourceMembershipResult> {
   assertSafeProfileId(profileId);
-  return addProfileSourceFor(options, profileId, providerId, sourceId, sourceRoot);
+  return addProfileSourceFor(options, profileId, providerId, sourceId, sourceRoot, dependencies);
 }
 
 async function addProfileSourceFor(
@@ -183,7 +214,8 @@ async function addProfileSourceFor(
   requestedProfileId: string | undefined,
   providerId: string,
   sourceId: string,
-  sourceRoot: string
+  sourceRoot: string,
+  dependencies: ProfileSourceMembershipDependencies
 ): Promise<ProfileSourceMembershipResult> {
   assertSafeSkillId(providerId);
   assertSafeSkillId(sourceId);
@@ -197,31 +229,76 @@ async function addProfileSourceFor(
     async (paths) => {
       await assertOptionalPhysicalDirectory(paths.sourceUnitsDirectory, 'Profile source-units directory');
       await assertOptionalPhysicalDirectory(paths.providerDirectory, 'Profile source-unit provider directory');
-      const descriptor: SourceDescriptor = {
-        schemaVersion: 1,
-        providerId,
-        sourceId,
-        sourceRoot: canonicalRoot
-      };
       const existing = await inspectDescriptor(paths.descriptorPath, providerId, sourceId);
       if (existing !== undefined) {
-        if (existing.sourceRoot === canonicalRoot) return result(paths, descriptor, 'current');
-        throw unmanagedDescriptor(paths.descriptorPath, 'names a different canonical source root');
+        if (existing.sourceRoot !== canonicalRoot) throw unmanagedDescriptor(paths.descriptorPath, 'names a different canonical source root');
+        if (existing.schemaVersion === 1) throw new BazframeError('SOURCE_BUILD_REQUIRED', 'Source membership requires `bazframe profile sources build` before it can be used.');
+        return result(paths, existing, 'current');
       }
+      const prepared = await prepareSourceUnit(options.bazframeHome, canonicalRoot, options.environment);
+      const descriptor: SourceDescriptorV2 = {
+        schemaVersion: 2,
+        providerId,
+        sourceId,
+        sourceRoot: canonicalRoot,
+        snapshotDigest: prepared.snapshot.digest,
+        sourceUnitRoot: prepared.sourceUnitRoot
+      };
+      await validateCandidate(options, paths, descriptor);
       await ensureManagedDirectory(options.bazframeHome, paths.providerDirectory);
-      const created = await createDescriptorExclusive(
-        paths.descriptorPath,
-        encodeSourceDescriptor(descriptor),
-        options.bazframeHome
-      );
-      if (!created) {
-        const raced = await inspectDescriptor(paths.descriptorPath, providerId, sourceId);
-        if (raced?.sourceRoot === canonicalRoot) return result(paths, descriptor, 'current');
-        throw unmanagedDescriptor(paths.descriptorPath, 'was occupied while the descriptor was being added');
-      }
+      const created = await createDescriptorExclusive(paths.descriptorPath, encodeSourceDescriptor(descriptor), options.bazframeHome, dependencies);
+      if (!created) throw unmanagedDescriptor(paths.descriptorPath, 'was occupied while the descriptor was being added');
       return result(paths, descriptor, 'added');
     }
   );
+}
+
+export async function buildActiveProfileSource(
+  options: ProfileSourceMembershipOptions,
+  providerId: string,
+  sourceId: string
+): Promise<ProfileSourceMembershipResult> {
+  return buildProfileSourceFor(options, undefined, providerId, sourceId);
+}
+
+export async function buildProfileSource(
+  options: ProfileSourceMembershipOptions,
+  profileId: string,
+  providerId: string,
+  sourceId: string
+): Promise<ProfileSourceMembershipResult> {
+  assertSafeProfileId(profileId);
+  return buildProfileSourceFor(options, profileId, providerId, sourceId);
+}
+
+async function buildProfileSourceFor(
+  options: ProfileSourceMembershipOptions,
+  requestedProfileId: string | undefined,
+  providerId: string,
+  sourceId: string
+): Promise<ProfileSourceMembershipResult> {
+  assertSafeSkillId(providerId);
+  assertSafeSkillId(sourceId);
+  return withProfileSourceLock(options, requestedProfileId, providerId, sourceId, 'bazframe profile sources build', async (paths) => {
+    const initial = await inspectDescriptorSnapshot(paths.descriptorPath, providerId, sourceId);
+    if (initial === undefined) throw new BazframeError('SOURCE_DESCRIPTOR_MISSING', `Source-unit descriptor does not exist: ${paths.descriptorPath}`);
+    const canonicalRoot = await canonicalPhysicalRoot(initial.descriptor.sourceRoot);
+    if (canonicalRoot !== initial.descriptor.sourceRoot) throw unmanagedDescriptor(paths.descriptorPath, 'provider input no longer has its recorded canonical identity');
+    const prepared = await prepareSourceUnit(options.bazframeHome, canonicalRoot, options.environment);
+    const descriptor: SourceDescriptorV2 = {
+      schemaVersion: 2,
+      providerId,
+      sourceId,
+      sourceRoot: canonicalRoot,
+      snapshotDigest: prepared.snapshot.digest,
+      sourceUnitRoot: prepared.sourceUnitRoot
+    };
+    await validateCandidate(options, paths, descriptor);
+    const revalidated = await inspectDescriptorSnapshot(paths.descriptorPath, providerId, sourceId);
+    if (revalidated === undefined || !sameDescriptorSnapshot(initial, revalidated)) throw unmanagedDescriptor(paths.descriptorPath, 'changed during source build');
+    await replaceDescriptorAtomic(paths.descriptorPath, encodeSourceDescriptor(descriptor), options.bazframeHome);
+    return result(paths, descriptor, 'built');
+  });
 }
 
 export async function removeActiveProfileSource(
@@ -422,7 +499,8 @@ function sameDescriptorSnapshot(left: DescriptorSnapshot, right: DescriptorSnaps
 async function createDescriptorExclusive(
   path: string,
   contents: string,
-  managedRoot: string
+  managedRoot: string,
+  dependencies: ProfileSourceMembershipDependencies
 ): Promise<boolean> {
   const temporaryDirectory = join(managedRoot, 'tmp', 'source-descriptors');
   await ensureManagedDirectory(managedRoot, temporaryDirectory);
@@ -431,6 +509,7 @@ async function createDescriptorExclusive(
     `${process.pid}.${randomUUID()}.json.tmp`
   );
   let handle: FileHandle | undefined;
+  let activated = false;
   try {
     handle = await open(temporaryPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
     await handle.writeFile(contents, 'utf8');
@@ -439,6 +518,7 @@ async function createDescriptorExclusive(
     handle = undefined;
     try {
       await link(temporaryPath, path);
+      activated = true;
     } catch (error) {
       if (errorCode(error) === 'EEXIST') return false;
       throw error;
@@ -452,10 +532,31 @@ async function createDescriptorExclusive(
     );
   } finally {
     if (handle !== undefined) await handle.close().catch(() => undefined);
-    await unlink(temporaryPath).catch((error: unknown) => {
-      if (errorCode(error) !== 'ENOENT') throw error;
+    await (dependencies.removeTemporaryDescriptor ?? unlink)(temporaryPath).catch((error: unknown) => {
+      if (errorCode(error) !== 'ENOENT' && !activated) throw error;
     });
   }
+}
+
+async function validateCandidate(
+  options: ProfileSourceMembershipOptions,
+  paths: SourcePaths,
+  descriptor: SourceDescriptorV2
+): Promise<void> {
+  const directory = profileDirectory(options.bazframeHome, paths.profileId);
+  const flatSkills = loadFlatSkillIdentities(await discoverSkillDirectories(join(directory, 'skills')));
+  await validateProspectiveSourceUnit(directory, flatSkills, {
+    ...descriptor,
+    descriptorPath: paths.descriptorPath,
+    relativeDescriptorPath: `${descriptor.providerId}/${descriptor.sourceId}.json`,
+    preparationState: 'ready',
+    rebuildAvailability: 'available'
+  });
+}
+
+async function replaceDescriptorAtomic(path: string, contents: string, managedRoot: string): Promise<void> {
+  try { await writeFileAtomic(path, contents, { managedRoot, mode: 0o600, commitOnRename: true }); }
+  catch (error) { throw new BazframeError('SOURCE_DESCRIPTOR_REPLACE_FAILED', `Could not activate source-unit descriptor ${path}${formatErrorCode(error)}`, { cause: error }); }
 }
 
 async function assertRequiredPhysicalDirectory(path: string, label: string): Promise<void> {

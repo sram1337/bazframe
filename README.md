@@ -1,6 +1,6 @@
 # Bazframe 2
 
-> **The first production adapter and provider-neutral source-unit slices are implemented; the first TUI management slice remains in progress.** Adapter lifecycle, profile lifecycle, project-over-global policy, status, adaptive context, flat profile skills, no-follow source descriptors and namespaces, Pi-authoritative bounded live derivation, and individual child projection are validated against Pi 0.82.0. `bazframe tui` manages profiles and selected-profile flat membership but intentionally has no source-unit mutation. The earlier `bazframe pi` launcher is deprecated and documented in the [prototype migration contract](docs/prototype.md).
+> **The production adapter and explicit managed source preparation/snapshot lifecycle are implemented; the first TUI management slice remains in progress.** Adapter lifecycle, profiles, project-over-global policy, flat skills, explicit declared builds, immutable content-addressed snapshots, Pi-authoritative bounded snapshot derivation, and individual child projection target Pi 0.82.x. `bazframe tui` manages profiles and selected-profile flat membership but intentionally has no source-unit mutation. The earlier `bazframe pi` launcher is deprecated and documented in the [prototype migration contract](docs/prototype.md).
 
 The accepted first [Pi integration boundary](docs/pi-adaptive-context-adapter.md) uses a global extension with direct Pi invocation: plain `pi` keeps native context and adds the profile, while `pi -nc` restores global Pi instructions and adds the profile. The adapter responds to Pi's structured context list and leaves native project resources under Pi's ownership.
 
@@ -13,7 +13,7 @@ Bazframe 2 treats a coding-agent harness as a portable, first-class object. Its 
 | Profiles | `bazframe profile` or `bazframe profiles` | `profile add`, `duplicate`, `use`, `rename`, `remove`, `list`, `current` |
 | Available skills | `bazframe skill` or `bazframe skills` | Browse the resolved Skillbook library |
 | Active-profile skills | `bazframe profile skills` | `profile skills add`, `profile skills remove` |
-| Profile source units | `bazframe profile sources` | `profile sources add`, `profile sources remove` |
+| Profile source units | `bazframe profile sources` | `profile sources add`, `build`, `remove` |
 | Global policy | `bazframe global` | `global enable`, `global disable` |
 | Project overrides | `bazframe project` or `bazframe projects` | `project enable`, `project disable` |
 | Adapters | `bazframe adapter` or `bazframe adapters` | `adapter install pi`, `adapter uninstall pi` |
@@ -35,7 +35,7 @@ Color is enabled automatically for terminal output and never carries meaning by 
 
 `bazframe tui` opens the keyboard-first Ink interface when both stdin and stdout are interactive terminals. The TUI runtime pins `ink@7.1.1` and `react@19.2.8`; the CLI loads them lazily only after dispatching this command. The interface provides `Profiles`, `Skills`, and `Settings` tabs; profile create, duplicate, activation, rename, and guarded removal; direct membership editing for the selected profile without silently changing active selection; a read-only Skillbook source browser; and structured read-only setup status with corrective actions. Provider-owned skill move/rename, settings writes, and editor launch remain unavailable. Press `?` for keys, use arrows or Vim `h`/`j`/`k`/`l` for directional navigation, uppercase `J`/`K` to jump between profile-editor panes, `1`–`3` for tabs, and `q` to exit. Non-interactive invocation fails plainly and points back to ordinary CLI commands.
 
-This is not a production-ready TUI. Automated coverage includes separate top-tab focus, persistent viewport offsets, compact and below-minimum layouts, resize state preservation, graceful and forced exit paths, non-color markers, screen-reader output, and CLI/TUI state agreement across profile lifecycle and inactive-profile membership. A real macOS pseudo-terminal smoke verifies alternate-screen entry/restoration, and the packed-package gate runs an interactive TUI smoke when the host provides `script`. Source-unit mutation is deliberately CLI-only in the implemented slice. Deeper TUI source trees, editor launch, settings writes, additional real sources, provider move/rename, and Linux/Windows Terminal/SSH/tmux/manual assistive-technology validation remain open.
+This is not a production-ready TUI. Automated evidence covers macOS direct PTY and local tmux, plus Linux arm64 direct PTY, tmux, and loopback SSH in a container built from a digest-pinned base image; each Linux run records the installed package and tool versions rather than claiming a byte-reproducible apt environment. Local installed-tarball tmux now also covers an actual Ink fatal render propagated through rejected `waitUntilExit()`—including exit `1`, diagnostic, raw-mode/cursor/alternate-screen restoration, and cleanup—and `80x24`/`60x16` cell bounds for CJK, combining marks, emoji-ZWJ, ANSI SGR, and a long unbroken path. Source-unit mutation is deliberately CLI-only in the implemented slice. Windows Terminal, representative remote SSH, terminal/font/locale ambiguous-width differences, and manual assistive-technology validation remain open, as do deeper TUI source trees and the deferred editor/settings/provider operations.
 
 ## Install for development
 
@@ -106,6 +106,7 @@ Inside a Git worktree, project policy wins over global policy. No project state 
 ├── active-profile
 ├── global.json                    # optional disabled global policy
 ├── projects/                      # optional per-worktree overrides
+├── source-snapshots/sha256/       # immutable prepared artifacts by manifest digest
 └── profiles/
     └── focused/
         ├── AGENTS.md             # required UTF-8
@@ -138,17 +139,22 @@ Two visibly different profiles are in [`examples/profiles/focused`](examples/pro
 
 ## Provider-neutral source units
 
-A profile may select zero or many intact provider-owned roots through strict schema-v1 JSON descriptors under `profiles/<profile>/source-units/<provider>/<source>.json`. The descriptor is the direct membership; there is no global registry. Bazframe derives valid descendant Agent Skills live, preserves their physical bases and definitions, and passes each child individually through the existing Pi 0.82.x profile/native collision pipeline. Pi's loader is authoritative for each child's effective name, including valid YAML forms and directory-name fallback when `name` is omitted.
+A profile may select zero or many provider inputs through strict JSON descriptors under `profiles/<profile>/source-units/<provider>/<source>.json`. `add` explicitly runs an optional literal build declared by root `bazframe-source.json`, snapshots the complete prepared artifact into immutable content-addressed storage, validates its Agent Skills, and activates a schema-v2 descriptor. `build` is the only operation that makes later provider-input changes visible. Existing schema-v1 live-root descriptors remain removable and can be explicitly migrated with `build`; runtime never projects their live bytes.
+
+Bazframe derives descendant Agent Skills only from the verified activated snapshot, preserves snapshot-relative physical bases and definitions, and passes each child individually through the Pi 0.82.x profile/native collision pipeline. Pi's loader is authoritative for effective names, including valid YAML forms and directory-name fallback.
 
 The canonical CLI is:
 
 ```bash
 bazframe profile sources
 bazframe profile sources add <provider> <source> <absolute-root> [--profile <profile>]
+bazframe profile sources build <provider> <source> [--profile <profile>]
 bazframe profile sources remove <provider> <source> [--profile <profile>]
 ```
 
-Add is idempotent only for an exact descriptor at the same canonical root and refuses replacement or retargeting. Remove validates and deletes only the descriptor, even when its provider root is broken, and never deletes provider bytes. Discovery is lexical and source-atomic, rejects malformed descriptor namespaces and non-skipped internal symlinks, and enforces compatibility bounds of 8 directory levels, 256 visited entries, and 64 effective children per source unit. Exact `.git` and `node_modules` directory or symlink entries are skipped before counting and never inspected. Flat skills win profile-name duplicates; otherwise every involved source unit is withheld. `status` and `/bazframe info` report flat skills, direct source units, derived children with origins, and failures separately. Child subsets, packs, acquisition, updates, dependency installation, command execution, mutable data, credentials, snapshots, a global registry, and TUI mutation remain outside this slice. Existing profiles require no migration and flat Skillbook behavior remains unchanged.
+Build execution uses the provider input as CWD, literal argv without a shell, and ordinary user-process authority. It occurs only during explicit `add` or `build`—never during overview, status, Pi startup, `/bazframe reload`, or skill invocation. Candidate structural/Pi failures and profile name collisions reject activation; rebuild failure preserves the prior descriptor and snapshot. Provider acquisition, publication, mutable data, credentials, skill-command execution, snapshot garbage collection, sandboxing, child subsets, packs, a global registry, and TUI source mutation remain outside this slice.
+
+Remove validates and deletes only the descriptor, even when its provider input is missing, and deletes neither provider bytes nor snapshots. Snapshot discovery remains lexical and source-atomic with compatibility bounds of 8 directory levels, 256 visited entries, and 64 effective children. `status` and `/bazframe info` report flat skills, direct sources, derived children, and failures separately. Flat Skillbook behavior remains unchanged.
 
 ## Demo
 
@@ -242,7 +248,7 @@ If Bazframe cannot remove the temporary effective file, the launch returns Bazfr
 
 ## Development validation
 
-The standard gate covers build, typecheck, lint, deterministic TUI reducer/component/service tests, fake-Pi integration, and packed-package lifecycle and interactive-TUI smoke checks. The real-Pi gate packs and installs the package, validates both context modes through Pi 0.82 with an isolated probe provider, and uses Pi RPC to prove that `/bazframe reload` exposes a live provider change in the same model-free process. Passing these gates does not replace the open cross-platform and manual accessibility validation.
+The standard gate covers build, typecheck, lint, deterministic TUI reducer/component/service tests, fake-Pi integration, and packed-package lifecycle and interactive-TUI smoke checks. The real-Pi gate packs and installs the package, validates both context modes through Pi 0.82 with an isolated probe provider, proves provider edits stay invisible, then uses explicit source build plus Pi RPC `/bazframe reload` to expose the activated snapshot in the same model-free process. Passing these gates does not replace the open cross-platform and manual accessibility validation.
 
 ```bash
 npm test

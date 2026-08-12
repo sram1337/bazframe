@@ -14,42 +14,55 @@
 - [x] Standardize the resource-oriented CLI overviews/help, available/profile skill listing, and missing-skill suggestions.
 - [x] Add accessible terminal-aware color without changing piped or `NO_COLOR` output.
 - [x] Define first-slice Pi context ordering and native/profile skill-collision aliases.
-- [x] Approve the provider-neutral source-unit production contract: profile-local versioned descriptors, bounded live derivation, CLI-only membership, atomic source failures, and provider-owned lifecycle (`docs/design.md`).
+- [x] Implement the superseded first source-unit slice: profile-local schema-v1 live-root descriptors, bounded derivation, CLI-only membership, atomic source failures, and provider-owned preparation.
 - [x] Implement source-unit descriptor persistence and `bazframe profile sources` add/remove/overview without changing flat Skillbook membership, including no-follow descriptor reads, substitution revalidation, and retry pruning.
 - [x] Implement no-follow, identity-checked bounded source-unit discovery, Pi 0.82-authoritative validation, complete-profile-set duplicate rejection, individual Pi projection, and separated status/`/bazframe info` reporting with acceptance coverage.
+- [x] Approve the replacement source lifecycle: explicit Bazframe build, immutable content-addressed snapshot activation, and snapshot-only runtime projection (`docs/design.md`).
 - [x] Replace redundant per-project opt-in registrations with project-over-global enable/disable policy and file-free enabled defaults.
 - [x] Apply global policy and the active profile in non-Git directories while keeping per-project overrides Git-only.
-- [ ] Define semantic instruction conflicts and cross-runtime skill conflicts.
-- [ ] **Deferred:** Revisit skill packs or profile export only after an explicit product decision.
+- [x] Define the first semantic composition contract: runtime-native repository harness material remains a separate provenance-preserving layer, while Bazframe adds the active personal profile without stored merging or repository-selected profile state.
+- [x] Define the bounded current-slice conflict policy: opaque provenance-preserving instruction layers with deterministic transport order and no semantic resolution; exact profile duplicate boundaries; Pi 0.82 runtime-cache aliases with truncation and visible no-fallback collision failure; and mandatory explicit behavior without profile-identity mutation for any future adapter.
+- [x] Decide against Bazframe inter-skill dependency schema or automation for the current product: the Agent Skills specification has no dependency field, shared resources/runtime packages remain provider-owned, and any future namespaced validate-only sidecar requires separate evidence and approval.
+- [ ] Collaboratively spec a `/swarm-leader` skill with the user that codifies one parent leader delegating subagent planning, implementation, independent review, validation, and fix passes; specification only before any implementation.
+
+## Managed source preparation and snapshots
+
+- [x] Add exact schema-v1/schema-v2 descriptor and `bazframe-source.json` build-manifest codecs while preserving schema-v1 removal and explicit-build migration.
+- [x] Implement complete artifact capture, canonical manifests, immutable content-addressed publication, reuse verification, and corruption rejection.
+- [x] Implement the explicit add/build transaction: literal build argv, absent-manifest snapshotting, prospective-profile validation, atomic activation, rollback, and schema-v1 upgrade.
+- [x] Move source resolution from live provider roots to verified snapshots while preserving existing discovery bounds, Pi validation, duplicate handling, and diagnostics.
+- [x] Expose `profile sources build` plus preparation/rebuild state through CLI help, overview, status, and README without implicit runtime builds.
+- [x] Bring the standalone Pi artifact to schema-v2 snapshot parity, including snapshot-relative bases, aliases, diagnostics, and reload behavior.
+- [x] Update unit, integration, pack, and real-Pi acceptance to prove provider changes remain invisible until explicit rebuild and activation.
+- [x] Complete independent correctness, transaction, CLI/Pi parity, and MSW-simplicity reviews; apply accepted fixes with one writer and rerun full gates.
 
 ## Terminal UI
 
 - [x] Capture the initial no-sidebar, top-tab TUI interaction design (`docs/tui-design.md`).
-- [ ] Resolve the provider-ownership contract for skill move/rename, including writable roots, cross-root moves, frontmatter IDs, provider lock state, rollback, and destructive recovery.
 - [x] Define profile-local provider-neutral source-unit descriptors supporting zero or many direct memberships while preserving current Skillbook resolution; defer a global registry as unnecessary for the first slice.
 - [x] Settle canonical source-unit identity and broken-root removal through strict versioned descriptors without following provider roots.
 - [x] Settle the first Settings-tab scope as structured read-only setup status.
-- [ ] Define writable Settings scope, ownership, persistence, validation, and CLI interoperability.
 - [x] Pin Ink 7.1.1 with React 19.2.8 and load the TUI framework only from the lazy `bazframe tui` entry path (`docs/tui-framework-research.md`).
-- [ ] Extend the completed macOS real-PTY smoke to Linux, Windows Terminal, SSH, and tmux.
 - [x] Define typed application-service seams for profile lifecycle, selected-profile membership, and dashboard reads without spawning CLI subprocesses.
 - [x] Extend the typed application-service seam with structured read-only setup status and diagnostic isolation.
 - [x] Implement separate top-tab focus with deterministic Tab/Shift+Tab traversal and explicit Enter activation.
 - [x] Distinguish focus with consistent active borders and add portable Vim `h`/`j`/`k`/`l` plus profile-pane `J`/`K` navigation.
 - [x] Implement reducer-owned persistent viewport offsets for the profile list, both membership panes, and the Skills browser, including reconciliation and resize clamping.
-- [ ] Complete deeper source-tree expansion/identity behavior and any node-specific bindings it introduces.
 - [x] Implement the read-only Skills source browser with provider-owned move/rename disabled and explained.
-- [ ] Implement skill artifact actions only after move/rename ownership review.
 - [x] Implement the Profiles list/lifecycle flows and two-pane selected-profile membership editor.
-- [ ] Implement selected-profile instruction-editor launch after its lifecycle gate.
 - [x] Render structured read-only setup status and corrective actions in Settings; keep writes disabled.
 - [x] Add deterministic compact/resize/exit/accessibility reducer/component coverage and a real macOS pseudo-terminal enter/restore smoke test.
 - [x] Exercise the installed tarball through a packed interactive TUI smoke when the host provides `script`.
 - [x] Pass the full `npm test` and packed real-Pi gates with the TUI dependencies and entrypoint present.
 - [x] Add CLI/TUI state-agreement integration coverage across profile lifecycle and inactive-profile membership while preserving provider artifacts.
 - [x] Complete independent interaction, safety, and accessibility code reviews; fix and re-review all reported blockers.
-- [ ] Expand real-terminal coverage for resize, error, and Ctrl+C paths on Linux, Windows Terminal, SSH, and tmux, plus manual assistive-technology checks.
-- [ ] Complete the documented cross-platform/manual validation and remaining feature scope before calling the TUI production-ready.
+- [ ] Complete the TUI production-readiness gate: macOS direct-PTY/local-tmux and Linux arm64 digest-pinned-base container direct-PTY/tmux/loopback-SSH resize, handled/fatal-render error, Ctrl+C, restoration, cleanup, and bounded CJK/combining/emoji-ZWJ/ANSI/long-path cell-width behavior are automated with run-recorded package/tool versions; Windows Terminal, representative remote SSH, terminal/font/locale ambiguous-width differences, and manual assistive-technology evidence remain open.
+
+## Deferred candidates (not active work)
+
+- Skill packs, profile export, child subsets, a global source registry, and snapshot garbage collection require separate product decisions.
+- TUI skill artifact move/rename requires provider ownership, writable-root, cross-root, identity, locking, rollback, and recovery semantics.
+- Writable Settings, deeper source browsing, and selected-profile instruction-editor launch remain candidate slices pending their documented lifecycle and interoperability gates.
 
 ## Research
 
@@ -59,8 +72,8 @@
 - [x] Approve the experiment-only Stage 1 parameters, fixture-preparer boundary, validation split, counting/error semantics, and isolated allowed write root (`docs/research/provider-neutral-nested-source-unit-composition.md`).
 - [x] Complete Stage 1: structural and Pi 0.82 composition mechanics passed; bounded-wrapper evidence did not demonstrate Bazframe-exclusive necessity (`experiments/provider-neutral-nested-source-unit-composition/REPORT.md`).
 - [x] Complete the reopened experiment-only Stage 2 sanitized MTG source-tree/runtime proof with two provider-prepared children and two unrelated callers; exclusive necessity was not demonstrated (`experiments/provider-neutral-nested-source-unit-composition/stage2-mtg/REPORT.md`).
-- [x] Record the later user-approved narrow production composition seam while retaining bounded-wrapper evidence and provider ownership (`docs/design.md`).
-- [ ] **Deferred:** Map the broader MTG skills' cross-skill dependencies or test a production transferable bundle through an external live library; the two-child Stage 2 proof and narrow composition approval do not expand into packs or provider lifecycle.
+- [x] Record the historical narrow live-composition seam and its bounded-wrapper evidence, then supersede its read-only/provider-preparation constraint with the explicit build-and-snapshot lifecycle (`docs/design.md`).
+- [x] Audit the production-shaped external MTG bundle and hand off its remaining package-local contract and lifecycle fixes; broader inter-skill dependency semantics remain the single product question above.
 
 ## Pi adaptive context adapter
 

@@ -121,6 +121,12 @@ describe('parseArgv', () => {
       kind: 'command',
       command: { name: 'profile-sources-add', profileId: 'reviewer' }
     });
+    expect(parseArgv(['profile', 'sources', 'build', 'provider', 'source'])).toEqual({
+      kind: 'command', command: { name: 'profile-sources-build', providerId: 'provider', sourceId: 'source' }
+    });
+    expect(parseArgv(['profile', 'sources', 'build', 'provider', 'source', '--profile', 'reviewer'])).toMatchObject({
+      kind: 'command', command: { name: 'profile-sources-build', profileId: 'reviewer' }
+    });
     expect(parseArgv([
       'profile', 'sources', 'remove', 'provider', 'source', '--profile', 'reviewer'
     ])).toEqual({
@@ -138,6 +144,7 @@ describe('parseArgv', () => {
     expect(parseArgv(['profile', 'sources', 'add', '--help'])).toEqual({
       kind: 'help', topic: 'profile-sources-add'
     });
+    expect(parseArgv(['help', 'profile', 'sources', 'build'])).toEqual({ kind: 'help', topic: 'profile-sources-build' });
     for (const argv of [
       ['sources'],
       ['profile', 'sources', 'add', 'provider', 'source', 'relative'],
