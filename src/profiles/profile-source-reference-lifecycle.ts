@@ -45,16 +45,16 @@ async function addFor(options: ProfileSourceReferenceOptions, requestedProfileId
   assertSafeSkillId(provider); assertSafeSkillId(source);
   return withReferenceLock(options, requestedProfileId, provider, source, 'bazframe profile sources add', async (profileId, directory, path) => {
     await assertValidNamespace(options.bazframeHome, profileId);
-    const existing = await optionalReference(path, provider, source);
+    const existing = await optionalReference(options.bazframeHome, profileId, provider, source);
     const globalPath = globalSourcePath(options.bazframeHome, provider, source);
-    const global = await readGlobalSourceSnapshot(globalPath, provider, source);
+    const global = await readGlobalSourceSnapshot(options.bazframeHome, provider, source);
     await verifySourceSnapshot(options.bazframeHome, global.record.digest);
     const flat = loadFlatSkillIdentities(await discoverSkillDirectories(join(directory, 'skills')));
     await validateProspectiveSourceUnit(directory, flat, direct(global.record, globalPath));
-    const revalidated = await readGlobalSourceSnapshot(globalPath, provider, source);
+    const revalidated = await readGlobalSourceSnapshot(options.bazframeHome, provider, source);
     if (!sameGlobalSourceSnapshot(global, revalidated)) throw new BazframeError('SOURCE_CHANGED', `Global source changed while adding reference: ${provider}/${source}`);
     if (existing !== undefined) {
-      const current = await readProfileSourceReferenceSnapshot(path, provider, source);
+      const current = await readProfileSourceReferenceSnapshot(options.bazframeHome, profileId, provider, source);
       if (!sameProfileSourceReferenceSnapshot(existing, current)) throw new BazframeError('SOURCE_REFERENCE_CHANGED', `Profile source reference changed while validating: ${path}`);
       return result(current.reference, profileId, path, 'current');
     }
@@ -68,10 +68,12 @@ async function addFor(options: ProfileSourceReferenceOptions, requestedProfileId
 async function removeFor(options: ProfileSourceReferenceOptions, requestedProfileId: string | undefined, provider: string, source: string): Promise<ProfileSourceReferenceResult> {
   assertSafeSkillId(provider); assertSafeSkillId(source);
   return withReferenceLock(options, requestedProfileId, provider, source, 'bazframe profile sources remove', async (profileId, _directory, path) => {
-    const initial = await optionalReference(path, provider, source);
+    const initial = await optionalReference(options.bazframeHome, profileId, provider, source);
     if (initial === undefined) return result({ schemaVersion: 1, provider, source }, profileId, path, 'absent');
-    const current = await readProfileSourceReferenceSnapshot(path, provider, source);
+    const current = await readProfileSourceReferenceSnapshot(options.bazframeHome, profileId, provider, source);
     if (!sameProfileSourceReferenceSnapshot(initial, current)) throw new BazframeError('SOURCE_REFERENCE_CHANGED', `Profile source reference changed during removal: ${path}`);
+    const beforeUnlink = await readProfileSourceReferenceSnapshot(options.bazframeHome, profileId, provider, source);
+    if (!sameProfileSourceReferenceSnapshot(initial, beforeUnlink)) throw new BazframeError('SOURCE_REFERENCE_CHANGED', `Profile source reference changed before removal commit: ${path}`);
     await unlink(path);
     await prune(profileSourceProviderDirectory(options.bazframeHome, profileId, provider));
     await prune(profileSourcesDirectory(options.bazframeHome, profileId));
@@ -100,13 +102,13 @@ async function withReferenceLock<T>(options: ProfileSourceReferenceOptions, requ
 async function assertValidNamespace(home: string, profileId: string): Promise<void> {
   const namespace = await scanProfileSourceReferences(home, profileId);
   if (namespace.diagnostics.length > 0) throw new BazframeError('SOURCE_REFERENCE_NAMESPACE_INVALID', `Profile source reference namespace is invalid: ${namespace.diagnostics.map((item) => item.path).join(', ')}`);
-  for (const path of namespace.references) await readProfileSourceReferenceSnapshot(path.path, path.provider, path.source);
+  for (const path of namespace.references) await readProfileSourceReferenceSnapshot(home, profileId, path.provider, path.source);
 }
 function direct(record: GlobalSourceRecord, path: string): DirectSourceUnit {
   return { schemaVersion: 1, providerId: record.provider, sourceId: record.source, sourceRoot: record.root, snapshotDigest: record.digest, sourceUnitRoot: record.sourceUnitRoot, descriptorPath: path, relativeDescriptorPath: `${record.provider}/${record.source}.json`, preparationState: 'ready', rebuildAvailability: 'available' };
 }
-async function optionalReference(path: string, provider: string, source: string): Promise<ProfileSourceReferenceSnapshot | undefined> {
-  try { return await readProfileSourceReferenceSnapshot(path, provider, source); }
+async function optionalReference(home: string, profileId: string, provider: string, source: string): Promise<ProfileSourceReferenceSnapshot | undefined> {
+  try { return await readProfileSourceReferenceSnapshot(home, profileId, provider, source); }
   catch (error) {
     if (error instanceof BazframeError && error.code === 'SOURCE_REFERENCE_READ_FAILED' && error.cause !== undefined && errorCode(error.cause) === 'ENOENT') return undefined;
     throw error;

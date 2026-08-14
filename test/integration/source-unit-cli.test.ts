@@ -14,22 +14,29 @@ describe('global source CLI', () => {
   it('adds one global source, references it, rebuilds explicitly, and removes only after detach', async () => {
     const fixture = await setup();
     const provider = await realpath(await fixture.directory.mkdir('provider'));
-    await fixture.directory.write('provider/alpha/SKILL.md', skill('alpha', 'first'));
+    await fixture.directory.write('provider/alpha/SKILL.md', skill('zeta', 'first'));
     const added = await runCli(['sources', 'add', 'provider', 'source', provider], fixture.cwd, fixture.environment);
     expect(added).toMatchObject({ status: 0, stderr: '' });
     expect(added.stdout).toContain('Global source: added');
+    const initialGlobalOverview = await runCli(['sources'], fixture.cwd, fixture.environment);
+    expect(initialGlobalOverview.stdout).toContain('      - zeta (alpha/SKILL.md)');
     expect((await runCli(['profile', 'sources', 'add', 'provider', 'source'], fixture.cwd, fixture.environment)).stdout).toContain('Profile source reference: added');
     const overview = await runCli(['profile', 'sources'], fixture.cwd, fixture.environment);
     expect(overview.stdout).toContain('Profile source references');
-    expect(overview.stdout).toContain('alpha (provider/source:alpha/SKILL.md)');
+    expect(overview.stdout).toContain('zeta (provider/source:alpha/SKILL.md)');
 
     const recordPath = fixture.directory.path('home/sources/provider/source.json');
     const beforeProviderChange = await readFile(recordPath, 'utf8');
-    await fixture.directory.write('provider/beta/SKILL.md', skill('beta'));
-    expect((await runCli(['profile', 'sources'], fixture.cwd, fixture.environment)).stdout).not.toContain('beta (provider/source');
+    await fixture.directory.write('provider/beta/SKILL.md', skill('aardvark'));
+    expect((await runCli(['profile', 'sources'], fixture.cwd, fixture.environment)).stdout).not.toContain('aardvark (provider/source');
     expect(await readFile(recordPath, 'utf8')).toBe(beforeProviderChange);
     expect((await runCli(['sources', 'build', 'provider', 'source'], fixture.cwd, fixture.environment)).stdout).toContain('Global source: built');
-    expect((await runCli(['profile', 'sources'], fixture.cwd, fixture.environment)).stdout).toContain('beta (provider/source:beta/SKILL.md)');
+    expect((await runCli(['profile', 'sources'], fixture.cwd, fixture.environment)).stdout).toContain('aardvark (provider/source:beta/SKILL.md)');
+    const rebuiltGlobalOverview = await runCli(['sources'], fixture.cwd, fixture.environment);
+    expect(rebuiltGlobalOverview.stdout).toContain('      - zeta (alpha/SKILL.md)');
+    expect(rebuiltGlobalOverview.stdout).toContain('      - aardvark (beta/SKILL.md)');
+    expect(rebuiltGlobalOverview.stdout.indexOf('zeta (alpha/SKILL.md)'))
+      .toBeLessThan(rebuiltGlobalOverview.stdout.indexOf('aardvark (beta/SKILL.md)'));
 
     const refused = await runCli(['sources', 'remove', 'provider', 'source'], fixture.cwd, fixture.environment);
     expect(refused.status).toBe(1); expect(refused.stderr).toContain('referenced by profiles: focused');

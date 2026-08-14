@@ -128,7 +128,7 @@ export async function inspectGlobalSources<T = unknown>(
   const sources: GlobalSourceInspection<T>[] = [];
   for (const item of namespace.sources) {
     try {
-      const record = await readGlobalSource(item.path, item.provider, item.source);
+      const record = await readGlobalSource(bazframeHome, item.provider, item.source);
       const rebuild = await rebuildAvailability(record.root);
       const direct = directFromRecord(record, item.path, item.relativePath, rebuild);
       let skills: DerivedSkill<T>[] = [];
@@ -172,7 +172,7 @@ export async function resolveProfileSourceUnits<T = unknown>(
     return { directSourceUnits: [], derivedSkills: [], diagnostics: sortDiagnostics(diagnostics) };
   }
   for (const item of namespace.references) {
-    try { await readProfileSourceReference(item.path, item.provider, item.source); }
+    try { await readProfileSourceReference(bazframeHome, profileId, item.provider, item.source); }
     catch {
       diagnostics.push({ category: 'invalid-reference', providerId: item.provider, sourceId: item.source, path: item.relativePath });
     }
@@ -188,9 +188,8 @@ export async function resolveProfileSourceUnits<T = unknown>(
       item.relativePath
     );
     directSourceUnits.push(referenceDirect);
-    const recordPath = join(bazframeHome, 'sources', item.provider, `${item.source}.json`);
     let record: GlobalSourceRecord;
-    try { record = await readGlobalSource(recordPath, item.provider, item.source); }
+    try { record = await readGlobalSource(bazframeHome, item.provider, item.source); }
     catch {
       diagnostics.push({ category: 'invalid-source', providerId: item.provider, sourceId: item.source, path: item.relativePath });
       continue;
@@ -264,8 +263,8 @@ async function structurallyValidExistingSkills<T>(profileDirectory: string, excl
   for (const item of namespace.references) {
     if (item.provider === excludedProviderId && item.source === excludedSourceId) continue;
     try {
-      await readProfileSourceReference(item.path, item.provider, item.source);
-      const record = await readGlobalSource(join(bazframeHome, 'sources', item.provider, `${item.source}.json`), item.provider, item.source);
+      await readProfileSourceReference(bazframeHome, profileId, item.provider, item.source);
+      const record = await readGlobalSource(bazframeHome, item.provider, item.source);
       skills.push(...await resolveOneSource(directFromRecord(record, item.path, item.relativePath), loader, bazframeHome));
     } catch { /* unrelated failures do not block activation */ }
   }

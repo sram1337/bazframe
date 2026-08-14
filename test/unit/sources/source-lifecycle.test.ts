@@ -1,4 +1,4 @@
-import { chmod, lstat, readFile, unlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, readFile, rename, symlink, unlink, writeFile } from 'node:fs/promises';
 import { afterEach, describe, expect, it } from 'vitest';
 import { addProfile } from '../../../src/profiles/profile-management.js';
 import { addProfileSourceReference, removeProfileSourceReference } from '../../../src/profiles/profile-source-reference-lifecycle.js';
@@ -102,6 +102,26 @@ describe('global source lifecycle', () => {
       .rejects.toMatchObject({ code: 'SOURCE_CANDIDATE_DUPLICATE' });
   });
 
+  it('rejects a rebuild that collides with another referenced source and preserves the prior digest', async () => {
+    const directory = await createTempDirectory('bazframe-source-collision-'); directories.push(directory);
+    const home = directory.path('home');
+    await addProfile(home, 'focused');
+    const firstRoot = await directory.mkdir('provider-first');
+    const secondRoot = await directory.mkdir('provider-second');
+    await directory.write('provider-first/alpha/SKILL.md', skill('alpha'));
+    await directory.write('provider-second/beta/SKILL.md', skill('beta'));
+    const first = await addSource({ bazframeHome: home }, 'provider', 'first', firstRoot);
+    await addSource({ bazframeHome: home }, 'provider', 'second', secondRoot);
+    await addProfileSourceReference({ bazframeHome: home }, 'focused', 'provider', 'first');
+    await addProfileSourceReference({ bazframeHome: home }, 'focused', 'provider', 'second');
+
+    await directory.write('provider-first/alpha/SKILL.md', skill('beta'));
+    await expect(buildSource({ bazframeHome: home }, 'provider', 'first'))
+      .rejects.toMatchObject({ code: 'SOURCE_DEPENDENT_INVALID' });
+    const active = JSON.parse(await readFile(globalSourcePath(home, 'provider', 'first'), 'utf8')) as { digest: string };
+    expect(active.digest).toBe(first.digest);
+  });
+
   it('revalidates the complete reference index before add, build, and remove commit points', async () => {
     const directory = await createTempDirectory('bazframe-global-source-reference-race-'); directories.push(directory);
     const home = directory.path('home');
@@ -136,6 +156,59 @@ describe('global source lifecycle', () => {
       }
     })).rejects.toMatchObject({ code: 'SOURCE_REFERENCE_INDEX_CHANGED' });
     await expect(readFile(globalSourcePath(home, 'provider', 'shared'), 'utf8')).resolves.toContain(added.digest);
+  });
+
+  it('rejects symlinked global namespace ancestors without deleting outside records', async () => {
+    const directory = await createTempDirectory('bazframe-global-source-symlink-'); directories.push(directory);
+    for (const ancestor of ['sources', 'provider'] as const) {
+      const home = directory.path(`home-${ancestor}`);
+      const providerRoot = await directory.mkdir(`provider-${ancestor}`);
+      await directory.write(`provider-${ancestor}/alpha/SKILL.md`, skill('alpha'));
+      await addSource({ bazframeHome: home }, 'provider', 'shared', providerRoot);
+      const sourcesPath = directory.path(`home-${ancestor}/sources`);
+      const providerPath = directory.path(`home-${ancestor}/sources/provider`);
+      await directory.mkdir(`outside-global-${ancestor}`);
+      const outsidePath = directory.path(`outside-global-${ancestor}`, ancestor);
+      const movedPath = ancestor === 'sources' ? sourcesPath : providerPath;
+      await rename(movedPath, outsidePath);
+      await symlink(outsidePath, movedPath);
+
+      await expect(removeSource({ bazframeHome: home }, 'provider', 'shared'))
+        .rejects.toMatchObject({ code: 'SOURCE_DESTINATION_OCCUPIED' });
+      const outsideRecord = ancestor === 'sources'
+        ? directory.path(`outside-global-${ancestor}/sources/provider/shared.json`)
+        : directory.path(`outside-global-${ancestor}/provider/shared.json`);
+      await expect(readFile(outsideRecord, 'utf8')).resolves.toContain('"source": "shared"');
+    }
+  });
+
+  it('rejects symlinked profile-reference ancestors without deleting outside references', async () => {
+    const directory = await createTempDirectory('bazframe-profile-reference-symlink-'); directories.push(directory);
+    for (const ancestor of ['profiles', 'sources', 'provider'] as const) {
+      const home = directory.path(`home-${ancestor}`);
+      await addProfile(home, 'focused');
+      const providerRoot = await directory.mkdir(`provider-reference-${ancestor}`);
+      await directory.write(`provider-reference-${ancestor}/alpha/SKILL.md`, skill('alpha'));
+      await addSource({ bazframeHome: home }, 'provider', 'shared', providerRoot);
+      await addProfileSourceReference({ bazframeHome: home }, 'focused', 'provider', 'shared');
+      const profilesPath = directory.path(`home-${ancestor}/profiles`);
+      const sourcesPath = directory.path(`home-${ancestor}/profiles/focused/sources`);
+      const providerPath = directory.path(`home-${ancestor}/profiles/focused/sources/provider`);
+      await directory.mkdir(`outside-reference-${ancestor}`);
+      const outsidePath = directory.path(`outside-reference-${ancestor}`, ancestor);
+      const movedPath = ancestor === 'profiles' ? profilesPath : ancestor === 'sources' ? sourcesPath : providerPath;
+      await rename(movedPath, outsidePath);
+      await symlink(outsidePath, movedPath);
+
+      await expect(removeProfileSourceReference({ bazframeHome: home }, 'focused', 'provider', 'shared'))
+        .rejects.toMatchObject({ code: 'SOURCE_REFERENCE_INVALID' });
+      const outsideReference = ancestor === 'profiles'
+        ? directory.path(`outside-reference-${ancestor}/profiles/focused/sources/provider/shared.json`)
+        : ancestor === 'sources'
+          ? directory.path(`outside-reference-${ancestor}/sources/provider/shared.json`)
+          : directory.path(`outside-reference-${ancestor}/provider/shared.json`);
+      await expect(readFile(outsideReference, 'utf8')).resolves.toContain('"source": "shared"');
+    }
   });
 
   it('validates pre-existing references before initial publication and fails closed on malformed reference state', async () => {

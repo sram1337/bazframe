@@ -731,11 +731,15 @@ function formatSourcesOverview(
   ];
   return [
     colors.heading('Global sources'),
-    ...(inspection.sources.length === 0 ? [colors.muted('  (none)')] : inspection.sources.map((source) => {
+    ...(inspection.sources.length === 0 ? [colors.muted('  (none)')] : inspection.sources.flatMap((source) => {
       const record = source.record;
       const referenceCount = referenceCounts.get(`${record.provider}/${record.source}`) ?? 'unknown';
       const health = source.diagnostics.length === 0 && referenceCount !== 'unknown' ? 'ready' : 'failed';
-      return `  - ${record.provider}/${record.source} [${health}] -> ${record.root} (sha256:${record.digest}; root:${record.sourceUnitRoot}; rebuild:${source.rebuildAvailability}; references:${referenceCount}; skills:${source.skills.length})`;
+      const skills = source.skills;
+      return [
+        `  - ${record.provider}/${record.source} [${health}] -> ${record.root} (sha256:${record.digest}; root:${record.sourceUnitRoot}; rebuild:${source.rebuildAvailability}; references:${referenceCount}; skills:${source.skills.length})`,
+        ...skills.map((skill) => `      - ${skill.name} (${skill.relativePath})`)
+      ];
     })),
     ...(sourceDiagnostics.length === 0 ? [] : [colors.heading('Source failures:'), ...sourceDiagnostics.map((diagnostic) => colors.warning(`  - ${formatSourceDiagnostic(diagnostic)}`))]),
     ...(referenceDiagnostics.length === 0 ? [] : [

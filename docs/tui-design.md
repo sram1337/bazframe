@@ -9,7 +9,7 @@ Bazframe's first graphical management surface is a keyboard-first terminal UI la
 - Make profiles, skill sources, and settings discoverable without sacrificing terminal-native workflows.
 - Work well locally, over SSH, and in ordinary developer terminals.
 - Keep navigation predictable with the keyboard and usable without a mouse.
-- Support one skill source now and multiple sources without redesigning the tree.
+- Represent Skillbook and global managed-source snapshots as multiple read-only roots without redesigning the tree.
 - Preserve Bazframe's existing ownership, validation, and destructive-operation safeguards.
 
 ## Non-goals for the first slice
@@ -17,17 +17,17 @@ Bazframe's first graphical management surface is a keyboard-first terminal UI la
 - A desktop window, browser server, or embedded web UI.
 - Settings writes or provider-owned skill-artifact mutation before their ownership contracts are approved.
 - A built-in full text editor or external-editor launch.
-- A provider registry or real multi-source configuration.
+- Provider acquisition, registry mutation, or provider-specific lifecycle operations.
 - Skill packs, profile export, or dependency-aware bundles.
 - New skill-artifact ownership hidden behind the UI.
 
 ## Implemented boundary
 
-The current slice pins runtime `ink@7.1.1` and `react@19.2.8` and loads them lazily only after the CLI dispatches `bazframe tui`. It implements the four-tab shell; profile create, duplicate, use, rename, and guarded removal; a two-pane selected-profile direct-membership editor; a read-only Skillbook source browser; and structured read-only setup status in Settings. The service and CLI membership paths both accept an explicit profile without changing active selection.
+The current slice pins runtime `ink@7.1.1` and `react@19.2.8` and loads them lazily only after the CLI dispatches `bazframe tui`. It implements the four-tab shell; profile create, duplicate, use, rename, and guarded removal; a two-pane selected-profile direct-membership editor with read-only profile source references; a read-only global Sources tab; a multi-root Skills browser for Skillbook and valid global managed-source snapshots; and structured read-only setup status in Settings. The service and CLI membership paths both accept an explicit profile without changing active selection.
 
 Deterministic reducer/component/service tests cover compact and below-minimum layouts, resize state preservation, pane boundaries, guarded removal, graceful and forced exits, non-color state markers, and screen-reader output. CLI/TUI state-agreement integration coverage exercises profile lifecycle and inactive-profile membership while preserving provider artifacts. A real macOS pseudo-terminal smoke verifies alternate-screen entry/restoration and linear screen-reader output, while the packed-package gate runs an interactive TUI smoke when `script` is available. `npm test` and `npm run test:real-pi` pass with this slice present.
 
-The top-tab focus model is now separate from active-tab and body/pane focus: `Tab` and `Shift+Tab` traverse focus, while `Left`/`Right` or `h`/`l` moves focused-tab selection and `Enter` activates it. Lists accept `j`/`k` as `Down`/`Up`, and the profile editor accepts portable `J`/`K` pane jumps. The reducer now owns persistent offsets for the profile list, Included pane, Available pane, and Skills browser, with stable-row visibility and authoritative shrink/resize clamping. Completed terminal evidence covers macOS direct PTY/local tmux and Linux arm64 digest-pinned-base container direct PTY/tmux/loopback SSH. Local installed-tarball tmux additionally proves real Ink fatal-render restoration and preferred/compact CJK, combining-mark, emoji-ZWJ, ANSI-SGR, and long-unbroken-path terminal-cell bounds. Still open are deeper source-tree behavior; canonical source identity and broken-root semantics for symlinked/retargeted Skillbook roots; editor launch; settings writes; provider move/rename; additional real sources; Windows Terminal; representative remote SSH; terminal/locale ambiguous-width differences; and manual assistive-technology validation. These gaps preclude a production-ready claim.
+The top-tab focus model is now separate from active-tab and body/pane focus: `Tab` and `Shift+Tab` traverse focus, while `Left`/`Right` or `h`/`l` moves focused-tab selection and `Enter` activates it. Lists accept `j`/`k` as `Down`/`Up`, and the profile editor accepts portable `J`/`K` pane jumps. The reducer now owns persistent offsets for the profile list, Included pane, Available pane, and Skills browser, with stable-row visibility and authoritative shrink/resize clamping. Completed terminal evidence covers macOS direct PTY/local tmux and Linux arm64 digest-pinned-base container direct PTY/tmux/loopback SSH. Local installed-tarball tmux additionally proves real Ink fatal-render restoration and preferred/compact CJK, combining-mark, emoji-ZWJ, ANSI-SGR, and long-unbroken-path terminal-cell bounds. Still open are deeper source-tree behavior; canonical source identity and broken-root semantics for symlinked/retargeted Skillbook roots; editor launch; settings writes; provider move/rename; additional provider-specific browsing capabilities; Windows Terminal; representative remote SSH; terminal/locale ambiguous-width differences; and manual assistive-technology validation. These gaps preclude a production-ready claim.
 
 ## Application shell
 
@@ -371,7 +371,7 @@ The implemented preferred terminal size is `80x24`; the minimum is `60x16`.
 
 ## Test strategy
 
-Current deterministic coverage includes stable-ID reducer reconciliation; separate active/focused top-tab and body/pane state; forward and reverse focus cycles; top-tab cursor movement and Enter activation; source expansion; modal precedence, including resize-while-modal ownership; typed service projections and selected-profile authorization; fixed-size Ink rendering with `string-width@8.2.2` cell bounds for CJK, decomposed combining text, emoji-ZWJ, ANSI SGR, and long unbroken paths at `80x24` and `60x16`; compact and below-minimum behavior, including bounded minimal help; resize state preservation including focused-tab cursor state; pane-boundary transfer; guarded removal; graceful/forced Ctrl+C; Kitty key-release handling; non-color state markers; and linear screen-reader output. Service tests prove explicit inactive-profile membership changes preserve active selection and provider content, and CLI/TUI state-agreement integration coverage exercises the shared profile lifecycle and membership state.
+Current deterministic coverage includes stable-ID reducer reconciliation; separate active/focused top-tab and body/pane state; forward and reverse focus cycles; top-tab cursor movement and Enter activation; Skillbook/global-snapshot source expansion; modal precedence, including resize-while-modal ownership; typed service projections and selected-profile authorization; fixed-size Ink rendering with `string-width@8.2.2` cell bounds for CJK, decomposed combining text, emoji-ZWJ, ANSI SGR, and long unbroken paths at `80x24` and `60x16`; compact and below-minimum behavior, including bounded minimal help; resize state preservation including focused-tab cursor state; pane-boundary transfer; guarded removal; graceful/forced Ctrl+C; Kitty key-release handling; non-color state markers; and linear screen-reader output. Service tests prove explicit inactive-profile membership changes preserve active selection and provider content, and CLI/TUI state-agreement integration coverage exercises the shared profile lifecycle and membership state.
 
 On macOS, the default real pseudo-terminal coverage verifies normal quit, idle Ctrl+C with exit 130, alternate-screen/cursor restoration, handled diagnostic rendering with continued interaction, no leaked process group, and screen-reader output without erase/alternate-screen sequences. The package gate installs the tarball, verifies exact runtime dependencies and lazy non-TTY behavior, and runs an interactive smoke when `script` is available.
 
@@ -379,16 +379,16 @@ The opt-in `npm run test:tui-terminal:local` gate packs and installs the current
 
 The opt-in `npm run test:tui-terminal:linux` gate passed twice consecutively in a Linux arm64 Node 22 Debian container built from a digest-pinned base image. Debian apt repositories and package selections are mutable, so this is not a byte-reproducible environment claim; every run records the base digest plus the installed versions of all directly requested apt packages and their exercised tools. The gate runs the direct GNU `script` PTY checks and the complete installed-tarball tmux matrix, then creates ephemeral host/client keys and uses public-key-only, batch-mode loopback SSH with strict host-key checking and a forced PTY to repeat the tmux matrix. The uniquely named container/image tag, sshd, keys, state, and tmux servers are removed on completion. This is Linux arm64 container PTY/tmux/loopback-SSH evidence—not Linux desktop-terminal or representative remote-network evidence.
 
-Remaining coverage includes deeper trees and additional roots; Windows Terminal; representative remote SSH behavior; terminal/font/locale differences for ambiguous-width and emoji presentation; manual assistive-technology validation; and editor suspension after that feature is approved. The bounded local corpus is dependency- and tmux-specific and does not prove those environments, so this remains not production-ready.
+Remaining coverage includes deeper trees and additional provider-specific projections; Windows Terminal; representative remote SSH behavior; terminal/font/locale differences for ambiguous-width and emoji presentation; manual assistive-technology validation; and editor suspension after that feature is approved. The bounded local corpus is dependency- and tmux-specific and does not prove those environments, so this remains not production-ready.
 
 ## Implementation sequence
 
 Implementation proceeds as separate vertical slices:
 
 1. **Framework foundation — implemented:** exact dependencies, build support, terminal lifecycle wrapper, reducer, shell, and test harness.
-2. **First management slice — implemented, under hardening:** `bazframe tui`; active top tabs with a separate focused-tab cursor and body/pane focus cycle; profile lifecycle; zero-or-one Skillbook source projection; two-pane selected-profile membership; structured read-only setup status; confirmations; compact/below-minimum modes; help; and current automated/PTY/package coverage. Deeper trees and broader terminal validation remain outside the completed subset; persistent per-view offsets are implemented.
+2. **First management slice — implemented, under hardening:** `bazframe tui`; active top tabs with a separate focused-tab cursor and body/pane focus cycle; profile lifecycle; read-only global Sources and profile references; Skillbook plus global managed-snapshot roots; two-pane selected-profile membership; structured read-only setup status; confirmations; compact/below-minimum modes; help; and current automated/PTY/package coverage. Deeper trees and broader terminal validation remain outside the completed subset; persistent per-view offsets are implemented.
 3. **Instruction editor — open:** selected-profile instruction launch after editor ownership, CLI discoverability, and child-process lifecycle are approved.
-4. **Additional providers/settings — open:** zero/many real roots and editable settings only after registry and persistence decisions.
+4. **Additional provider capabilities/settings — open:** provider-specific browsing and editable settings only after their ownership, registry, and persistence decisions.
 5. **Skill artifact move/rename — open:** only after provider ownership, lock metadata, cross-root, rollback, and recovery semantics are approved.
 
 Each slice updates `TODO.md`, passes the existing default and real-Pi gates when relevant, adds observable TUI tests, and receives independent interaction/safety review. TUI documentation and implementation remain separate from the current profile/policy/adapter release batch.
@@ -405,7 +405,7 @@ Each slice updates `TODO.md`, passes the existing default and real-Pi gates when
 ### Deferred approvals
 
 5. **Editor lifecycle:** editor command ownership, CLI discoverability, parsing, and terminal suspension.
-6. **Additional sources:** registry, ordering, provider contracts, and real multi-root configuration.
+6. **Additional provider capabilities:** provider contracts, ordering, registry mutation, and provider-specific browsing beyond the implemented read-only global snapshots.
 7. **Settings writes:** scope, ownership, persistence, validation, and CLI interoperability.
 8. **Skill artifact operations:** provider ownership and transaction semantics for move/rename.
 

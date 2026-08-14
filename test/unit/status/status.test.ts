@@ -242,6 +242,29 @@ describe('Bazframe status', () => {
     });
   });
 
+  it('reports the canonical global build correction when a failed source can be rebuilt', async () => {
+    const directory = await temporary();
+    const options = await statusOptions(directory);
+    await readyProfile(directory, options);
+    await installPiAdapter(options);
+    const provider = await realpath(await directory.mkdir('provider-rebuild'));
+    await directory.write('provider-rebuild/alpha/SKILL.md', '---\nname: alpha\ndescription: alpha\n---\n');
+    await directory.write(
+      'bazframe-home/sources/provider/source.json',
+      encodeGlobalSource({ schemaVersion: 1, provider: 'provider', source: 'source', root: provider, digest: '0'.repeat(64), sourceUnitRoot: '.' })
+    );
+    await directory.write(
+      'bazframe-home/profiles/focused/sources/provider/source.json',
+      encodeProfileSourceReference({ schemaVersion: 1, provider: 'provider', source: 'source' })
+    );
+
+    const status = await buildStatus(options);
+
+    expect(status.exitStatus).toBe(3);
+    expect(status.text).toContain('provider/source: failed; rebuild available;');
+    expect(status.text).toContain('Build the sources with: `bazframe sources build provider source`.');
+  });
+
   it('keeps flat status ready while reporting a scoped source-unit failure', async () => {
     const directory = await temporary();
     const options = await statusOptions(directory);

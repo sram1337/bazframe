@@ -1,5 +1,7 @@
-import { chmod, readFile, readdir, realpath } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { chmod, readFile, readdir, realpath, rename, symlink, unlink } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
 import ts from 'typescript';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { captureProviderManifest } from '../../helpers/provider-manifest.js';
@@ -9,6 +11,7 @@ import { encodeGlobalSource } from '../../../src/sources/source-store.js';
 import { encodeProfileSourceReference } from '../../../src/profiles/profile-source-reference.js';
 
 const temporaryDirectories: TempDirectory[] = [];
+const execFileAsync = promisify(execFile);
 const originalBazframeHome = process.env.BAZFRAME_HOME;
 const originalPiAgentDirectory = process.env.PI_CODING_AGENT_DIR;
 const originalPath = process.env.PATH;
@@ -246,6 +249,48 @@ describe('packaged Pi adapter command', () => {
       .toContain('Profile: focused');
   });
 
+  it('rejects symlinked profile ancestors before loading external instructions or flat skills', async () => {
+    for (const scenario of ['home-root', 'profiles-root', 'profile-root'] as const) {
+      const fixture = await activeFixture(`profile-ancestor-${scenario}`, ['external-skill']);
+      const homeRoot = fixture.directory.path('bazframe-home');
+      const profilesRoot = fixture.directory.path('bazframe-home/profiles');
+      const profileRoot = fixture.directory.path('bazframe-home/profiles/focused');
+      await fixture.directory.mkdir(`outside-${scenario}`);
+      const outsidePath = fixture.directory.path(`outside-${scenario}`, scenario);
+      const movedPath = scenario === 'home-root'
+        ? homeRoot
+        : scenario === 'profiles-root'
+          ? profilesRoot
+          : profileRoot;
+      await rename(movedPath, outsidePath);
+      await symlink(outsidePath, movedPath);
+      const outsideProfile = scenario === 'home-root'
+        ? `${outsidePath}/profiles/focused`
+        : scenario === 'profiles-root'
+          ? `${outsidePath}/focused`
+          : outsidePath;
+
+      const harness = register(await loadArtifact(fixture.directory, true), []);
+      const resources = await required(harness.events, 'resources_discover')(
+        { cwd: fixture.repository }, { hasUI: false, ui: { notify: () => undefined } }
+      );
+      const beforeAgent = required(harness.events, 'before_agent_start')(
+        { systemPrompt: 'native prompt', systemPromptOptions: { contextFiles: [{ path: '/pi/AGENTS.md' }] } },
+        { hasUI: false, ui: { notify: () => undefined } }
+      );
+      const info = await runCommand(required(harness.commands, 'bazframe'), 'info', ['/pi/AGENTS.md']);
+
+      expect(resources, scenario).toBeUndefined();
+      expect(beforeAgent, scenario).toBeUndefined();
+      expect(info.message, scenario).toContain('Profile: (none)');
+      expect(info.message, scenario).not.toContain('profile instructions');
+      expect(info.message, scenario).not.toContain('external-skill');
+      await expect(readFile(`${outsideProfile}/AGENTS.md`, 'utf8'), scenario).resolves.toBe('profile instructions\n');
+      await expect(readFile(`${outsideProfile}/skills/external-skill/SKILL.md`, 'utf8'), scenario)
+        .resolves.toContain('name: external-skill');
+    }
+  });
+
   it('projects activated snapshot definitions individually without passing a grouping root', async () => {
     const fixture = await activeFixture('source-projection');
     const provider = await realpath(await fixture.directory.mkdir('provider-root'));
@@ -295,6 +340,116 @@ describe('packaged Pi adapter command', () => {
     expect(ownedAfterReload).toEqual(ownedBeforeReload);
     expect(reloaded).toEqual({ skillPaths: [`${activated.artifactRoot}/nested/alpha/SKILL.md`] });
     expect((reloaded as { skillPaths: string[] }).skillPaths).not.toContain(await realpath(betaDefinition));
+  });
+
+  it('rejects symlinked source and reference namespace ancestors in the artifact', async () => {
+    const globalFixture = await activeFixture('global-source-ancestor');
+    const globalProvider = await realpath(await globalFixture.directory.mkdir('provider-root'));
+    await globalFixture.directory.write('provider-root/alpha/SKILL.md', '---\nname: alpha\ndescription: alpha\n---\n');
+    await writeSnapshotDescriptor(globalFixture.directory, globalProvider);
+    await globalFixture.directory.mkdir('outside-global');
+    const globalNamespace = globalFixture.directory.path('bazframe-home/sources/provider');
+    const outsideGlobal = globalFixture.directory.path('outside-global/provider');
+    await rename(globalNamespace, outsideGlobal);
+    await symlink(outsideGlobal, globalNamespace);
+    const globalHarness = register(await loadArtifact(globalFixture.directory, true), []);
+    const globalResources = await required(globalHarness.events, 'resources_discover')(
+      { cwd: globalFixture.repository }, { hasUI: false, ui: { notify: () => undefined } }
+    );
+    const globalMessage = (await runCommand(required(globalHarness.commands, 'bazframe'), 'info', [])).message;
+    expect(globalResources).toBeUndefined();
+    expect(globalMessage).toContain('provider/source:provider/source.json invalid-source');
+    await expect(readFile(`${outsideGlobal}/source.json`, 'utf8')).resolves.toContain('"source": "source"');
+
+    const referenceFixture = await activeFixture('reference-source-ancestor');
+    const referenceProvider = await realpath(await referenceFixture.directory.mkdir('provider-root'));
+    await referenceFixture.directory.write('provider-root/alpha/SKILL.md', '---\nname: alpha\ndescription: alpha\n---\n');
+    await writeSnapshotDescriptor(referenceFixture.directory, referenceProvider);
+    await referenceFixture.directory.mkdir('outside-reference');
+    const referenceNamespace = referenceFixture.directory.path('bazframe-home/profiles/focused/sources/provider');
+    const outsideReference = referenceFixture.directory.path('outside-reference/provider');
+    await rename(referenceNamespace, outsideReference);
+    await symlink(outsideReference, referenceNamespace);
+    const referenceHarness = register(await loadArtifact(referenceFixture.directory, true), []);
+    const referenceResources = await required(referenceHarness.events, 'resources_discover')(
+      { cwd: referenceFixture.repository }, { hasUI: false, ui: { notify: () => undefined } }
+    );
+    const referenceMessage = (await runCommand(required(referenceHarness.commands, 'bazframe'), 'info', [])).message;
+    expect(referenceResources).toBeUndefined();
+    expect(referenceMessage).toContain('provider/<unknown-source>:provider invalid-reference');
+    await expect(readFile(`${outsideReference}/source.json`, 'utf8')).resolves.toContain('"source": "source"');
+  });
+
+  it('fails the independent artifact reference reader closed across its physical-file matrix', async () => {
+    const cases = [
+      'profiles-root',
+      'profile-root',
+      'sources-root',
+      'provider-root',
+      'final-link',
+      'invalid-utf8',
+      'invalid-json',
+      ...(process.platform === 'win32' ? [] : ['fifo'] as const)
+    ] as const;
+    for (const scenario of cases) {
+      const fixture = await activeFixture(`reference-reader-${scenario}`);
+      const provider = await realpath(await fixture.directory.mkdir('provider-root'));
+      await fixture.directory.write('provider-root/alpha/SKILL.md', '---\nname: alpha\ndescription: alpha\n---\n');
+      await writeSnapshotDescriptor(fixture.directory, provider);
+      const profilesRoot = fixture.directory.path('bazframe-home/profiles');
+      const profileRoot = fixture.directory.path('bazframe-home/profiles/focused');
+      const sourcesRoot = fixture.directory.path('bazframe-home/profiles/focused/sources');
+      const providerRoot = fixture.directory.path('bazframe-home/profiles/focused/sources/provider');
+      const referencePath = fixture.directory.path('bazframe-home/profiles/focused/sources/provider/source.json');
+      let outsideReference: string | undefined;
+      if (scenario.endsWith('-root')) {
+        const movedPath = scenario === 'profiles-root'
+          ? profilesRoot
+          : scenario === 'profile-root'
+            ? profileRoot
+            : scenario === 'sources-root'
+              ? sourcesRoot
+              : providerRoot;
+        await fixture.directory.mkdir(`outside-${scenario}`);
+        const outsidePath = fixture.directory.path(`outside-${scenario}`, scenario);
+        await rename(movedPath, outsidePath);
+        await symlink(outsidePath, movedPath);
+        outsideReference = scenario === 'profiles-root'
+          ? `${outsidePath}/focused/sources/provider/source.json`
+          : scenario === 'profile-root'
+            ? `${outsidePath}/sources/provider/source.json`
+            : scenario === 'sources-root'
+              ? `${outsidePath}/provider/source.json`
+              : `${outsidePath}/source.json`;
+      } else if (scenario === 'final-link') {
+        await fixture.directory.mkdir('outside-final-link');
+        outsideReference = fixture.directory.path('outside-final-link/source.json');
+        await rename(referencePath, outsideReference);
+        await symlink(outsideReference, referencePath);
+      } else if (scenario === 'invalid-utf8') {
+        await fixture.directory.write('bazframe-home/profiles/focused/sources/provider/source.json', new Uint8Array([0xff]));
+      } else if (scenario === 'invalid-json') {
+        await fixture.directory.write('bazframe-home/profiles/focused/sources/provider/source.json', '{');
+      } else {
+        await unlink(referencePath);
+        await execFileAsync('mkfifo', [referencePath]);
+      }
+
+      const harness = register(await loadArtifact(fixture.directory, true), []);
+      const resources = await required(harness.events, 'resources_discover')(
+        { cwd: fixture.repository }, { hasUI: false, ui: { notify: () => undefined } }
+      );
+      const message = (await runCommand(required(harness.commands, 'bazframe'), 'info', [])).message;
+      expect(resources, scenario).toBeUndefined();
+      if (scenario === 'profiles-root' || scenario === 'profile-root') {
+        expect(message, scenario).toContain('Profile: (none)');
+      } else {
+        expect(message, scenario).toContain('invalid-reference');
+      }
+      if (outsideReference !== undefined) {
+        await expect(readFile(outsideReference, 'utf8'), scenario).resolves.toContain('"source": "source"');
+      }
+    }
   });
 
   it('ignores inert pre-alpha source-units content and rejects writable snapshot mode drift', async () => {

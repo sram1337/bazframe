@@ -75,12 +75,27 @@ export function decodeProfileSourceReference(value: unknown, expectedProvider?: 
   if (expectedSource !== undefined && candidate.source !== expectedSource) throw invalid('source does not match reference path');
   return { schemaVersion: 1, provider: candidate.provider, source: candidate.source };
 }
-export async function readProfileSourceReference(path: string, expectedProvider?: string, expectedSource?: string): Promise<ProfileSourceReference> {
-  return (await readProfileSourceReferenceSnapshot(path, expectedProvider, expectedSource)).reference;
+export async function readProfileSourceReference(home: string, profileId: string, provider: string, source: string): Promise<ProfileSourceReference> {
+  return (await readProfileSourceReferenceSnapshot(home, profileId, provider, source)).reference;
 }
-export async function readProfileSourceReferenceSnapshot(path: string, expectedProvider?: string, expectedSource?: string): Promise<ProfileSourceReferenceSnapshot> {
+export async function readProfileSourceReferenceSnapshot(home: string, profileId: string, provider: string, source: string): Promise<ProfileSourceReferenceSnapshot> {
+  if (!isSafeProfileId(profileId)) throw invalid('profile is invalid');
+  if (!isSafeSkillId(provider)) throw invalid('provider is invalid');
+  if (!isSafeSkillId(source)) throw invalid('source is invalid');
+  const directoryPaths = [
+    home,
+    join(home, 'profiles'),
+    profileDirectory(home, profileId),
+    profileSourcesDirectory(home, profileId),
+    profileSourceProviderDirectory(home, profileId, provider)
+  ];
+  const path = profileSourceReferencePath(home, profileId, provider, source);
+  const directories: OpenDirectory[] = [];
   let handle: FileHandle | undefined;
   try {
+    for (const directoryPath of directoryPaths) {
+      directories.push(await openExistingDirectory(directoryPath, 'reference ancestor must be a physical directory'));
+    }
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const before = await handle.stat({ bigint: true });
     if (!before.isFile()) throw invalid('reference must be a physical regular file');
@@ -90,6 +105,7 @@ export async function readProfileSourceReferenceSnapshot(path: string, expectedP
     if (!after.isFile() || pathMetadata.isSymbolicLink() || !pathMetadata.isFile()
       || before.dev !== after.dev || before.ino !== after.ino
       || after.dev !== pathMetadata.dev || after.ino !== pathMetadata.ino) throw invalid('reference identity changed while reading');
+    for (const directory of [...directories].reverse()) await assertDirectoryStable(directory);
     let text: string;
     try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
     catch (error) { throw new BazframeError('SOURCE_REFERENCE_INVALID', 'Profile source reference is not valid UTF-8.', { cause: error }); }
@@ -97,7 +113,7 @@ export async function readProfileSourceReferenceSnapshot(path: string, expectedP
     try { value = JSON.parse(text); }
     catch (error) { throw new BazframeError('SOURCE_REFERENCE_INVALID', 'Profile source reference is not valid JSON.', { cause: error }); }
     return {
-      reference: decodeProfileSourceReference(value, expectedProvider, expectedSource),
+      reference: decodeProfileSourceReference(value, provider, source),
       path,
       device: before.dev,
       inode: before.ino,
@@ -105,9 +121,12 @@ export async function readProfileSourceReferenceSnapshot(path: string, expectedP
     };
   } catch (error) {
     if (error instanceof BazframeError) throw error;
-    if (errorCode(error) === 'ELOOP') throw invalid('reference must be a physical regular file');
+    if (errorCode(error) === 'ELOOP') throw invalid('reference and its namespace ancestors must be physical');
     throw new BazframeError('SOURCE_REFERENCE_READ_FAILED', `Could not read profile source reference ${path}${formatCode(error)}`, { cause: error });
-  } finally { await handle?.close().catch(() => undefined); }
+  } finally {
+    await handle?.close().catch(() => undefined);
+    for (const directory of [...directories].reverse()) await directory.handle.close().catch(() => undefined);
+  }
 }
 export function sameProfileSourceReferenceSnapshot(left: ProfileSourceReferenceSnapshot, right: ProfileSourceReferenceSnapshot): boolean {
   return left.device === right.device && left.inode === right.inode && left.contentSha256 === right.contentSha256;
@@ -182,7 +201,7 @@ export async function captureProfileSourceReferenceBulkIndex(
         for (const diagnostic of namespace.diagnostics) diagnostics.push({ profileId, diagnostic });
         for (const path of namespace.references) {
           try {
-            const snapshot = await readProfileSourceReferenceSnapshot(path.path, path.provider, path.source);
+            const snapshot = await readProfileSourceReferenceSnapshot(home, profileId, path.provider, path.source);
             identityParts.push(`reference:${profileId}/${path.relativePath}:${snapshot.device}:${snapshot.inode}:${snapshot.contentSha256}:${snapshot.reference.provider}/${snapshot.reference.source}`);
             const key = profileSourceReferenceKey(snapshot.reference.provider, snapshot.reference.source);
             const profileIds = profileIdsBySource.get(key) ?? [];
@@ -258,6 +277,12 @@ async function scanReferenceRoot(rootPath: string): Promise<ProfileSourceReferen
     return { references, diagnostics };
   } catch { return invalidRoot(); }
   finally { await root?.handle.close().catch(() => undefined); }
+}
+
+async function openExistingDirectory(path: string, invalidDetail: string): Promise<OpenDirectory> {
+  const metadata = await lstat(path, { bigint: true });
+  if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw invalid(invalidDetail);
+  return openDirectory(path, identity(metadata));
 }
 
 async function openDirectory(path: string, expected: DirectoryIdentity): Promise<OpenDirectory> {

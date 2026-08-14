@@ -472,7 +472,7 @@ async function inspectProfiles(
       for (const item of referenceNamespace.references) {
         try {
           readableReferences.push({
-            reference: await readProfileSourceReference(item.path, item.provider, item.source),
+            reference: await readProfileSourceReference(bazframeHome, entry.name, item.provider, item.source),
             path: item.path
           });
         } catch (error) {

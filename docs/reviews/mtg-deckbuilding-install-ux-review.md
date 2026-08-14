@@ -1,10 +1,10 @@
 # MTG deckbuilding source installation UX review
 
-> Status: draft session evidence and analysis for Mac review; not a product decision
+> Status: historical session evidence; the profile-local live-source model described below was superseded by global managed sources, immutable snapshots, and exact profile references
 >
 > Scope: installing the local `mtg-deckbuilding` npm package/source unit into the active Bazframe profile on SamPC/Windows on 2026-08-10
 >
-> Current product decisions remain authoritative in [`../design.md`](../design.md) and [`../tui-design.md`](../tui-design.md).
+> Current product decisions remain authoritative in [`../design.md`](../design.md) and [`../tui-design.md`](../tui-design.md). Current-state assertions, candidate models, and open questions below record the pre-redesign product and are not current decisions or pending implementation requirements.
 
 ## Purpose
 
@@ -376,9 +376,9 @@ bazframe profile skills remove <source>/<skill>
 
 Exact commands are undecided. A first-class source model would reopen the currently deferred registry, persistence, ordering, migration, and lifecycle-capability questions. It should not be implemented merely as aliases over the existing tuple without settling those semantics.
 
-## Existing product decisions that this review does not change
+## Product decisions in force when this evidence was recorded
 
-The following are recorded decisions, not findings to silently overturn:
+The following were recorded decisions at the time. The global-source redesign later superseded the profile-local/live-source and TUI projection statements; see the current design documents linked above:
 
 - Bazframe does not acquire, update, publish, prepare, or delete provider source artifacts.
 - Skill packs, child subsets, and a global source registry are deferred.
@@ -389,9 +389,9 @@ The following are recorded decisions, not findings to silently overturn:
 - Source-unit mutation currently has CLI actions but no TUI action.
 - The implemented TUI Skills browser currently projects zero or one Skillbook source, not arbitrary provider roots.
 
-## Questions for Mac review
+## Historical questions for Mac review
 
-These are open questions, not recommendations already accepted.
+These were open questions before the global-source redesign, not current recommendations or pending approvals.
 
 ### 1. Read-only source-unit visibility
 
@@ -492,6 +492,6 @@ One initial packaging attempt used `npm --prefix <repo> pack` from the Bazframe 
 
 This is npm/operator friction rather than Bazframe product behavior, but it reinforces why an end-to-end recipe should use commands whose working-directory assumptions are explicit.
 
-## Handoff state
+## Historical handoff state
 
-The SamPC installation is currently complete and healthy. No Bazframe repository implementation has been changed as part of this review document. The next step is Mac review of the questions above, followed by explicit product decisions in `docs/design.md` or `docs/tui-design.md` before implementation.
+At the end of the recorded SamPC session, the installation was complete and healthy under the then-current profile-local model, and this review document itself made no implementation changes. The later Mac review and product work superseded that handoff by approving and implementing global managed sources, immutable snapshot activation, exact profile references, and read-only TUI projections. Current behavior and remaining work are defined only by `docs/design.md`, `docs/tui-design.md`, `TODO.md`, and `SCRATCHPAD.md`.

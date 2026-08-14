@@ -1,3 +1,6 @@
+import { execFile } from 'node:child_process';
+import { symlink, unlink } from 'node:fs/promises';
+import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   captureProfileSourceReferenceBulkIndex,
@@ -5,11 +8,13 @@ import {
   encodeProfileSourceReference,
   findReferencingProfiles,
   profileSourceReferenceKey,
+  readProfileSourceReferenceSnapshot,
   scanProfileSourceReferences
 } from '../../../src/profiles/profile-source-reference.js';
 import { createTempDirectory, type TempDirectory } from '../../helpers/temp-directory.js';
 
 const directories: TempDirectory[] = [];
+const execFileAsync = promisify(execFile);
 afterEach(async () => Promise.all(directories.splice(0).map((directory) => directory.cleanup())));
 
 describe('profile source reference codec', () => {
@@ -62,5 +67,61 @@ describe('profile source reference codec', () => {
       references: [],
       diagnostics: [{ provider: 'provider', source: '<unknown-source>', path: 'provider' }]
     });
+  });
+
+  it('rejects symlinked profiles and profile ancestors before exact reads', async () => {
+    const directory = await createTempDirectory('bazframe-reference-full-chain-'); directories.push(directory);
+    await directory.write('outside/profiles/focused/sources/provider/source.json', encodeProfileSourceReference(reference));
+    await directory.mkdir('home');
+    await symlink(directory.path('outside/profiles'), directory.path('home/profiles'));
+    await expect(readProfileSourceReferenceSnapshot(directory.path('home'), 'focused', 'provider', 'source'))
+      .rejects.toMatchObject({ code: 'SOURCE_REFERENCE_INVALID' });
+
+    await unlink(directory.path('home/profiles'));
+    await directory.mkdir('home/profiles');
+    await symlink(directory.path('outside/profiles/focused'), directory.path('home/profiles/focused'));
+    await expect(readProfileSourceReferenceSnapshot(directory.path('home'), 'focused', 'provider', 'source'))
+      .rejects.toMatchObject({ code: 'SOURCE_REFERENCE_INVALID' });
+    await expect(readProfileSourceReferenceSnapshot(directory.path('home'), 'Unsafe', 'provider', 'source'))
+      .rejects.toMatchObject({ code: 'SOURCE_REFERENCE_INVALID' });
+  });
+
+  it('rejects symlinked namespace ancestors and final links', async () => {
+    const directory = await createTempDirectory('bazframe-reference-physical-'); directories.push(directory);
+    const outside = await directory.mkdir('outside/provider');
+    await directory.write('outside/provider/source.json', encodeProfileSourceReference(reference));
+    await directory.mkdir('home/profiles/focused');
+    await symlink(directory.path('outside'), directory.path('home/profiles/focused/sources'));
+    await expect(readProfileSourceReferenceSnapshot(directory.path('home'), 'focused', 'provider', 'source'))
+      .rejects.toMatchObject({ code: 'SOURCE_REFERENCE_INVALID' });
+
+    await unlink(directory.path('home/profiles/focused/sources'));
+    await directory.mkdir('home/profiles/focused/sources');
+    await symlink(outside, directory.path('home/profiles/focused/sources/provider'));
+    await expect(readProfileSourceReferenceSnapshot(directory.path('home'), 'focused', 'provider', 'source'))
+      .rejects.toMatchObject({ code: 'SOURCE_REFERENCE_INVALID' });
+
+    await unlink(directory.path('home/profiles/focused/sources/provider'));
+    await directory.mkdir('home/profiles/focused/sources/provider');
+    await symlink(directory.path('outside/provider/source.json'), directory.path('home/profiles/focused/sources/provider/source.json'));
+    await expect(readProfileSourceReferenceSnapshot(directory.path('home'), 'focused', 'provider', 'source'))
+      .rejects.toMatchObject({ code: 'SOURCE_REFERENCE_INVALID' });
+  });
+
+  it('rejects malformed bytes and non-regular files without blocking', async () => {
+    const directory = await createTempDirectory('bazframe-reference-invalid-'); directories.push(directory);
+    const path = await directory.write('home/profiles/focused/sources/provider/source.json', new Uint8Array([0xff]));
+    await expect(readProfileSourceReferenceSnapshot(directory.path('home'), 'focused', 'provider', 'source'))
+      .rejects.toMatchObject({ code: 'SOURCE_REFERENCE_INVALID' });
+    await directory.write('home/profiles/focused/sources/provider/source.json', '{');
+    await expect(readProfileSourceReferenceSnapshot(directory.path('home'), 'focused', 'provider', 'source'))
+      .rejects.toMatchObject({ code: 'SOURCE_REFERENCE_INVALID' });
+
+    if (process.platform !== 'win32') {
+      await unlink(path);
+      await execFileAsync('mkfifo', [path]);
+      await expect(readProfileSourceReferenceSnapshot(directory.path('home'), 'focused', 'provider', 'source'))
+        .rejects.toMatchObject({ code: 'SOURCE_REFERENCE_INVALID' });
+    }
   });
 });

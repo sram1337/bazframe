@@ -1,8 +1,8 @@
 # Provider-neutral nested source-unit composition
 
-> **Status: Stage 1 and the reopened sanitized MTG Stage 2 completed; the user subsequently approved the narrow production composition seam.**
+> **Status: historical mechanics research. Stage 1 and the reopened sanitized MTG Stage 2 completed; their profile-local live-source contract was later superseded by global managed sources, explicit builds, immutable snapshots, and exact profile references.**
 >
-> [`../design.md`](../design.md) is the product source of truth for the approved profile-local descriptor, bounded live discovery, CLI, projection, and diagnostics contract. The experiments did not demonstrate Bazframe-exclusive necessity: a provider plus a bounded wrapper reproduced the mechanics. The user nevertheless deliberately values Bazframe profile/runtime integration and approved this smallest production slice. Acquisition, updates, dependencies, execution, mutable data, credentials, subsets, packs, and a global source registry remain outside Bazframe ownership.
+> [`../design.md`](../design.md) is the current product source of truth. The profile-local descriptor, bounded live discovery, and deferred global-registry statements below record the superseded experiment-era contract rather than current behavior. The experiments did not demonstrate Bazframe-exclusive necessity: a provider plus a bounded wrapper reproduced the mechanics. Acquisition, updates, dependencies, mutable data, credentials, subsets, and packs remain outside Bazframe ownership; current build, snapshot, reference, and projection responsibilities are defined in the design.
 
 ## Purpose
 

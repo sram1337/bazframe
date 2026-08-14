@@ -48,7 +48,7 @@ export async function addSource(
   const canonical = await canonicalPhysicalSourceRoot(root);
   return withGlobalLock(options, 'bazframe sources add', globalSourcePath(options.bazframeHome, provider, source), async () => {
     const path = globalSourcePath(options.bazframeHome, provider, source);
-    const existing = await optionalSnapshot(path, provider, source);
+    const existing = await optionalSnapshot(options.bazframeHome, provider, source);
     if (existing !== undefined) {
       if (existing.record.root !== canonical) throw occupied(path, 'names a different canonical provider root');
       return result(existing.record, path, 'current');
@@ -74,7 +74,7 @@ export async function buildSource(
   assertSafeSkillId(provider); assertSafeSkillId(source);
   return withGlobalLock(options, 'bazframe sources build', globalSourcePath(options.bazframeHome, provider, source), async () => {
     const path = globalSourcePath(options.bazframeHome, provider, source);
-    const initial = await requiredSnapshot(path, provider, source);
+    const initial = await requiredSnapshot(options.bazframeHome, provider, source);
     const canonical = await canonicalPhysicalSourceRoot(initial.record.root);
     if (canonical !== initial.record.root) throw occupied(path, 'provider root no longer has its recorded canonical identity');
     const prepared = await prepareSourceUnit(options.bazframeHome, canonical, options.environment);
@@ -82,7 +82,7 @@ export async function buildSource(
     await validateIndependent(options.bazframeHome, candidate);
     const referenceIndex = await captureValidatedReferenceIndex(options.bazframeHome, provider, source);
     await validateDependents(options.bazframeHome, candidate, path, referenceIndex);
-    const current = await requiredSnapshot(path, provider, source);
+    const current = await requiredSnapshot(options.bazframeHome, provider, source);
     if (!sameGlobalSourceSnapshot(initial, current)) throw occupied(path, 'changed during build');
     await assertReferenceIndexUnchanged(options.bazframeHome, provider, source, referenceIndex, dependencies);
     await writeFileAtomic(path, encodeGlobalSource(candidate), { managedRoot: options.bazframeHome, mode: 0o600, commitOnRename: true });
@@ -99,12 +99,14 @@ export async function removeSource(
   assertSafeSkillId(provider); assertSafeSkillId(source);
   return withGlobalLock(options, 'bazframe sources remove', globalSourcePath(options.bazframeHome, provider, source), async () => {
     const path = globalSourcePath(options.bazframeHome, provider, source);
-    const initial = await requiredSnapshot(path, provider, source);
+    const initial = await requiredSnapshot(options.bazframeHome, provider, source);
     const referenceIndex = await captureValidatedReferenceIndex(options.bazframeHome, provider, source);
     if (referenceIndex.profileIds.length > 0) throw new BazframeError('SOURCE_REFERENCED', `Cannot remove ${provider}/${source}; referenced by profiles: ${referenceIndex.profileIds.join(', ')}`);
-    const current = await requiredSnapshot(path, provider, source);
+    const current = await requiredSnapshot(options.bazframeHome, provider, source);
     if (!sameGlobalSourceSnapshot(initial, current)) throw occupied(path, 'changed during remove');
     await assertReferenceIndexUnchanged(options.bazframeHome, provider, source, referenceIndex, dependencies);
+    const beforeUnlink = await requiredSnapshot(options.bazframeHome, provider, source);
+    if (!sameGlobalSourceSnapshot(initial, beforeUnlink)) throw occupied(path, 'changed before remove commit');
     await unlink(path);
     return result(initial.record, path, 'removed');
   });
@@ -172,15 +174,17 @@ async function validateDependents(
     throw new BazframeError('SOURCE_DEPENDENT_INVALID', `Source activation would invalidate referencing profiles:\n${failures.join('\n')}`);
   }
 }
-async function optionalSnapshot(path: string, provider: string, source: string): Promise<GlobalSourceRecordSnapshot | undefined> {
-  try { return await readGlobalSourceSnapshot(path, provider, source); }
+async function optionalSnapshot(home: string, provider: string, source: string): Promise<GlobalSourceRecordSnapshot | undefined> {
+  const path = globalSourcePath(home, provider, source);
+  try { return await readGlobalSourceSnapshot(home, provider, source); }
   catch (error) {
     if (error instanceof BazframeError && error.code === 'SOURCE_RECORD_READ_FAILED' && error.cause !== undefined && errorCode(error.cause) === 'ENOENT') return undefined;
     throw occupied(path, error instanceof Error ? error.message : String(error));
   }
 }
-async function requiredSnapshot(path: string, provider: string, source: string): Promise<GlobalSourceRecordSnapshot> {
-  const value = await optionalSnapshot(path, provider, source);
+async function requiredSnapshot(home: string, provider: string, source: string): Promise<GlobalSourceRecordSnapshot> {
+  const path = globalSourcePath(home, provider, source);
+  const value = await optionalSnapshot(home, provider, source);
   if (value === undefined) throw new BazframeError('SOURCE_NOT_FOUND', `Global source does not exist: ${path}`);
   return value;
 }

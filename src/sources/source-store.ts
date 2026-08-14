@@ -92,13 +92,23 @@ export function decodeGlobalSource(value: unknown, expectedProvider?: string, ex
   };
 }
 
-export async function readGlobalSource(path: string, expectedProvider?: string, expectedSource?: string): Promise<GlobalSourceRecord> {
-  return (await readGlobalSourceSnapshot(path, expectedProvider, expectedSource)).record;
+export async function readGlobalSource(home: string, provider: string, source: string): Promise<GlobalSourceRecord> {
+  return (await readGlobalSourceSnapshot(home, provider, source)).record;
 }
 
-export async function readGlobalSourceSnapshot(path: string, expectedProvider?: string, expectedSource?: string): Promise<GlobalSourceRecordSnapshot> {
+export async function readGlobalSourceSnapshot(home: string, provider: string, source: string): Promise<GlobalSourceRecordSnapshot> {
+  if (!isSafeSkillId(provider)) throw invalid('provider is invalid');
+  if (!isSafeSkillId(source)) throw invalid('source is invalid');
+  const rootPath = globalSourcesDirectory(home);
+  const providerPath = globalSourceProviderDirectory(home, provider);
+  const path = globalSourcePath(home, provider, source);
+  const directoryPaths = [home, rootPath, providerPath];
+  const directories: OpenDirectory[] = [];
   let handle: FileHandle | undefined;
   try {
+    for (const directoryPath of directoryPaths) {
+      directories.push(await openExistingDirectory(directoryPath, 'source ancestor must be a physical directory'));
+    }
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const before = await handle.stat({ bigint: true });
     if (!before.isFile()) throw invalid('source must be a physical regular file');
@@ -108,6 +118,7 @@ export async function readGlobalSourceSnapshot(path: string, expectedProvider?: 
     if (!after.isFile() || pathMetadata.isSymbolicLink() || !pathMetadata.isFile()
       || before.dev !== after.dev || before.ino !== after.ino
       || after.dev !== pathMetadata.dev || after.ino !== pathMetadata.ino) throw invalid('source identity changed while reading');
+    for (const directory of [...directories].reverse()) await assertDirectoryStable(directory);
     let text: string;
     try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
     catch (error) { throw new BazframeError('SOURCE_RECORD_INVALID', 'Global source is not valid UTF-8.', { cause: error }); }
@@ -115,7 +126,7 @@ export async function readGlobalSourceSnapshot(path: string, expectedProvider?: 
     try { value = JSON.parse(text); }
     catch (error) { throw new BazframeError('SOURCE_RECORD_INVALID', 'Global source is not valid JSON.', { cause: error }); }
     return {
-      record: decodeGlobalSource(value, expectedProvider, expectedSource),
+      record: decodeGlobalSource(value, provider, source),
       path,
       device: before.dev,
       inode: before.ino,
@@ -123,9 +134,12 @@ export async function readGlobalSourceSnapshot(path: string, expectedProvider?: 
     };
   } catch (error) {
     if (error instanceof BazframeError) throw error;
-    if (errorCode(error) === 'ELOOP') throw invalid('source must be a physical regular file');
+    if (errorCode(error) === 'ELOOP') throw invalid('source and its namespace ancestors must be physical');
     throw new BazframeError('SOURCE_RECORD_READ_FAILED', `Could not read global source ${path}${formatCode(error)}`, { cause: error });
-  } finally { await handle?.close().catch(() => undefined); }
+  } finally {
+    await handle?.close().catch(() => undefined);
+    for (const directory of [...directories].reverse()) await directory.handle.close().catch(() => undefined);
+  }
 }
 
 export function sameGlobalSourceSnapshot(left: GlobalSourceRecordSnapshot, right: GlobalSourceRecordSnapshot): boolean {
@@ -196,6 +210,12 @@ async function scanNamespace(rootPath: string): Promise<GlobalSourceNamespace> {
     return { sources, diagnostics };
   } catch { return invalidRoot(); }
   finally { await root?.handle.close().catch(() => undefined); }
+}
+
+async function openExistingDirectory(path: string, invalidDetail: string): Promise<OpenDirectory> {
+  const metadata = await lstat(path, { bigint: true });
+  if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw invalid(invalidDetail);
+  return openDirectory(path, identity(metadata));
 }
 
 async function openDirectory(path: string, expected: DirectoryIdentity): Promise<OpenDirectory> {

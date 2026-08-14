@@ -524,13 +524,27 @@ class InvalidSourceReference extends Error {}
 class InvalidGlobalSource extends Error {}
 
 async function validateSourceReference(
-	path: string,
+	bazframeHome: string,
+	profileId: string,
 	providerId: string,
 	sourceId: string,
 	expectedReferenceIdentity: SourcePhysicalIdentity,
 ): Promise<void> {
+	if (!PROFILE_ID.test(profileId) || profileId.length > 64 || !safeSourceId(providerId) || !safeSourceId(sourceId)) {
+		throw new InvalidSourceReference("Invalid profile source reference identity.");
+	}
+	const profilesPath = join(bazframeHome, "profiles");
+	const profilePath = join(profilesPath, profileId);
+	const sourcesPath = join(profilePath, "sources");
+	const providerPath = join(sourcesPath, providerId);
+	const path = join(providerPath, `${sourceId}.json`);
 	try {
-		const value = await readStableSourceJson(path, "Profile source reference", expectedReferenceIdentity);
+		const value = await readStableSourceJson(
+			[bazframeHome, profilesPath, profilePath, sourcesPath, providerPath],
+			path,
+			"Profile source reference",
+			expectedReferenceIdentity,
+		);
 		if (!hasExactKeys(value, ["schemaVersion", "provider", "source"])
 			|| value.schemaVersion !== 1 || value.provider !== providerId || value.source !== sourceId) throw new Error("invalid reference fields");
 	} catch (error) { throw new InvalidSourceReference(`Invalid profile source reference: ${path}`, { cause: error }); }
@@ -541,10 +555,15 @@ async function readSourceDescriptor(
 	sourceId: string,
 	bazframeHome: string,
 ): Promise<SourceDescriptor> {
+	if (!safeSourceId(providerId) || !safeSourceId(sourceId)) throw new InvalidGlobalSource("Invalid global source identity.");
 	const globalPath = join(bazframeHome, "sources", providerId, `${sourceId}.json`);
 	let candidate: Record<string, unknown>;
 	try {
-		candidate = await readStableSourceJson(globalPath, "Global source");
+		candidate = await readStableSourceJson(
+			[bazframeHome, join(bazframeHome, "sources"), join(bazframeHome, "sources", providerId)],
+			globalPath,
+			"Global source",
+		);
 		if (!hasExactKeys(candidate, ["schemaVersion", "provider", "source", "root", "digest", "sourceUnitRoot"])
 			|| candidate.schemaVersion !== 1 || candidate.provider !== providerId || candidate.source !== sourceId
 			|| typeof candidate.root !== "string" || !isAbsolute(candidate.root) || candidate.root.includes("\0") || resolve(candidate.root) !== candidate.root
@@ -555,12 +574,15 @@ async function readSourceDescriptor(
 }
 
 async function readStableSourceJson(
+	directoryPaths: string[],
 	path: string,
 	label: string,
 	expectedIdentity?: SourcePhysicalIdentity,
 ): Promise<Record<string, unknown>> {
+	const directories: SourceOpenDirectory[] = [];
 	let handle: FileHandle | undefined;
 	try {
+		for (const directoryPath of directoryPaths) directories.push(await openExistingSourceDirectory(directoryPath));
 		const before = await lstat(path, { bigint: true });
 		if (before.isSymbolicLink() || !before.isFile()
 			|| (expectedIdentity !== undefined && !sameSourceIdentity(sourceIdentity(before), expectedIdentity))) throw new Error("not the expected physical file");
@@ -573,8 +595,18 @@ async function readStableSourceJson(
 			|| !sameSourceIdentity(sourceIdentity(opened), identityBefore)
 			|| !sameSourceIdentity(sourceIdentity(after), identityBefore)
 			|| !sameSourceIdentity(sourceIdentity(current), identityBefore)) throw new Error("file identity changed");
+		for (const directory of [...directories].reverse()) await assertSourceDirectoryStable(directory);
 		return JSON.parse(decodeUtf8(bytes, label)) as Record<string, unknown>;
-	} finally { await handle?.close().catch(() => undefined); }
+	} finally {
+		await handle?.close().catch(() => undefined);
+		for (const directory of [...directories].reverse()) await directory.handle.close().catch(() => undefined);
+	}
+}
+
+async function openExistingSourceDirectory(path: string): Promise<SourceOpenDirectory> {
+	const metadata = await lstat(path, { bigint: true });
+	if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new Error(`Source namespace path is not a physical directory: ${path}`);
+	return openSourceDirectory(path, sourceIdentity(metadata));
 }
 
 interface SourcePhysicalIdentity {
@@ -1043,8 +1075,9 @@ async function loadProfileSources(
 	if (diagnostics.length > 0) {
 		return { directSourceUnits: [], derivedSkills: [], diagnostics: sortSourceDiagnostics(diagnostics) };
 	}
+	const profileId = profileDirectory.split(sep).at(-1)!;
 	for (const item of namespace.descriptors) {
-		try { await validateSourceReference(item.path, item.providerId, item.sourceId, item.identity); } catch {
+		try { await validateSourceReference(bazframeHome, profileId, item.providerId, item.sourceId, item.identity); } catch {
 			diagnostics.push(sourceDiagnostic(
 				"invalid-reference",
 				item.providerId,
@@ -1122,35 +1155,43 @@ async function sourceRebuildAvailability(sourceRoot: string): Promise<"available
 
 async function loadProfile(bazframeHome: string): Promise<ProfileState> {
 	const id = await readActiveProfileId(bazframeHome);
-	const directory = join(bazframeHome, "profiles", id);
-	const metadata = await stat(directory);
-	if (!metadata.isDirectory()) throw new Error(`Profile is not a directory: ${directory}`);
-	const instructionsPath = join(directory, "AGENTS.md");
-	const instructions = decodeUtf8(
-		await readUserFile(instructionsPath, `Profile ${id} instructions`, MAX_INSTRUCTIONS_BYTES),
-		`Profile ${id} instructions`,
-	);
-	const loaded = await loadProfileSkills(join(directory, "skills"));
-	const names = new Set<string>();
-	for (const skill of loaded.skills) {
-		if (names.has(skill.name)) throw new Error(`Duplicate profile skill name: ${skill.name}`);
-		names.add(skill.name);
+	const profilesPath = join(bazframeHome, "profiles");
+	const directory = join(profilesPath, id);
+	const directories: SourceOpenDirectory[] = [];
+	try {
+		for (const directoryPath of [bazframeHome, profilesPath, directory]) {
+			directories.push(await openExistingSourceDirectory(directoryPath));
+		}
+		const instructionsPath = join(directory, "AGENTS.md");
+		const instructions = decodeUtf8(
+			await readUserFile(instructionsPath, `Profile ${id} instructions`, MAX_INSTRUCTIONS_BYTES),
+			`Profile ${id} instructions`,
+		);
+		const loaded = await loadProfileSkills(join(directory, "skills"));
+		const names = new Set<string>();
+		for (const skill of loaded.skills) {
+			if (names.has(skill.name)) throw new Error(`Duplicate profile skill name: ${skill.name}`);
+			names.add(skill.name);
+		}
+		const sources = await loadProfileSources(directory, loaded.skills);
+		for (const openedDirectory of [...directories].reverse()) await assertSourceDirectoryStable(openedDirectory);
+		const combined = [...loaded.skills, ...sources.derivedSkills.map((derived) => derived.skill)];
+		return {
+			id,
+			directory,
+			instructionsPath,
+			instructions,
+			flatSkills: loaded.skills,
+			directSourceUnits: sources.directSourceUnits,
+			derivedSkills: sources.derivedSkills,
+			sourceDiagnostics: sources.diagnostics,
+			skills: combined,
+			skillDirectories: [...new Set(combined.map((skill) => skill.baseDir))].sort(),
+			warnings: loaded.warnings,
+		};
+	} finally {
+		for (const directory of [...directories].reverse()) await directory.handle.close().catch(() => undefined);
 	}
-	const sources = await loadProfileSources(directory, loaded.skills);
-	const combined = [...loaded.skills, ...sources.derivedSkills.map((derived) => derived.skill)];
-	return {
-		id,
-		directory,
-		instructionsPath,
-		instructions,
-		flatSkills: loaded.skills,
-		directSourceUnits: sources.directSourceUnits,
-		derivedSkills: sources.derivedSkills,
-		sourceDiagnostics: sources.diagnostics,
-		skills: combined,
-		skillDirectories: [...new Set(combined.map((skill) => skill.baseDir))].sort(),
-		warnings: loaded.warnings,
-	};
 }
 
 async function loadGlobalContext(): Promise<InstructionFile | undefined> {

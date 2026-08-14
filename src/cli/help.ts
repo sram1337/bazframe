@@ -74,7 +74,7 @@ export const PROJECT_HELP = [
 export const STATUS_HELP = [
   'Usage: bazframe status',
   '',
-  'Read adapter, current project behavior, active-profile, and alias-cache state.',
+  'Read adapter, current project behavior, active-profile, source-reference health, derived skills, and alias-cache state.',
   'Exit status 3 means the setup needs an action listed in the report.',
   ''
 ].join('\n');
