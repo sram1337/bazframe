@@ -7,6 +7,7 @@ export const ROOT_HELP = [
   '',
   'Resources:',
   '  profiles   Manage profiles and the active selection',
+  '  sources    Manage global built skill collections',
   '  skills     Browse available Skillbook skills',
   '  projects   Manage per-project Bazframe policy overrides',
   '  global     Manage the global Bazframe policy',
@@ -16,6 +17,7 @@ export const ROOT_HELP = [
   '',
   'Suggestions:',
   '  bazframe profiles',
+  '  bazframe sources',
   '  bazframe skills',
   '  bazframe status',
   '  bazframe tui',
@@ -100,8 +102,7 @@ export const PROFILE_HELP = [
   '  bazframe profiles',
   '  bazframe profile skills',
   '  bazframe profile sources',
-  '  bazframe profile sources add <provider> <source> <absolute-root> [--profile <profile>]',
-  '  bazframe profile sources build <provider> <source> [--profile <profile>]',
+  '  bazframe profile sources add <provider> <source> [--profile <profile>]',
   '  bazframe profile sources remove <provider> <source> [--profile <profile>]',
   '  bazframe profile add <profile>',
   '  bazframe profile duplicate <source> <new>',
@@ -211,44 +212,34 @@ export const PROFILE_SKILLS_REMOVE_HELP = [
   ''
 ].join('\n');
 
+export const SOURCES_HELP = [
+  'Usage:',
+  '  bazframe sources',
+  '  bazframe sources add <provider> <source> <absolute-root>',
+  '  bazframe sources build <provider> <source>',
+  '  bazframe sources remove <provider> <source>',
+  '',
+  'Manage global source objects and their activated immutable snapshots.',
+  'Add and build explicitly run a declared provider build; inspection never runs builds.',
+  'Remove is refused while any profile references the source.',
+  ''
+].join('\n');
+export const SOURCES_ADD_HELP = ['Usage: bazframe sources add <provider> <source> <absolute-root>', '', 'Explicitly build, validate, snapshot, and activate a new global source.', ''].join('\n');
+export const SOURCES_BUILD_HELP = ['Usage: bazframe sources build <provider> <source>', '', 'Explicitly rebuild a global source. Activation is rejected if any referencing profile would become invalid.', ''].join('\n');
+export const SOURCES_REMOVE_HELP = ['Usage: bazframe sources remove <provider> <source>', '', 'Remove only an unreferenced global source record. Provider inputs and immutable snapshots are preserved.', ''].join('\n');
+
 export const PROFILE_SOURCES_HELP = [
   'Usage:',
   '  bazframe profile sources',
-  '  bazframe profile sources add <provider> <source> <absolute-root> [--profile <profile>]',
-  '  bazframe profile sources build <provider> <source> [--profile <profile>]',
+  '  bazframe profile sources add <provider> <source> [--profile <profile>]',
   '  bazframe profile sources remove <provider> <source> [--profile <profile>]',
   '',
-  'With no command, inspect direct memberships, activated snapshots, and derived skills for the active profile.',
-  'Add and build explicitly run a declared provider build and activate an immutable snapshot.',
-  'Inspection, Pi startup, reload, and skill invocation never run builds.',
-  'Use --profile to target a profile without changing the active selection.',
+  'Inspect or change references from a profile to global sources.',
+  'Reference changes never build a source or change active selection.',
   ''
 ].join('\n');
-
-export const PROFILE_SOURCES_ADD_HELP = [
-  'Usage: bazframe profile sources add <provider> <source> <absolute-root> [--profile <profile>]',
-  '',
-  'Explicitly prepare an existing physical provider input and activate its immutable snapshot.',
-  'A declared literal build runs with the provider input as CWD; an absent manifest snapshots the input directly.',
-  'An exact existing schema-v2 descriptor is current; occupied invalid or retargeted entries are refused.',
-  ''
-].join('\n');
-
-export const PROFILE_SOURCES_BUILD_HELP = [
-  'Usage: bazframe profile sources build <provider> <source> [--profile <profile>]',
-  '',
-  'Explicitly rebuild the recorded provider input and atomically activate a verified immutable snapshot.',
-  'A failure preserves the previously active descriptor and snapshot.',
-  ''
-].join('\n');
-
-export const PROFILE_SOURCES_REMOVE_HELP = [
-  'Usage: bazframe profile sources remove <provider> <source> [--profile <profile>]',
-  '',
-  'Remove only the verified profile-owned descriptor.',
-  'The provider root is never resolved or changed, so removal works when that root is broken or missing.',
-  ''
-].join('\n');
+export const PROFILE_SOURCES_ADD_HELP = ['Usage: bazframe profile sources add <provider> <source> [--profile <profile>]', '', 'Add a validated reference to an existing global source.', ''].join('\n');
+export const PROFILE_SOURCES_REMOVE_HELP = ['Usage: bazframe profile sources remove <provider> <source> [--profile <profile>]', '', 'Remove only the profile-owned reference. The global source, provider input, and snapshots are preserved.', ''].join('\n');
 
 export const ADD_HELP = [
   'Usage: bazframe add <skill>',

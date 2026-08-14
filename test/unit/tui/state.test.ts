@@ -13,6 +13,7 @@ const VIEWPORT_ROWS: ViewportRows = {
   profileList: 5,
   included: 4,
   available: 3,
+  sources: 3,
   skillsBrowser: 6
 };
 
@@ -110,6 +111,31 @@ describe('TUI state', () => {
       focusedTab: 'settings',
       focusedRegion: 'tabs'
     });
+  });
+
+  it('falls back to a managed source parent when a selected child disappears', () => {
+    const dashboard = snapshot(['focused'], []);
+    dashboard.skillRoots = [
+      {
+        id: 'managed:p/one', provider: 'p', label: 'p/one', root: '/snapshots/one', artifactWritesSupported: false,
+        skills: [{ id: 'a', sourceId: 'managed:p/one', directory: '/snapshots/one/a' }]
+      },
+      {
+        id: 'managed:p/two', provider: 'p', label: 'p/two', root: '/snapshots/two', artifactWritesSupported: false,
+        skills: [{ id: 'z', sourceId: 'managed:p/two', directory: '/snapshots/two/z' }]
+      }
+    ];
+    let state: TuiState = {
+      ...initialTuiState,
+      expandedSourceIds: ['managed:p/one', 'managed:p/two'],
+      browserSkillId: 'managed:p/two:z'
+    };
+
+    state = tuiReducer(state, { type: 'reconcile', snapshot: dashboard, viewportRows: VIEWPORT_ROWS });
+    dashboard.skillRoots[1]!.skills = [];
+    state = tuiReducer(state, { type: 'reconcile', snapshot: dashboard, viewportRows: VIEWPORT_ROWS });
+
+    expect(state.browserSkillId).toBe('source:managed:p/two');
   });
 
   it('selects the create row when no profiles exist', () => {
@@ -358,7 +384,7 @@ describe('TUI state', () => {
     state = tuiReducer(state, {
       type: 'clamp-viewports',
       snapshot: dashboard,
-      viewportRows: { profileList: 15, included: 6, available: 6, skillsBrowser: 13 }
+      viewportRows: { profileList: 15, included: 6, available: 6, sources: 6, skillsBrowser: 13 }
     });
     expect(state).toMatchObject({
       profileListOffset: 16,
@@ -370,7 +396,7 @@ describe('TUI state', () => {
     state = tuiReducer(state, {
       type: 'clamp-viewports',
       snapshot: dashboard,
-      viewportRows: { profileList: 5, included: 3, available: 3, skillsBrowser: 5 }
+      viewportRows: { profileList: 5, included: 3, available: 3, sources: 3, skillsBrowser: 5 }
     });
     expect(state).toMatchObject({
       profileListOffset: 16,

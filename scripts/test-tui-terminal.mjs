@@ -105,7 +105,7 @@ try {
     waitForCurrentText(session, 'Status: Ready', deadline);
     assertAlternate(session, '1');
     const fixturePid = readFixturePid(marker, deadline, session);
-    sendLiteral(session, '3');
+    sendLiteral(session, '4');
     return {
       expectedStatus: 1,
       expectedStderr: 'error: fatal renderer fixture\n',
@@ -118,7 +118,7 @@ try {
     waitForCurrentText(session, 'Status: Ready', deadline);
     assertAlternate(session, '1');
     const fixturePid = readFixturePid(marker, deadline, session);
-    actAndWaitForCurrentText(session, () => sendLiteral(session, '2'), '路径', deadline);
+    actAndWaitForCurrentText(session, () => sendLiteral(session, '3'), '路径', deadline);
     assertUnicodeCellFrame(session, 80);
     actAndWaitForCurrentText(session, () => resize(session, 60, 16), '路径', deadline);
     assertUnicodeCellFrame(session, 60);

@@ -141,55 +141,30 @@ try {
   run(executable, ['profile', 'use', 'focused'], temporaryRoot, environment);
   const profileCurrent = run(executable, ['profile', 'current'], temporaryRoot, environment);
   assert(profileCurrent.stdout === 'focused\n', 'Packed CLI current profile was incorrect.');
-  const sourceDescriptorPath = join(
-    bazframeHome,
-    'profiles',
-    'focused',
-    'source-units',
-    'provider',
-    'source.json'
-  );
+  const sourceDescriptorPath = join(bazframeHome, 'sources', 'provider', 'source.json');
+  const sourceReferencePath = join(bazframeHome, 'profiles', 'focused', 'sources', 'provider', 'source.json');
   const ownedBeforeSourceAdd = providerManifest(sourceDescriptorPath);
   const sourceBeforeAdd = providerManifest(sourceProvider);
-  const sourceAdded = run(
-    executable,
-    ['profile', 'sources', 'add', 'provider', 'source', realpathSync(sourceProvider)],
-    temporaryRoot,
-    environment
-  );
-  const sourceAfterAdd = providerManifest(sourceProvider);
-  const ownedAfterSourceAdd = providerManifest(sourceDescriptorPath);
-  assert(sourceAfterAdd === sourceBeforeAdd, 'Source add changed provider bytes.');
-  assert(ownedAfterSourceAdd !== ownedBeforeSourceAdd, 'Source add did not change descriptor state.');
-  assert(sourceAdded.stdout.includes('Profile source membership: added'), 'Packed CLI did not add source membership.');
-  assert(existsSync(sourceDescriptorPath), 'Source add did not create the Bazframe-owned descriptor.');
+  const sourceAdded = run(executable, ['sources', 'add', 'provider', 'source', realpathSync(sourceProvider)], temporaryRoot, environment);
+  assert(providerManifest(sourceProvider) === sourceBeforeAdd, 'Source add changed provider bytes.');
+  assert(providerManifest(sourceDescriptorPath) !== ownedBeforeSourceAdd, 'Source add did not change global source state.');
+  assert(sourceAdded.stdout.includes('Global source: added'), 'Packed CLI did not add global source.');
+  const referenceAdded = run(executable, ['profile', 'sources', 'add', 'provider', 'source'], temporaryRoot, environment);
+  assert(referenceAdded.stdout.includes('Profile source reference: added'), 'Packed CLI did not add source reference.');
+  assert(existsSync(sourceReferencePath), 'Profile source reference was not created.');
   const expectedSourceDescriptor = JSON.parse(readFileSync(sourceDescriptorPath, 'utf8'));
-  assert(expectedSourceDescriptor.schemaVersion === 2
-    && expectedSourceDescriptor.providerId === 'provider'
-    && expectedSourceDescriptor.sourceId === 'source'
-    && expectedSourceDescriptor.sourceRoot === realpathSync(sourceProvider)
-    && /^[a-f0-9]{64}$/u.test(expectedSourceDescriptor.snapshotDigest)
-    && expectedSourceDescriptor.sourceUnitRoot === '.', 'Source add wrote an unexpected descriptor.');
+  assert(expectedSourceDescriptor.schemaVersion === 1
+    && expectedSourceDescriptor.provider === 'provider'
+    && expectedSourceDescriptor.source === 'source'
+    && expectedSourceDescriptor.root === realpathSync(sourceProvider)
+    && /^[a-f0-9]{64}$/u.test(expectedSourceDescriptor.digest)
+    && expectedSourceDescriptor.sourceUnitRoot === '.', 'Source add wrote an unexpected global record.');
   const ownedBeforeIdempotentAdd = providerManifest(sourceDescriptorPath);
   const sourceBeforeIdempotentAdd = providerManifest(sourceProvider);
-  const sourceCurrent = run(
-    executable,
-    ['profile', 'sources', 'add', 'provider', 'source', realpathSync(sourceProvider)],
-    temporaryRoot,
-    environment
-  );
-  const sourceAfterIdempotentAdd = providerManifest(sourceProvider);
-  const ownedAfterIdempotentAdd = providerManifest(sourceDescriptorPath);
-  assert(
-    sourceAfterIdempotentAdd === sourceBeforeIdempotentAdd,
-    'Idempotent source add changed provider bytes.'
-  );
-  assert(
-    ownedAfterIdempotentAdd === ownedBeforeIdempotentAdd,
-    'Idempotent source add changed descriptor state.'
-  );
-  assert(sourceCurrent.stdout.includes('Profile source membership: current'), 'Packed CLI source add was not idempotent.');
-  assert(existsSync(sourceDescriptorPath), 'Idempotent source add removed the descriptor.');
+  const sourceCurrent = run(executable, ['sources', 'add', 'provider', 'source', realpathSync(sourceProvider)], temporaryRoot, environment);
+  assert(providerManifest(sourceProvider) === sourceBeforeIdempotentAdd, 'Idempotent source add changed provider bytes.');
+  assert(providerManifest(sourceDescriptorPath) === ownedBeforeIdempotentAdd, 'Idempotent source add changed global source state.');
+  assert(sourceCurrent.stdout.includes('Global source: current'), 'Packed CLI source add was not idempotent.');
   const added = run(
     executable,
     ['profile', 'skills', 'add', 'profile-probe'],
@@ -283,8 +258,8 @@ try {
   assert(!nonRpcBeforeBuild.stdout.includes('PACKED_LIVE_SOURCE'), 'A fresh non-RPC Pi run saw provider mutation before explicit build.');
 
   const sourceBeforeExplicitBuild = providerManifest(sourceProvider);
-  const rebuiltForLiveSource = run(executable, ['profile', 'sources', 'build', 'provider', 'source'], temporaryRoot, environment);
-  assert(rebuiltForLiveSource.stdout.includes('Profile source membership: built'), 'Explicit source build did not activate the provider change.');
+  const rebuiltForLiveSource = run(executable, ['sources', 'build', 'provider', 'source'], temporaryRoot, environment);
+  assert(rebuiltForLiveSource.stdout.includes('Global source: built'), 'Explicit source build did not activate the provider change.');
   assert(providerManifest(sourceProvider) === sourceBeforeExplicitBuild, 'Explicit snapshot-only build changed provider bytes.');
   const afterBuildBeforeReload = rpcCommandNames(await rpcClient.request({ type: 'get_commands' }));
   assert(!afterBuildBeforeReload.includes('skill:live-source'), 'The same Pi process saw the rebuilt snapshot before /bazframe reload.');
@@ -311,8 +286,8 @@ try {
   ].join('\n'));
   assert(!rpcCommandNames(await rpcClient.request({ type: 'get_commands' })).includes('skill:rpc-reloaded-source'), 'RPC process saw a second provider mutation before build.');
   const providerBeforeRpcBuild = providerManifest(sourceProvider);
-  const rpcBuilt = run(executable, ['profile', 'sources', 'build', 'provider', 'source'], temporaryRoot, environment);
-  assert(rpcBuilt.stdout.includes('Profile source membership: built'), 'Explicit RPC-era source build did not activate.');
+  const rpcBuilt = run(executable, ['sources', 'build', 'provider', 'source'], temporaryRoot, environment);
+  assert(rpcBuilt.stdout.includes('Global source: built'), 'Explicit RPC-era source build did not activate.');
   assert(providerManifest(sourceProvider) === providerBeforeRpcBuild, 'RPC-era source build changed provider bytes.');
   assert(!rpcCommandNames(await rpcClient.request({ type: 'get_commands' })).includes('skill:rpc-reloaded-source'), 'RPC process saw second rebuilt source before reload.');
   assert((await rpcClient.request({ type: 'prompt', message: '/bazframe reload' })).success === true, 'Second RPC reload failed.');
@@ -494,39 +469,16 @@ try {
 
   const ownedBeforeSourceRemove = providerManifest(sourceDescriptorPath);
   const sourceBeforeRemove = providerManifest(sourceProvider);
-  const sourceRemoved = run(
-    executable,
-    ['profile', 'sources', 'remove', 'provider', 'source'],
-    temporaryRoot,
-    environment
-  );
-  const sourceAfterRemove = providerManifest(sourceProvider);
-  const ownedAfterSourceRemove = providerManifest(sourceDescriptorPath);
-  assert(sourceAfterRemove === sourceBeforeRemove, 'Source removal changed provider bytes.');
-  assert(ownedAfterSourceRemove !== ownedBeforeSourceRemove, 'Source removal did not change descriptor state.');
-  assert(sourceRemoved.stdout.includes('Profile source membership: removed'), 'Packed CLI did not remove source membership.');
-  assert(!existsSync(sourceDescriptorPath), 'Source removal left the Bazframe-owned descriptor.');
-
-  const ownedBeforeAbsentRetry = providerManifest(sourceDescriptorPath);
-  const sourceBeforeAbsentRetry = providerManifest(sourceProvider);
-  const sourceAbsent = run(
-    executable,
-    ['profile', 'sources', 'remove', 'provider', 'source'],
-    temporaryRoot,
-    environment
-  );
-  const sourceAfterAbsentRetry = providerManifest(sourceProvider);
-  const ownedAfterAbsentRetry = providerManifest(sourceDescriptorPath);
-  assert(
-    sourceAfterAbsentRetry === sourceBeforeAbsentRetry,
-    'Absent source-remove retry changed provider bytes.'
-  );
-  assert(
-    ownedAfterAbsentRetry === ownedBeforeAbsentRetry,
-    'Absent source-remove retry changed descriptor state.'
-  );
-  assert(sourceAbsent.stdout.includes('Profile source membership: absent'), 'Source-remove retry was not absent.');
-  assert(!existsSync(sourceDescriptorPath), 'Absent source-remove retry recreated the descriptor.');
+  const sourceRemoved = run(executable, ['profile', 'sources', 'remove', 'provider', 'source'], temporaryRoot, environment);
+  assert(providerManifest(sourceProvider) === sourceBeforeRemove, 'Source detach changed provider bytes.');
+  assert(providerManifest(sourceDescriptorPath) === ownedBeforeSourceRemove, 'Source detach changed global source state.');
+  assert(sourceRemoved.stdout.includes('Profile source reference: removed'), 'Packed CLI did not remove source reference.');
+  assert(!existsSync(sourceReferencePath), 'Source detach left the profile reference.');
+  const sourceAbsent = run(executable, ['profile', 'sources', 'remove', 'provider', 'source'], temporaryRoot, environment);
+  assert(sourceAbsent.stdout.includes('Profile source reference: absent'), 'Source detach retry was not absent.');
+  const globalRemoved = run(executable, ['sources', 'remove', 'provider', 'source'], temporaryRoot, environment);
+  assert(globalRemoved.stdout.includes('Global source: removed'), 'Packed CLI did not remove unreferenced global source.');
+  assert(!existsSync(sourceDescriptorPath), 'Global source removal left its record.');
 
   run(executable, ['adapter', 'uninstall', 'pi'], temporaryRoot, environment);
   assert(!existsSync(join(agentDirectory, 'extensions', 'bazframe.ts')), 'Adapter uninstall left its artifact.');
@@ -740,14 +692,7 @@ function run(executable, args, cwd, environment) {
 }
 
 function runPiPreservingProvider(providerRoot, cwd, environment, extraArgs, prompt) {
-  const descriptorPath = join(
-    environment.BAZFRAME_HOME,
-    'profiles',
-    'focused',
-    'source-units',
-    'provider',
-    'source.json'
-  );
+  const descriptorPath = join(environment.BAZFRAME_HOME, 'sources', 'provider', 'source.json');
   const aliasRoot = join(
     environment.BAZFRAME_HOME,
     'adapter-cache',

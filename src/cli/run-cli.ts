@@ -31,14 +31,12 @@ import {
   type ProfileRenameResult
 } from '../profiles/profile-management.js';
 import {
-  addActiveProfileSource,
-  addProfileSource,
-  buildActiveProfileSource,
-  buildProfileSource,
-  removeActiveProfileSource,
-  removeProfileSource,
-  type ProfileSourceMembershipResult
-} from '../profiles/profile-source-membership.js';
+  addActiveProfileSourceReference,
+  addProfileSourceReference,
+  removeActiveProfileSourceReference,
+  removeProfileSourceReference,
+  type ProfileSourceReferenceResult
+} from '../profiles/profile-source-reference-lifecycle.js';
 import {
   addActiveProfileSkill,
   addProfileSkill,
@@ -64,10 +62,18 @@ import { loadRootRepositoryInstructions } from '../project/repository-instructio
 import { listAvailableSkills } from '../skills/skill-library.js';
 import {
   formatSourceDiagnostic,
+  inspectGlobalSources,
   loadFlatSkillIdentities,
   resolveProfileSourceUnits,
-  type ProfileSourceComposition
+  type GlobalSourceInspection,
+  type ProfileSourceComposition,
+  type SourceDiagnostic
 } from '../source-units/source-unit-resolver.js';
+import {
+  captureProfileSourceReferenceBulkIndex,
+  profileSourceReferenceKey
+} from '../profiles/profile-source-reference.js';
+import { addSource, buildSource, removeSource, type SourceLifecycleResult } from '../sources/source-lifecycle.js';
 import { buildStatus } from '../status/status.js';
 import {
   colorizeHelp,
@@ -92,9 +98,12 @@ import {
   PROFILE_SKILLS_HELP,
   PROFILE_SKILLS_REMOVE_HELP,
   PROFILE_SOURCES_ADD_HELP,
-  PROFILE_SOURCES_BUILD_HELP,
   PROFILE_SOURCES_HELP,
   PROFILE_SOURCES_REMOVE_HELP,
+  SOURCES_ADD_HELP,
+  SOURCES_BUILD_HELP,
+  SOURCES_HELP,
+  SOURCES_REMOVE_HELP,
   PROFILE_USE_HELP,
   PROJECT_HELP,
   REMOVE_HELP,
@@ -304,6 +313,27 @@ async function runCommand(
     ));
     return EXIT_STATUS.success;
   }
+  if (command.name === 'sources-overview') {
+    const inspection = await inspectGlobalSources(bazframeHome);
+    const referenceIndex = await captureProfileSourceReferenceBulkIndex(bazframeHome);
+    const referenceCounts = new Map<string, number | 'unknown'>();
+    for (const source of inspection.sources) {
+      const key = profileSourceReferenceKey(source.record.provider, source.record.source);
+      referenceCounts.set(
+        key,
+        referenceIndex.diagnostics.length > 0
+          ? 'unknown'
+          : (referenceIndex.profileIdsBySource.get(key)?.length ?? 0)
+      );
+    }
+    writeStdout(formatSourcesOverview(
+      inspection,
+      referenceCounts,
+      referenceIndex.diagnostics,
+      stdoutColors
+    ));
+    return EXIT_STATUS.success;
+  }
   if (command.name === 'profile-sources-overview') {
     const profileId = await readActiveProfile(bazframeHome);
     const profile = await loadProfile(bazframeHome, profileId);
@@ -359,31 +389,26 @@ async function runCommand(
     writeStdout(`${await currentProfile(bazframeHome)}\n`);
     return EXIT_STATUS.success;
   }
-  if (command.name === 'profile-sources-add' || command.name === 'profile-sources-build' || command.name === 'profile-sources-remove') {
+  if (command.name === 'sources-add' || command.name === 'sources-build' || command.name === 'sources-remove') {
     const options = { bazframeHome, environment };
+    const result = command.name === 'sources-add'
+      ? await addSource(options, command.providerId, command.sourceId, command.sourceRoot)
+      : command.name === 'sources-build'
+        ? await buildSource(options, command.providerId, command.sourceId)
+        : await removeSource(options, command.providerId, command.sourceId);
+    writeStdout(formatSourceLifecycleResult(result));
+    return EXIT_STATUS.success;
+  }
+  if (command.name === 'profile-sources-add' || command.name === 'profile-sources-remove') {
+    const options = { bazframeHome };
     const result = command.name === 'profile-sources-add'
       ? command.profileId === undefined
-        ? await addActiveProfileSource(
-            options,
-            command.providerId,
-            command.sourceId,
-            command.sourceRoot
-          )
-        : await addProfileSource(
-            options,
-            command.profileId,
-            command.providerId,
-            command.sourceId,
-            command.sourceRoot
-          )
-      : command.name === 'profile-sources-build'
-        ? command.profileId === undefined
-          ? await buildActiveProfileSource(options, command.providerId, command.sourceId)
-          : await buildProfileSource(options, command.profileId, command.providerId, command.sourceId)
-        : command.profileId === undefined
-          ? await removeActiveProfileSource(options, command.providerId, command.sourceId)
-          : await removeProfileSource(options, command.profileId, command.providerId, command.sourceId);
-    writeStdout(formatSourceMembershipResult(result, command.profileId !== undefined));
+        ? await addActiveProfileSourceReference(options, command.providerId, command.sourceId)
+        : await addProfileSourceReference(options, command.profileId, command.providerId, command.sourceId)
+      : command.profileId === undefined
+        ? await removeActiveProfileSourceReference(options, command.providerId, command.sourceId)
+        : await removeProfileSourceReference(options, command.profileId, command.providerId, command.sourceId);
+    writeStdout(formatSourceReferenceResult(result, command.profileId !== undefined));
     return EXIT_STATUS.success;
   }
   if (command.name === 'add' || command.name === 'remove') {
@@ -694,19 +719,52 @@ function formatProfileSkillsOverview(
   ].join('\n');
 }
 
+function formatSourcesOverview(
+  inspection: { sources: GlobalSourceInspection[]; diagnostics: SourceDiagnostic[] },
+  referenceCounts: ReadonlyMap<string, number | 'unknown'>,
+  referenceDiagnostics: ReadonlyArray<{ profileId: string; diagnostic: { provider: string; source: string; path: string } }>,
+  colors: CliColors
+): string {
+  const sourceDiagnostics = [
+    ...inspection.diagnostics,
+    ...inspection.sources.flatMap((source) => source.diagnostics)
+  ];
+  return [
+    colors.heading('Global sources'),
+    ...(inspection.sources.length === 0 ? [colors.muted('  (none)')] : inspection.sources.map((source) => {
+      const record = source.record;
+      const referenceCount = referenceCounts.get(`${record.provider}/${record.source}`) ?? 'unknown';
+      const health = source.diagnostics.length === 0 && referenceCount !== 'unknown' ? 'ready' : 'failed';
+      return `  - ${record.provider}/${record.source} [${health}] -> ${record.root} (sha256:${record.digest}; root:${record.sourceUnitRoot}; rebuild:${source.rebuildAvailability}; references:${referenceCount}; skills:${source.skills.length})`;
+    })),
+    ...(sourceDiagnostics.length === 0 ? [] : [colors.heading('Source failures:'), ...sourceDiagnostics.map((diagnostic) => colors.warning(`  - ${formatSourceDiagnostic(diagnostic)}`))]),
+    ...(referenceDiagnostics.length === 0 ? [] : [
+      colors.heading('Reference index failures:'),
+      ...referenceDiagnostics.map((item) => colors.warning(`  - ${item.profileId}:${item.diagnostic.path} invalid-reference (${item.diagnostic.provider}/${item.diagnostic.source})`))
+    ]),
+    '',
+    colors.heading('Commands:'),
+    colors.command('  bazframe sources add <provider> <source> <absolute-root>'),
+    colors.command('  bazframe sources build <provider> <source>'),
+    colors.command('  bazframe sources remove <provider> <source>'),
+    ''
+  ].join('\n');
+}
+
 function formatProfileSourcesOverview(
   profileId: string,
   composition: ProfileSourceComposition,
   colors: CliColors
 ): string {
   return [
-    colors.heading('Profile source units'),
+    colors.heading('Profile source references'),
     colors.success(`Active profile: ${profileId}`),
-    colors.heading('Direct source units:'),
+    colors.heading('Referenced sources:'),
     ...(composition.directSourceUnits.length === 0
       ? [colors.muted('  (none)')]
-      : composition.directSourceUnits.map((source) =>
-          `  - ${source.providerId}/${source.sourceId} -> ${source.sourceRoot} (${source.preparationState}; rebuild:${source.rebuildAvailability}${source.schemaVersion === 2 ? `; sha256:${source.snapshotDigest}; root:${source.sourceUnitRoot}` : ''})`)),
+      : composition.directSourceUnits.map((source) => source.snapshotDigest === undefined
+        ? `  - ${source.providerId}/${source.sourceId} (target unavailable)`
+        : `  - ${source.providerId}/${source.sourceId} (sha256:${source.snapshotDigest}; root:${source.sourceUnitRoot})`)),
     colors.heading('Derived effective skills:'),
     ...(composition.derivedSkills.length === 0
       ? [colors.muted('  (none)')]
@@ -719,8 +777,7 @@ function formatProfileSourcesOverview(
           colors.warning(`  - ${formatSourceDiagnostic(diagnostic)}`))),
     '',
     colors.heading('Commands:'),
-    colors.command('  bazframe profile sources add <provider> <source> <absolute-root> [--profile <profile>]'),
-    colors.command('  bazframe profile sources build <provider> <source> [--profile <profile>]'),
+    colors.command('  bazframe profile sources add <provider> <source> [--profile <profile>]'),
     colors.command('  bazframe profile sources remove <provider> <source> [--profile <profile>]'),
     ''
   ].join('\n');
@@ -831,19 +888,24 @@ function formatMembershipResult(
   ].join('\n');
 }
 
-function formatSourceMembershipResult(
-  result: ProfileSourceMembershipResult,
-  explicitlyTargeted: boolean
-): string {
+function formatSourceLifecycleResult(result: SourceLifecycleResult): string {
   return [
-    `Profile source membership: ${result.action}`,
+    `Global source: ${result.action}`,
+    `Source: ${result.provider}/${result.source}`,
+    `Provider root: ${result.root}`,
+    `Snapshot: ${result.digest}`,
+    `Source-unit root: ${result.sourceUnitRoot}`,
+    `Record: ${result.path}`,
+    ''
+  ].join('\n');
+}
+
+function formatSourceReferenceResult(result: ProfileSourceReferenceResult, explicitlyTargeted: boolean): string {
+  return [
+    `Profile source reference: ${result.action}`,
     `${explicitlyTargeted ? 'Profile' : 'Active profile'}: ${result.profileId}`,
-    `Provider: ${result.providerId}`,
-    `Source unit: ${result.sourceId}`,
-    `Provider root: ${result.sourceRoot}`,
-    `Schema: ${result.schemaVersion}`,
-    ...(result.schemaVersion === 2 ? [`Snapshot: ${result.snapshotDigest}`, `Source-unit root: ${result.sourceUnitRoot}`] : []),
-    `Descriptor: ${result.descriptorPath}`,
+    `Source: ${result.provider}/${result.source}`,
+    `Reference: ${result.path}`,
     ''
   ].join('\n');
 }
@@ -895,8 +957,11 @@ function helpFor(topic: HelpTopic): string {
     case 'profile-skills-remove': return PROFILE_SKILLS_REMOVE_HELP;
     case 'profile-sources': return PROFILE_SOURCES_HELP;
     case 'profile-sources-add': return PROFILE_SOURCES_ADD_HELP;
-    case 'profile-sources-build': return PROFILE_SOURCES_BUILD_HELP;
     case 'profile-sources-remove': return PROFILE_SOURCES_REMOVE_HELP;
+    case 'sources': return SOURCES_HELP;
+    case 'sources-add': return SOURCES_ADD_HELP;
+    case 'sources-build': return SOURCES_BUILD_HELP;
+    case 'sources-remove': return SOURCES_REMOVE_HELP;
     case 'skills': return SKILLS_HELP;
     case 'project': return PROJECT_HELP;
     case 'pi': return PI_HELP;

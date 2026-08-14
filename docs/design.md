@@ -2,7 +2,7 @@
 
 > Status: current product source of truth
 
-Bazframe composes Agent Skills-compatible capabilities into profiles, then applies profiles to coding agents. A profile carries personal instructions, flat direct skill memberships, and optional provider-neutral source-unit memberships across working directories. Runtime adapters resolve an available Git-worktree project override, then global policy, then the file-free enabled default.
+Bazframe composes Agent Skills-compatible capabilities into profiles, then applies profiles to coding agents. A profile carries personal instructions, flat direct skill memberships, and optional exact references to global managed sources across working directories. Runtime adapters resolve an available Git-worktree project override, then global policy, then the file-free enabled default.
 
 ## Product direction
 
@@ -24,9 +24,9 @@ The user continues to invoke Pi directly. Absent global state means enabled in b
 
 ## TUI direction
 
-Bazframe's first interactive management UI is a keyboard-first terminal UI with no sidebar, launched explicitly as `bazframe tui`. Its top navigation contains `Profiles`, `Skills`, and `Settings`. The implemented management slice provides guarded profile lifecycle actions, a two-pane selected-profile direct-membership editor, a read-only Skillbook source browser, and structured read-only setup status with corrective actions. It calls typed application services rather than spawning CLI subprocesses, and explicit profile targeting never silently changes the active selection.
+Bazframe's first interactive management UI is a keyboard-first terminal UI with no sidebar, launched explicitly as `bazframe tui`. Its top navigation contains `Profiles`, `Sources`, `Skills`, and `Settings`. The implemented management slice provides guarded profile lifecycle actions, a two-pane selected-profile direct-membership editor, a read-only multi-root skill-source browser and global managed-source view, and structured read-only setup status with corrective actions. It calls typed application services rather than spawning CLI subprocesses, and explicit profile targeting never silently changes the active selection.
 
-[`tui-design.md`](tui-design.md) records the implemented boundary, interaction model, safety requirements, tests, and remaining review gates. Runtime `ink@7.1.1` and `react@19.2.8` are exact pins and load lazily only after CLI dispatch to `bazframe tui`. Deterministic tests cover compact/resize/exit/accessibility behavior and cell-aware bounds; a real macOS pseudo-terminal smoke covers alternate-screen entry/restoration; and the packed-package gate includes an interactive smoke when `script` is available. This does not make the TUI production-ready. The implemented shell keeps active top-tab state separate from a keyboard-focused top-tab cursor and body/pane focus, and reducer-owned per-view viewport offsets preserve stable-row visibility across navigation, refresh, routing, tab changes, and resize. Schema-v1 source identity and broken-root removal remain the implemented CLI baseline; schema-v2 preparation/build mutation has no TUI surface in this slice. Editor launch, settings writes, additional real sources, and provider move/rename remain open. Automated evidence covers macOS direct-PTY/local-tmux and Linux arm64 digest-pinned-base container direct-PTY/tmux/loopback-SSH, with Linux package/tool versions recorded per run. The local installed-tarball tmux gate now also proves actual Ink render-error rejection with exit `1`, diagnostic and terminal restoration/cleanup, plus `80x24`/`60x16` CJK, combining-mark, emoji-ZWJ, ANSI-SGR, and long-unbroken-path cell bounds. Windows Terminal, representative remote SSH, terminal/font/locale ambiguous-width differences, and manual assistive-technology evidence remain open.
+[`tui-design.md`](tui-design.md) records the implemented boundary, interaction model, safety requirements, tests, and remaining review gates. Runtime `ink@7.1.1` and `react@19.2.8` are exact pins and load lazily only after CLI dispatch to `bazframe tui`. Deterministic tests cover compact/resize/exit/accessibility behavior and cell-aware bounds; a real macOS pseudo-terminal smoke covers alternate-screen entry/restoration; and the packed-package gate includes an interactive smoke when `script` is available. This does not make the TUI production-ready. The implemented shell keeps active top-tab state separate from a keyboard-focused top-tab cursor and body/pane focus, and reducer-owned per-view viewport offsets preserve stable-row visibility across navigation, refresh, routing, tab changes, and resize. Managed source and profile-reference mutations remain CLI-only; the TUI reads global sources, profile references, and activated snapshot skills without running builds. Editor launch, settings writes, additional real sources, and provider move/rename remain open. Automated evidence covers macOS direct-PTY/local-tmux and Linux arm64 digest-pinned-base container direct-PTY/tmux/loopback-SSH, with Linux package/tool versions recorded per run. The local installed-tarball tmux gate now also proves actual Ink render-error rejection with exit `1`, diagnostic and terminal restoration/cleanup, plus `80x24`/`60x16` CJK, combining-mark, emoji-ZWJ, ANSI-SGR, and long-unbroken-path cell bounds. Windows Terminal, representative remote SSH, terminal/font/locale ambiguous-width differences, and manual assistive-technology evidence remain open.
 
 ## Core objects
 
@@ -40,7 +40,7 @@ Skill packs are deferred. Bazframe will not introduce pack behavior unless a lat
 
 ### Profile
 
-A profile combines personal instructions, flat direct skill memberships, and zero or more direct source-unit memberships. Bazframe manages profile definitions, membership, selection, and application to supported coding agents.
+A profile combines personal instructions, flat direct skill memberships, and zero or more exact references to global managed sources. Bazframe manages profile definitions, membership, selection, and application to supported coding agents. Global source records—not profiles—own provider roots, activated snapshot digests, and source-unit roots.
 
 The profile layout is:
 
@@ -49,12 +49,12 @@ profiles/<id>/
 ├── AGENTS.md
 ├── skills/
 │   └── <skill>/SKILL.md
-└── source-units/                         # optional; absence means zero memberships
+└── sources/                              # optional global-source references
     └── <providerId>/
         └── <sourceId>.json
 ```
 
-The profile-local `AGENTS.md` contains personal coding-agent instructions. Each materialized flat skill is an Agent Skills-compatible directory, including any supporting files used by its `SKILL.md`. Source-unit descriptors identify provider inputs and Bazframe-owned immutable snapshots; effective child skills are derived from the activated snapshot rather than the mutable provider input.
+The profile-local `AGENTS.md` contains personal coding-agent instructions. Each materialized flat skill is an Agent Skills-compatible directory, including any supporting files used by its `SKILL.md`. Each profile source file contains only exact provider/source identity. The matching global source record owns the provider input root, activated snapshot digest, and snapshot-relative source-unit root; effective child skills are derived from that activated snapshot rather than mutable provider input.
 
 The first slice has one global active profile selected by `bazframe profile use <profile>`; `bazframe use <profile>` remains a compatibility alias. `profile add` creates a physical profile directory containing a zero-byte physical `AGENTS.md` and an empty physical `skills/` directory without activating it. `profile list` prints valid physical profile IDs and `profile current` prints only the selected ID for scripts. Bare `bazframe profile` and `bazframe profiles` instead render the human profile overview: valid profiles in lexical order, an explicit active marker, current-selection state, and the available profile commands.
 
@@ -89,7 +89,7 @@ The current layered effective-harness composition contract treats runtime-native
 
 ```text
 ActiveSelection  -> ProfileId
-ProfileId        -> Profile(instructions, flat skills, source units)
+ProfileId        -> Profile(instructions, flat skills, global source references)
 GlobalPolicy     -> enabled | disabled
 CanonicalGitRoot -> OptionalOverride(enabled | disabled)
 OptionalOverride
@@ -107,11 +107,11 @@ OptionalOverride
 - A canonical Git root maps to at most one enabled/disabled override or legacy inherit record.
 - Git-worktree project override wins over global policy; effective disable bypasses profile loading.
 - The effective harness is resolved data; its sources retain their user, Bazframe, repository, or runtime ownership.
-- A schema-v2 source membership resolves only its activated Bazframe snapshot; mutable provider input is preparation-time state, not runtime state.
+- A profile source reference resolves only the global source object's activated Bazframe snapshot; mutable provider input is preparation-time state, not runtime state.
 - Build execution requires explicit add/build command intent and never occurs while resolving the effective harness.
 - Adapter-specific projection, such as a Pi skill alias, belongs to the effective harness cache rather than the source profile.
 
-This model makes the profile the portable stored object and the effective harness the runtime composition of that profile with project-over-global policy.
+This model makes profiles and global managed sources separate portable stored objects, and the effective harness the runtime composition of the active profile's direct skills and source references with project-over-global policy.
 
 ## Pi context behavior
 
@@ -147,7 +147,7 @@ Existing physical profile skill directories remain readable for compatibility bu
 
 Profile skills enter Pi through `resources_discover`.
 
-Profile-set duplicates are resolved before runtime projection and never receive aliases. Duplicate Pi-loaded names among flat memberships invalidate the complete profile. A prospective source add/build that introduces a duplicate is rejected before activation. For already-active source memberships, a flat/derived conflict preserves the flat skill and atomically withholds the complete derived source unit; a source/source conflict atomically withholds every involved source unit; unrelated valid flat skills and source units remain effective. The exact per-definition `duplicate-name` records and within-source behavior are specified in the snapshot discovery contract below. Bazframe does not infer semantic or dependency incompatibility among differently named skills.
+Profile-set duplicates are resolved before runtime projection and never receive aliases. Duplicate Pi-loaded names among flat memberships invalidate the complete profile. A prospective source add/build that introduces a duplicate is rejected before activation. For already-active source references, a flat/derived conflict preserves the flat skill and atomically withholds the complete derived source unit; a source/source conflict atomically withholds every involved source unit; unrelated valid flat skills and source units remain effective. The exact per-definition `duplicate-name` records and within-source behavior are specified in the snapshot discovery contract below. Bazframe does not infer semantic or dependency incompatibility among differently named skills.
 
 At the Pi boundary, any pre-existing Pi command with `source === "skill"` occupies its `skill:<name>` command; Bazframe does not claim finer ownership provenance. A profile skill keeps its original name when it is free. On a collision, the pre-existing Pi skill-command occupant keeps that name and Bazframe tries exactly one deterministic profile alias. The ordinary alias is:
 
@@ -161,40 +161,52 @@ The alias is used only when its generated name is free from pre-existing Pi skil
 
 Only Pi 0.82.x has an implemented and evidenced adapter contract. A future adapter must define and test its instruction order and provenance, loader compatibility, runtime command namespace, duplicate behavior, and collision projection. It may expose both definitions under adapter-specific deterministic reported names or fail visibly, but it cannot silently drop or overwrite either definition, mutate the profile skill's identity, or persist a runtime alias into the portable profile.
 
-## Provider-neutral source-unit preparation and composition
+## Global managed sources and profile composition
 
-[Stage 1 and Stage 2](research/provider-neutral-nested-source-unit-composition.md) demonstrated bounded composition from externally prepared roots; those historical experiments remain evidence for discovery and Pi projection, not a permanent ownership constraint. The product now also gives Bazframe an explicit preparation boundary: a selected provider input may declare one build, Bazframe runs that build only when asked, snapshots the resulting artifact into immutable content-addressed storage, and projects skills from the activated snapshot. Selecting a source consents to its declared build running with ordinary user-process authority. This is the same fundamental code-execution trust already present when a user invokes a skill; it is not a claim of sandboxing.
+Managed sources are top-level Bazframe objects. A source owns provider input identity, one explicit build declaration, and one activated immutable content-addressed snapshot. Profiles do not own or duplicate source objects; they contain references to global sources and compose the referenced sources' activated skills with their direct flat skills.
 
-Build execution is never implicit in inspection or runtime loading. It occurs only during `profile sources add` and the explicit `profile sources build` command, never during `status`, profile/source overview, Pi startup, `/bazframe reload`, or child-skill invocation. Acquisition of the provider input, publication, credentials, mutable runtime data, and child-command execution remain outside this slice.
+Build execution is explicit only. It occurs during `sources add` and `sources build`, never during overview, status, TUI load/refresh, Pi startup, `/bazframe reload`, or skill invocation. Providers retain acquisition, credentials, mutable runtime data, publication, dependencies, and child-command behavior. Bazframe owns declared build execution, snapshot publication and verification, activation, references, and composition validation. Selecting or rebuilding a source consents to the declared build running with ordinary user-process authority; Bazframe provides no sandbox.
 
-### Direct membership and persistence
+### Persistence
 
-A profile may have zero or many direct source-unit memberships in the namespace `profiles/<profile>/source-units/`, which is intentionally distinct from flat `profiles/<profile>/skills/`. Existing profiles need no migration: an absent `source-units/` directory means zero source-unit memberships, and all flat Skillbook behavior remains unchanged.
-
-Each membership is one Bazframe-owned JSON descriptor at:
+A global source object is stored at:
 
 ```text
-profiles/<profile>/source-units/<providerId>/<sourceId>.json
+<BAZFRAME_HOME>/sources/<provider>/<source>.json
 ```
 
-The implemented schema-v1 descriptor records a live `sourceRoot`. It remains valid only for removal and migration: runtime reporting marks it `build-required`, and `profile sources build` upgrades it through preparation rather than projecting its live bytes.
-
-Schema version 2 has exactly these fields:
+Its exact schema-v1 object is:
 
 ```json
 {
-  "schemaVersion": 2,
-  "providerId": "provider-id",
-  "sourceId": "source-id",
-  "sourceRoot": "/canonical/absolute/provider-input",
-  "snapshotDigest": "<lowercase-sha256>",
+  "schemaVersion": 1,
+  "provider": "provider-id",
+  "source": "source-id",
+  "root": "/canonical/absolute/provider-input",
+  "digest": "<lowercase-sha256>",
   "sourceUnitRoot": "source-unit"
 }
 ```
 
-`providerId` and `sourceId` are each 1–64 lowercase ASCII letters or digits separated by single hyphens, and they must match the descriptor path. `sourceRoot` is the canonical physical provider input used only by add, explicit rebuild, and shallow rebuild-availability reporting. `snapshotDigest` is exactly 64 lowercase hexadecimal characters and selects Bazframe's immutable content-addressed artifact snapshot. `sourceUnitRoot` selects the directory within that snapshot's `artifact/` tree from which runtime discovery begins. Missing provider input does not invalidate an existing snapshot; it only prevents a later build.
+A profile reference is stored at:
 
-A provider input may contain one physical regular non-link `bazframe-source.json` at its root:
+```text
+<BAZFRAME_HOME>/profiles/<profile>/sources/<provider>/<source>.json
+```
+
+Its exact schema-v1 object is:
+
+```json
+{
+  "schemaVersion": 1,
+  "provider": "provider-id",
+  "source": "source-id"
+}
+```
+
+Both namespaces use safe 1–64 character lowercase hyphenated IDs, exact fields, physical regular non-link files, UTF-8, identity revalidation, and deterministic lexical inspection. Existing pre-alpha `profiles/<profile>/source-units/` content is inert ordinary profile content: source code never reads, migrates, or falls back to it.
+
+A provider input may contain the exact physical `bazframe-source.json` build declaration already specified by the source-build manifest contract:
 
 ```json
 {
@@ -205,79 +217,40 @@ A provider input may contain one physical regular non-link `bazframe-source.json
 }
 ```
 
-The build manifest is absent only when opening it fails with `ENOENT`; any present entry must be the physical regular non-link file above. The manifest is exact and contains no extra fields. `build` is a nonempty literal argv array of nonempty strings, executed directly without a shell with the provider input as CWD. Build-manifest `artifactRoot`, build-manifest `sourceUnitRoot`, and schema-v2 descriptor `sourceUnitRoot` use the same grammar: a value is either the literal `.` root sentinel or `/`-separated nonempty segments; all other `.` or `..` segments, empty segments, backslashes, POSIX absolute paths, and Windows drive, UNC, or device absolute forms are rejected. After the build, Bazframe resolves `artifactRoot` through physical non-link directory components contained by the provider input, then resolves the build-manifest `sourceUnitRoot` the same way within that artifact root. Runtime repeats physical non-link component and containment validation for the descriptor `sourceUnitRoot` beneath the activated snapshot's `artifact/` directory. Bazframe runs the command with the ordinary user process environment and authority. If the build manifest is absent, the provider input is already prepared: Bazframe uses `artifactRoot: "."` and `sourceUnitRoot: "."` and still snapshots it before activation.
+The build argv is executed directly without a shell with the provider input as CWD. An absent manifest means already-prepared input and still produces a snapshot. Portable relative roots reject path escape, absolute forms, backslashes, empty segments, and `.`/`..` segments except the literal `.` root sentinel.
 
-Bazframe stages under a unique sibling of the final digest path, copies the complete artifact into staged `<snapshot>/artifact/`, and accepts only physical directories and regular files; links and special entries fail preparation, while empty directories are retained. It writes the snapshot identity to `<snapshot>/manifest.json`. The manifest bytes are UTF-8 without a BOM and consist of one JSON object on one line followed by exactly one LF, with no insignificant whitespace. The root object's fixed key order is `schemaVersion`, then `entries`, with `schemaVersion: 1`. `entries` includes the root path `.` and every descendant directory, including empty directories, and sorts by `path` in lexical Unicode code-point order. Snapshot entry paths have their own physical-path grammar: `.` or `/`-joined nonempty physical basename segments with no NUL and no literal empty, `.`, or `..` segment. They are not provider build-relative paths, so legal POSIX basenames containing backslash, colon, or drive-like text remain representable. Each entry has one of these exact fixed-key forms: a directory is `{"path":string,"type":"directory"}`; a regular file is `{"path":string,"type":"file","executable":boolean,"sha256":64-lowercase-hex}`. A file's `executable` value records whether any executable bit was set in the prepared input on a platform that exposes executable mode bits, and is `false` otherwise. The snapshot digest is the lowercase hexadecimal SHA-256 of the exact manifest bytes.
+Snapshot publication retains the exact canonical manifest and immutable storage contract at `<BAZFRAME_HOME>/source-snapshots/sha256/<digest>/{manifest.json,artifact/}`. Complete artifact bytes, empty directories, executable identity, containment, physical entry types, stored manifest bytes, digest, and immutable modes are verified before use. Failed activation may leave an unreferenced valid snapshot; garbage collection is deferred.
 
-The exact published layout is `<BAZFRAME_HOME>/source-snapshots/sha256/<digest>/{manifest.json,artifact/}`. Where the platform supports modes, published directories are normalized to non-writable and searchable, executable files to non-writable and executable, and other files to non-writable. Runtime verifies the actual artifact tree against the stored manifest before using it. An existing digest directory is reused only after its stored manifest and complete artifact verify exactly against the candidate manifest; any mismatch is snapshot corruption and a build failure, not permission to repair or replace the active descriptor. Bazframe validates the candidate source-unit structure and Pi definitions, then evaluates prospective full-profile composition using the candidate in place of the current membership. Candidate structural or Pi failure, or any duplicate involving the candidate, rejects activation; unrelated failures already present in other source units do not. Cross-machine output and digest identity are not required: each digest identifies the exact locally produced artifact. Snapshot publication and descriptor replacement are atomic from the profile's perspective. A failed build, copy, validation, publication, or prospective composition leaves the prior descriptor and snapshot active; an initial failed add creates neither active membership nor a published partial snapshot.
+### Commands and transactions
 
-There is no global source registry in this slice. Content-addressed snapshot storage may be shared by digest, but source identity and selection remain profile-local. Repeating a descriptor in another profile is sufficient. Snapshot garbage collection is deferred.
-
-The canonical commands are:
+The only managed-source commands are:
 
 ```text
+bazframe sources
+bazframe sources add <provider> <source> <absolute-root>
+bazframe sources build <provider> <source>
+bazframe sources remove <provider> <source>
+
 bazframe profile sources
-bazframe profile sources add <provider> <source> <absolute-root> [--profile <profile>]
-bazframe profile sources build <provider> <source> [--profile <profile>]
+bazframe profile sources add <provider> <source> [--profile <profile>]
 bazframe profile sources remove <provider> <source> [--profile <profile>]
 ```
 
-The overview lists descriptors in lexical `providerId`, then `sourceId` order and distinguishes direct membership, snapshot digest, preparation state, and derived children. Add, build, and remove follow the existing explicit-profile rule. There are no top-level aliases and no TUI source mutation in this slice.
+There is no singular `source` alias and no legacy profile-local build/add-root command.
 
-Add canonicalizes the provider input, obtains build consent from the explicit source-selection command, prepares and snapshots it, and writes a new schema-v2 descriptor only after validation. Re-adding the same provider/source identity and canonical input rebuilds only when explicitly requested through `profile sources build`; otherwise an exact active schema-v2 membership is a successful no-op. A valid schema-v1 descriptor with the same identity and canonical input is preserved and refused with direction to run `profile sources build`; add never migrates it without executing the build. An occupied descriptor path that is symlinked, non-regular, malformed, has mismatched IDs, or names a different provider input is preserved and refused.
+Global add explicitly builds, validates, snapshots, and activates a source without requiring a profile. Re-adding an exact source/root is a no-op. Global build prepares a candidate and validates it against every profile that references that identity. If the candidate would introduce a structural, Pi-loader, or duplicate conflict in any dependent profile, activation is rejected for everyone and the previous global record/digest remains active. Unrelated pre-existing failures do not alone block activation, but malformed or raced reference namespaces fail closed because Bazframe cannot prove the complete dependent set.
 
-Build uses the descriptor's canonical provider input and current manifest, then atomically changes only that membership to the newly validated snapshot. It is the sole command that makes later provider-byte changes visible after add. It also upgrades a valid schema-v1 descriptor. Status, overview, startup, reload, and skill execution never trigger or repair a build.
+Profile reference add validates the global object, snapshot, and prospective profile without building. Reference remove deletes only the named reference and does not require the global object or provider input. Neither changes active profile selection.
 
-Remove strictly validates and removes either a schema-v1 or schema-v2 descriptor without resolving the provider input or snapshot. It prunes only empty Bazframe-owned descriptor directories and deletes neither provider bytes nor snapshots. Profile duplicate and rename copy or move descriptor bytes; profile removal may delete descriptors but not provider inputs or snapshot storage. Flat Skillbook membership and lifecycle behavior remain unchanged.
+Global source removal is refused while any profile references it and reports the sorted dependent profiles. Once unreferenced, removal unlinks only the global JSON object; provider input, provider namespace directory, and immutable snapshots remain untouched. All source and reference writers take the global state lock; a one-profile reference write then takes that profile's source lock.
 
-### Snapshot discovery contract
+### Runtime discovery and conflicts
 
-Runtime resolution is read-only against activated snapshots. Before parsing descriptor bytes or resolving any snapshot, it validates the complete descriptor namespace. `source-units` must be absent or a physical directory. Each immediate entry beneath it must be a physical directory whose basename is a safe `providerId`; each immediate entry beneath a valid provider directory must be a physical regular file named exactly `<safe-sourceId>.json`. No other namespace entry is allowed. These checks use link-aware metadata: a symlink is invalid even when its target has the required type, and an invalid provider entry is never traversed.
+Runtime reads only references from the active profile, joins them to global records, verifies activated snapshots, and derives children from snapshot-relative roots. Unreferenced global sources never enter a profile or Pi composition and never affect active status readiness. A valid reference with a missing/malformed global target reports `invalid-source`; a malformed reference namespace reports `invalid-reference` and withholds managed sources for that profile while preserving flat skills.
 
-Namespace validation is a lexical two-pass operation over the `source-units` directory and the immediate children of physical, safe provider directories. It reports every malformed entry that can be reached without following a symlink. Every such record has exactly `{ category: "invalid-descriptor", providerId, sourceId, path }` and a namespace-relative `/`-separated `path`: `.` for the `source-units` entry itself, the exact provider basename for a provider entry, or `<provider-basename>/<child-basename>` for a child entry. The stable placeholder IDs are `<unknown-provider>` and `<unknown-source>`. `providerId` is the basename only when that basename is safe; otherwise it is `<unknown-provider>`. `sourceId` is the filename stem only when the provider ID is known and the child name is exactly `<safe-sourceId>.json`; otherwise it is `<unknown-source>`. Thus an invalid `source-units` entry uses both placeholders, an invalid provider entry always uses the source placeholder, and an unsafe child name uses the known provider ID plus the source placeholder. Bazframe does not parse descriptors or resolve snapshots if namespace validation emits a record. This malformed-namespace state withholds all source-unit composition for the profile while preserving valid flat skills. Once the namespace shape is valid, malformed descriptor bytes or fields emit the same exact record shape with known IDs and `path: <providerId>/<sourceId>.json`; they remain failures of only their identified source unit.
+Traversal retains depth 8, 256 visited entries, and 64 effective children per source; lexical DFS; skipped `.git`/`node_modules`; no-follow containment; source-atomic failures; Pi 0.82-authoritative Agent Skills loading; exact diagnostic ordering; and profile-wide duplicate semantics. Flat/source conflicts preserve flat skills and withhold the derived unit. Source/source conflicts withhold every involved source. Pi command collisions remain adapter-specific and use the existing one deterministic alias attempt.
 
-Portable Node does not expose `openat` or directory enumeration directly from a `FileHandle`. Bazframe therefore opens each namespace directory with no-follow/directory flags, keeps that handle open, and compares physical device/inode identity for the handle and pathname before and after pathname-based enumeration. Changed or raced identity becomes `invalid-descriptor` and withholds composition. A non-cooperating process can still replace and restore the same pathname wholly inside the irreducible pathname-based `readdir` window; excluding that race requires a native handle-relative enumeration API.
-
-For each valid schema-v2 descriptor, the resolver opens the digest-addressed snapshot, verifies its stored content identity, resolves `sourceUnitRoot` within it, and traverses that physical root depth-first by lexical relative path. A missing, mutable, or digest-mismatched snapshot fails closed; the provider input is never consulted during runtime resolution. For every discovered physical definition directory, Bazframe calls the Pi 0.82 Agent Skills loader, requires exactly one returned skill whose base directory and definition path equal that discovered snapshot child, and uses Pi's loaded name. This accepts Pi-valid YAML metadata forms and uses Pi's directory-name fallback when `name` is omitted. Every effective record preserves that Pi-loaded name, physical snapshot child base directory, and physical `SKILL.md` definition path, plus provider/source/relative-path identity for diagnostics. Bazframe never flattens a child, rewrites its metadata, asks Pi to scan a grouping root, or applies an additional YAML/frontmatter parser.
-
-A source root containing a regular `SKILL.md` is a terminal standalone skill. It yields that root definition only; any descendant `SKILL.md` makes the source unit invalid as `mixed-root`. A root without `SKILL.md` is a grouping root and exposes every valid descendant Agent Skill. Zero valid descendants is allowed. Child subsets, manifests, and pack semantics remain deferred.
-
-Traversal has these first-slice compatibility bounds:
-
-- a maximum directory depth of 8 below the source root, where the root is depth 0 and files immediately inside a depth-8 directory may be inspected;
-- at most 256 visited entries below the root; and
-- at most 64 effective children per source unit.
-
-These exact values were explicitly approved by the user and tested in Stage 1. They are now part of the first-slice compatibility contract, not defaults inferred from examples or agent judgment. The root itself is not an entry. After 256 counted entries, the next encountered entry fails the source; after 64 effective children, the next child fails it. A directory encountered at depth 9 fails it.
-
-Exact-name `.git` and `node_modules` directory or symlink entries are skipped before counting, are not counted, and are never inspected or followed; this includes every symlink beneath a skipped root because traversal never enters that root. The user explicitly selected this production pruning rule in this continuation because VCS and dependency internals are not direct skill definitions. It is a product decision, not Stage 2 evidence: Stage 2 established discovery before `node_modules` preparation and did not rerun discovery afterward, so it did not measure this pruning behavior. Other encountered internal symlinks are rejected without following them. All other entries count once when encountered. Ordinary files and directories—including names such as `shared/` and `data/`—remain provider resources with no universal Bazframe semantics. Unsupported filesystem entries, canonical-containment failures, and filesystem races fail the source rather than broadening traversal.
-
-Failures are atomic per source unit. A schema-v1 descriptor awaiting build, missing or broken snapshot, malformed descendant, mixed root, internal symlink, exceeded depth/entry/child bound, duplicate profile-declared name, unexpected I/O, or Pi-loader failure withholds every derived child from that source unit. `invalid-descriptor` records use the namespace-relative paths defined above. Every other diagnostic record contains `category`, `providerId`, `sourceId`, and a snapshot source-root-relative `/`-separated `path` (`.` for the root and `SKILL.md` for a standalone definition); `build-required` and root-level missing, corrupt, or broken snapshot records always use `path: "."`. `limit-exceeded` also contains `limit: depth | entries | skills`. The stable categories add `build-required` and `broken-snapshot` to `invalid-descriptor`, `limit-exceeded`, `internal-symlink`, `unsupported-entry`, `mixed-root`, `invalid-definition`, `duplicate-name`, `pi-loader`, and `io-error`.
-
-Traversal failures use encounter order. For each lexical entry, exact skipped internal names are handled first; otherwise the entry is counted, then depth, symlink, filesystem type, and definition checks occur in that order. Root validation precedes descendants; finding a descendant definition under a root definition yields `mixed-root` without projecting the root. Profile-wide duplicate analysis occurs only after structural and Pi-loader validation of all candidate sources, so it can mark every source involved rather than whichever one happened to be visited later. Reported diagnostics sort by provider ID, source ID, path, and category. Multiple `pi-loader` records with the same keys then sort by `diagnosticIndex` and `message`. Other valid source units and existing flat skills remain available, so the unit—not provider content or the complete profile—is the ordinary source failure boundary; the malformed descriptor-namespace rule above is the sole profile-wide source-composition exception.
-
-Pi-loader normalization retains every Pi diagnostic rather than aggregating it. For each rejected child definition, Bazframe emits one record per Pi diagnostic with exactly `{ category: "pi-loader", providerId, sourceId, path, diagnosticIndex, message }`: `path` is that child's source-root-relative definition path, `diagnosticIndex` is the zero-based index in Pi's returned diagnostic list, and `message` is Pi's reported message string unchanged. Records for that definition order by `diagnosticIndex`, then `message`. If Pi rejects a definition without returning a diagnostic, Bazframe emits the single deterministic record `{ category: "pi-loader", providerId, sourceId, path, diagnosticIndex: 0, message: "Pi loader rejected definition without a diagnostic" }`. Any Pi-loader record withholds the source unit.
-
-Pi-loaded effective names must be unique across the complete Bazframe profile set before Pi command-namespace collision projection. Discovery first retains valid flat direct skills, then evaluates every source unit and builds one profile-name index. Each `duplicate-name` record has exactly `{ category: "duplicate-name", providerId, sourceId, path, name }`, where `path` is the conflicting derived definition's source-root-relative `SKILL.md` path and `name` is its Pi-loaded effective name. A within-source duplicate emits one record at every conflicting definition path and withholds that unit. A cross-source duplicate emits one record at every conflicting definition path in every involved source unit and withholds every involved unit. A flat/derived conflict emits one record only for each conflicting derived definition path, withholds its source unit, and preserves the flat membership; it never emits a synthetic flat-source record. A derived definition receives only one duplicate record for its name and path even when more than one other definition has that name. These complete-set outcomes do not depend on traversal arrival order.
-
-A valid derived child that collides only with a pre-existing Pi skill command is not a profile duplicate: it enters the existing Pi command-namespace collision pipeline and receives the deterministic alias only when that alias is free. The resulting alias points to the derived child's physical definition and base directory within the active snapshot. A collision on the generated alias is a visible runtime projection error; Bazframe does not replace the occupant or generate a second alias. Other Pi projection errors likewise remain visible runtime errors.
-
-### Runtime reporting and acceptance behavior
-
-`bazframe status` and `/bazframe info` distinguish:
-
-- flat direct skills from `profiles/<profile>/skills/`;
-- direct source units from descriptor files, including schema, active snapshot digest, and `ready | build-required | failed` preparation state;
-- rebuild availability as a separate `available | unavailable` observation; and
-- derived effective skills, including their provider/source/relative-path origin.
-
-Alias reporting keeps static cache inspection and live runtime mappings distinct. `bazframe status` performs no runtime namespace discovery and reports only the count of physical cached Pi alias files, which may be stale or inert. `/bazframe info` reports live `original -> alias` mappings only after those alias commands appear in Pi's current command set. A schema-v1 membership reports the corrective `profile sources build` command. A failed or missing snapshot is shown with its scoped diagnostic and contributes no derived children. Reporting may only shallowly check that the provider input still resolves to the stored canonical physical directory; it never traverses that input, reads its build manifest, or executes a build. A missing or retargeted provider input makes rebuild unavailable but, when the active snapshot remains valid, is informational and does not make status require attention or hide valid children. `build-required` and broken-snapshot states do require attention. With no `source-units/` directory, status, runtime projection, flat-skill ordering, and collision behavior remain the current flat behavior apart from the explicit zero source-unit/derived counts.
-
-The initial runtime compatibility claim remains Pi 0.82.x. Preparation acceptance requires fixtures for manifest absence and exact manifest validation; literal argv execution; ordinary environment/CWD behavior; add-time build and snapshot; explicit rebuild after provider changes; provider changes remaining invisible before rebuild; schema-v1 `build-required`, upgrade, and removal; initial and replacement build failure; immutable digest-addressed storage; atomic descriptor activation and rollback; missing provider input with a usable active snapshot; no build during status, overview, Pi startup, reload, or child execution; and content validation before activation. Tests assert the produced local digest and bytes but do not require different machines to produce the same snapshot.
-
-Composition acceptance retains the implemented fixtures for zero memberships; malformed descriptor namespaces; profile duplicate/rename/remove; standalone, zero-child, nested, skipped-internal, symlink, mixed-root, invalid-definition, boundary and over-boundary discovery; duplicate names; multi-diagnostic Pi-loader normalization; snapshot-relative physical bases delivered individually to Pi; pre-existing Pi skill-command collision aliases; status and `/bazframe info` separation; and flat Skillbook regressions. Historical Stage 1 and Stage 2 provider-preservation manifests remain evidence for those experiments, not a requirement that add-time provider build execution leave its input unchanged.
-
-Bazframe still does not acquire, publish, or remove provider inputs; run child skill commands; own credentials or mutable runtime data; or supervise skill processes. It now owns declared build execution, prepared-artifact snapshotting, validation, activation, and rebuild for selected sources.
+`bazframe sources` reports every global source, including unreferenced health, root, digest, source-unit root, rebuild availability, derived children/failures, and reference count. `bazframe profile sources`, `bazframe status`, and `/bazframe info` report active-profile references, effective derived children, and scoped failures. Active status corrective actions use `bazframe sources build <provider> <source>`; unreferenced source failures do not require active-runtime attention.
 
 ## Ownership
 
@@ -286,7 +259,7 @@ Bazframe still does not acquire, publish, or remove provider inputs; run child s
 | User | profile content and instructions, source-provider choices, explicit selection/build consent, and provider inputs; `profile remove --force` authorizes Bazframe to delete only the named non-active physical profile content |
 | Skillbook | flat skill acquisition, library copies, versioning, updating, publication, deletion, lockfile, and Agent Skills-compatible source directories |
 | Other source providers | provider input bytes, acquisition, versioning, updates, dependencies, build declaration, publication, deletion, mutable runtime data, credentials, and child-command behavior |
-| Bazframe | profile lifecycle operations, flat direct membership links, source-unit descriptors, declared build execution, prepared-artifact staging, immutable content-addressed snapshots, atomic activation, snapshot validation and child derivation, profile selection and resolution, runtime projection, active-profile state, global policy, project overrides, adapter manifest, installed adapter artifact, diagnostics, and generated alias cache |
+| Bazframe | profile lifecycle operations, flat direct membership links, global source objects, profile source references, declared build execution, prepared-artifact staging, immutable content-addressed snapshots, all-dependent atomic activation, referenced-delete refusal, snapshot validation and child derivation, profile selection and resolution, runtime projection, active-profile state, global policy, project overrides, adapter manifest, installed adapter artifact, diagnostics, and generated alias cache |
 | Repository | worktree files and project instructions |
 | Pi | settings, trust decisions, tools, models, extensions, packages, prompts, themes, system-prompt files, native skills, and execution |
 
@@ -308,9 +281,12 @@ bazframe profile current
 bazframe profile skills
 bazframe profile skills add <skill> [--profile <profile>]
 bazframe profile skills remove <skill> [--profile <profile>]
+bazframe sources
+bazframe sources add <provider> <source> <absolute-root>
+bazframe sources build <provider> <source>
+bazframe sources remove <provider> <source>
 bazframe profile sources
-bazframe profile sources add <provider> <source> <absolute-root> [--profile <profile>]
-bazframe profile sources build <provider> <source> [--profile <profile>]
+bazframe profile sources add <provider> <source> [--profile <profile>]
 bazframe profile sources remove <provider> <source> [--profile <profile>]
 
 bazframe tui
@@ -331,13 +307,13 @@ Bare singular and plural resources produce human overviews. Scoped verbs mutate 
 
 CLI color is presentation-only: it is enabled automatically for terminal streams, disabled for pipes and redirects, disabled when `NO_COLOR` is present, and explicitly enabled by nonzero `FORCE_COLOR` only when `NO_COLOR` is absent. Headings, active/current state, warnings, errors, and command hints retain text and symbols that remain understandable without color.
 
-Adapter installation is explicit and orthogonal to global/project policy. Global and project disable operations require neither adapter nor profile. Global enable validates runtime setup before removing disabled state. Project enable validates runtime setup because it makes the current worktree effective-enabled, including when it overrides global disable. Profile skill add/remove mutate only flat direct membership in the active or explicitly targeted profile. Profile source add/build prepare and activate Bazframe-owned snapshots; source remove deletes only the descriptor. Source-unit mutation has no top-level compatibility aliases or TUI action in this slice.
+Adapter installation is explicit and orthogonal to global/project policy. Global and project disable operations require neither adapter nor profile. Global enable validates runtime setup before removing disabled state. Project enable validates runtime setup because it makes the current worktree effective-enabled, including when it overrides global disable. Profile skill add/remove mutate only flat direct membership in the active or explicitly targeted profile. Global source add/build explicitly prepare and activate snapshots; profile source add/remove change references only. Managed-source mutation has no singular alias or TUI action.
 
 For adapter installation, `--force` repairs a drifted artifact only when a valid Bazframe ownership manifest identifies the destination. For `profile remove`, `--force` separately authorizes deletion of all content under the named non-active physical profile; it never extends authority to symlink targets.
 
 Inside Pi, the adapter registers exactly one namespaced command: `/bazframe info` or `/bazframe reload`. `/bazframe reload` awaits Pi's reload operation, which reloads extensions, policy, profiles, skills, and context. Bare, unknown, or extra arguments show `Usage: /bazframe info | /bazframe reload` without reloading.
 
-`/bazframe info` remains compact. It reports the effective profile (or `(none)`); effective context entries labeled `(pi)` or `(bazframe)` by supplier; separate lexical lines for flat direct skills, direct source units, and source-derived effective skills; effective Pi skill-command names as one deduplicated lexical comma-separated list (or `(none)`); source-scoped failures when present; and deterministic live `original -> alias` mappings only when the projected alias commands are present in Pi's current command set. Pi context retains `contextFiles` order. With an active profile whose flat state is valid, Bazframe appends the profile instructions entry; when Pi reports no context it first reports the restored global context when present. A failed source unit is reported and omitted atomically without hiding the otherwise effective profile. Disabled, unresolved, or flat-profile-error states do not report an effective profile or Bazframe context.
+`/bazframe info` remains compact. It reports the effective profile (or `(none)`); effective context entries labeled `(pi)` or `(bazframe)` by supplier; separate lexical lines for flat direct skills, profile source references, and source-derived effective skills; effective Pi skill-command names as one deduplicated lexical comma-separated list (or `(none)`); source-scoped failures when present; and deterministic live `original -> alias` mappings only when the projected alias commands are present in Pi's current command set. Pi context retains `contextFiles` order. With an active profile whose flat state is valid, Bazframe appends the profile instructions entry; when Pi reports no context it first reports the restored global context when present. A failed source unit is reported and omitted atomically without hiding the otherwise effective profile. Disabled, unresolved, or flat-profile-error states do not report an effective profile or Bazframe context.
 
 ## Safety and diagnostics
 
@@ -345,21 +321,21 @@ Bazframe-managed writes use validated external paths, per-resource locks, mode-r
 
 A default-enabled session validates flat profile state as before and reports actionable errors in both Git and non-Git directories. Source-unit errors are additionally reported at their atomic unit boundary: a failed source contributes no children, while valid flat skills and other valid sources remain available. An effective-disabled session retains native Pi behavior.
 
-`bazframe status` reads and reports adapter ownership, drift, current project state and effective behavior, active-profile validity when required, flat direct skill counts, direct source-unit preparation state and snapshot digests, derived effective skill counts, source-scoped failures, the physical cached Pi alias count, and corrective commands. It does not discover live Pi alias mappings and never prepares or rebuilds a source.
+`bazframe status` reads and reports adapter ownership, drift, current project state and effective behavior, active-profile validity when required, flat direct skill counts, profile source-reference target health and snapshot digests, derived effective skill counts, source-scoped failures, the physical cached Pi alias count, and corrective commands. It does not discover live Pi alias mappings and never prepares or rebuilds a source.
 
 ## Research agenda
 
 Product work now focuses on:
 
 - completing the TUI's remaining source-tree/viewport interaction work after the separate top-tab focus model;
-- implementing and validating schema-v2 source descriptors, declared builds, immutable snapshots, explicit rebuild, and snapshot-based bounded discovery;
+- retaining the global source-object and profile-reference lifecycle, declared builds, immutable snapshots, all-dependent activation validation, and snapshot-based bounded discovery;
 - keeping editor launch, settings writes, TUI source mutation, additional provider operations, and provider move/rename behind their explicit ownership and lifecycle decisions;
 - retaining Linux and local tmux evidence while validating Windows Terminal, representative remote SSH, terminal/font/locale width differences, and manual assistive-technology behavior before any production-ready TUI claim;
 - preserving flat direct-membership behavior while adding the smallest explicit source preparation lifecycle.
 
 The Agent Skills specification defines no standard dependency field; it permits arbitrary additional files and string-valued `metadata`, and recommends that scripts be self-contained or clearly document dependencies. Bazframe's current product decision is to add no inter-skill dependency schema or automation: source providers own shared resources and runtime packages, and Bazframe does not infer dependency semantics from prose, `compatibility`, `metadata`, `allowed-tools`, sibling paths, or co-packaging. Any future namespaced validate-only sidecar requires separate interoperability evidence and an explicit product decision before schema or automation.
 
-Skill packs, child subsets, a global source registry, profile export, and snapshot garbage collection remain deferred.
+Skill packs, child subsets, profile export, and snapshot garbage collection remain deferred.
 
 ## Implementation plan
 

@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { measureProviderOperation } from '../../helpers/provider-manifest.js';
 import { createTempDirectory, type TempDirectory } from '../../helpers/temp-directory.js';
 import { publishSourceSnapshot } from '../../../src/source-units/source-snapshot.js';
+import { encodeGlobalSource } from '../../../src/sources/source-store.js';
+import { encodeProfileSourceReference } from '../../../src/profiles/profile-source-reference.js';
 import {
   loadFlatSkillIdentities,
   resolveProfileSourceUnits,
@@ -18,7 +20,9 @@ afterEach(async () => Promise.all(directories.splice(0).map((directory) => direc
 async function fixture(): Promise<{ directory: TempDirectory; profile: string }> {
   const directory = await createTempDirectory('bazframe-source-resolver-');
   directories.push(directory);
-  const profile = await directory.mkdir('profile');
+  const profile = await directory.mkdir('profiles/profile');
+  await directory.mkdir('profiles/profile/skills');
+  await directory.write('profiles/profile/AGENTS.md', 'profile\n');
   return { directory, profile };
 }
 
@@ -31,15 +35,19 @@ async function descriptor(
   const sourceRoot = await realpath(root);
   const snapshot = await publishSourceSnapshot(directory.root, sourceRoot);
   await directory.write(
-    `profile/source-units/${providerId}/${sourceId}.json`,
-    `${JSON.stringify({
-      schemaVersion: 2,
-      providerId,
-      sourceId,
-      sourceRoot,
-      snapshotDigest: snapshot.digest,
+    `sources/${providerId}/${sourceId}.json`,
+    encodeGlobalSource({
+      schemaVersion: 1,
+      provider: providerId,
+      source: sourceId,
+      root: sourceRoot,
+      digest: snapshot.digest,
       sourceUnitRoot: '.'
-    }, null, 2)}\n`
+    })
+  );
+  await directory.write(
+    `profiles/profile/sources/${providerId}/${sourceId}.json`,
+    encodeProfileSourceReference({ schemaVersion: 1, provider: providerId, source: sourceId })
   );
 }
 
@@ -54,7 +62,7 @@ async function discoverPreservingProvider<T>(
 ): Promise<T> {
   const measured = await measureProviderOperation(
     providerRoots,
-    [`${profile}/source-units`],
+    [`${profile}/sources`],
     operation
   );
   expect(measured.providerAfter).toEqual(measured.providerBefore);
@@ -168,7 +176,7 @@ describe('source-unit resolver', () => {
 
   it('reports exact placeholders for malformed source-units roots', async () => {
     const first = await fixture();
-    await first.directory.write('profile/source-units', 'not a directory\n');
+    await first.directory.write('profiles/profile/sources', 'not a directory\n');
     await expect(discoverPreservingProvider(
       first.profile,
       [],
@@ -177,7 +185,7 @@ describe('source-unit resolver', () => {
       directSourceUnits: [],
       derivedSkills: [],
       diagnostics: [{
-        category: 'invalid-descriptor',
+        category: 'invalid-reference',
         providerId: UNKNOWN_PROVIDER_ID,
         sourceId: UNKNOWN_SOURCE_ID,
         path: '.'
@@ -186,7 +194,7 @@ describe('source-unit resolver', () => {
 
     const second = await fixture();
     await second.directory.mkdir('elsewhere');
-    await symlink(second.directory.path('elsewhere'), second.directory.path('profile/source-units'));
+    await symlink(second.directory.path('elsewhere'), second.directory.path('profiles/profile/sources'));
     await expect(discoverPreservingProvider(
       second.profile,
       [],
@@ -195,7 +203,7 @@ describe('source-unit resolver', () => {
       directSourceUnits: [],
       derivedSkills: [],
       diagnostics: [{
-        category: 'invalid-descriptor',
+        category: 'invalid-reference',
         providerId: UNKNOWN_PROVIDER_ID,
         sourceId: UNKNOWN_SOURCE_ID,
         path: '.'
@@ -203,16 +211,16 @@ describe('source-unit resolver', () => {
     });
   });
 
-  it('reports every reachable namespace-shape problem and blocks descriptor/provider traversal', async () => {
+  it('reports every reachable namespace-shape problem and does not inspect valid-shaped siblings', async () => {
     const { directory, profile } = await fixture();
-    await directory.mkdir('profile/source-units/good-provider');
-    await directory.write('profile/source-units/good-provider/bad.txt', '{}');
-    await directory.mkdir('profile/source-units/good-provider/child.json');
-    await directory.write('profile/source-units/Unsafe/source.json', '{}');
-    await directory.write('profile/source-units/file-provider', 'not a directory');
+    await directory.mkdir('profiles/profile/sources/good-provider');
+    await directory.write('profiles/profile/sources/good-provider/bad.txt', '{}');
+    await directory.mkdir('profiles/profile/sources/good-provider/child.json');
+    await directory.write('profiles/profile/sources/Unsafe/source.json', '{}');
+    await directory.write('profiles/profile/sources/file-provider', 'not a directory');
     const inaccessibleRoot = directory.path('does-not-exist');
     await directory.write(
-      'profile/source-units/good-provider/good.json',
+      'profiles/profile/sources/good-provider/good.json',
       `${JSON.stringify({
         schemaVersion: 1,
         providerId: 'good-provider',
@@ -231,25 +239,25 @@ describe('source-unit resolver', () => {
     expect(result.derivedSkills).toEqual([]);
     expect(result.diagnostics).toEqual([
       {
-        category: 'invalid-descriptor',
+        category: 'invalid-reference',
         providerId: UNKNOWN_PROVIDER_ID,
         sourceId: UNKNOWN_SOURCE_ID,
         path: 'Unsafe'
       },
       {
-        category: 'invalid-descriptor',
+        category: 'invalid-reference',
         providerId: 'file-provider',
         sourceId: UNKNOWN_SOURCE_ID,
         path: 'file-provider'
       },
       {
-        category: 'invalid-descriptor',
+        category: 'invalid-reference',
         providerId: 'good-provider',
         sourceId: UNKNOWN_SOURCE_ID,
         path: 'good-provider/bad.txt'
       },
       {
-        category: 'invalid-descriptor',
+        category: 'invalid-reference',
         providerId: 'good-provider',
         sourceId: 'child',
         path: 'good-provider/child.json'
@@ -551,8 +559,8 @@ describe('source-unit resolver', () => {
   it('fails closed when an activated snapshot is corrupt', async () => {
     const { directory, profile } = await fixture(); const root = await directory.mkdir('corrupt'); await directory.write('corrupt/SKILL.md', skill('corrupt'));
     await descriptor(directory, 'provider', 'corrupt', root);
-    const stored = JSON.parse(await readFile(directory.path('profile/source-units/provider/corrupt.json'), 'utf8')) as { snapshotDigest: string };
-    const artifact = directory.path('source-snapshots/sha256', stored.snapshotDigest, 'artifact', 'SKILL.md');
+    const stored = JSON.parse(await readFile(directory.path('sources/provider/corrupt.json'), 'utf8')) as { digest: string };
+    const artifact = directory.path('source-snapshots/sha256', stored.digest, 'artifact', 'SKILL.md');
     await chmod(artifact, 0o600); await writeFile(artifact, 'changed');
     const result = await resolveProfileSourceUnits(profile, []);
     expect(result.derivedSkills).toEqual([]);
@@ -581,19 +589,59 @@ describe('source-unit resolver', () => {
     expect(result.diagnostics).toEqual([]);
   });
 
-  it('allows a zero-child snapshot and reports schema-v1 as build-required', async () => {
+  it('withholds a valid backed reference when a sibling reference is malformed', async () => {
+    const { directory, profile } = await fixture();
+    const root = await directory.mkdir('valid-backed');
+    await directory.write('valid-backed/SKILL.md', skill('valid-backed'));
+    await descriptor(directory, 'provider', 'source', root);
+    await directory.write('profiles/profile/sources/provider/broken.json', '{');
+
+    const result = await resolveProfileSourceUnits(profile, []);
+
+    expect(result).toEqual({
+      directSourceUnits: [],
+      derivedSkills: [],
+      diagnostics: [{
+        category: 'invalid-reference',
+        providerId: 'provider',
+        sourceId: 'broken',
+        path: 'provider/broken.json'
+      }]
+    });
+  });
+
+  it('does not resolve global targets after finding a malformed sibling reference', async () => {
+    const { directory, profile } = await fixture();
+    await directory.write('profiles/profile/sources/provider/broken.json', '{');
+    await directory.write(
+      'profiles/profile/sources/provider/malformed.json',
+      encodeProfileSourceReference({ schemaVersion: 1, provider: 'provider', source: 'malformed' })
+    );
+    await directory.write('sources/provider/malformed.json', '{}\n');
+    await directory.write(
+      'profiles/profile/sources/provider/missing.json',
+      encodeProfileSourceReference({ schemaVersion: 1, provider: 'provider', source: 'missing' })
+    );
+
+    const result = await resolveProfileSourceUnits(profile, []);
+
+    expect(result).toEqual({
+      directSourceUnits: [],
+      derivedSkills: [],
+      diagnostics: [
+        { category: 'invalid-reference', providerId: 'provider', sourceId: 'broken', path: 'provider/broken.json' }
+      ]
+    });
+  });
+
+  it('allows a zero-child snapshot and reports zero-child snapshots', async () => {
     const { directory, profile } = await fixture();
     const empty = await directory.mkdir('empty');
     await descriptor(directory, 'provider', 'empty', empty);
     const missing = directory.path('missing');
     await directory.write(
-      'profile/source-units/provider/missing.json',
-      `${JSON.stringify({
-        schemaVersion: 1,
-        providerId: 'provider',
-        sourceId: 'missing',
-        sourceRoot: missing
-      })}\n`
+      'profiles/profile/sources/provider/missing.json',
+      encodeProfileSourceReference({ schemaVersion: 1, provider: 'provider', source: 'missing' })
     );
 
     const result = await discoverPreservingProvider(
@@ -604,10 +652,10 @@ describe('source-unit resolver', () => {
     expect(result.directSourceUnits).toHaveLength(2);
     expect(result.derivedSkills).toEqual([]);
     expect(result.diagnostics).toEqual([{
-      category: 'build-required',
+      category: 'invalid-source',
       providerId: 'provider',
       sourceId: 'missing',
-      path: '.'
+      path: 'provider/missing.json'
     }]);
   });
 });

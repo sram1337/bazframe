@@ -3,11 +3,11 @@ import type { ProfileRemovalIdentity } from '../profiles/profile-removal-identit
 
 export const PROFILE_CREATE_ROW_ID = '@create-profile';
 
-export type TuiTab = 'profiles' | 'skills' | 'settings';
+export type TuiTab = 'profiles' | 'sources' | 'skills' | 'settings';
 export type TuiFocusRegion = 'tabs' | 'body';
 export type ProfileRoute = 'list' | 'editor';
 export type ProfilePane = 'included' | 'available';
-export type ViewportRegion = 'profileList' | 'included' | 'available' | 'skillsBrowser';
+export type ViewportRegion = 'profileList' | 'included' | 'available' | 'sources' | 'skillsBrowser';
 export type ViewportRows = Readonly<Record<ViewportRegion, number>>;
 export type ModalKind =
   | 'create'
@@ -35,10 +35,12 @@ export interface TuiState {
   focusedPane: ProfilePane;
   includedSkillId?: string;
   availableSkillId?: string;
+  selectedSourceId?: string;
   browserSkillId?: string;
   profileListOffset: number;
   includedOffset: number;
   availableOffset: number;
+  sourcesOffset: number;
   skillsBrowserOffset: number;
   expandedSourceIds: readonly string[];
   modal?: TuiModal;
@@ -62,6 +64,7 @@ export type TuiAction =
   | { type: 'focus-pane'; pane: ProfilePane }
   | { type: 'select-included'; id?: string; ids?: readonly string[]; viewportRows?: number }
   | { type: 'select-available'; id?: string; ids?: readonly string[]; viewportRows?: number }
+  | { type: 'select-source'; id?: string; ids?: readonly string[]; viewportRows?: number }
   | { type: 'select-browser-skill'; id?: string; ids?: readonly string[]; viewportRows?: number }
   | { type: 'toggle-source'; id: string; expanded?: boolean }
   | { type: 'clamp-viewports'; snapshot: DashboardSnapshot; viewportRows: ViewportRows }
@@ -79,6 +82,7 @@ export const initialTuiState: TuiState = {
   profileListOffset: 0,
   includedOffset: 0,
   availableOffset: 0,
+  sourcesOffset: 0,
   skillsBrowserOffset: 0,
   expandedSourceIds: ['skillbook']
 };
@@ -157,6 +161,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
           action.viewportRows
         )
       };
+    case 'select-source':
+      return { ...state, selectedSourceId: action.id, sourcesOffset: selectionOffset(state.sourcesOffset, action.ids, action.id, action.viewportRows) };
     case 'select-browser-skill':
       return {
         ...state,
@@ -233,21 +239,24 @@ function reconcileState(
   const includedSkillIds = new Set(
     selectedProfile?.memberships.map((membership) => membership.skillId) ?? []
   );
-  const availableIds = snapshot.sources.flatMap((source) => source.skills)
+  const availableIds = (snapshot.availableSkillSources ?? snapshot.sources ?? []).flatMap((source) => source.skills)
     .filter((skill) => !includedSkillIds.has(skill.id))
     .map((skill) => `${skill.sourceId}:${skill.id}`);
+  const sourceIds = (snapshot.managedSources ?? []).map((source) => source.id);
   const browserIds = browserIdsFor(snapshot, state.expandedSourceIds);
   const next = {
     ...state,
     selectedProfileId,
     includedSkillId: keepOrFirst(includedIds, state.includedSkillId),
     availableSkillId: keepOrFirst(availableIds, state.availableSkillId),
+    selectedSourceId: keepOrFirst(sourceIds, state.selectedSourceId),
     browserSkillId: keepOrBrowserNeighbor(browserIds, state.browserSkillId)
   };
   return clampOffsetsForIds(next, {
     profileList: [...profileIds, PROFILE_CREATE_ROW_ID],
     included: includedIds,
     available: availableIds,
+    sources: sourceIds,
     skillsBrowser: browserIds
   }, viewportRows);
 }
@@ -264,13 +273,14 @@ function clampViewportOffsets(
   const includedSkillIds = new Set(
     selectedProfile?.memberships.map((membership) => membership.skillId) ?? []
   );
-  const availableIds = snapshot.sources.flatMap((source) => source.skills)
+  const availableIds = (snapshot.availableSkillSources ?? snapshot.sources ?? []).flatMap((source) => source.skills)
     .filter((skill) => !includedSkillIds.has(skill.id))
     .map((skill) => `${skill.sourceId}:${skill.id}`);
   return clampOffsetsForIds(state, {
     profileList: [...snapshot.profiles.map((profile) => profile.id), PROFILE_CREATE_ROW_ID],
     included: includedIds,
     available: availableIds,
+    sources: (snapshot.managedSources ?? []).map((source) => source.id),
     skillsBrowser: browserIdsFor(snapshot, state.expandedSourceIds)
   }, viewportRows);
 }
@@ -300,6 +310,7 @@ function clampOffsetsForIds(
       state.availableOffset,
       viewportRows.available
     ),
+    sourcesOffset: clampViewportOffset(ids.sources, state.selectedSourceId, state.sourcesOffset, viewportRows.sources),
     skillsBrowserOffset: clampViewportOffset(
       ids.skillsBrowser,
       state.browserSkillId,
@@ -340,7 +351,7 @@ function browserIdsFor(
   snapshot: DashboardSnapshot,
   expandedSourceIds: readonly string[]
 ): string[] {
-  return snapshot.sources.flatMap((source) => [
+  return (snapshot.skillRoots ?? snapshot.sources ?? []).flatMap((source) => [
     `source:${source.id}`,
     ...(expandedSourceIds.includes(source.id)
       ? source.skills.map((skill) => `${skill.sourceId}:${skill.id}`)
@@ -355,13 +366,14 @@ function keepOrBrowserNeighbor(
   if (currentId === undefined || currentId.startsWith('source:')) {
     return keepOrFirst(ids, currentId);
   }
-  const separator = currentId.indexOf(':');
-  const sourceId = separator < 0 ? undefined : currentId.slice(0, separator);
-  if (sourceId === undefined) return keepOrFirst(ids, currentId);
+  const sourceRow = ids
+    .filter((id) => id.startsWith('source:'))
+    .sort((left, right) => right.length - left.length)
+    .find((id) => currentId.startsWith(`${id.slice('source:'.length)}:`));
+  if (sourceRow === undefined) return keepOrFirst(ids, currentId);
+  const sourceId = sourceRow.slice('source:'.length);
   const siblingIds = ids.filter((id) => id.startsWith(`${sourceId}:`));
-  return keepOrFirst(siblingIds, currentId)
-    ?? ids.find((id) => id === `source:${sourceId}`)
-    ?? keepOrFirst(ids, currentId);
+  return keepOrFirst(siblingIds, currentId) ?? sourceRow;
 }
 
 function keepOrFirst(ids: readonly string[], currentId: string | undefined): string | undefined {

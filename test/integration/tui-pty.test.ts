@@ -47,6 +47,7 @@ describe('packed-style TUI terminal lifecycle', () => {
     }, [
       { afterOutput: 'Status: Ready', input: '\t' },
       { afterOutput: 'Profiles tab, selected, focused', input: '\u001B[C' },
+      { afterOutput: 'Sources tab, focused', input: '\u001B[C' },
       { afterOutput: 'Skills tab, focused', input: 'q' }
     ]);
     expect(screenReaderResult.status, JSON.stringify(screenReaderResult)).toBe(0);

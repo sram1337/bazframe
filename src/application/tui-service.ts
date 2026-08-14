@@ -26,6 +26,20 @@ import {
 import { isSafeSkillId } from '../skills/skill-id.js';
 import { listAvailableSkills } from '../skills/skill-library.js';
 import { inspectStatus, type StatusInspection } from '../status/status.js';
+import {
+  formatSourceDiagnostic,
+  inspectGlobalSources,
+  type GlobalSourceInspection,
+  type SourceDiagnostic
+} from '../source-units/source-unit-resolver.js';
+import { resolvePhysicalRelativeDirectory, verifySourceSnapshot } from '../source-units/source-snapshot.js';
+import {
+  captureProfileSourceReferenceBulkIndex,
+  profileSourceReferenceKey,
+  readProfileSourceReference,
+  scanProfileSourceReferences,
+  type ProfileSourceReference
+} from '../profiles/profile-source-reference.js';
 
 export type DiagnosticSeverity = 'warning' | 'error';
 
@@ -49,6 +63,13 @@ export interface DirectMembership {
   diagnostic?: string;
 }
 
+export interface ProfileSourceReferenceSummary extends ProfileSourceReference {
+  id: string;
+  path: string;
+  availability: 'available' | 'unavailable';
+  diagnostic?: string;
+}
+
 export interface ProfileSummary {
   id: string;
   directory: string;
@@ -58,6 +79,7 @@ export interface ProfileSummary {
   membershipWritable: boolean;
   membershipDiagnostic?: string;
   memberships: DirectMembership[];
+  sourceReferences?: ProfileSourceReferenceSummary[];
 }
 
 export interface SkillSummary {
@@ -68,12 +90,25 @@ export interface SkillSummary {
 
 export interface SkillSourceSummary {
   id: string;
-  provider: 'skillbook';
+  provider: string;
   label: string;
   root: string;
   canonicalRoot?: string;
   artifactWritesSupported: false;
   skills: SkillSummary[];
+}
+
+export interface ManagedSourceSummary {
+  id: string;
+  provider: string;
+  source: string;
+  root: string;
+  digest: string;
+  sourceUnitRoot: string;
+  rebuildAvailability: 'available' | 'unavailable';
+  referenceCount: number | 'unknown';
+  health: 'ready' | 'failed';
+  diagnostics: string[];
 }
 
 export type DashboardSetupStatus =
@@ -84,7 +119,11 @@ export interface DashboardSnapshot {
   revision: number;
   activeProfileId?: string;
   profiles: ProfileSummary[];
-  sources: SkillSourceSummary[];
+  managedSources?: ManagedSourceSummary[];
+  skillRoots?: SkillSourceSummary[];
+  availableSkillSources?: SkillSourceSummary[];
+  /** Test-fixture compatibility only; production dashboards use the separated collections above. */
+  sources?: SkillSourceSummary[];
   status: DashboardSetupStatus;
   diagnostics: DashboardDiagnostic[];
 }
@@ -186,20 +225,73 @@ async function inspectDashboard(
 ): Promise<DashboardSnapshot> {
   const diagnostics: DashboardDiagnostic[] = [];
   const activeProfileId = await inspectActiveProfile(options.bazframeHome, diagnostics);
-  const source = await inspectSkillbookSource(options, diagnostics);
+  const skillbook = await inspectSkillbookSource(options, diagnostics);
+  const global = await inspectGlobalSources(options.bazframeHome);
+  for (const item of global.diagnostics) diagnostics.push({ id: `managed-source-${item.providerId}-${item.sourceId}`, severity: 'error', message: `${item.providerId}/${item.sourceId}:${item.path} ${item.category}` });
+  const managedSources: ManagedSourceSummary[] = [];
+  const managedRoots: SkillSourceSummary[] = [];
+  const referenceIndex = await captureProfileSourceReferenceBulkIndex(options.bazframeHome);
+  for (const item of referenceIndex.diagnostics) diagnostics.push({
+    id: `managed-source-reference-index-${item.profileId}-${item.diagnostic.path}`,
+    severity: 'error',
+    message: `Reference index unavailable at ${item.profileId}:${item.diagnostic.path}.`
+  });
+  const referenceIndexReady = referenceIndex.diagnostics.length === 0;
+  for (const item of global.sources) {
+    const record = item.record;
+    const referenceKey = profileSourceReferenceKey(record.provider, record.source);
+    const id = `managed:${record.provider}/${record.source}`;
+    const sourceDiagnostics = [
+      ...item.diagnostics.map((entry) => `${entry.path} ${entry.category}`),
+      ...(referenceIndexReady ? [] : ['reference index unavailable'])
+    ];
+    const sourceHealthy = item.diagnostics.length === 0 && referenceIndexReady;
+    managedSources.push({
+      id,
+      provider: record.provider,
+      source: record.source,
+      root: record.root,
+      digest: record.digest,
+      sourceUnitRoot: record.sourceUnitRoot,
+      rebuildAvailability: item.rebuildAvailability,
+      referenceCount: referenceIndexReady
+        ? (referenceIndex.profileIdsBySource.get(referenceKey)?.length ?? 0)
+        : 'unknown',
+      health: sourceHealthy ? 'ready' : 'failed',
+      diagnostics: sourceDiagnostics
+    });
+    if (item.diagnostics.length === 0) {
+      const snapshot = await verifySourceSnapshot(options.bazframeHome, record.digest);
+      const immutableRoot = await resolvePhysicalRelativeDirectory(
+        snapshot.artifactRoot,
+        record.sourceUnitRoot
+      );
+      managedRoots.push({
+        id,
+        provider: record.provider,
+        label: `${record.provider}/${record.source}`,
+        root: immutableRoot,
+        artifactWritesSupported: false,
+        skills: item.skills.map((skill) => ({ id: skill.name, sourceId: id, directory: skill.baseDir }))
+      });
+    }
+  }
   const profiles = await inspectProfiles(
     options.bazframeHome,
-    source?.root,
+    skillbook?.root,
     activeProfileId,
+    global,
     diagnostics
   );
   const status = await inspectSetupStatus(options, diagnostics);
-
+  const availableSkillSources = skillbook === undefined ? [] : [skillbook];
   return {
     revision,
     ...(activeProfileId === undefined ? {} : { activeProfileId }),
     profiles,
-    sources: source === undefined ? [] : [source],
+    managedSources,
+    skillRoots: [...availableSkillSources, ...managedRoots],
+    availableSkillSources,
     status,
     diagnostics
   };
@@ -285,6 +377,7 @@ async function inspectProfiles(
   bazframeHome: string,
   skillbookSkillsRoot: string | undefined,
   activeProfileId: string | undefined,
+  globalSources: { sources: GlobalSourceInspection[]; diagnostics: SourceDiagnostic[] },
   diagnostics: DashboardDiagnostic[]
 ): Promise<ProfileSummary[]> {
   const root = join(bazframeHome, 'profiles');
@@ -371,6 +464,36 @@ async function inspectProfiles(
           message: membershipDiagnostic
         });
       }
+      const sourceReferences: ProfileSourceReferenceSummary[] = [];
+      const referenceNamespace = await scanProfileSourceReferences(bazframeHome, entry.name);
+      const invalidReferencePaths = referenceNamespace.diagnostics.map((item) => item.path);
+      for (const item of referenceNamespace.diagnostics) diagnostics.push({ id: `profile-${entry.name}-source-${item.path}`, severity: 'error', message: `Invalid source reference ${item.path}.` });
+      const readableReferences: Array<{ reference: ProfileSourceReference; path: string }> = [];
+      for (const item of referenceNamespace.references) {
+        try {
+          readableReferences.push({
+            reference: await readProfileSourceReference(item.path, item.provider, item.source),
+            path: item.path
+          });
+        } catch (error) {
+          invalidReferencePaths.push(item.relativePath);
+          diagnostics.push(diagnostic(`profile-${entry.name}-source-${item.relativePath}`, error));
+        }
+      }
+      const namespaceDiagnostic = invalidReferencePaths.length === 0
+        ? undefined
+        : `Profile source reference namespace is invalid: ${[...invalidReferencePaths].sort(lexicalCompare).join(', ')}`;
+      for (const item of readableReferences) {
+        const availability = namespaceDiagnostic === undefined
+          ? inspectReferenceAvailability(item.reference, globalSources)
+          : { availability: 'unavailable' as const, diagnostic: namespaceDiagnostic };
+        sourceReferences.push({
+          ...item.reference,
+          id: `${item.reference.provider}/${item.reference.source}`,
+          path: item.path,
+          ...availability
+        });
+      }
       profiles.push({
         id: entry.name,
         directory,
@@ -379,13 +502,35 @@ async function inspectProfiles(
         active: entry.name === activeProfileId,
         membershipWritable,
         ...(membershipDiagnostic === undefined ? {} : { membershipDiagnostic }),
-        memberships
+        memberships,
+        sourceReferences
       });
     } catch (error) {
       diagnostics.push(diagnostic(`profile-${entry.name}`, error));
     }
   }
   return profiles;
+}
+
+function inspectReferenceAvailability(
+  reference: ProfileSourceReference,
+  globalSources: { sources: GlobalSourceInspection[]; diagnostics: SourceDiagnostic[] }
+): Pick<ProfileSourceReferenceSummary, 'availability' | 'diagnostic'> {
+  const source = globalSources.sources.find((item) =>
+    item.record.provider === reference.provider && item.record.source === reference.source
+  );
+  if (source !== undefined && source.diagnostics.length === 0) {
+    return { availability: 'available' };
+  }
+  const failures = source?.diagnostics ?? globalSources.diagnostics.filter((item) =>
+    item.providerId === reference.provider && item.sourceId === reference.source
+  );
+  return {
+    availability: 'unavailable',
+    diagnostic: failures.length === 0
+      ? 'Global source target is unavailable.'
+      : failures.map(formatSourceDiagnostic).join('; ')
+  };
 }
 
 async function inspectMemberships(

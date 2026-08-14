@@ -1,4 +1,4 @@
-import { lstat, readlink, realpath, rm, symlink } from 'node:fs/promises';
+import { chmod, lstat, readFile, readlink, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   createBazframeTuiService,
@@ -10,6 +10,8 @@ import {
   renameProfile
 } from '../../../src/profiles/profile-management.js';
 import { readActiveProfile, writeActiveProfile } from '../../../src/profiles/profile-store.js';
+import { encodeProfileSourceReference } from '../../../src/profiles/profile-source-reference.js';
+import { addSource } from '../../../src/sources/source-lifecycle.js';
 import { createTempDirectory, type TempDirectory } from '../../helpers/temp-directory.js';
 
 const temporaryDirectories: TempDirectory[] = [];
@@ -36,7 +38,7 @@ describe('Bazframe TUI service', () => {
     expect(() => JSON.stringify(first.profiles.map((profile) => profile.removalIdentity)))
       .not.toThrow();
     expect(first.profiles.map((profile) => profile.id)).toEqual(['focused', 'reviewer']);
-    expect(first.sources).toMatchObject([{
+    expect(first.availableSkillSources).toMatchObject([{
       id: 'skillbook',
       provider: 'skillbook',
       artifactWritesSupported: false,
@@ -202,11 +204,104 @@ describe('Bazframe TUI service', () => {
       userHome: directory.root
     });
 
-    const source = (await service.loadDashboard()).sources[0];
+    const source = (await service.loadDashboard()).availableSkillSources![0];
     expect(source).toMatchObject({
       root: directory.path('library-link/skills'),
       canonicalRoot: await realpath(directory.path('provider/skills'))
     });
+  });
+
+  it('uses the verified immutable snapshot root for a healthy zero-child managed source', async () => {
+    const fixture = await createFixture();
+    const provider = await fixture.directory.mkdir('empty-provider');
+    const added = await addSource(
+      { bazframeHome: fixture.home },
+      'provider',
+      'empty',
+      provider
+    );
+
+    const dashboard = await fixture.service.loadDashboard();
+    const root = dashboard.skillRoots?.find((source) => source.id === 'managed:provider/empty');
+
+    expect(root).toMatchObject({ skills: [] });
+    expect(root?.root).toBe(await realpath(fixture.directory.path(
+      'home/source-snapshots/sha256',
+      added.digest,
+      'artifact'
+    )));
+    expect(root?.root).not.toBe(provider);
+  });
+
+  it('keeps inactive-profile references visible with deterministic target availability diagnostics', async () => {
+    const fixture = await createFixture();
+    const provider = await fixture.directory.mkdir('managed-provider');
+    await fixture.directory.write('managed-provider/demo/SKILL.md', skill('managed-demo'));
+    const added = await addSource(
+      { bazframeHome: fixture.home },
+      'provider',
+      'unusable',
+      provider
+    );
+    const reference = (source: string) => encodeProfileSourceReference({
+      schemaVersion: 1,
+      provider: 'provider',
+      source
+    });
+    await fixture.directory.write('home/profiles/reviewer/sources/provider/missing.json', reference('missing'));
+    await fixture.directory.write('home/profiles/reviewer/sources/provider/malformed.json', reference('malformed'));
+    await fixture.directory.write('home/profiles/reviewer/sources/provider/unusable.json', reference('unusable'));
+    await fixture.directory.write('home/sources/provider/malformed.json', '{}\n');
+    const snapshotSkill = fixture.directory.path(
+      'home/source-snapshots/sha256', added.digest, 'artifact', 'demo', 'SKILL.md'
+    );
+    if (process.platform !== 'win32') await chmod(snapshotSkill, 0o600);
+    await writeFile(snapshotSkill, 'corrupt\n');
+    const providerBefore = await readFile(fixture.directory.path('managed-provider/demo/SKILL.md'));
+
+    const dashboard = await fixture.service.loadDashboard();
+    const reviewer = dashboard.profiles.find((profile) => profile.id === 'reviewer');
+
+    expect(reviewer?.active).toBe(false);
+    expect(reviewer?.sourceReferences).toEqual([
+      expect.objectContaining({
+        id: 'provider/malformed',
+        availability: 'unavailable',
+        diagnostic: expect.stringContaining('invalid-source')
+      }),
+      expect.objectContaining({
+        id: 'provider/missing',
+        availability: 'unavailable',
+        diagnostic: 'Global source target is unavailable.'
+      }),
+      expect.objectContaining({
+        id: 'provider/unusable',
+        availability: 'unavailable',
+        diagnostic: expect.stringContaining('broken-snapshot')
+      })
+    ]);
+    expect(await readFile(fixture.directory.path('managed-provider/demo/SKILL.md'))).toEqual(providerBefore);
+  });
+
+  it('marks reference counts unknown and source health failed when the reference index is invalid', async () => {
+    const fixture = await createFixture();
+    const provider = await fixture.directory.mkdir('provider');
+    await fixture.directory.write('provider/demo/SKILL.md', skill('demo'));
+    await addSource({ bazframeHome: fixture.home }, 'provider', 'source', provider);
+    await fixture.directory.write('home/profiles/broken-profile', 'not a directory');
+
+    const dashboard = await fixture.service.loadDashboard();
+
+    expect(dashboard.managedSources).toEqual([expect.objectContaining({
+      id: 'managed:provider/source',
+      referenceCount: 'unknown',
+      health: 'failed',
+      diagnostics: expect.arrayContaining(['reference index unavailable'])
+    })]);
+    expect(dashboard.diagnostics).toContainEqual(expect.objectContaining({
+      severity: 'error',
+      message: expect.stringContaining('Reference index unavailable')
+    }));
   });
 
   it('loads an empty dashboard without creating Bazframe state', async () => {
@@ -225,7 +320,7 @@ describe('Bazframe TUI service', () => {
 
     await expect(service.loadDashboard()).resolves.toMatchObject({
       profiles: [],
-      sources: [{ id: 'skillbook', skills: [] }],
+      availableSkillSources: [{ id: 'skillbook', skills: [] }],
       status: { state: 'available' }
     });
     await expect(lstat(home)).rejects.toMatchObject({ code: 'ENOENT' });
@@ -248,7 +343,7 @@ describe('Bazframe TUI service', () => {
     const dashboard = await service.loadDashboard();
 
     expect(dashboard.profiles.map((profile) => profile.id)).toEqual(['focused', 'reviewer']);
-    expect(dashboard.sources).toEqual([]);
+    expect(dashboard.availableSkillSources).toEqual([]);
     expect(dashboard.status).toMatchObject({
       state: 'available',
       value: {
@@ -279,7 +374,7 @@ describe('Bazframe TUI service', () => {
     const dashboard = await fixture.service.loadDashboard();
 
     expect(dashboard.profiles.map((profile) => profile.id)).toEqual(['focused', 'reviewer']);
-    expect(dashboard.sources[0]?.skills.map((entry) => entry.id)).toEqual(['demo-skill']);
+    expect(dashboard.availableSkillSources![0]?.skills.map((entry) => entry.id)).toEqual(['demo-skill']);
     expect(dashboard.status).toMatchObject({
       state: 'unavailable',
       diagnostic: { id: 'setup-status', severity: 'error' }

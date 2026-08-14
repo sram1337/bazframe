@@ -186,13 +186,12 @@ export async function inspectStatus(options: StatusOptions): Promise<StatusInspe
         };
         if (sources.diagnostics.length > 0) {
           const buildRequired = sources.directSourceUnits
-            .filter((source) => source.preparationState === 'build-required'
-              || (source.preparationState === 'failed' && source.rebuildAvailability === 'available'))
-            .map((source) => `bazframe profile sources build ${source.providerId} ${source.sourceId}`);
+            .filter((source) => source.preparationState === 'failed' && source.rebuildAvailability === 'available')
+            .map((source) => `bazframe sources build ${source.providerId} ${source.sourceId}`);
           corrections.set('source-units', {
             id: 'source-units',
             message: buildRequired.length === 0
-              ? 'Inspect source-unit failures with `bazframe profile sources`.'
+              ? 'Inspect referenced-source failures with `bazframe profile sources`.'
               : `Build the sources with: ${buildRequired.map((command) => `\`${command}\``).join(', ')}.`
           });
         }
@@ -311,8 +310,10 @@ export function formatStatus(status: StatusInspection): string {
     `Active profile: ${activeProfile}`,
     `Profile instructions: ${instructionSource}`,
     `Flat direct skills: ${flatSkillCount}`,
-    `Direct source units: ${directSourceUnitCount}`,
-    ...directSourceUnits.map((source) => `  - ${source.providerId}/${source.sourceId}: ${source.preparationState}; rebuild ${source.rebuildAvailability}${source.schemaVersion === 2 ? `; sha256:${source.snapshotDigest}; root:${source.sourceUnitRoot}` : ''}`),
+    `Profile source references: ${directSourceUnitCount}`,
+    ...directSourceUnits.map((source) => source.snapshotDigest === undefined
+      ? `  - ${source.providerId}/${source.sourceId}: ${source.preparationState}; target unavailable`
+      : `  - ${source.providerId}/${source.sourceId}: ${source.preparationState}; rebuild ${source.rebuildAvailability}; sha256:${source.snapshotDigest}; root:${source.sourceUnitRoot}`),
     `Derived effective skills: ${derivedSkillCount}`,
     ...(derivedSkills.length === 0
       ? ['  (none)']

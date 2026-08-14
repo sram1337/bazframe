@@ -1,154 +1,155 @@
-import { constants } from 'node:fs';
-import { lstat, open, readdir, realpath, type FileHandle } from 'node:fs/promises';
+import { lstat, readdir, realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { loadSkillsFromDir, type Skill } from '@earendil-works/pi-coding-agent';
 import { BazframeError, errorCode } from '../core/errors.js';
-import { readSourceDescriptor, type SourceDescriptor } from '../profiles/profile-source-membership.js';
+import {
+  readProfileSourceReference,
+  scanProfileSourceReferences
+} from '../profiles/profile-source-reference.js';
 import { isSafeSkillId } from '../skills/skill-id.js';
 import { SKILL_DEFINITION } from '../skills/skill-metadata.js';
+import {
+  readGlobalSource,
+  scanGlobalSourceNamespace,
+  type GlobalSourceRecord
+} from '../sources/source-store.js';
 import { resolvePhysicalRelativeDirectory, verifySourceSnapshot } from './source-snapshot.js';
 
-export const SOURCE_UNIT_LIMITS = Object.freeze({
-  depth: 8,
-  entries: 256,
-  skills: 64
-});
+export const SOURCE_UNIT_LIMITS = Object.freeze({ depth: 8, entries: 256, skills: 64 });
 export const UNKNOWN_PROVIDER_ID = '<unknown-provider>';
 export const UNKNOWN_SOURCE_ID = '<unknown-source>';
 
-export interface FlatSkillIdentity {
-  name: string;
-  definitionPath: string;
-}
-
-export function loadFlatSkillIdentities(
-  skillDirectories: readonly string[]
-): FlatSkillIdentity[] {
+export interface FlatSkillIdentity { name: string; definitionPath: string; }
+export function loadFlatSkillIdentities(skillDirectories: readonly string[]): FlatSkillIdentity[] {
   return skillDirectories.map((directory) => {
     const definitionPath = join(directory, SKILL_DEFINITION);
     let loaded: ReturnType<typeof loadSkillsFromDir>;
-    try {
-      loaded = loadSkillsFromDir({ dir: directory, source: 'bazframe-profile' });
-    } catch (error) {
-      throw invalidFlatSkill(directory, [], error);
-    }
+    try { loaded = loadSkillsFromDir({ dir: directory, source: 'bazframe-profile' }); }
+    catch (error) { throw invalidFlatSkill(directory, [], error); }
     const hasLoaderError = loaded.diagnostics.some((diagnostic) => diagnostic.type === 'error');
     const skill = loaded.skills.length === 1 ? loaded.skills[0] : undefined;
-    if (hasLoaderError
-      || skill === undefined
-      || skill.baseDir !== directory
-      || skill.filePath !== definitionPath) {
-      throw invalidFlatSkill(
-        directory,
-        loaded.diagnostics.map((diagnostic) => diagnostic.message)
-      );
+    if (hasLoaderError || skill === undefined || skill.baseDir !== directory || skill.filePath !== definitionPath) {
+      throw invalidFlatSkill(directory, loaded.diagnostics.map((diagnostic) => diagnostic.message));
     }
     return { name: skill.name, definitionPath: skill.filePath };
   });
 }
 
-export type DirectSourceUnit = SourceDescriptor & {
-  descriptorPath: string;
-  relativeDescriptorPath: string;
-  preparationState: 'ready' | 'build-required' | 'failed';
-  rebuildAvailability: 'available' | 'unavailable';
-};
-
-export interface DerivedSkill<T = unknown> {
-  name: string;
-  baseDir: string;
-  definitionPath: string;
+/** Compatibility-shaped projection of a referenced global source. */
+export interface DirectSourceUnit {
+  schemaVersion: 1 | 2;
   providerId: string;
   sourceId: string;
-  sourceRoot: string;
-  relativePath: string;
-  loaded?: T;
+  sourceRoot?: string;
+  snapshotDigest?: string;
+  sourceUnitRoot?: string;
+  descriptorPath: string;
+  relativeDescriptorPath: string;
+  preparationState: 'ready' | 'failed';
+  rebuildAvailability: 'available' | 'unavailable';
 }
-
-export interface DefinitionLoaderSkill<T = unknown> {
-  name: string;
-  baseDir: string;
-  definitionPath: string;
-  loaded?: T;
+export interface DerivedSkill<T = unknown> {
+  name: string; baseDir: string; definitionPath: string;
+  providerId: string; sourceId: string; sourceRoot: string; relativePath: string; loaded?: T;
 }
-
-export interface DefinitionLoaderDiagnostic {
-  type?: 'error' | 'warning' | 'collision';
-  message: string;
-}
-
-export interface DefinitionLoaderResult<T = unknown> {
-  skills: DefinitionLoaderSkill<T>[];
-  diagnostics: DefinitionLoaderDiagnostic[];
-}
-
-export type DefinitionLoader<T = unknown> = (
-  baseDir: string,
-  definitionPath: string
-) => Promise<DefinitionLoaderResult<T>> | DefinitionLoaderResult<T>;
+export interface DefinitionLoaderSkill<T = unknown> { name: string; baseDir: string; definitionPath: string; loaded?: T; }
+export interface DefinitionLoaderDiagnostic { type?: 'error' | 'warning' | 'collision'; message: string; }
+export interface DefinitionLoaderResult<T = unknown> { skills: DefinitionLoaderSkill<T>[]; diagnostics: DefinitionLoaderDiagnostic[]; }
+export type DefinitionLoader<T = unknown> = (baseDir: string, definitionPath: string) => Promise<DefinitionLoaderResult<T>> | DefinitionLoaderResult<T>;
 
 export type SourceDiagnostic =
-  | {
-      category: 'invalid-descriptor';
-      providerId: string;
-      sourceId: string;
-      path: string;
-    }
-  | {
-      category: 'broken-root' | 'broken-snapshot' | 'build-required' | 'internal-symlink' | 'unsupported-entry'
-        | 'mixed-root' | 'invalid-definition' | 'io-error';
-      providerId: string;
-      sourceId: string;
-      path: string;
-    }
-  | {
-      category: 'limit-exceeded';
-      providerId: string;
-      sourceId: string;
-      path: string;
-      limit: 'depth' | 'entries' | 'skills';
-    }
-  | {
-      category: 'duplicate-name';
-      providerId: string;
-      sourceId: string;
-      path: string;
-      name: string;
-    }
-  | {
-      category: 'pi-loader';
-      providerId: string;
-      sourceId: string;
-      path: string;
-      diagnosticIndex: number;
-      message: string;
-    };
+  | { category: 'invalid-reference' | 'invalid-source'; providerId: string; sourceId: string; path: string }
+  | { category: 'broken-root' | 'broken-snapshot' | 'internal-symlink' | 'unsupported-entry' | 'mixed-root' | 'invalid-definition' | 'io-error'; providerId: string; sourceId: string; path: string }
+  | { category: 'limit-exceeded'; providerId: string; sourceId: string; path: string; limit: 'depth' | 'entries' | 'skills' }
+  | { category: 'duplicate-name'; providerId: string; sourceId: string; path: string; name: string }
+  | { category: 'pi-loader'; providerId: string; sourceId: string; path: string; diagnosticIndex: number; message: string };
 
 export interface ProfileSourceComposition<T = unknown> {
   directSourceUnits: DirectSourceUnit[];
   derivedSkills: DerivedSkill<T>[];
   diagnostics: SourceDiagnostic[];
 }
-
-interface NamespaceDescriptorPath {
-  providerId: string;
-  sourceId: string;
-  descriptorPath: string;
-  relativeDescriptorPath: string;
-}
-
-interface CandidateSource<T> {
-  direct: DirectSourceUnit;
+export interface GlobalSourceInspection<T = unknown> {
+  record: GlobalSourceRecord;
+  path: string;
+  rebuildAvailability: 'available' | 'unavailable';
   skills: DerivedSkill<T>[];
+  diagnostics: SourceDiagnostic[];
 }
-
+interface CandidateSource<T> { direct: DirectSourceUnit; skills: DerivedSkill<T>[]; }
 class SourceFailure extends Error {
   readonly diagnostic: SourceDiagnostic | SourceDiagnostic[];
+  constructor(diagnostic: SourceDiagnostic | SourceDiagnostic[]) { super('source-unit resolution failed'); this.diagnostic = diagnostic; }
+}
 
-  constructor(diagnostic: SourceDiagnostic | SourceDiagnostic[]) {
-    super('source-unit resolution failed');
-    this.diagnostic = diagnostic;
+function homeForProfile(profileDirectory: string): string {
+  const profileParent = dirname(profileDirectory);
+  return profileParent.endsWith(`${sep}profiles`) ? dirname(profileParent) : profileParent;
+}
+function directFromReference(
+  providerId: string,
+  sourceId: string,
+  referencePath: string,
+  relativePath: string
+): DirectSourceUnit {
+  return {
+    schemaVersion: 1,
+    providerId,
+    sourceId,
+    descriptorPath: referencePath,
+    relativeDescriptorPath: relativePath,
+    preparationState: 'failed',
+    rebuildAvailability: 'unavailable'
+  };
+}
+function directFromRecord(record: GlobalSourceRecord, referencePath: string, relativePath: string, rebuild: 'available' | 'unavailable' = 'unavailable'): DirectSourceUnit {
+  return {
+    schemaVersion: 1,
+    providerId: record.provider,
+    sourceId: record.source,
+    sourceRoot: record.root,
+    snapshotDigest: record.digest,
+    sourceUnitRoot: record.sourceUnitRoot,
+    descriptorPath: referencePath,
+    relativeDescriptorPath: relativePath,
+    preparationState: 'ready',
+    rebuildAvailability: rebuild
+  };
+}
+
+export async function inspectGlobalSources<T = unknown>(
+  bazframeHome: string,
+  definitionLoader: DefinitionLoader<T> = defaultDefinitionLoader as unknown as DefinitionLoader<T>
+): Promise<{ sources: GlobalSourceInspection<T>[]; diagnostics: SourceDiagnostic[] }> {
+  const namespace = await scanGlobalSourceNamespace(bazframeHome);
+  const diagnostics: SourceDiagnostic[] = namespace.diagnostics.map((item) => ({
+    category: 'invalid-source', providerId: item.provider, sourceId: item.source, path: item.path
+  }));
+  const sources: GlobalSourceInspection<T>[] = [];
+  for (const item of namespace.sources) {
+    try {
+      const record = await readGlobalSource(item.path, item.provider, item.source);
+      const rebuild = await rebuildAvailability(record.root);
+      const direct = directFromRecord(record, item.path, item.relativePath, rebuild);
+      let skills: DerivedSkill<T>[] = [];
+      const sourceDiagnostics: SourceDiagnostic[] = [];
+      try { skills = await resolveOneSource(direct, definitionLoader, bazframeHome); }
+      catch (error) {
+        if (error instanceof SourceFailure) sourceDiagnostics.push(...(Array.isArray(error.diagnostic) ? error.diagnostic : [error.diagnostic]));
+        else sourceDiagnostics.push(baseDiagnostic('io-error', direct, '.'));
+      }
+      sources.push({ record, path: item.path, rebuildAvailability: rebuild, skills, diagnostics: sortDiagnostics(sourceDiagnostics) });
+    } catch { diagnostics.push({ category: 'invalid-source', providerId: item.provider, sourceId: item.source, path: item.relativePath }); }
   }
+  return { sources, diagnostics: sortDiagnostics(diagnostics) };
+}
+
+export async function resolveGlobalSource<T = unknown>(
+  bazframeHome: string,
+  record: GlobalSourceRecord,
+  definitionLoader: DefinitionLoader<T> = defaultDefinitionLoader as unknown as DefinitionLoader<T>
+): Promise<DerivedSkill<T>[]> {
+  return resolveOneSource(directFromRecord(record, '', `${record.provider}/${record.source}.json`), definitionLoader, bazframeHome);
 }
 
 export async function resolveProfileSourceUnits<T = unknown>(
@@ -156,98 +157,82 @@ export async function resolveProfileSourceUnits<T = unknown>(
   flatSkills: readonly FlatSkillIdentity[],
   definitionLoader: DefinitionLoader<T> = defaultDefinitionLoader as unknown as DefinitionLoader<T>
 ): Promise<ProfileSourceComposition<T>> {
-  const sourceUnitsRoot = join(profileDirectory, 'source-units');
-  const namespace = await validateNamespace(sourceUnitsRoot);
-  if (namespace.diagnostics.length > 0) {
-    return {
-      directSourceUnits: [],
-      derivedSkills: [],
-      diagnostics: sortDiagnostics(namespace.diagnostics)
-    };
-  }
-
+  const bazframeHome = homeForProfile(profileDirectory);
+  const profileId = profileDirectory.split(sep).at(-1)!;
+  const namespace = await scanProfileSourceReferences(bazframeHome, profileId);
   const directSourceUnits: DirectSourceUnit[] = [];
   const candidates: CandidateSource<T>[] = [];
-  const diagnostics: SourceDiagnostic[] = [];
-  for (const path of namespace.descriptors) {
-    let descriptor: SourceDescriptor;
-    try {
-      descriptor = await readSourceDescriptor(
-        path.descriptorPath,
-        path.providerId,
-        path.sourceId
-      );
-    } catch {
-      diagnostics.push(invalidDescriptor(path.providerId, path.sourceId, path.relativeDescriptorPath));
-      continue;
-    }
-    const direct: DirectSourceUnit = {
-      ...descriptor,
-      descriptorPath: path.descriptorPath,
-      relativeDescriptorPath: path.relativeDescriptorPath,
-      preparationState: descriptor.schemaVersion === 1 ? 'build-required' : 'ready',
-      rebuildAvailability: await rebuildAvailability(descriptor.sourceRoot)
-    };
-    directSourceUnits.push(direct);
-    try {
-      const profileParent = dirname(profileDirectory);
-      const bazframeHome = profileParent.endsWith(`${sep}profiles`) ? dirname(profileParent) : profileParent;
-      candidates.push({ direct, skills: await resolveOneSource(direct, definitionLoader, bazframeHome) });
-    } catch (error) {
-      if (error instanceof SourceFailure) {
-        const failures = Array.isArray(error.diagnostic) ? error.diagnostic : [error.diagnostic];
-        if (failures.some((failure) => failure.category === 'broken-snapshot')) direct.preparationState = 'failed';
-        diagnostics.push(...failures);
-      } else {
-        diagnostics.push(baseDiagnostic('io-error', direct, '.'));
-      }
+  const diagnostics: SourceDiagnostic[] = namespace.diagnostics.map((item) => ({
+    category: 'invalid-reference' as const,
+    providerId: item.provider,
+    sourceId: item.source,
+    path: item.path
+  }));
+  if (diagnostics.length > 0) {
+    return { directSourceUnits: [], derivedSkills: [], diagnostics: sortDiagnostics(diagnostics) };
+  }
+  for (const item of namespace.references) {
+    try { await readProfileSourceReference(item.path, item.provider, item.source); }
+    catch {
+      diagnostics.push({ category: 'invalid-reference', providerId: item.provider, sourceId: item.source, path: item.relativePath });
     }
   }
+  if (diagnostics.length > 0) {
+    return { directSourceUnits: [], derivedSkills: [], diagnostics: sortDiagnostics(diagnostics) };
+  }
+  for (const item of namespace.references) {
+    const referenceDirect = directFromReference(
+      item.provider,
+      item.source,
+      item.path,
+      item.relativePath
+    );
+    directSourceUnits.push(referenceDirect);
+    const recordPath = join(bazframeHome, 'sources', item.provider, `${item.source}.json`);
+    let record: GlobalSourceRecord;
+    try { record = await readGlobalSource(recordPath, item.provider, item.source); }
+    catch {
+      diagnostics.push({ category: 'invalid-source', providerId: item.provider, sourceId: item.source, path: item.relativePath });
+      continue;
+    }
+    const direct = directFromRecord(record, item.path, item.relativePath, await rebuildAvailability(record.root));
+    directSourceUnits[directSourceUnits.length - 1] = direct;
+    try { candidates.push({ direct, skills: await resolveOneSource(direct, definitionLoader, bazframeHome) }); }
+    catch (error) {
+      direct.preparationState = 'failed';
+      if (error instanceof SourceFailure) {
+        const failures = Array.isArray(error.diagnostic) ? error.diagnostic : [error.diagnostic];
+        diagnostics.push(...failures);
+      } else diagnostics.push(baseDiagnostic('io-error', direct, '.'));
+    }
+  }
+  return composeCandidates(directSourceUnits, candidates, flatSkills, diagnostics);
+}
 
+function composeCandidates<T>(directSourceUnits: DirectSourceUnit[], candidates: CandidateSource<T>[], flatSkills: readonly FlatSkillIdentity[], diagnostics: SourceDiagnostic[]): ProfileSourceComposition<T> {
   const duplicateUnits = new Set<string>();
   const flatNames = new Set(flatSkills.map((skill) => skill.name));
   const byName = new Map<string, DerivedSkill<T>[]>();
-  for (const candidate of candidates) {
-    for (const skill of candidate.skills) {
-      const group = byName.get(skill.name) ?? [];
-      group.push(skill);
-      byName.set(skill.name, group);
-    }
+  for (const candidate of candidates) for (const skill of candidate.skills) {
+    const group = byName.get(skill.name) ?? []; group.push(skill); byName.set(skill.name, group);
   }
   for (const [name, skills] of [...byName.entries()].sort(([left], [right]) => compare(left, right))) {
     if (!flatNames.has(name) && skills.length < 2) continue;
     for (const skill of skills) {
-      const key = sourceKey(skill.providerId, skill.sourceId);
-      duplicateUnits.add(key);
-      diagnostics.push({
-        category: 'duplicate-name',
-        providerId: skill.providerId,
-        sourceId: skill.sourceId,
-        path: skill.relativePath,
-        name
-      });
+      duplicateUnits.add(sourceKey(skill.providerId, skill.sourceId));
+      diagnostics.push({ category: 'duplicate-name', providerId: skill.providerId, sourceId: skill.sourceId, path: skill.relativePath, name });
     }
   }
-
-  const derivedSkills = candidates
-    .filter((candidate) => !duplicateUnits.has(sourceKey(
-      candidate.direct.providerId,
-      candidate.direct.sourceId
-    )))
-    .flatMap((candidate) => candidate.skills);
   return {
     directSourceUnits,
-    derivedSkills,
+    derivedSkills: candidates.filter((candidate) => !duplicateUnits.has(sourceKey(candidate.direct.providerId, candidate.direct.sourceId))).flatMap((candidate) => candidate.skills),
     diagnostics: sortDiagnostics(diagnostics)
   };
 }
 
 async function rebuildAvailability(sourceRoot: string): Promise<'available' | 'unavailable'> {
-  try {
-    const metadata = await lstat(sourceRoot);
-    return !metadata.isSymbolicLink() && metadata.isDirectory() && await realpath(sourceRoot) === sourceRoot
-      ? 'available' : 'unavailable';
-  } catch { return 'unavailable'; }
+  try { const metadata = await lstat(sourceRoot); return !metadata.isSymbolicLink() && metadata.isDirectory() && await realpath(sourceRoot) === sourceRoot ? 'available' : 'unavailable'; }
+  catch { return 'unavailable'; }
 }
 
 export async function validateProspectiveSourceUnit<T = unknown>(
@@ -256,8 +241,7 @@ export async function validateProspectiveSourceUnit<T = unknown>(
   candidate: DirectSourceUnit,
   definitionLoader: DefinitionLoader<T> = defaultDefinitionLoader as unknown as DefinitionLoader<T>
 ): Promise<DerivedSkill<T>[]> {
-  const profileParent = dirname(profileDirectory);
-  const bazframeHome = profileParent.endsWith(`${sep}profiles`) ? dirname(profileParent) : profileParent;
+  const bazframeHome = homeForProfile(profileDirectory);
   let skills: DerivedSkill<T>[];
   try { skills = await resolveOneSource(candidate, definitionLoader, bazframeHome); }
   catch (error) {
@@ -267,238 +251,25 @@ export async function validateProspectiveSourceUnit<T = unknown>(
   const ownNames = new Map<string, number>();
   for (const skill of skills) ownNames.set(skill.name, (ownNames.get(skill.name) ?? 0) + 1);
   const occupied = new Set(flatSkills.map((skill) => skill.name));
-  for (const skill of await structurallyValidExistingSkills(
-    profileDirectory,
-    candidate.providerId,
-    candidate.sourceId,
-    definitionLoader,
-    bazframeHome
-  )) occupied.add(skill.name);
+  for (const skill of await structurallyValidExistingSkills(profileDirectory, candidate.providerId, candidate.sourceId, definitionLoader, bazframeHome)) occupied.add(skill.name);
   const conflict = skills.find((skill) => (ownNames.get(skill.name) ?? 0) > 1 || occupied.has(skill.name));
   if (conflict !== undefined) throw new BazframeError('SOURCE_CANDIDATE_DUPLICATE', `Candidate source skill name conflicts with the prospective profile: ${conflict.name}`);
   return skills;
 }
 
-/** Returns every structurally/Pi-valid existing child before profile duplicate filtering. */
-async function structurallyValidExistingSkills<T>(
-  profileDirectory: string,
-  excludedProviderId: string,
-  excludedSourceId: string,
-  loader: DefinitionLoader<T>,
-  bazframeHome: string
-): Promise<DerivedSkill<T>[]> {
-  const namespace = await validateNamespace(join(profileDirectory, 'source-units'));
+async function structurallyValidExistingSkills<T>(profileDirectory: string, excludedProviderId: string, excludedSourceId: string, loader: DefinitionLoader<T>, bazframeHome: string): Promise<DerivedSkill<T>[]> {
+  const profileId = profileDirectory.split(sep).at(-1)!;
+  const namespace = await scanProfileSourceReferences(bazframeHome, profileId);
   const skills: DerivedSkill<T>[] = [];
-  for (const path of namespace.descriptors) {
-    if (path.providerId === excludedProviderId && path.sourceId === excludedSourceId) continue;
+  for (const item of namespace.references) {
+    if (item.provider === excludedProviderId && item.source === excludedSourceId) continue;
     try {
-      const descriptor = await readSourceDescriptor(path.descriptorPath, path.providerId, path.sourceId);
-      const direct: DirectSourceUnit = {
-        ...descriptor,
-        descriptorPath: path.descriptorPath,
-        relativeDescriptorPath: path.relativeDescriptorPath,
-        preparationState: descriptor.schemaVersion === 1 ? 'build-required' : 'ready',
-        rebuildAvailability: await rebuildAvailability(descriptor.sourceRoot)
-      };
-      skills.push(...await resolveOneSource(direct, loader, bazframeHome));
-    } catch {
-      // Unrelated malformed, unbuilt, or otherwise failing sources do not block activation.
-    }
+      await readProfileSourceReference(item.path, item.provider, item.source);
+      const record = await readGlobalSource(join(bazframeHome, 'sources', item.provider, `${item.source}.json`), item.provider, item.source);
+      skills.push(...await resolveOneSource(directFromRecord(record, item.path, item.relativePath), loader, bazframeHome));
+    } catch { /* unrelated failures do not block activation */ }
   }
   return skills;
-}
-
-interface PhysicalIdentity {
-  device: bigint;
-  inode: bigint;
-}
-
-interface OpenDirectory {
-  path: string;
-  handle: FileHandle;
-  identity: PhysicalIdentity;
-}
-
-async function validateNamespace(sourceUnitsRoot: string): Promise<{
-  descriptors: NamespaceDescriptorPath[];
-  diagnostics: SourceDiagnostic[];
-}> {
-  let rootMetadata;
-  try {
-    rootMetadata = await lstat(sourceUnitsRoot, { bigint: true });
-  } catch (error) {
-    if (errorCode(error) === 'ENOENT') return { descriptors: [], diagnostics: [] };
-    return invalidNamespaceRoot();
-  }
-  if (rootMetadata.isSymbolicLink() || !rootMetadata.isDirectory()) return invalidNamespaceRoot();
-
-  let root: OpenDirectory | undefined;
-  try {
-    root = await openPhysicalDirectory(sourceUnitsRoot, identityOf(rootMetadata));
-    const providerNames = await enumerateStableDirectory(root);
-    const diagnostics: SourceDiagnostic[] = [];
-    const validProviders: Array<{ id: string; identity: PhysicalIdentity }> = [];
-
-    for (const providerName of providerNames) {
-      const providerPath = join(sourceUnitsRoot, providerName);
-      let metadata;
-      try {
-        metadata = await lstat(providerPath, { bigint: true });
-      } catch {
-        diagnostics.push(invalidDescriptor(
-          isSafeSkillId(providerName) ? providerName : UNKNOWN_PROVIDER_ID,
-          UNKNOWN_SOURCE_ID,
-          providerName
-        ));
-        continue;
-      }
-      if (!isSafeSkillId(providerName) || metadata.isSymbolicLink() || !metadata.isDirectory()) {
-        diagnostics.push(invalidDescriptor(
-          isSafeSkillId(providerName) ? providerName : UNKNOWN_PROVIDER_ID,
-          UNKNOWN_SOURCE_ID,
-          providerName
-        ));
-        continue;
-      }
-      validProviders.push({ id: providerName, identity: identityOf(metadata) });
-    }
-
-    const descriptors: NamespaceDescriptorPath[] = [];
-    const descriptorIdentities = new Map<string, PhysicalIdentity>();
-    for (const provider of validProviders) {
-      const providerPath = join(sourceUnitsRoot, provider.id);
-      let openedProvider: OpenDirectory | undefined;
-      try {
-        openedProvider = await openPhysicalDirectory(providerPath, provider.identity);
-        const childNames = await enumerateStableDirectory(openedProvider);
-        for (const childName of childNames) {
-          const childPath = join(providerPath, childName);
-          const sourceId = sourceIdFromDescriptorName(childName);
-          let metadata;
-          try {
-            metadata = await lstat(childPath, { bigint: true });
-          } catch {
-            diagnostics.push(invalidDescriptor(
-              provider.id,
-              sourceId ?? UNKNOWN_SOURCE_ID,
-              `${provider.id}/${childName}`
-            ));
-            continue;
-          }
-          if (sourceId === undefined || metadata.isSymbolicLink() || !metadata.isFile()) {
-            diagnostics.push(invalidDescriptor(
-              provider.id,
-              sourceId ?? UNKNOWN_SOURCE_ID,
-              `${provider.id}/${childName}`
-            ));
-            continue;
-          }
-          descriptors.push({
-            providerId: provider.id,
-            sourceId,
-            descriptorPath: childPath,
-            relativeDescriptorPath: `${provider.id}/${childName}`
-          });
-          descriptorIdentities.set(childPath, identityOf(metadata));
-        }
-        await assertStableDirectory(openedProvider);
-      } catch {
-        diagnostics.push(invalidDescriptor(provider.id, UNKNOWN_SOURCE_ID, provider.id));
-      } finally {
-        await openedProvider?.handle.close().catch(() => undefined);
-      }
-    }
-
-    for (const descriptor of descriptors) {
-      try {
-        const metadata = await lstat(descriptor.descriptorPath, { bigint: true });
-        if (metadata.isSymbolicLink()
-          || !metadata.isFile()
-          || !sameIdentity(identityOf(metadata), descriptorIdentities.get(descriptor.descriptorPath))) {
-          throw new Error('descriptor namespace entry changed');
-        }
-      } catch {
-        diagnostics.push(invalidDescriptor(
-          descriptor.providerId,
-          descriptor.sourceId,
-          descriptor.relativeDescriptorPath
-        ));
-      }
-    }
-    await assertStableDirectory(root);
-    return { descriptors, diagnostics };
-  } catch {
-    return invalidNamespaceRoot();
-  } finally {
-    await root?.handle.close().catch(() => undefined);
-  }
-}
-
-function invalidNamespaceRoot(): {
-  descriptors: NamespaceDescriptorPath[];
-  diagnostics: SourceDiagnostic[];
-} {
-  return {
-    descriptors: [],
-    diagnostics: [invalidDescriptor(UNKNOWN_PROVIDER_ID, UNKNOWN_SOURCE_ID, '.')]
-  };
-}
-
-async function openPhysicalDirectory(
-  path: string,
-  expectedIdentity: PhysicalIdentity
-): Promise<OpenDirectory> {
-  const handle = await open(
-    path,
-    constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW
-  );
-  try {
-    const metadata = await handle.stat({ bigint: true });
-    if (!metadata.isDirectory() || !sameIdentity(identityOf(metadata), expectedIdentity)) {
-      throw new Error('directory identity changed');
-    }
-    const opened = { path, handle, identity: expectedIdentity };
-    await assertStableDirectory(opened);
-    return opened;
-  } catch (error) {
-    await handle.close().catch(() => undefined);
-    throw error;
-  }
-}
-
-async function enumerateStableDirectory(directory: OpenDirectory): Promise<string[]> {
-  await assertStableDirectory(directory);
-  const names = (await readdir(directory.path)).sort(compare);
-  await assertStableDirectory(directory);
-  return names;
-}
-
-async function assertStableDirectory(directory: OpenDirectory): Promise<void> {
-  const [openedMetadata, pathMetadata] = await Promise.all([
-    directory.handle.stat({ bigint: true }),
-    lstat(directory.path, { bigint: true })
-  ]);
-  if (!openedMetadata.isDirectory()
-    || pathMetadata.isSymbolicLink()
-    || !pathMetadata.isDirectory()
-    || !sameIdentity(identityOf(openedMetadata), directory.identity)
-    || !sameIdentity(identityOf(pathMetadata), directory.identity)) {
-    throw new Error('directory identity changed');
-  }
-}
-
-function identityOf(metadata: { dev: bigint; ino: bigint }): PhysicalIdentity {
-  return { device: metadata.dev, inode: metadata.ino };
-}
-
-function sameIdentity(
-  left: PhysicalIdentity | undefined,
-  right: PhysicalIdentity | undefined
-): boolean {
-  return left !== undefined
-    && right !== undefined
-    && left.device === right.device
-    && left.inode === right.inode;
 }
 
 async function resolveOneSource<T>(
@@ -506,8 +277,15 @@ async function resolveOneSource<T>(
   loader: DefinitionLoader<T>,
   bazframeHome: string
 ): Promise<DerivedSkill<T>[]> {
-  if (direct.schemaVersion === 1) fail(baseDiagnostic('build-required', direct, '.'));
   let root: string;
+  if (direct.snapshotDigest === undefined || direct.sourceUnitRoot === undefined) {
+    fail({
+      category: 'invalid-source',
+      providerId: direct.providerId,
+      sourceId: direct.sourceId,
+      path: direct.relativeDescriptorPath
+    });
+  }
   try {
     const snapshot = await verifySourceSnapshot(bazframeHome, direct.snapshotDigest);
     root = await resolvePhysicalRelativeDirectory(snapshot.artifactRoot, direct.sourceUnitRoot);
@@ -680,19 +458,9 @@ function invalidFlatSkill(
   );
 }
 
-function sourceIdFromDescriptorName(name: string): string | undefined {
-  if (!name.endsWith('.json')) return undefined;
-  const sourceId = name.slice(0, -'.json'.length);
-  return isSafeSkillId(sourceId) ? sourceId : undefined;
-}
-
-function invalidDescriptor(providerId: string, sourceId: string, path: string): SourceDiagnostic {
-  return { category: 'invalid-descriptor', providerId, sourceId, path };
-}
-
 function baseDiagnostic(
   category: Extract<SourceDiagnostic['category'],
-    'broken-root' | 'broken-snapshot' | 'build-required' | 'internal-symlink' | 'unsupported-entry' | 'mixed-root'
+    'broken-root' | 'broken-snapshot' | 'internal-symlink' | 'unsupported-entry' | 'mixed-root'
     | 'invalid-definition' | 'io-error'>,
   direct: DirectSourceUnit,
   path: string

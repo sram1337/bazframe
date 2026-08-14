@@ -16,6 +16,8 @@ import {
   type StatusOptions
 } from '../../../src/status/status.js';
 import { publishSourceSnapshot } from '../../../src/source-units/source-snapshot.js';
+import { encodeGlobalSource } from '../../../src/sources/source-store.js';
+import { encodeProfileSourceReference } from '../../../src/profiles/profile-source-reference.js';
 import { captureProviderManifest } from '../../helpers/provider-manifest.js';
 import { createTempDirectory, type TempDirectory } from '../../helpers/temp-directory.js';
 
@@ -67,7 +69,7 @@ describe('Bazframe status', () => {
         'Active profile: focused',
         `Profile instructions: ${directory.path('bazframe-home/profiles/focused/AGENTS.md')}`,
         'Flat direct skills: 1',
-        'Direct source units: 0',
+        'Profile source references: 0',
         'Derived effective skills: 0',
         '  (none)',
         'Source failures:',
@@ -110,7 +112,7 @@ describe('Bazframe status', () => {
         'Active profile: (not used: disabled: project-disabled-override)',
         'Profile instructions: (not used: disabled: project-disabled-override)',
         'Flat direct skills: (not used: disabled: project-disabled-override)',
-        'Direct source units: (not used: disabled: project-disabled-override)',
+        'Profile source references: (not used: disabled: project-disabled-override)',
         'Derived effective skills: (not used: disabled: project-disabled-override)',
         '  (none)',
         'Source failures:',
@@ -181,7 +183,7 @@ describe('Bazframe status', () => {
         'Active profile: focused',
         `Profile instructions: ${directory.path('bazframe-home/profiles/focused/AGENTS.md')}`,
         'Flat direct skills: 1',
-        'Direct source units: 0',
+        'Profile source references: 0',
         'Derived effective skills: 0',
         '  (none)',
         'Source failures:',
@@ -212,9 +214,10 @@ describe('Bazframe status', () => {
     );
     const snapshot = await publishSourceSnapshot(directory.path('bazframe-home'), provider);
     const descriptorPath = await directory.write(
-      'bazframe-home/profiles/focused/source-units/provider/source.json',
-      `${JSON.stringify({ schemaVersion: 2, providerId: 'provider', sourceId: 'source', sourceRoot: provider, snapshotDigest: snapshot.digest, sourceUnitRoot: '.' })}\n`
+      'bazframe-home/sources/provider/source.json',
+      encodeGlobalSource({ schemaVersion: 1, provider: 'provider', source: 'source', root: provider, digest: snapshot.digest, sourceUnitRoot: '.' })
     );
+    await directory.write('bazframe-home/profiles/focused/sources/provider/source.json', encodeProfileSourceReference({ schemaVersion: 1, provider: 'provider', source: 'source' }));
 
     const ownedBefore = await captureProviderManifest([descriptorPath]);
     const providerBefore = await captureProviderManifest([provider]);
@@ -245,22 +248,13 @@ describe('Bazframe status', () => {
     await readyProfile(directory, options);
     await installPiAdapter(options);
     const missingRoot = directory.path('missing-provider');
-    await directory.write(
-      'bazframe-home/profiles/focused/source-units/provider/source.json',
-      `${JSON.stringify({
-        schemaVersion: 1,
-        providerId: 'provider',
-        sourceId: 'source',
-        sourceRoot: missingRoot
-      })}\n`
-    );
-    await directory.write(
-      'bazframe-home/profiles/focused/source-units/provider/another.json',
-      `${JSON.stringify({ schemaVersion: 1, providerId: 'provider', sourceId: 'another', sourceRoot: missingRoot })}\n`
-    );
+    for (const source of ['another', 'source']) {
+      await directory.write(`bazframe-home/sources/provider/${source}.json`, encodeGlobalSource({ schemaVersion: 1, provider: 'provider', source, root: missingRoot, digest: '0'.repeat(64), sourceUnitRoot: '.' }));
+      await directory.write(`bazframe-home/profiles/focused/sources/provider/${source}.json`, encodeProfileSourceReference({ schemaVersion: 1, provider: 'provider', source }));
+    }
 
     const descriptorPath = directory.path(
-      'bazframe-home/profiles/focused/source-units/provider/source.json'
+      'bazframe-home/sources/provider/source.json'
     );
     const ownedBefore = await captureProviderManifest([descriptorPath]);
     const before = await captureProviderManifest([missingRoot]);
@@ -275,15 +269,15 @@ describe('Bazframe status', () => {
       directSourceUnitCount: 2,
       derivedSkillCount: 0,
       sourceDiagnostics: [{
-        category: 'build-required', providerId: 'provider', sourceId: 'another', path: '.'
+        category: 'broken-snapshot', providerId: 'provider', sourceId: 'another', path: '.'
       }, {
-        category: 'build-required', providerId: 'provider', sourceId: 'source', path: '.'
+        category: 'broken-snapshot', providerId: 'provider', sourceId: 'source', path: '.'
       }]
     });
     expect(statusExitStatus(inspection)).toBe(3);
-    expect(formatStatus(inspection)).toContain('Source failures:\n  - provider/another:. build-required\n  - provider/source:. build-required');
+    expect(formatStatus(inspection)).toContain('Source failures:\n  - provider/another:. broken-snapshot\n  - provider/source:. broken-snapshot');
     expect(formatStatus(inspection)).toContain(
-      'Build the sources with: `bazframe profile sources build provider another`, `bazframe profile sources build provider source`.'
+      'Inspect referenced-source failures with `bazframe profile sources`.'
     );
   });
 
@@ -361,7 +355,7 @@ describe('Bazframe status', () => {
         'Active profile: focused',
         `Profile instructions: ${directory.path('bazframe-home/profiles/focused/AGENTS.md')}`,
         'Flat direct skills: 1',
-        'Direct source units: 0',
+        'Profile source references: 0',
         'Derived effective skills: 0',
         '  (none)',
         'Source failures:',
@@ -424,7 +418,7 @@ describe('Bazframe status', () => {
       'Active profile: (none)',
       'Profile instructions: (none)',
       'Flat direct skills: 0',
-      'Direct source units: 0',
+      'Profile source references: 0',
       'Derived effective skills: 0',
       '  (none)',
       'Source failures:',

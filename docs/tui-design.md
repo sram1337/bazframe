@@ -23,7 +23,7 @@ Bazframe's first graphical management surface is a keyboard-first terminal UI la
 
 ## Implemented boundary
 
-The current slice pins runtime `ink@7.1.1` and `react@19.2.8` and loads them lazily only after the CLI dispatches `bazframe tui`. It implements the three-tab shell; profile create, duplicate, use, rename, and guarded removal; a two-pane selected-profile direct-membership editor; a read-only Skillbook source browser; and structured read-only setup status in Settings. The service and CLI membership paths both accept an explicit profile without changing active selection.
+The current slice pins runtime `ink@7.1.1` and `react@19.2.8` and loads them lazily only after the CLI dispatches `bazframe tui`. It implements the four-tab shell; profile create, duplicate, use, rename, and guarded removal; a two-pane selected-profile direct-membership editor; a read-only Skillbook source browser; and structured read-only setup status in Settings. The service and CLI membership paths both accept an explicit profile without changing active selection.
 
 Deterministic reducer/component/service tests cover compact and below-minimum layouts, resize state preservation, pane boundaries, guarded removal, graceful and forced exits, non-color state markers, and screen-reader output. CLI/TUI state-agreement integration coverage exercises profile lifecycle and inactive-profile membership while preserving provider artifacts. A real macOS pseudo-terminal smoke verifies alternate-screen entry/restoration and linear screen-reader output, while the packed-package gate runs an interactive TUI smoke when `script` is available. `npm test` and `npm run test:real-pi` pass with this slice present.
 
@@ -31,11 +31,11 @@ The top-tab focus model is now separate from active-tab and body/pane focus: `Ta
 
 ## Application shell
 
-The TUI has no sidebar. A persistent top navigation bar contains three tabs:
+The TUI has no sidebar. A persistent top navigation bar contains four tabs:
 
 ```text
 ┌──────────────────────────────────────────────────────────────┐
-│  Profiles  │  Skills  │  Settings                           │
+│  Profiles  │  Sources  │  Skills  │  Settings                           │
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
 │                     active tab content                       │
@@ -45,7 +45,7 @@ The TUI has no sidebar. A persistent top navigation bar contains three tabs:
 └──────────────────────────────────────────────────────────────┘
 ```
 
-Only the active tab's content occupies the body. Active profile and active tab retain `*` markers, while source expansion retains `v`/`>` semantics. Focus uses a cyan bold border (or the same bold border without color under `NO_COLOR`), and selected rows/tabs use inverse/bold styling plus descriptive accessibility labels rather than cursor-arrow prefixes. Inactive focusable sections retain subdued classic borders. Number keys and bracket cycling remain direct active-tab shortcuts. `Tab` and `Shift+Tab` move focus between the top-tab region and the active body; in the profile editor the cycle includes Included and Available as separate pane stops. While the top tabs own focus, `Left`/`Right` or `h`/`l` moves the focused-tab cursor without activation and `Enter` activates it. Each implemented list/browser region retains an independent reducer-owned scroll offset. Deeper tree expansion remains open.
+Only the active tab's content occupies the body. Active profile and active tab retain `*` markers, while source expansion retains ``[-]`/`[+]` semantics. Focus uses a cyan bold border (or the same bold border without color under `NO_COLOR`), and selected rows/tabs use inverse/bold styling plus descriptive accessibility labels rather than cursor-arrow prefixes. Inactive focusable sections retain subdued classic borders. Number keys and bracket cycling remain direct active-tab shortcuts. `Tab` and `Shift+Tab` move focus between the top-tab region and the active body; in the profile editor the cycle includes Included and Available as separate pane stops. While the top tabs own focus, `Left`/`Right` or `h`/`l` moves the focused-tab cursor without activation and `Enter` activates it. Each implemented list/browser region retains an independent reducer-owned scroll offset. Deeper tree expansion remains open.
 
 ## Skills tab
 
@@ -60,11 +60,13 @@ The Skills tab is a tree navigator. Every configured skill source is a root node
 ▸ ~/mySkillLibrary/skills/
 ```
 
-The current read-only browser implements one expandable Skillbook root and its immediate valid skill entries. Browsing files below a skill, retained descendant expansion, and additional real roots remain future work.
+The current read-only browser implements multiple independently expandable roots: Skillbook plus every valid global managed source snapshot, with immediate valid skill entries. Browsing files below a skill, retained descendant expansion, and additional real roots remain future work.
 
 ### Target tree behavior
 
 - Source roots appear in deterministic configured order.
+- Root rows begin with exact `[-]` when expanded or `[+]` when collapsed; visible children begin with two ASCII spaces.
+- Skillbook starts expanded and managed roots start collapsed.
 - Skill directories and their children appear in deterministic lexical order.
 - `Enter` expands or collapses the selected expandable node.
 - Collapsed nodes retain their previous descendant expansion state when practical.
@@ -88,7 +90,7 @@ SkillSource
   diagnostics
 ```
 
-For the current provider, the displayed tree root is the resolved configuration path to `<Skillbook library>/skills`, not the parent library where provider metadata may live. The service also projects its `realpath` when the root exists, and the browser shows both when they differ. The adapter returns zero or one Skillbook source whose immediate valid skills may be linked into profiles but whose artifacts remain provider-owned and non-writable by Bazframe. The view projection is array-shaped, but additional real sources are not configured or validated. Canonical authority for symlinked/retargeted roots and behavior for a missing or broken root remain unsettled, especially because removal must continue to recognize an expected broken membership without provider content.
+For the current provider, the displayed tree root is the resolved configuration path to `<Skillbook library>/skills`, not the parent library where provider metadata may live. The service also projects its `realpath` when the root exists, and the browser shows both when they differ. The adapter returns zero or one Skillbook source whose immediate valid skills may be linked into profiles but whose artifacts remain provider-owned and non-writable by Bazframe. Global managed source snapshots are additional read-only roots. Stable IDs use `managed:<provider>/<source>` so rebuilds retain expansion and selection. Canonical authority for symlinked/retargeted roots and behavior for a missing or broken root remain unsettled, especially because removal must continue to recognize an expected broken membership without provider content.
 
 ### Move and rename ownership gate
 
@@ -159,6 +161,8 @@ The current editor header shows profile identity and active state. Lifecycle act
 The proposed action keys are specified below. `Enter` continues to mean expand/collapse for tree nodes and must not acquire a conflicting destructive meaning.
 
 ## Settings tab
+
+The read-only Sources tab lists global identity, health, reference count, provider input, activated digest, source-unit root, rebuild availability, and diagnostics. It has no mutation controls. Profile editors list source references read-only; flat Skillbook membership controls remain unchanged.
 
 Settings currently renders the structured, read-only setup inspection used by `bazframe status`: Pi adapter state/version, global policy, effective current behavior, active-profile readiness and skill count, cached collision-alias count, and corrective actions. A status failure is isolated as a typed diagnostic so profile and source reads can remain available. The view explicitly states that no writable settings are defined.
 
@@ -284,7 +288,7 @@ The primary bindings avoid function keys and platform-specific modifiers. Modifi
 
 | Key | Action |
 |---|---|
-| `1`, `2`, `3` | Open Profiles, Skills, or Settings directly when no text input owns the key |
+| `1`, `2`, `3`, `4` | Open Profiles, Sources, Skills, or Settings directly when no text input owns the key |
 | `[` / `]` | Open the previous / next top tab directly |
 | `Tab` / `Shift+Tab` | Cycle focus between top tabs and body; in the profile editor, traverse top tabs, Included, and Available. |
 | `?` | Open contextual help overlay |
@@ -416,6 +420,6 @@ Before a production-ready claim, Bazframe must:
 - retain the proven macOS direct-PTY/local-tmux and Linux arm64 digest-pinned-base container direct-PTY/tmux/loopback-SSH gates with run-recorded package/tool versions while adding Windows Terminal and representative-remote SSH evidence;
 - validate residual terminal/font/locale differences for ambiguous-width and emoji presentation;
 - complete manual assistive-technology checks;
-- keep editor launch, settings writes, additional real sources, and provider move/rename unavailable until their respective ownership and lifecycle decisions are approved.
+- keep editor launch, settings writes, managed-source mutation, and provider move/rename unavailable until their respective ownership and lifecycle decisions are approved.
 
 The implemented tests already cover guarded profile lifecycle, explicit selected-profile membership without hidden activation, provider preservation, compact/resize state behavior, deterministic exits, read-only structured Settings status, macOS real-PTY restoration, and packed interactive startup/exit.

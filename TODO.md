@@ -25,16 +25,15 @@
 - [x] Decide against Bazframe inter-skill dependency schema or automation for the current product: the Agent Skills specification has no dependency field, shared resources/runtime packages remain provider-owned, and any future namespaced validate-only sidecar requires separate evidence and approval.
 - [ ] Collaboratively spec a `/swarm-leader` skill with the user that codifies one parent leader delegating subagent planning, implementation, independent review, validation, and fix passes; specification only before any implementation.
 
-## Managed source preparation and snapshots
+## Global managed sources and profile references
 
-- [x] Add exact schema-v1/schema-v2 descriptor and `bazframe-source.json` build-manifest codecs while preserving schema-v1 removal and explicit-build migration.
-- [x] Implement complete artifact capture, canonical manifests, immutable content-addressed publication, reuse verification, and corruption rejection.
-- [x] Implement the explicit add/build transaction: literal build argv, absent-manifest snapshotting, prospective-profile validation, atomic activation, rollback, and schema-v1 upgrade.
-- [x] Move source resolution from live provider roots to verified snapshots while preserving existing discovery bounds, Pi validation, duplicate handling, and diagnostics.
-- [x] Expose `profile sources build` plus preparation/rebuild state through CLI help, overview, status, and README without implicit runtime builds.
-- [x] Bring the standalone Pi artifact to schema-v2 snapshot parity, including snapshot-relative bases, aliases, diagnostics, and reload behavior.
-- [x] Update unit, integration, pack, and real-Pi acceptance to prove provider changes remain invisible until explicit rebuild and activation.
-- [x] Complete independent correctness, transaction, CLI/Pi parity, and MSW-simplicity reviews; apply accepted fixes with one writer and rerun full gates.
+- [x] Replace profile-local source descriptors with exact global source objects and exact profile references; old `source-units/` remains inert pre-alpha content.
+- [x] Implement global add/build/remove plus profile reference add/remove with no legacy aliases or migration.
+- [x] Validate shared-source activation against every referencing profile and refuse referenced deletion atomically.
+- [x] Resolve only active-profile references at runtime while retaining snapshot security, bounds, Pi validation, and collisions.
+- [x] Bring status, standalone Pi, pack, real-Pi, CLI/TUI agreement, and documentation to global-source parity.
+- [x] Add the read-only Sources tab, profile reference display, and multi-root Skills forest with exact `[+]`/`[-]` markers and indented children.
+- [x] Complete follow-up independent re-review; fail closed on malformed profile reference namespaces in production/Pi, keep unavailable TUI references visible, use one bulk reference-index snapshot per CLI/TUI overview, correct stale source/TUI terminology, and pass focused/full/real-Pi/local-terminal/Linux-terminal gates.
 
 ## Terminal UI
 
@@ -60,7 +59,7 @@
 
 ## Deferred candidates (not active work)
 
-- Skill packs, profile export, child subsets, a global source registry, and snapshot garbage collection require separate product decisions.
+- Skill packs, profile export, child subsets, and snapshot garbage collection require separate product decisions.
 - TUI skill artifact move/rename requires provider ownership, writable-root, cross-root, identity, locking, rollback, and recovery semantics.
 - Writable Settings, deeper source browsing, and selected-profile instruction-editor launch remain candidate slices pending their documented lifecycle and interoperability gates.
 

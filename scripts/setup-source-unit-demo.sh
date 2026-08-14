@@ -39,7 +39,8 @@ EOF
 cli=(node "$repository_root/dist/cli.js")
 "${cli[@]}" profile add demo
 "${cli[@]}" profile use demo
-"${cli[@]}" profile sources add custom test-suite "$PROVIDER"
+"${cli[@]}" sources add custom test-suite "$PROVIDER"
+"${cli[@]}" profile sources add custom test-suite
 "${cli[@]}" adapter install pi
 
 printf '\n--- Source-unit discovery ---\n'

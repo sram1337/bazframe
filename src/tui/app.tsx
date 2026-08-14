@@ -20,6 +20,7 @@ import type {
   DashboardDiagnostic,
   DashboardSnapshot,
   DirectMembership,
+  ManagedSourceSummary,
   ProfileSummary,
   SkillSummary
 } from '../application/tui-service.js';
@@ -50,7 +51,7 @@ interface UiMessage {
 
 const MIN_COLUMNS = 60;
 const MIN_ROWS = 16;
-const TABS: readonly TuiTab[] = ['profiles', 'skills', 'settings'];
+const TABS: readonly TuiTab[] = ['profiles', 'sources', 'skills', 'settings'];
 
 export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppProps) {
   const { exit } = useApp();
@@ -66,6 +67,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
     profileList: Math.max(1, bodyRows - 4),
     included: paneRows,
     available: paneRows,
+    sources: Math.max(1, bodyRows - 5),
     skillsBrowser: Math.max(1, bodyRows - 4)
   };
   const viewportRowsRef = useRef(viewportRows);
@@ -375,7 +377,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
       if (!mutationActive.current) void load();
       return;
     }
-    if (input === '1' || input === '2' || input === '3') {
+    if (input === '1' || input === '2' || input === '3' || input === '4') {
       dispatch({ type: 'activate-tab', tab: TABS[Number(input) - 1]! });
       return;
     }
@@ -613,6 +615,19 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
       return;
     }
 
+    if (currentState.activeTab === 'sources') {
+      const ids = currentSnapshot.managedSources?.map((source) => source.id) ?? [];
+      if (key.upArrow || key.downArrow || vimUp || vimDown || key.pageUp || key.pageDown || key.home || key.end) {
+        const id = key.home ? ids[0] : key.end ? ids[ids.length - 1] : moveSelection(
+          ids,
+          currentState.selectedSourceId,
+          key.pageDown ? viewportRowsRef.current.sources : key.pageUp ? -viewportRowsRef.current.sources : key.downArrow || vimDown ? 1 : -1
+        );
+        dispatch({ type: 'select-source', id, ids, viewportRows: viewportRowsRef.current.sources });
+      }
+      return;
+    }
+
     if (currentState.activeTab === 'skills') {
       const ids = browserNodeIds(currentSnapshot, currentState.expandedSourceIds);
       if (
@@ -646,7 +661,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
         if (key.return) dispatch({ type: 'toggle-source', id: sourceId });
         else if (key.rightArrow || vimRight) {
           if (currentState.expandedSourceIds.includes(sourceId)) {
-            const firstSkill = currentSnapshot.sources.find(
+            const firstSkill = (currentSnapshot.skillRoots ?? currentSnapshot.sources ?? []).find(
               (source) => source.id === sourceId
             )?.skills[0];
             if (firstSkill !== undefined) {
@@ -664,7 +679,8 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
         return;
       }
       if ((key.leftArrow || vimLeft) && currentState.browserSkillId !== undefined) {
-        const sourceId = currentState.browserSkillId.split(':', 1)[0];
+        const sourceId = (currentSnapshot.skillRoots ?? currentSnapshot.sources ?? [])
+          .find((source) => currentState.browserSkillId?.startsWith(`${source.id}:`))?.id;
         if (sourceId !== undefined) {
           dispatch({
             type: 'select-browser-skill',
@@ -718,7 +734,15 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
                   maxRows={bodyRows}
                   compact={compact}
                 />
-            : state.activeTab === 'skills'
+            : state.activeTab === 'sources'
+              ? <SourcesView
+                  sources={snapshot?.managedSources ?? []}
+                  selectedId={state.selectedSourceId}
+                  offset={state.sourcesOffset}
+                  focused={state.focusedRegion === 'body'}
+                  maxRows={viewportRows.sources}
+                />
+              : state.activeTab === 'skills'
               ? <SkillsBrowser
                   snapshot={snapshot}
                   selectedId={state.browserSkillId}
@@ -984,6 +1008,13 @@ function ProfileEditor({
         : <Text dimColor wrap="truncate-end">
             {profile.membershipDiagnostic ?? profile.directory}
           </Text>}
+      <Text wrap="truncate-end">
+        Source references: {profile.sourceReferences?.length
+          ? profile.sourceReferences.map((reference) => reference.availability === 'available'
+            ? `${reference.provider}/${reference.source}`
+            : `${reference.provider}/${reference.source} [unavailable: ${reference.diagnostic ?? 'unknown failure'}]`).join(', ')
+          : '(none)'} (read-only)
+      </Text>
       <MembershipPane
         title="Included skills"
         memberships={profile.memberships}
@@ -1103,6 +1134,39 @@ function SkillPane({
   );
 }
 
+function SourcesView({
+  sources,
+  selectedId,
+  offset,
+  focused,
+  maxRows
+}: {
+  sources: readonly ManagedSourceSummary[];
+  selectedId: string | undefined;
+  offset: number;
+  focused: boolean;
+  maxRows: number;
+}) {
+  return (
+    <Box borderStyle={focused ? 'bold' : 'classic'} borderColor={focusBorderColor(focused)} borderDimColor={!focused} flexDirection="column" paddingX={1}>
+      <Text bold aria-label={`Managed sources${focused ? ', focused' : ''}`}>Managed sources (read-only)</Text>
+      {sources.length === 0
+        ? <Text dimColor>No global managed sources.</Text>
+        : visibleRows(sources, offset, Math.max(1, maxRows)).map((source) => (
+            <Box key={source.id} flexDirection="column">
+              <Text inverse={focused && source.id === selectedId} bold={source.id === selectedId} aria-label={managedSourceAccessibilityLabel(source, source.id === selectedId)}>
+                {source.provider}/{source.source} [{source.health}] refs:{source.referenceCount}
+              </Text>
+              {source.id === selectedId
+                ? <Text dimColor wrap="truncate-end">  sha256:{source.digest} root:{source.sourceUnitRoot} rebuild:{source.rebuildAvailability} input:{source.root}{source.diagnostics.length ? `; ${source.diagnostics.join('; ')}` : ''}</Text>
+                : null}
+            </Box>
+          ))}
+      <Text dimColor>Source mutations are available only through `bazframe sources`.</Text>
+    </Box>
+  );
+}
+
 function SkillsBrowser({
   snapshot,
   selectedId,
@@ -1149,7 +1213,7 @@ function SkillsBrowser({
       <Text bold aria-label={`Skill sources browser${focused ? ', focused' : ''}`}>
         Skill sources
       </Text>
-      {snapshot.sources.length === 0
+      {(snapshot.skillRoots ?? snapshot.sources ?? []).length === 0
         ? <Text dimColor>No configured source is available.</Text>
         : visible.map((row) => row.kind === 'source'
           ? <Text
@@ -1159,7 +1223,7 @@ function SkillsBrowser({
               wrap="truncate-end"
               aria-label={`${row.label} source, ${row.expanded ? 'expanded' : 'collapsed'}${row.id === selectedId ? ', selected' : ''}, ${row.root}`}
             >
-              {row.expanded ? 'v' : '>'}{' '}{row.label} - {row.root}
+              {row.expanded ? '[-]' : '[+]'}{' '}{row.label} - {row.root}
             </Text>
           : <Text
               key={row.id}
@@ -1167,7 +1231,7 @@ function SkillsBrowser({
               bold={row.id === selectedId}
               aria-label={`Skill ${row.skillId}, source ${row.sourceId}${row.id === selectedId ? ', selected' : ''}`}
             >
-                {row.skillId}
+                {'  '}{row.skillId}
             </Text>)}
       <Text dimColor>
         {compact
@@ -1176,6 +1240,13 @@ function SkillsBrowser({
       </Text>
     </Box>
   );
+}
+
+export function managedSourceAccessibilityLabel(source: ManagedSourceSummary, selected: boolean): string {
+  const references = source.referenceCount === 'unknown'
+    ? 'profile reference count unknown'
+    : `${source.referenceCount} profile references`;
+  return `Source ${source.provider}/${source.source}, ${source.health}, ${references}${selected ? ', selected' : ''}`;
 }
 
 function Settings({
@@ -1268,7 +1339,7 @@ function Modal({
     return (
       <FocusedOverlay>
         <Text bold>Keyboard help</Text>
-        <Text wrap="truncate-end">1/2/3 and [/] open tabs directly. Tab/Shift+Tab cycle focus.</Text>
+        <Text wrap="truncate-end">1/2/3/4 and [/] open tabs directly. Tab/Shift+Tab cycle focus.</Text>
         <Text wrap="truncate-end">Focused tabs: Left/Right or h/l moves focus; Enter activates.</Text>
         <Text wrap="truncate-end">Body: arrows or j/k move; PageUp/PageDown and Home/End jump.</Text>
         <Text wrap="truncate-end">Tree: Left/h collapses or selects parent; Right/l expands or selects first child.</Text>
@@ -1408,7 +1479,7 @@ function availableForProfile(
 ): SkillSummary[] {
   if (snapshot === undefined) return [];
   const included = new Set(profile?.memberships.map((membership) => membership.skillId) ?? []);
-  return snapshot.sources.flatMap((source) => source.skills)
+  return (snapshot.availableSkillSources ?? snapshot.sources ?? []).flatMap((source) => source.skills)
     .filter((skill) => !included.has(skill.id));
 }
 
@@ -1462,7 +1533,7 @@ function sourceBrowserRows(
   snapshot: DashboardSnapshot,
   expandedSourceIds: readonly string[]
 ): SourceBrowserRow[] {
-  return snapshot.sources.flatMap((source): SourceBrowserRow[] => {
+  return (snapshot.skillRoots ?? snapshot.sources ?? []).flatMap((source): SourceBrowserRow[] => {
     const expanded = expandedSourceIds.includes(source.id);
     return [{
       id: `source:${source.id}`,
@@ -1488,7 +1559,7 @@ function browserNodeIds(
   snapshot: DashboardSnapshot,
   expandedSourceIds: readonly string[]
 ): string[] {
-  return snapshot.sources.flatMap((source) => [
+  return (snapshot.skillRoots ?? snapshot.sources ?? []).flatMap((source) => [
     `source:${source.id}`,
     ...(expandedSourceIds.includes(source.id)
       ? source.skills.map(compositeSkillId)

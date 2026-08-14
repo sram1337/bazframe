@@ -40,7 +40,10 @@ try {
   }
   assertExists(join(packageRoot, 'dist', 'tui', 'run-tui.js'));
   assertExists(join(packageRoot, 'dist', 'application', 'tui-service.js'));
-  assertExists(join(packageRoot, 'dist', 'profiles', 'profile-source-membership.js'));
+  assertExists(join(packageRoot, 'dist', 'profiles', 'profile-source-reference.js'));
+  assertExists(join(packageRoot, 'dist', 'profiles', 'profile-source-reference-lifecycle.js'));
+  assertExists(join(packageRoot, 'dist', 'sources', 'source-store.js'));
+  assertExists(join(packageRoot, 'dist', 'sources', 'source-lifecycle.js'));
   assertExists(join(packageRoot, 'dist', 'source-units', 'source-unit-resolver.js'));
   assertExists(join(packageRoot, 'artifacts', 'pi', 'bazframe.ts'));
   assertExists(join(packageRoot, 'README.md'));

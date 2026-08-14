@@ -9,14 +9,18 @@ export type HelpTopic =
   | 'profile' | 'profile-add' | 'profile-duplicate' | 'profile-remove' | 'profile-rename'
   | 'profile-use' | 'profile-list' | 'profile-current' | 'profile-skills'
   | 'profile-skills-add' | 'profile-skills-remove' | 'profile-sources'
-  | 'profile-sources-add' | 'profile-sources-build' | 'profile-sources-remove' | 'skills' | 'project' | 'tui';
+  | 'profile-sources-add' | 'profile-sources-remove' | 'sources' | 'sources-add' | 'sources-build' | 'sources-remove'
+  | 'skills' | 'project' | 'tui';
 export type Command =
   | { name: 'profiles-overview' }
   | { name: 'skills-overview' }
   | { name: 'profile-skills-overview' }
+  | { name: 'sources-overview' }
+  | { name: 'sources-add'; providerId: string; sourceId: string; sourceRoot: string }
+  | { name: 'sources-build'; providerId: string; sourceId: string }
+  | { name: 'sources-remove'; providerId: string; sourceId: string }
   | { name: 'profile-sources-overview' }
-  | { name: 'profile-sources-add'; providerId: string; sourceId: string; sourceRoot: string; profileId?: string }
-  | { name: 'profile-sources-build'; providerId: string; sourceId: string; profileId?: string }
+  | { name: 'profile-sources-add'; providerId: string; sourceId: string; profileId?: string }
   | { name: 'profile-sources-remove'; providerId: string; sourceId: string; profileId?: string }
   | { name: 'projects-overview' }
   | { name: 'global-overview' }
@@ -69,6 +73,7 @@ export function parseArgv(argv: readonly string[]): ParseResult {
   if (first === 'skill' || first === 'skills') {
     return parseOverview(rest, 'skills-overview', 'skills');
   }
+  if (first === 'sources') return parseSources(rest);
   if (first === 'project') return parseProject(rest);
   if (first === 'projects') return parsePluralOverview(rest, 'projects-overview', 'project');
   if (first === 'global') return parseGlobal(rest);
@@ -93,8 +98,8 @@ function parseHelp(args: readonly string[]): ParseResult {
     ['profile skills', 'profile-skills'],
     ['profile sources', 'profile-sources'],
     ['profile sources add', 'profile-sources-add'],
-    ['profile sources build', 'profile-sources-build'],
     ['profile sources remove', 'profile-sources-remove'],
+    ['sources', 'sources'], ['sources add', 'sources-add'], ['sources build', 'sources-build'], ['sources remove', 'sources-remove'],
     ['skill', 'skills'], ['skills', 'skills'],
     ['project', 'project'], ['projects', 'project'],
     ['global', 'global'],
@@ -231,63 +236,42 @@ function parseProfileSkills(args: readonly string[]): ParseResult {
 }
 
 function parseProfileSources(args: readonly string[]): ParseResult {
-  if (args.length === 0) {
-    return { kind: 'command', command: { name: 'profile-sources-overview' } };
-  }
-  if (args.length === 1 && HELP_FLAGS.has(args[0])) {
-    return { kind: 'help', topic: 'profile-sources' };
-  }
+  if (args.length === 0) return { kind: 'command', command: { name: 'profile-sources-overview' } };
+  if (args.length === 1 && HELP_FLAGS.has(args[0])) return { kind: 'help', topic: 'profile-sources' };
   const [subcommand, ...rest] = args;
-  if (subcommand !== 'add' && subcommand !== 'build' && subcommand !== 'remove') {
-    return usageError('profile sources requires `add`, `build`, or `remove`.', 'profile-sources');
-  }
+  if (subcommand !== 'add' && subcommand !== 'remove') return usageError('profile sources requires `add` or `remove`.', 'profile-sources');
   const topic: HelpTopic = `profile-sources-${subcommand}`;
   if (rest.length === 1 && HELP_FLAGS.has(rest[0])) return { kind: 'help', topic };
-  const required = subcommand === 'add' ? 3 : 2;
-  const hasExplicitProfile = rest.length === required + 2
-    && rest[required] === '--profile';
-  if (!(rest.length === required || hasExplicitProfile)) {
-    return usageError(
-      `profile sources ${subcommand} requires ${subcommand === 'add'
-        ? '<provider> <source> <absolute-root>'
-        : '<provider> <source>'} followed only by optional --profile <profile>.`,
-      topic
-    );
-  }
+  const hasExplicitProfile = rest.length === 4 && rest[2] === '--profile';
+  if (!(rest.length === 2 || hasExplicitProfile)) return usageError(`profile sources ${subcommand} requires <provider> <source> followed only by optional --profile <profile>.`, topic);
   const [providerId, sourceId] = rest;
-  if (!isSafeSkillId(providerId) || !isSafeSkillId(sourceId)) {
-    return usageError(
-      'Provider and source IDs must be 1-64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen.',
-      topic
-    );
-  }
-  const profileId = hasExplicitProfile ? rest[required + 1] : undefined;
+  if (!isSafeSkillId(providerId) || !isSafeSkillId(sourceId)) return invalidSourceIds(topic);
+  const profileId = hasExplicitProfile ? rest[3] : undefined;
   if (profileId !== undefined && !isSafeProfileId(profileId)) return invalidProfileId(topic);
+  return { kind: 'command', command: { name: `profile-sources-${subcommand}`, providerId, sourceId, ...(profileId === undefined ? {} : { profileId }) } as Command };
+}
+
+function parseSources(args: readonly string[]): ParseResult {
+  if (args.length === 0) return { kind: 'command', command: { name: 'sources-overview' } };
+  if (args.length === 1 && HELP_FLAGS.has(args[0])) return { kind: 'help', topic: 'sources' };
+  const [subcommand, ...rest] = args;
+  if (!new Set(['add', 'build', 'remove']).has(subcommand)) return usageError('sources requires `add`, `build`, or `remove`.', 'sources');
+  const topic = `sources-${subcommand}` as HelpTopic;
+  if (rest.length === 1 && HELP_FLAGS.has(rest[0])) return { kind: 'help', topic };
+  const required = subcommand === 'add' ? 3 : 2;
+  if (rest.length !== required) return usageError(`sources ${subcommand} requires ${subcommand === 'add' ? '<provider> <source> <absolute-root>' : '<provider> <source>'}.`, topic);
+  const [providerId, sourceId] = rest;
+  if (!isSafeSkillId(providerId) || !isSafeSkillId(sourceId)) return invalidSourceIds(topic);
   if (subcommand === 'add') {
     const sourceRoot = rest[2];
-    if (!isAbsolute(sourceRoot) || sourceRoot.includes('\0')) {
-      return usageError('Source root must be a non-empty absolute path without NUL bytes.', topic);
-    }
-    return {
-      kind: 'command',
-      command: {
-        name: 'profile-sources-add',
-        providerId,
-        sourceId,
-        sourceRoot,
-        ...(profileId === undefined ? {} : { profileId })
-      }
-    };
+    if (!isAbsolute(sourceRoot) || sourceRoot.includes('\0')) return usageError('Source root must be a non-empty absolute path without NUL bytes.', topic);
+    return { kind: 'command', command: { name: 'sources-add', providerId, sourceId, sourceRoot } };
   }
-  return {
-    kind: 'command',
-    command: {
-      name: subcommand === 'build' ? 'profile-sources-build' : 'profile-sources-remove',
-      providerId,
-      sourceId,
-      ...(profileId === undefined ? {} : { profileId })
-    }
-  };
+  return { kind: 'command', command: { name: `sources-${subcommand}`, providerId, sourceId } as Command };
+}
+
+function invalidSourceIds(topic: HelpTopic): ParseResult {
+  return usageError('Provider and source IDs must be 1-64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen.', topic);
 }
 
 function invalidProfileId(topic: HelpTopic): ParseResult {

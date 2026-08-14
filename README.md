@@ -4,7 +4,7 @@
 
 The accepted first [Pi integration boundary](docs/pi-adaptive-context-adapter.md) uses a global extension with direct Pi invocation: plain `pi` keeps native context and adds the profile, while `pi -nc` restores global Pi instructions and adds the profile. The adapter responds to Pi's structured context list and leaves native project resources under Pi's ownership.
 
-Bazframe 2 treats a coding-agent harness as a portable, first-class object. Its CLI is organized around resources: a bare singular or plural resource shows a human overview, while a scoped verb changes that resource.
+Bazframe 2 treats a coding-agent harness as a portable, first-class object. Its CLI is organized around resource overviews and scoped actions. Most established resources accept singular and plural overview forms; global managed sources intentionally use only the plural `bazframe sources` namespace.
 
 ## CLI at a glance
 
@@ -13,7 +13,8 @@ Bazframe 2 treats a coding-agent harness as a portable, first-class object. Its 
 | Profiles | `bazframe profile` or `bazframe profiles` | `profile add`, `duplicate`, `use`, `rename`, `remove`, `list`, `current` |
 | Available skills | `bazframe skill` or `bazframe skills` | Browse the resolved Skillbook library |
 | Active-profile skills | `bazframe profile skills` | `profile skills add`, `profile skills remove` |
-| Profile source units | `bazframe profile sources` | `profile sources add`, `build`, `remove` |
+| Global sources | `bazframe sources` | `sources add`, `build`, `remove` |
+| Profile source references | `bazframe profile sources` | `profile sources add`, `remove` |
 | Global policy | `bazframe global` | `global enable`, `global disable` |
 | Project overrides | `bazframe project` or `bazframe projects` | `project enable`, `project disable` |
 | Adapters | `bazframe adapter` or `bazframe adapters` | `adapter install pi`, `adapter uninstall pi` |
@@ -26,14 +27,15 @@ The overview commands list current resources, mark active/current state where ap
 bazframe --help                  # minimal top-level help and suggestions
 bazframe help profiles           # profile reference
 bazframe profile skills --help   # active-profile flat-skill reference
-bazframe profile sources --help  # provider-neutral source-unit reference
+bazframe sources --help          # global managed sources
+bazframe profile sources --help  # profile source references
 ```
 
 Top-level `use`, `add`, and `remove` remain compatibility aliases. The old `init`/`uninit` forms report migration guidance to `project enable`/`disable`. `profile list` and `profile current` retain concise output for scripts. The deprecated `bazframe pi [--dry-run] [-- <pi args>]` launcher remains available only for migration.
 
 Color is enabled automatically for terminal output and never carries meaning by itself. Pipes and redirected output remain plain text. Set `NO_COLOR` to disable color or `FORCE_COLOR=1` to enable it explicitly; `NO_COLOR` wins when both are present.
 
-`bazframe tui` opens the keyboard-first Ink interface when both stdin and stdout are interactive terminals. The TUI runtime pins `ink@7.1.1` and `react@19.2.8`; the CLI loads them lazily only after dispatching this command. The interface provides `Profiles`, `Skills`, and `Settings` tabs; profile create, duplicate, activation, rename, and guarded removal; direct membership editing for the selected profile without silently changing active selection; a read-only Skillbook source browser; and structured read-only setup status with corrective actions. Provider-owned skill move/rename, settings writes, and editor launch remain unavailable. Press `?` for keys, use arrows or Vim `h`/`j`/`k`/`l` for directional navigation, uppercase `J`/`K` to jump between profile-editor panes, `1`–`3` for tabs, and `q` to exit. Non-interactive invocation fails plainly and points back to ordinary CLI commands.
+`bazframe tui` opens the keyboard-first Ink interface when both stdin and stdout are interactive terminals. The TUI runtime pins `ink@7.1.1` and `react@19.2.8`; the CLI loads them lazily only after dispatching this command. The interface provides `Profiles`, `Sources`, `Skills`, and `Settings` tabs; profile create, duplicate, activation, rename, and guarded removal; direct membership editing for the selected profile without silently changing active selection; read-only global sources and profile source references; a read-only multi-root Skills browser for Skillbook and valid global managed snapshots; and structured read-only setup status with corrective actions. Provider-owned skill move/rename, source mutation, settings writes, and editor launch remain unavailable. Press `?` for keys, use arrows or Vim `h`/`j`/`k`/`l` for directional navigation, uppercase `J`/`K` to jump between profile-editor panes, `1`–`4` for tabs, and `q` to exit. Non-interactive invocation fails plainly and points back to ordinary CLI commands.
 
 This is not a production-ready TUI. Automated evidence covers macOS direct PTY and local tmux, plus Linux arm64 direct PTY, tmux, and loopback SSH in a container built from a digest-pinned base image; each Linux run records the installed package and tool versions rather than claiming a byte-reproducible apt environment. Local installed-tarball tmux now also covers an actual Ink fatal render propagated through rejected `waitUntilExit()`—including exit `1`, diagnostic, raw-mode/cursor/alternate-screen restoration, and cleanup—and `80x24`/`60x16` cell bounds for CJK, combining marks, emoji-ZWJ, ANSI SGR, and a long unbroken path. Source-unit mutation is deliberately CLI-only in the implemented slice. Windows Terminal, representative remote SSH, terminal/font/locale ambiguous-width differences, and manual assistive-technology validation remain open, as do deeper TUI source trees and the deferred editor/settings/provider operations.
 
@@ -107,14 +109,15 @@ Inside a Git worktree, project policy wins over global policy. No project state 
 ├── global.json                    # optional disabled global policy
 ├── projects/                      # optional per-worktree overrides
 ├── source-snapshots/sha256/       # immutable prepared artifacts by manifest digest
+├── sources/
+│   └── provider-id/source-id.json # global source identity and active digest
 └── profiles/
     └── focused/
         ├── AGENTS.md             # required UTF-8
         ├── skills/
         │   └── demo-profile -> /absolute/path/.skillbook/skills/demo-profile
-        └── source-units/
-            └── provider-id/
-                └── source-id.json
+        └── sources/
+            └── provider-id/source-id.json # portable global-source reference
 ```
 
 Profile IDs provisionally use 1–64 lowercase ASCII letters/digits separated by single hyphens. `active-profile` is plain text and is replaced atomically.
@@ -139,22 +142,19 @@ Two visibly different profiles are in [`examples/profiles/focused`](examples/pro
 
 ## Provider-neutral source units
 
-A profile may select zero or many provider inputs through strict JSON descriptors under `profiles/<profile>/source-units/<provider>/<source>.json`. `add` explicitly runs an optional literal build declared by root `bazframe-source.json`, snapshots the complete prepared artifact into immutable content-addressed storage, validates its Agent Skills, and activates a schema-v2 descriptor. `build` is the only operation that makes later provider-input changes visible. Existing schema-v1 live-root descriptors remain removable and can be explicitly migrated with `build`; runtime never projects their live bytes.
+Global sources are first-class built objects under `<BAZFRAME_HOME>/sources/<provider>/<source>.json`. Profiles include exact references under `profiles/<profile>/sources/<provider>/<source>.json`. `sources add` performs the explicit initial build/snapshot activation; `sources build` is the only operation that makes later provider-input changes visible. Activation is rejected if any referencing profile would become invalid. Source deletion is refused while referenced. Provider inputs and immutable snapshots are never deleted by source removal.
 
-Bazframe derives descendant Agent Skills only from the verified activated snapshot, preserves snapshot-relative physical bases and definitions, and passes each child individually through the Pi 0.82.x profile/native collision pipeline. Pi's loader is authoritative for effective names, including valid YAML forms and directory-name fallback.
-
-The canonical CLI is:
-
-```bash
+```text
+bazframe sources
+bazframe sources add <provider> <source> <absolute-root>
+bazframe sources build <provider> <source>
+bazframe sources remove <provider> <source>
 bazframe profile sources
-bazframe profile sources add <provider> <source> <absolute-root> [--profile <profile>]
-bazframe profile sources build <provider> <source> [--profile <profile>]
+bazframe profile sources add <provider> <source> [--profile <profile>]
 bazframe profile sources remove <provider> <source> [--profile <profile>]
 ```
 
-Build execution uses the provider input as CWD, literal argv without a shell, and ordinary user-process authority. It occurs only during explicit `add` or `build`—never during overview, status, Pi startup, `/bazframe reload`, or skill invocation. Candidate structural/Pi failures and profile name collisions reject activation; rebuild failure preserves the prior descriptor and snapshot. Provider acquisition, publication, mutable data, credentials, skill-command execution, snapshot garbage collection, sandboxing, child subsets, packs, a global registry, and TUI source mutation remain outside this slice.
-
-Remove validates and deletes only the descriptor, even when its provider input is missing, and deletes neither provider bytes nor snapshots. Snapshot discovery remains lexical and source-atomic with compatibility bounds of 8 directory levels, 256 visited entries, and 64 effective children. `status` and `/bazframe info` report flat skills, direct sources, derived children, and failures separately. Flat Skillbook behavior remains unchanged.
+The TUI has Profiles, Sources, Skills, and Settings tabs. Sources and profile source references are read-only. Skills renders Skillbook and all valid global managed snapshots as independent roots using `[-]` expanded and `[+]` collapsed rows with indented children. Legacy pre-alpha `profiles/<profile>/source-units/` content is inert and is never read or migrated.
 
 ## Demo
 
