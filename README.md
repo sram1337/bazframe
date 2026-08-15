@@ -6,7 +6,7 @@ Choose a named profile such as `focused`, `reviewer`, or `documentation`, then s
 
 ```text
 Pi's tools, model, and settings ─┐
-Current project's instructions ─┼─> Pi session
+Current project's instructions  ─┼─> Pi session
 Active Bazframe profile ─────────┘
 ```
 
