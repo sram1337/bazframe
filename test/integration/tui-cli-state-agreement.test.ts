@@ -133,6 +133,49 @@ describe('CLI and TUI service state agreement', () => {
       .toEqual([]);
     expect(await snapshotFilesystem(library)).toEqual(providerBefore);
   });
+
+  it('shares manifest-free global source addition without implicit profile composition or provider mutation', async () => {
+    const directory = await createTempDirectory('bazframe source state agreement ');
+    temporaryDirectories.push(directory);
+    const home = directory.path('home');
+    const cwd = await directory.mkdir('outside git');
+    const provider = await directory.mkdir('downloaded');
+    await directory.write('downloaded/demo/SKILL.md', skill('source-demo'));
+    await directory.write('downloaded/provider-state.json', '{"owner":"provider"}\n');
+    const environment: NodeJS.ProcessEnv = {
+      ...process.env,
+      BAZFRAME_HOME: home,
+      SKILLBOOK_LIBRARY: directory.path('skillbook'),
+      PI_CODING_AGENT_DIR: directory.path('pi-agent'),
+      NO_COLOR: '1'
+    };
+    const cli = (args: readonly string[]) => runCapturedCli(args, cwd, directory.root, environment);
+    const service = createBazframeTuiService({
+      bazframeHome: home,
+      bazframeVersion: '0.0.0-integration-test',
+      cwd,
+      environment,
+      userHome: directory.root
+    });
+    await service.createProfile('focused');
+    await service.createProfile('spare');
+    await service.useProfile('spare');
+    const providerBefore = await snapshotFilesystem(provider);
+
+    const added = await service.addSource({ root: provider });
+    expect(added).toMatchObject({ action: 'added', source: 'downloaded' });
+
+    const overview = await cli(['sources']);
+    expect(overview).toMatchObject({ status: 0, stderr: '' });
+    expect(overview.stdout).toContain('downloaded');
+    const dashboard = await service.loadDashboard();
+    expect(dashboard.activeProfileId).toBe('spare');
+    expect(dashboard.managedSources).toContainEqual(expect.objectContaining({
+      source: 'downloaded', root: added.root, referenceCount: 0
+    }));
+    expect(dashboard.profiles.every((profile) => profile.sourceReferences?.length === 0)).toBe(true);
+    expect(await snapshotFilesystem(provider)).toEqual(providerBefore);
+  });
 });
 
 interface CapturedCliResult {

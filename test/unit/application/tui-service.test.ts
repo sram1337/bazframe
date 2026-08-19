@@ -40,7 +40,6 @@ describe('Bazframe TUI service', () => {
     expect(first.profiles.map((profile) => profile.id)).toEqual(['focused', 'reviewer']);
     expect(first.availableSkillSources).toMatchObject([{
       id: 'skillbook',
-      provider: 'skillbook',
       artifactWritesSupported: false,
       skills: [{ id: 'demo-skill', sourceId: 'skillbook' }]
     }]);
@@ -213,16 +212,11 @@ describe('Bazframe TUI service', () => {
 
   it('uses the verified immutable snapshot root for a healthy zero-child managed source', async () => {
     const fixture = await createFixture();
-    const provider = await fixture.directory.mkdir('empty-provider');
-    const added = await addSource(
-      { bazframeHome: fixture.home },
-      'provider',
-      'empty',
-      provider
-    );
+    const sourceRoot = await fixture.directory.mkdir('empty');
+    const added = await addSource({ bazframeHome: fixture.home }, sourceRoot);
 
     const dashboard = await fixture.service.loadDashboard();
-    const root = dashboard.skillRoots?.find((source) => source.id === 'managed:provider/empty');
+    const root = dashboard.skillRoots?.find((source) => source.id === 'managed:empty');
 
     expect(root).toMatchObject({ skills: [] });
     expect(root?.root).toBe(await realpath(fixture.directory.path(
@@ -230,34 +224,25 @@ describe('Bazframe TUI service', () => {
       added.digest,
       'artifact'
     )));
-    expect(root?.root).not.toBe(provider);
+    expect(root?.root).not.toBe(sourceRoot);
   });
 
   it('keeps inactive-profile references visible with deterministic target availability diagnostics', async () => {
     const fixture = await createFixture();
-    const provider = await fixture.directory.mkdir('managed-provider');
-    await fixture.directory.write('managed-provider/demo/SKILL.md', skill('managed-demo'));
-    const added = await addSource(
-      { bazframeHome: fixture.home },
-      'provider',
-      'unusable',
-      provider
-    );
-    const reference = (source: string) => encodeProfileSourceReference({
-      schemaVersion: 1,
-      provider: 'provider',
-      source
-    });
-    await fixture.directory.write('home/profiles/reviewer/sources/provider/missing.json', reference('missing'));
-    await fixture.directory.write('home/profiles/reviewer/sources/provider/malformed.json', reference('malformed'));
-    await fixture.directory.write('home/profiles/reviewer/sources/provider/unusable.json', reference('unusable'));
-    await fixture.directory.write('home/sources/provider/malformed.json', '{}\n');
+    const sourceRoot = await fixture.directory.mkdir('unusable');
+    await fixture.directory.write('unusable/demo/SKILL.md', skill('managed-demo'));
+    const added = await addSource({ bazframeHome: fixture.home }, sourceRoot);
+    const reference = (source: string) => encodeProfileSourceReference({ schemaVersion: 1, source });
+    await fixture.directory.write('home/profiles/reviewer/sources/missing.json', reference('missing'));
+    await fixture.directory.write('home/profiles/reviewer/sources/malformed.json', reference('malformed'));
+    await fixture.directory.write('home/profiles/reviewer/sources/unusable.json', reference('unusable'));
+    await fixture.directory.write('home/sources/malformed.json', '{}\n');
     const snapshotSkill = fixture.directory.path(
       'home/source-snapshots/sha256', added.digest, 'artifact', 'demo', 'SKILL.md'
     );
     if (process.platform !== 'win32') await chmod(snapshotSkill, 0o600);
     await writeFile(snapshotSkill, 'corrupt\n');
-    const providerBefore = await readFile(fixture.directory.path('managed-provider/demo/SKILL.md'));
+    const providerBefore = await readFile(fixture.directory.path('unusable/demo/SKILL.md'));
 
     const dashboard = await fixture.service.loadDashboard();
     const reviewer = dashboard.profiles.find((profile) => profile.id === 'reviewer');
@@ -265,35 +250,35 @@ describe('Bazframe TUI service', () => {
     expect(reviewer?.active).toBe(false);
     expect(reviewer?.sourceReferences).toEqual([
       expect.objectContaining({
-        id: 'provider/malformed',
+        id: 'malformed',
         availability: 'unavailable',
         diagnostic: expect.stringContaining('invalid-source')
       }),
       expect.objectContaining({
-        id: 'provider/missing',
+        id: 'missing',
         availability: 'unavailable',
         diagnostic: 'Global source target is unavailable.'
       }),
       expect.objectContaining({
-        id: 'provider/unusable',
+        id: 'unusable',
         availability: 'unavailable',
         diagnostic: expect.stringContaining('broken-snapshot')
       })
     ]);
-    expect(await readFile(fixture.directory.path('managed-provider/demo/SKILL.md'))).toEqual(providerBefore);
+    expect(await readFile(fixture.directory.path('unusable/demo/SKILL.md'))).toEqual(providerBefore);
   });
 
   it('marks reference counts unknown and source health failed when the reference index is invalid', async () => {
     const fixture = await createFixture();
-    const provider = await fixture.directory.mkdir('provider');
-    await fixture.directory.write('provider/demo/SKILL.md', skill('demo'));
-    await addSource({ bazframeHome: fixture.home }, 'provider', 'source', provider);
+    const sourceRoot = await fixture.directory.mkdir('source');
+    await fixture.directory.write('source/demo/SKILL.md', skill('demo'));
+    await addSource({ bazframeHome: fixture.home }, sourceRoot);
     await fixture.directory.write('home/profiles/broken-profile', 'not a directory');
 
     const dashboard = await fixture.service.loadDashboard();
 
     expect(dashboard.managedSources).toEqual([expect.objectContaining({
-      id: 'managed:provider/source',
+      id: 'managed:source',
       referenceCount: 'unknown',
       health: 'failed',
       diagnostics: expect.arrayContaining(['reference index unavailable'])
@@ -302,6 +287,88 @@ describe('Bazframe TUI service', () => {
       severity: 'error',
       message: expect.stringContaining('Reference index unavailable')
     }));
+  });
+
+  it('loads authoritative Skillbook and immutable managed SKILL.md previews', async () => {
+    const fixture = await createFixture();
+    const skillbook = await fixture.service.loadSkillPreview({
+      sourceId: 'skillbook', skillId: 'demo-skill'
+    });
+    expect(skillbook.contents).toContain('# Skill');
+
+    const sourceRoot = await fixture.directory.mkdir('preview');
+    await fixture.directory.write('preview/demo/SKILL.md', skill('managed-demo'));
+    await addSource({ bazframeHome: fixture.home }, sourceRoot);
+    const before = await fixture.service.loadSkillPreview({
+      sourceId: 'managed:preview', skillId: 'managed-demo'
+    });
+    await fixture.directory.write('preview/demo/SKILL.md', skill('managed-demo').replace('# Skill', '# Changed'));
+    const after = await fixture.service.loadSkillPreview({
+      sourceId: 'managed:preview', skillId: 'managed-demo'
+    });
+
+    expect(after).toEqual(before);
+    await expect(fixture.service.loadSkillPreview({
+      sourceId: 'managed:preview', skillId: 'missing'
+    })).rejects.toThrow(/no longer available/u);
+  });
+
+  it('browses physical directories and adds a manifest-free source without composing it', async () => {
+    const fixture = await createFixture();
+    await fixture.directory.mkdir('Downloads/skills');
+    await fixture.directory.mkdir('Documents');
+    await fixture.directory.write('Downloads/skills/SKILL.md', skill('downloaded'));
+
+    const partial = await fixture.service.browseDirectories('~/Down');
+    expect(partial.entries).toEqual([{
+      name: 'Downloads', path: await realpath(fixture.directory.path('Downloads'))
+    }]);
+    const exact = await fixture.service.browseDirectories('~/Downloads/skills');
+    expect(exact.selectablePath).toBe(fixture.directory.path('Downloads/skills'));
+    await expect(fixture.service.browseDirectories('relative/path')).rejects.toThrow(/absolute/u);
+    if (process.platform !== 'win32') {
+      await symlink(fixture.directory.path('Downloads'), fixture.directory.path('Downloads-link'), 'dir');
+      await expect(fixture.service.browseDirectories('~/Downloads-link/skills'))
+        .rejects.toThrow(/symbolic link/u);
+      await expect(fixture.service.browseDirectories('~/Downloads-link/sk'))
+        .rejects.toThrow(/symbolic link/u);
+      await expect(fixture.service.browseDirectories('~/Downloads-link/skills/sk'))
+        .rejects.toThrow(/symbolic link/u);
+    }
+
+    const candidate = await fixture.service.inspectSourceCandidate({ root: '~/Downloads/skills' });
+    expect(candidate).toMatchObject({
+      sourceId: 'skills',
+      enteredRoot: fixture.directory.path('Downloads/skills'),
+      canonicalRoot: await realpath(fixture.directory.path('Downloads/skills')),
+      manifest: { state: 'absent' }
+    });
+    await fixture.service.addSource({ root: '~/Downloads/skills' });
+    const dashboard = await fixture.service.loadDashboard();
+    expect(dashboard.managedSources).toContainEqual(expect.objectContaining({
+      id: 'managed:skills', health: 'ready', referenceCount: 0
+    }));
+    expect(dashboard.profiles.every((profile) => profile.sourceReferences?.length === 0)).toBe(true);
+    expect(await readActiveProfile(fixture.home)).toBe('focused');
+  });
+
+  it('reports declared source builds and refuses to execute them through the TUI service', async () => {
+    const fixture = await createFixture();
+    await fixture.directory.write('declared/bazframe-source.json', `${JSON.stringify({
+      schemaVersion: 1,
+      build: [process.execPath, '-e', "require('node:fs').writeFileSync('ran', 'yes')"],
+      artifactRoot: '.',
+      sourceUnitRoot: '.'
+    })}\n`);
+    await fixture.directory.write('declared/demo/SKILL.md', skill('declared-demo'));
+    const candidate = await fixture.service.inspectSourceCandidate({ root: fixture.directory.path('declared') });
+    expect(candidate.manifest.state).toBe('present');
+    await expect(fixture.service.addSource({ root: fixture.directory.path('declared') }))
+      .rejects.toMatchObject({ code: 'SOURCE_BUILD_REQUIRES_CLI' });
+    await expect(lstat(fixture.directory.path('declared/ran'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect((await fixture.service.loadDashboard()).managedSources).not.toContainEqual(
+      expect.objectContaining({ id: 'managed:declared' })
+    );
   });
 
   it('loads an empty dashboard without creating Bazframe state', async () => {

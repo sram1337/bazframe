@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { DashboardSnapshot } from '../../../src/application/tui-service.js';
 import {
+  availableRowsFor,
+  availableSourcesForProfile,
+  clampAvailableViewportOffset,
   initialTuiState,
+  moveAvailableSelectionByRows,
   moveSelection,
   PROFILE_CREATE_ROW_ID,
   tuiReducer,
@@ -13,26 +17,42 @@ const VIEWPORT_ROWS: ViewportRows = {
   profileList: 5,
   included: 4,
   available: 3,
-  sources: 3,
-  skillsBrowser: 6
+  skillsBrowser: 6,
+  skillPreview: 6
 };
 
 describe('TUI state', () => {
-  it('keeps active tab, focused tab, and body focus independent', () => {
+  it('keeps grouped Available selection source-aware across visual-row paging', () => {
+    const rows = ['@source:alpha', 'alpha:a1', 'alpha:a2', '@source:beta', 'beta:b1', 'beta:b2'];
+    expect(moveAvailableSelectionByRows(rows, 'alpha:a1', 3)).toBe('beta:b1');
+    expect(moveAvailableSelectionByRows(rows, 'beta:b1', -3)).toBe('alpha:a1');
+    expect(moveAvailableSelectionByRows(rows, 'alpha:a2', 1)).toBe('@source:beta');
+    expect(clampAvailableViewportOffset(rows, 'beta:b1', 0, 3)).toBe(2);
+    expect(rows.slice(2, 5)).toEqual(['alpha:a2', '@source:beta', 'beta:b1']);
+    expect(clampAvailableViewportOffset(rows, 'alpha:a1', 4, 3)).toBe(0);
+    expect(clampAvailableViewportOffset(rows, 'alpha:a1', 0, 1)).toBe(1);
+  });
+
+  it('starts on Skills and keeps active tab, focused tab, and body focus independent', () => {
+    expect(initialTuiState).toMatchObject({
+      activeTab: 'skills',
+      focusedTab: 'skills',
+      focusedRegion: 'body'
+    });
     const topFocused = tuiReducer(initialTuiState, {
       type: 'cycle-focus',
       direction: 1
     });
-    const cursorMoved = tuiReducer(topFocused, { type: 'focus-tab', tab: 'skills' });
+    const cursorMoved = tuiReducer(topFocused, { type: 'focus-tab', tab: 'profiles' });
     expect(cursorMoved).toMatchObject({
-      activeTab: 'profiles',
-      focusedTab: 'skills',
+      activeTab: 'skills',
+      focusedTab: 'profiles',
       focusedRegion: 'tabs'
     });
 
-    expect(tuiReducer(cursorMoved, { type: 'activate-tab', tab: 'skills' })).toMatchObject({
-      activeTab: 'skills',
-      focusedTab: 'skills',
+    expect(tuiReducer(cursorMoved, { type: 'activate-tab', tab: 'profiles' })).toMatchObject({
+      activeTab: 'profiles',
+      focusedTab: 'profiles',
       focusedRegion: 'tabs'
     });
   });
@@ -46,7 +66,12 @@ describe('TUI state', () => {
   });
 
   it('cycles tabs, Included, and Available focus in the profile editor', () => {
-    const editor = tuiReducer(initialTuiState, { type: 'profile-route', route: 'editor' });
+    const profilesState: TuiState = {
+      ...initialTuiState,
+      activeTab: 'profiles',
+      focusedTab: 'profiles'
+    };
+    const editor = tuiReducer(profilesState, { type: 'profile-route', route: 'editor' });
     const tabs = tuiReducer(editor, { type: 'cycle-focus', direction: -1 });
     const available = tuiReducer(tabs, { type: 'cycle-focus', direction: -1 });
     const included = tuiReducer(available, { type: 'cycle-focus', direction: -1 });
@@ -93,7 +118,7 @@ describe('TUI state', () => {
       selectedProfileId: 'reviewer',
       includedSkillId: 'two',
       profileRoute: 'editor',
-      activeTab: 'profiles',
+      activeTab: 'skills',
       focusedTab: 'settings',
       focusedRegion: 'tabs'
     });
@@ -107,7 +132,7 @@ describe('TUI state', () => {
       selectedProfileId: 'focused',
       includedSkillId: 'one',
       profileRoute: 'editor',
-      activeTab: 'profiles',
+      activeTab: 'skills',
       focusedTab: 'settings',
       focusedRegion: 'tabs'
     });
@@ -117,25 +142,25 @@ describe('TUI state', () => {
     const dashboard = snapshot(['focused'], []);
     dashboard.skillRoots = [
       {
-        id: 'managed:p/one', provider: 'p', label: 'p/one', root: '/snapshots/one', artifactWritesSupported: false,
-        skills: [{ id: 'a', sourceId: 'managed:p/one', directory: '/snapshots/one/a' }]
+        id: 'managed:one', label: 'one', root: '/snapshots/one', artifactWritesSupported: false,
+        skills: [{ id: 'a', sourceId: 'managed:one', directory: '/snapshots/one/a' }]
       },
       {
-        id: 'managed:p/two', provider: 'p', label: 'p/two', root: '/snapshots/two', artifactWritesSupported: false,
-        skills: [{ id: 'z', sourceId: 'managed:p/two', directory: '/snapshots/two/z' }]
+        id: 'managed:two', label: 'two', root: '/snapshots/two', artifactWritesSupported: false,
+        skills: [{ id: 'z', sourceId: 'managed:two', directory: '/snapshots/two/z' }]
       }
     ];
     let state: TuiState = {
       ...initialTuiState,
-      expandedSourceIds: ['managed:p/one', 'managed:p/two'],
-      browserSkillId: 'managed:p/two:z'
+      expandedSourceIds: ['managed:one', 'managed:two'],
+      browserSkillId: 'managed:two:z'
     };
 
     state = tuiReducer(state, { type: 'reconcile', snapshot: dashboard, viewportRows: VIEWPORT_ROWS });
     dashboard.skillRoots[1]!.skills = [];
     state = tuiReducer(state, { type: 'reconcile', snapshot: dashboard, viewportRows: VIEWPORT_ROWS });
 
-    expect(state.browserSkillId).toBe('source:managed:p/two');
+    expect(state.browserSkillId).toBe('source:managed:two');
   });
 
   it('selects the create row when no profiles exist', () => {
@@ -147,19 +172,82 @@ describe('TUI state', () => {
     expect(state.selectedProfileId).toBe(PROFILE_CREATE_ROW_ID);
   });
 
-  it('tracks source expansion independently from browser selection', () => {
+  it('tracks Skills and Available source expansion independently', () => {
     const collapsed = tuiReducer(initialTuiState, {
       type: 'toggle-source',
       id: 'skillbook',
       expanded: false
     });
     expect(collapsed.expandedSourceIds).toEqual([]);
+    expect(collapsed.expandedAvailableSourceIds).toEqual(['skillbook']);
     const expanded = tuiReducer(collapsed, {
       type: 'toggle-source',
       id: 'skillbook',
       expanded: true
     });
     expect(expanded.expandedSourceIds).toEqual(['skillbook']);
+
+    const availableCollapsed = tuiReducer({
+      ...expanded,
+      availableSkillId: 'skillbook:one'
+    }, {
+      type: 'toggle-available-source',
+      id: 'skillbook',
+      expanded: false,
+      rowIds: ['@source:skillbook', '@source:other'],
+      viewportRows: 3
+    });
+    expect(availableCollapsed.expandedAvailableSourceIds).toEqual([]);
+    expect(availableCollapsed.expandedSourceIds).toEqual(['skillbook']);
+    expect(availableCollapsed.availableSkillId).toBe('@source:skillbook');
+  });
+
+  it('selects unreferenced browsable roots for Available without granting direct membership', () => {
+    const dashboard = snapshot(['focused'], []);
+    const skillbook = dashboard.sources![0]!;
+    const managed = {
+      id: 'managed:mtg-deckbuilding', label: 'mtg-deckbuilding', root: '/snapshots/mtg',
+      artifactWritesSupported: false as const,
+      skills: [{
+        id: 'deck-building', sourceId: 'managed:mtg-deckbuilding',
+        directory: '/snapshots/mtg/deck-building'
+      }]
+    };
+    dashboard.availableSkillSources = [skillbook];
+    dashboard.skillRoots = [skillbook, managed];
+
+    expect(availableSourcesForProfile(dashboard, dashboard.profiles[0])
+      .map((source) => source.id)).toEqual(['skillbook', 'managed:mtg-deckbuilding']);
+
+    dashboard.profiles[0]!.sourceReferences = [{
+      schemaVersion: 1, source: 'mtg-deckbuilding', id: 'mtg-deckbuilding',
+      path: '/profiles/focused/sources/mtg-deckbuilding.json', availability: 'available'
+    }];
+    expect(availableSourcesForProfile(dashboard, dashboard.profiles[0])
+      .map((source) => source.id)).toEqual(['skillbook']);
+    expect(dashboard.availableSkillSources.map((source) => source.id)).toEqual(['skillbook']);
+  });
+
+  it('constructs Available visual rows from browsable sources and expansion state', () => {
+    const sources = [
+      {
+        id: 'skillbook', label: 'Skillbook', root: '/skills', artifactWritesSupported: false as const,
+        skills: [
+          { id: 'included', sourceId: 'skillbook', directory: '/skills/included' },
+          { id: 'free', sourceId: 'skillbook', directory: '/skills/free' }
+        ]
+      },
+      {
+        id: 'other', label: 'Other', root: '/other', artifactWritesSupported: false as const,
+        skills: [{ id: 'second', sourceId: 'other', directory: '/other/second' }]
+      }
+    ];
+    const rows = availableRowsFor(sources, new Set(['included']), ['skillbook']);
+    expect(rows.map((row) => row.id)).toEqual([
+      '@source:skillbook', 'skillbook:free', '@source:other'
+    ]);
+    expect(rows[0]).toMatchObject({ kind: 'source', expanded: true, label: 'Skillbook' });
+    expect(rows[2]).toMatchObject({ kind: 'source', expanded: false, label: 'Other' });
   });
 
   it('owns four independent offsets across tab and profile-route changes', () => {
@@ -215,7 +303,7 @@ describe('TUI state', () => {
     expect(state).toMatchObject({
       profileListOffset: 6,
       includedOffset: 7,
-      availableOffset: 8,
+      availableOffset: 9,
       skillsBrowserOffset: 11
     });
 
@@ -226,7 +314,7 @@ describe('TUI state', () => {
     expect(state).toMatchObject({
       profileListOffset: 6,
       includedOffset: 7,
-      availableOffset: 8,
+      availableOffset: 9,
       skillsBrowserOffset: 11
     });
   });
@@ -263,7 +351,7 @@ describe('TUI state', () => {
       id: 'reviewer',
       profileIds: ['focused', 'reviewer'],
       includedIds: reviewerIncluded,
-      availableIds: reviewerAvailable,
+      availableRowIds: ['@source:skillbook', ...reviewerAvailable],
       viewportRows,
       openEditor: true
     });
@@ -272,10 +360,10 @@ describe('TUI state', () => {
       selectedProfileId: 'reviewer',
       profileRoute: 'editor',
       includedSkillId: 'reviewer-member-00',
-      availableSkillId: 'skillbook:a-available-04',
+      availableSkillId: '@source:skillbook',
       profileListOffset: 1,
       includedOffset: 0,
-      availableOffset: 2,
+      availableOffset: 0,
       browserSkillId: 'skillbook:browser-09',
       skillsBrowserOffset: 7
     });
@@ -330,11 +418,11 @@ describe('TUI state', () => {
     expect(state).toMatchObject({
       selectedProfileId: 'profile-07',
       includedSkillId: 'included-05',
-      availableSkillId: 'skillbook:available-04',
+      availableSkillId: '@source:skillbook',
       browserSkillId: 'skillbook:available-04',
       profileListOffset: 4,
       includedOffset: 2,
-      availableOffset: 2,
+      availableOffset: 0,
       skillsBrowserOffset: 0
     });
   });
@@ -384,7 +472,7 @@ describe('TUI state', () => {
     state = tuiReducer(state, {
       type: 'clamp-viewports',
       snapshot: dashboard,
-      viewportRows: { profileList: 15, included: 6, available: 6, sources: 6, skillsBrowser: 13 }
+      viewportRows: { profileList: 15, included: 6, available: 6, skillsBrowser: 13, skillPreview: 13 }
     });
     expect(state).toMatchObject({
       profileListOffset: 16,
@@ -396,12 +484,12 @@ describe('TUI state', () => {
     state = tuiReducer(state, {
       type: 'clamp-viewports',
       snapshot: dashboard,
-      viewportRows: { profileList: 5, included: 3, available: 3, sources: 3, skillsBrowser: 5 }
+      viewportRows: { profileList: 5, included: 3, available: 3, skillsBrowser: 5, skillPreview: 5 }
     });
     expect(state).toMatchObject({
       profileListOffset: 16,
       includedOffset: 13,
-      availableOffset: 18,
+      availableOffset: 19,
       skillsBrowserOffset: 22
     });
   });
@@ -454,7 +542,6 @@ function snapshot(
     })),
     sources: [{
       id: 'skillbook',
-      provider: 'skillbook',
       label: 'Skillbook',
       root: '/skills',
       artifactWritesSupported: false,

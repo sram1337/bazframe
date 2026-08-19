@@ -1,13 +1,19 @@
-import type { DashboardSnapshot } from '../application/tui-service.js';
+import type {
+  DashboardSnapshot,
+  ProfileSummary,
+  SkillSourceSummary,
+  SkillSummary
+} from '../application/tui-service.js';
 import type { ProfileRemovalIdentity } from '../profiles/profile-removal-identity.js';
 
 export const PROFILE_CREATE_ROW_ID = '@create-profile';
 
-export type TuiTab = 'profiles' | 'sources' | 'skills' | 'settings';
+export type TuiTab = 'skills' | 'profiles' | 'adapters' | 'settings';
 export type TuiFocusRegion = 'tabs' | 'body';
 export type ProfileRoute = 'list' | 'editor';
+export type SkillRoute = 'browser' | 'preview';
 export type ProfilePane = 'included' | 'available';
-export type ViewportRegion = 'profileList' | 'included' | 'available' | 'sources' | 'skillsBrowser';
+export type ViewportRegion = 'profileList' | 'included' | 'available' | 'skillsBrowser' | 'skillPreview';
 export type ViewportRows = Readonly<Record<ViewportRegion, number>>;
 export type ModalKind =
   | 'create'
@@ -15,6 +21,8 @@ export type ModalKind =
   | 'rename'
   | 'remove-confirm'
   | 'remove-recursive'
+  | 'source-root'
+  | 'source-confirm'
   | 'help';
 
 export interface TuiModal {
@@ -24,6 +32,10 @@ export interface TuiModal {
   directory?: string;
   removalIdentity?: ProfileRemovalIdentity;
   preservedTargets?: readonly string[];
+  sourceId?: string;
+  root?: string;
+  enteredRoot?: string;
+  canonicalRoot?: string;
 }
 
 export interface TuiState {
@@ -31,18 +43,19 @@ export interface TuiState {
   focusedTab: TuiTab;
   focusedRegion: TuiFocusRegion;
   profileRoute: ProfileRoute;
+  skillRoute: SkillRoute;
   selectedProfileId?: string;
   focusedPane: ProfilePane;
   includedSkillId?: string;
   availableSkillId?: string;
-  selectedSourceId?: string;
   browserSkillId?: string;
   profileListOffset: number;
   includedOffset: number;
   availableOffset: number;
-  sourcesOffset: number;
   skillsBrowserOffset: number;
+  skillPreviewOffset: number;
   expandedSourceIds: readonly string[];
+  expandedAvailableSourceIds: readonly string[];
   modal?: TuiModal;
 }
 
@@ -51,22 +64,30 @@ export type TuiAction =
   | { type: 'focus-tab'; tab: TuiTab }
   | { type: 'cycle-focus'; direction: 1 | -1 }
   | { type: 'profile-route'; route: ProfileRoute }
+  | { type: 'skill-route'; route: SkillRoute }
+  | { type: 'set-skill-preview-offset'; offset: number }
   | { type: 'select-profile'; id?: string; ids?: readonly string[]; viewportRows?: number }
   | {
       type: 'select-profile-snapshot';
       id: string;
       profileIds: readonly string[];
       includedIds: readonly string[];
-      availableIds: readonly string[];
+      availableRowIds: readonly string[];
       viewportRows: ViewportRows;
       openEditor?: boolean;
     }
   | { type: 'focus-pane'; pane: ProfilePane }
   | { type: 'select-included'; id?: string; ids?: readonly string[]; viewportRows?: number }
   | { type: 'select-available'; id?: string; ids?: readonly string[]; viewportRows?: number }
-  | { type: 'select-source'; id?: string; ids?: readonly string[]; viewportRows?: number }
   | { type: 'select-browser-skill'; id?: string; ids?: readonly string[]; viewportRows?: number }
   | { type: 'toggle-source'; id: string; expanded?: boolean }
+  | {
+      type: 'toggle-available-source';
+      id: string;
+      expanded?: boolean;
+      rowIds?: readonly string[];
+      viewportRows?: number;
+    }
   | { type: 'clamp-viewports'; snapshot: DashboardSnapshot; viewportRows: ViewportRows }
   | { type: 'open-modal'; modal: TuiModal }
   | { type: 'set-modal-value'; value: string }
@@ -74,17 +95,19 @@ export type TuiAction =
   | { type: 'reconcile'; snapshot: DashboardSnapshot; viewportRows: ViewportRows };
 
 export const initialTuiState: TuiState = {
-  activeTab: 'profiles',
-  focusedTab: 'profiles',
+  activeTab: 'skills',
+  focusedTab: 'skills',
   focusedRegion: 'body',
   profileRoute: 'list',
+  skillRoute: 'browser',
   focusedPane: 'included',
   profileListOffset: 0,
   includedOffset: 0,
   availableOffset: 0,
-  sourcesOffset: 0,
   skillsBrowserOffset: 0,
-  expandedSourceIds: ['skillbook']
+  skillPreviewOffset: 0,
+  expandedSourceIds: ['skillbook'],
+  expandedAvailableSourceIds: ['skillbook']
 };
 
 export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
@@ -97,6 +120,10 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       return cycleFocus(state, action.direction);
     case 'profile-route':
       return { ...state, profileRoute: action.route };
+    case 'skill-route':
+      return { ...state, skillRoute: action.route };
+    case 'set-skill-preview-offset':
+      return { ...state, skillPreviewOffset: Math.max(0, action.offset) };
     case 'select-profile':
       return {
         ...state,
@@ -110,7 +137,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       };
     case 'select-profile-snapshot': {
       const includedSkillId = keepOrFirst(action.includedIds, state.includedSkillId);
-      const availableSkillId = keepOrFirst(action.availableIds, state.availableSkillId);
+      const availableSkillId = keepOrAvailableNeighbor(action.availableRowIds, state.availableSkillId);
       return {
         ...state,
         selectedProfileId: action.id,
@@ -129,8 +156,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
           state.includedOffset,
           action.viewportRows.included
         ),
-        availableOffset: clampViewportOffset(
-          action.availableIds,
+        availableOffset: clampAvailableViewportOffset(
+          action.availableRowIds,
           availableSkillId,
           state.availableOffset,
           action.viewportRows.available
@@ -154,15 +181,13 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       return {
         ...state,
         availableSkillId: action.id,
-        availableOffset: selectionOffset(
+        availableOffset: availableSelectionOffset(
           state.availableOffset,
           action.ids,
           action.id,
           action.viewportRows
         )
       };
-    case 'select-source':
-      return { ...state, selectedSourceId: action.id, sourcesOffset: selectionOffset(state.sourcesOffset, action.ids, action.id, action.viewportRows) };
     case 'select-browser-skill':
       return {
         ...state,
@@ -180,6 +205,29 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       if (shouldExpand) expanded.add(action.id);
       else expanded.delete(action.id);
       return { ...state, expandedSourceIds: [...expanded] };
+    }
+    case 'toggle-available-source': {
+      const expanded = new Set(state.expandedAvailableSourceIds);
+      const shouldExpand = action.expanded ?? !expanded.has(action.id);
+      if (shouldExpand) expanded.add(action.id);
+      else expanded.delete(action.id);
+      const sourceRowId = availableSourceRowId(action.id);
+      const selectedId = !shouldExpand && isAvailableChildOf(state.availableSkillId, action.id)
+        ? sourceRowId
+        : state.availableSkillId;
+      return {
+        ...state,
+        expandedAvailableSourceIds: [...expanded],
+        availableSkillId: selectedId,
+        availableOffset: action.rowIds === undefined || action.viewportRows === undefined
+          ? state.availableOffset
+          : clampAvailableViewportOffset(
+              action.rowIds,
+              selectedId,
+              state.availableOffset,
+              action.viewportRows
+            )
+      };
     }
     case 'clamp-viewports':
       return clampViewportOffsets(state, action.snapshot, action.viewportRows);
@@ -201,7 +249,9 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
 
 export function cycleFocus(state: TuiState, direction: 1 | -1): TuiState {
   if (state.activeTab !== 'profiles' || state.profileRoute !== 'editor') {
-    return { ...state, focusedRegion: state.focusedRegion === 'tabs' ? 'body' : 'tabs' };
+    return state.focusedRegion === 'tabs'
+      ? { ...state, focusedRegion: 'body' }
+      : { ...state, focusedRegion: 'tabs', focusedTab: state.activeTab };
   }
 
   const current = state.focusedRegion === 'tabs' ? 'tabs' : state.focusedPane;
@@ -209,7 +259,7 @@ export function cycleFocus(state: TuiState, direction: 1 | -1): TuiState {
   const currentIndex = order.indexOf(current);
   const next = order[(currentIndex + direction + order.length) % order.length]!;
   return next === 'tabs'
-    ? { ...state, focusedRegion: 'tabs' }
+    ? { ...state, focusedRegion: 'tabs', focusedTab: state.activeTab }
     : { ...state, focusedRegion: 'body', focusedPane: next };
 }
 
@@ -236,28 +286,25 @@ function reconcileState(
     : keepOrFirst(profileIds, state.selectedProfileId) ?? PROFILE_CREATE_ROW_ID;
   const selectedProfile = snapshot.profiles.find((profile) => profile.id === selectedProfileId);
   const includedIds = selectedProfile?.memberships.map((membership) => membership.id) ?? [];
-  const includedSkillIds = new Set(
-    selectedProfile?.memberships.map((membership) => membership.skillId) ?? []
-  );
-  const availableIds = (snapshot.availableSkillSources ?? snapshot.sources ?? []).flatMap((source) => source.skills)
-    .filter((skill) => !includedSkillIds.has(skill.id))
-    .map((skill) => `${skill.sourceId}:${skill.id}`);
-  const sourceIds = (snapshot.managedSources ?? []).map((source) => source.id);
+  const availableRowIds = availableRowsFor(
+    availableSourcesForProfile(snapshot, selectedProfile),
+    new Set<string>(),
+    state.expandedAvailableSourceIds
+  ).map((row) => row.id);
   const browserIds = browserIdsFor(snapshot, state.expandedSourceIds);
   const next = {
     ...state,
     selectedProfileId,
     includedSkillId: keepOrFirst(includedIds, state.includedSkillId),
-    availableSkillId: keepOrFirst(availableIds, state.availableSkillId),
-    selectedSourceId: keepOrFirst(sourceIds, state.selectedSourceId),
+    availableSkillId: keepOrAvailableNeighbor(availableRowIds, state.availableSkillId),
     browserSkillId: keepOrBrowserNeighbor(browserIds, state.browserSkillId)
   };
   return clampOffsetsForIds(next, {
     profileList: [...profileIds, PROFILE_CREATE_ROW_ID],
     included: includedIds,
-    available: availableIds,
-    sources: sourceIds,
-    skillsBrowser: browserIds
+    available: availableRowIds,
+    skillsBrowser: browserIds,
+    skillPreview: []
   }, viewportRows);
 }
 
@@ -270,18 +317,20 @@ function clampViewportOffsets(
     (profile) => profile.id === state.selectedProfileId
   );
   const includedIds = selectedProfile?.memberships.map((membership) => membership.id) ?? [];
-  const includedSkillIds = new Set(
-    selectedProfile?.memberships.map((membership) => membership.skillId) ?? []
-  );
-  const availableIds = (snapshot.availableSkillSources ?? snapshot.sources ?? []).flatMap((source) => source.skills)
-    .filter((skill) => !includedSkillIds.has(skill.id))
-    .map((skill) => `${skill.sourceId}:${skill.id}`);
-  return clampOffsetsForIds(state, {
+  const availableRowIds = availableRowsFor(
+    availableSourcesForProfile(snapshot, selectedProfile),
+    new Set<string>(),
+    state.expandedAvailableSourceIds
+  ).map((row) => row.id);
+  return clampOffsetsForIds({
+    ...state,
+    availableSkillId: keepOrAvailableNeighbor(availableRowIds, state.availableSkillId)
+  }, {
     profileList: [...snapshot.profiles.map((profile) => profile.id), PROFILE_CREATE_ROW_ID],
     included: includedIds,
-    available: availableIds,
-    sources: (snapshot.managedSources ?? []).map((source) => source.id),
-    skillsBrowser: browserIdsFor(snapshot, state.expandedSourceIds)
+    available: availableRowIds,
+    skillsBrowser: browserIdsFor(snapshot, state.expandedSourceIds),
+    skillPreview: []
   }, viewportRows);
 }
 
@@ -304,13 +353,12 @@ function clampOffsetsForIds(
       state.includedOffset,
       viewportRows.included
     ),
-    availableOffset: clampViewportOffset(
+    availableOffset: clampAvailableViewportOffset(
       ids.available,
       state.availableSkillId,
       state.availableOffset,
       viewportRows.available
     ),
-    sourcesOffset: clampViewportOffset(ids.sources, state.selectedSourceId, state.sourcesOffset, viewportRows.sources),
     skillsBrowserOffset: clampViewportOffset(
       ids.skillsBrowser,
       state.browserSkillId,
@@ -336,6 +384,34 @@ export function clampViewportOffset(
   return nextOffset;
 }
 
+export function clampAvailableViewportOffset(
+  rowIds: readonly string[],
+  selectedId: string | undefined,
+  offset: number,
+  viewportRows: number
+): number {
+  const rows = Math.max(1, Math.floor(viewportRows));
+  const selectedIndex = selectedId === undefined ? -1 : rowIds.indexOf(selectedId);
+  const selectedGroupHeading = selectedIndex > 0 && rowIds[selectedIndex - 1]?.startsWith('@source:')
+    ? selectedIndex - 1
+    : -1;
+  if (rows <= 1 || selectedGroupHeading < 0) {
+    return clampViewportOffset(rowIds, selectedId, offset, rows);
+  }
+  const maximumOffset = Math.max(0, rowIds.length - rows);
+  const minimumForSelection = Math.max(0, selectedIndex - rows + 1);
+  const maximumForHeading = Math.min(selectedGroupHeading, maximumOffset);
+  return Math.max(minimumForSelection, Math.min(maximumForHeading, offset));
+}
+
+export function moveAvailableSelectionByRows(
+  rowIds: readonly string[],
+  currentId: string | undefined,
+  delta: number
+): string | undefined {
+  return moveSelection(rowIds, currentId, delta);
+}
+
 function selectionOffset(
   offset: number,
   ids: readonly string[] | undefined,
@@ -347,16 +423,153 @@ function selectionOffset(
     : clampViewportOffset(ids, selectedId, offset, viewportRows);
 }
 
+function availableSelectionOffset(
+  offset: number,
+  ids: readonly string[] | undefined,
+  selectedId: string | undefined,
+  viewportRows: number | undefined
+): number {
+  return ids === undefined || viewportRows === undefined
+    ? offset
+    : clampAvailableViewportOffset(ids, selectedId, offset, viewportRows);
+}
+
+export type AvailableRow =
+  | {
+      id: string;
+      kind: 'source';
+      sourceId: string;
+      label: string;
+      root: string;
+      expanded: boolean;
+    }
+  | { id: string; kind: 'skill'; sourceId: string; skill: SkillSummary };
+
+export function availableSourcesForProfile(
+  snapshot: DashboardSnapshot | undefined,
+  profile: ProfileSummary | undefined
+): SkillSourceSummary[] {
+  if (snapshot === undefined) return [];
+  const directSourceIds = new Set(
+    directMembershipSources(snapshot).map((source) => source.id)
+  );
+  const includedSkillIds = new Set(
+    profile?.memberships.map((membership) => membership.skillId) ?? []
+  );
+  const referencedManagedSourceIds = new Set(
+    profile?.sourceReferences?.map((reference) => `managed:${reference.source}`) ?? []
+  );
+  const browsableSources = snapshot.skillRoots ?? snapshot.availableSkillSources ?? snapshot.sources ?? [];
+
+  return browsableSources.flatMap((source) => {
+    if (referencedManagedSourceIds.has(source.id)) return [];
+    if (!directSourceIds.has(source.id)) return [source];
+    const skills = source.skills.filter((skill) => !includedSkillIds.has(skill.id));
+    return skills.length === 0 ? [] : [{ ...source, skills }];
+  });
+}
+
+export function isDirectMembershipSource(
+  snapshot: DashboardSnapshot,
+  sourceId: string
+): boolean {
+  return directMembershipSources(snapshot).some((source) => source.id === sourceId);
+}
+
+function directMembershipSources(snapshot: DashboardSnapshot): readonly SkillSourceSummary[] {
+  if (snapshot.availableSkillSources !== undefined) return snapshot.availableSkillSources;
+  return snapshot.skillRoots === undefined ? snapshot.sources ?? [] : [];
+}
+
+export function availableRowsFor(
+  sources: readonly SkillSourceSummary[],
+  includedSkillIds: ReadonlySet<string>,
+  expandedSourceIds: readonly string[]
+): AvailableRow[] {
+  const expanded = new Set(expandedSourceIds);
+  const rows: AvailableRow[] = [];
+  for (const source of sources) {
+    const skills = source.skills.filter((skill) => !includedSkillIds.has(skill.id));
+    if (skills.length === 0) continue;
+    const isExpanded = expanded.has(source.id);
+    rows.push({
+      id: availableSourceRowId(source.id),
+      kind: 'source',
+      sourceId: source.id,
+      label: source.label,
+      root: source.root,
+      expanded: isExpanded
+    });
+    if (isExpanded) {
+      for (const skill of skills) {
+        rows.push({
+          id: `${skill.sourceId}:${skill.id}`,
+          kind: 'skill',
+          sourceId: source.id,
+          skill
+        });
+      }
+    }
+  }
+  return rows;
+}
+
+export function availableSourceRowId(sourceId: string): string {
+  return `@source:${sourceId}`;
+}
+
+export function availableSourceIdForRow(
+  rowIds: readonly string[],
+  rowId: string | undefined
+): string | undefined {
+  if (rowId === undefined) return undefined;
+  if (rowId.startsWith('@source:')) return rowId.slice('@source:'.length);
+  const sourceRows = rowIds
+    .filter((id) => id.startsWith('@source:'))
+    .sort((left, right) => right.length - left.length);
+  return sourceRows
+    .map((id) => id.slice('@source:'.length))
+    .find((sourceId) => rowId.startsWith(`${sourceId}:`));
+}
+
 function browserIdsFor(
   snapshot: DashboardSnapshot,
   expandedSourceIds: readonly string[]
 ): string[] {
-  return (snapshot.skillRoots ?? snapshot.sources ?? []).flatMap((source) => [
+  const roots = snapshot.skillRoots ?? snapshot.sources ?? [];
+  const skillbook = roots.filter((source) => source.id === 'skillbook');
+  const managed = (snapshot.managedSources ?? []).map((source) =>
+    roots.find((root) => root.id === source.id) ?? { id: source.id, skills: [] });
+  const managedIds = new Set(managed.map((source) => source.id));
+  const remaining = roots.filter((source) => source.id !== 'skillbook' && !managedIds.has(source.id));
+  return [...skillbook, ...managed, ...remaining].flatMap((source) => [
     `source:${source.id}`,
     ...(expandedSourceIds.includes(source.id)
       ? source.skills.map((skill) => `${skill.sourceId}:${skill.id}`)
       : [])
   ]);
+}
+
+function keepOrAvailableNeighbor(
+  ids: readonly string[],
+  currentId: string | undefined
+): string | undefined {
+  if (currentId === undefined) {
+    return ids.find((id) => !id.startsWith('@source:')) ?? ids[0];
+  }
+  if (currentId.startsWith('@source:')) return keepOrFirst(ids, currentId);
+  if (ids.includes(currentId)) return currentId;
+  const sourceId = availableSourceIdForRow(ids, currentId);
+  const sourceRowId = sourceId === undefined ? undefined : availableSourceRowId(sourceId);
+  return sourceRowId !== undefined && ids.includes(sourceRowId)
+    ? sourceRowId
+    : keepOrFirst(ids, currentId);
+}
+
+function isAvailableChildOf(rowId: string | undefined, sourceId: string): boolean {
+  return rowId !== undefined
+    && !rowId.startsWith('@source:')
+    && rowId.startsWith(`${sourceId}:`);
 }
 
 function keepOrBrowserNeighbor(

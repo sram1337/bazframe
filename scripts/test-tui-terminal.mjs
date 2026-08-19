@@ -60,17 +60,41 @@ try {
   evidence.push(runScenario('resize', executable, packageRoot, ({ session, deadline }) => {
     waitForCurrentText(session, 'Status: Ready', deadline);
     assertAlternate(session, '1');
+    sendLiteral(session, '2');
     actAndWaitForCurrentText(session, () => sendKey(session, 'Enter'), 'Available skills', deadline);
-    actAndWaitForCurrentText(session, () => resize(session, 70, 20), 'hjkl move', deadline);
+    actAndWaitForCurrentText(session, () => resize(session, 80, 16), '<- Profiles /', deadline);
+    const leadingBlankRowsAfter16 = assertTopAligned(session);
+    actAndWaitForCurrentText(session, () => {
+      resize(session, 80, 24);
+      sendKey(session, 'Tab');
+    }, '┃Available skills', deadline);
+    const leadingBlankRowsAfter24 = assertTopAligned(session);
+    actAndWaitForCurrentText(session, () => {
+      resize(session, 80, 30);
+      sendKey(session, 'Tab');
+      sendKey(session, 'Tab');
+    }, '┃Included skills', deadline);
+    const leadingBlankRowsAfter30 = assertTopAligned(session);
+    actAndWaitForCurrentText(session, () => resize(session, 70, 20), '<- Profiles /', deadline);
     actAndWaitForCurrentText(
       session,
       () => resize(session, 59, 15),
       'Terminal too small (59x15); minimum 60x16.',
       deadline
     );
-    actAndWaitForCurrentText(session, () => resize(session, 80, 24), 'Available skills', deadline);
+    actAndWaitForCurrentText(session, () => resize(session, 80, 24), 'Source references:', deadline);
     sendLiteral(session, 'q');
-    return { sizes: ['80x24', '70x20', '59x15', '80x24'], expectedStatus: 0 };
+    return {
+      evidence: {
+        sizes: ['80x24 (initial)', '80x16', '80x24', '80x30', '70x20', '59x15', '80x24'],
+        leadingBlankRowsAfterSameWidthResize: {
+          '80x16': leadingBlankRowsAfter16,
+          '80x24': leadingBlankRowsAfter24,
+          '80x30': leadingBlankRowsAfter30
+        }
+      },
+      expectedStatus: 0
+    };
   }));
 
   evidence.push(runScenario('handled-lock-error', executable, packageRoot, ({ session, deadline, home }) => {
@@ -86,6 +110,7 @@ try {
     })}\n`, { mode: 0o600 });
     waitForCurrentText(session, 'Status: Ready', deadline);
     assertAlternate(session, '1');
+    sendLiteral(session, '2');
     actAndWaitForCurrentText(session, () => sendLiteral(session, 'c'), 'Create profile', deadline);
     sendLiteral(session, 'reviewer');
     actAndWaitForCurrentText(session, () => sendKey(session, 'Enter'), 'Bazframe state is busy', deadline);
@@ -118,7 +143,7 @@ try {
     waitForCurrentText(session, 'Status: Ready', deadline);
     assertAlternate(session, '1');
     const fixturePid = readFixturePid(marker, deadline, session);
-    actAndWaitForCurrentText(session, () => sendLiteral(session, '3'), '路径', deadline);
+    waitForCurrentText(session, '路径', deadline);
     assertUnicodeCellFrame(session, 80);
     actAndWaitForCurrentText(session, () => resize(session, 60, 16), '路径', deadline);
     assertUnicodeCellFrame(session, 60);
@@ -271,6 +296,7 @@ function runScenario(name, executable, packageRoot, drive, fixtureMode) {
 }
 
 function beginBlockingMutation(session, deadline) {
+  sendLiteral(session, '2');
   actAndWaitForCurrentText(session, () => sendKey(session, 'Enter'), 'Available skills', deadline);
   sendKey(session, 'Tab');
   actAndWaitForCurrentText(session, () => sendLiteral(session, 'a'), 'Add membership...', deadline);
@@ -296,6 +322,15 @@ function capture(session) {
 function captureCurrent(session) {
   return tmux(activeSocket, ['capture-pane', '-p', '-t', `${session}:0.0`]);
 }
+function assertTopAligned(session) {
+  const rows = captureCurrent(session).split('\n');
+  const leadingBlankRows = rows.findIndex((row) => row.length > 0);
+  const firstContentRow = rows[Math.max(0, leadingBlankRows)] ?? '';
+  if (leadingBlankRows !== 0 || !/^[+┏]/u.test(firstContentRow)) {
+    throw scenarioError(session, `TUI shell is not on row 0 after vertical resize (leading blank rows: ${leadingBlankRows}): ${JSON.stringify(firstContentRow)}`);
+  }
+  return leadingBlankRows;
+}
 function captureCurrentEscaped(session) {
   return tmux(activeSocket, ['capture-pane', '-p', '-e', '-t', `${session}:0.0`]);
 }
@@ -304,9 +339,9 @@ function assertUnicodeCellFrame(session, columns) {
   const output = captureCurrent(session);
   const lines = output.split('\n');
   const sourceLines = lines.filter((line) => line.includes('路径'));
-  if (sourceLines.length !== 1) throw scenarioError(session, `found ${sourceLines.length} Unicode source rows at ${columns} columns`);
-  const sourceRow = sourceLines[0];
   const tokens = ['路径', 'Cafe\u0301', '👩‍💻', 'ANSI'];
+  const sourceRow = sourceLines.find((line) => tokens.every((token) => line.includes(token)));
+  if (sourceRow === undefined) throw scenarioError(session, `found no complete Unicode source row among ${sourceLines.length} rows at ${columns} columns`);
   let previousIndex = -1;
   for (const token of tokens) {
     const index = sourceRow.indexOf(token);
@@ -322,9 +357,10 @@ function assertUnicodeCellFrame(session, columns) {
     if (width > columns) throw scenarioError(session, `row ${index + 1} used ${width} cells at ${columns} columns`);
   }
   const escapedSourceRows = captureCurrentEscaped(session).split('\n').filter((line) => line.includes('路径'));
-  if (escapedSourceRows.length !== 1
-    || !escapedSourceRows[0].includes('\u001B[')
-    || !escapedSourceRows[0].includes('m')) {
+  const escapedSourceRow = escapedSourceRows.find((line) => tokens.every((token) => line.includes(token)));
+  if (escapedSourceRow === undefined
+    || !escapedSourceRow.includes('\u001B[')
+    || !escapedSourceRow.includes('m')) {
     throw scenarioError(session, `escaped Unicode source row omitted SGR at ${columns} columns`);
   }
 }

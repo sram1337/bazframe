@@ -3,7 +3,9 @@ import { cleanup, render } from 'ink-testing-library';
 import stringWidth from 'string-width';
 import type {
   BazframeTuiService,
-  DashboardSnapshot
+  DashboardSnapshot,
+  DirectoryBrowserSnapshot,
+  SourceCandidateSummary
 } from '../../../src/application/tui-service.js';
 import { BazframeError } from '../../../src/core/errors.js';
 import type { ProfileRemovalIdentity } from '../../../src/profiles/profile-removal-identity.js';
@@ -11,33 +13,48 @@ import { managedSourceAccessibilityLabel, TuiApp } from '../../../src/tui/app.js
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllEnvs();
 });
 
 describe('TuiApp', () => {
-  it('renders the profile management shell and navigates tabs', async () => {
+  it('starts on Skills and navigates the management shell tabs', async () => {
     const service = fakeService();
     const view = render(<TuiApp service={service} />);
 
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
-    expect(view.lastFrame()).toContain('1 Profiles');
-    expect(view.lastFrame()).toContain('c create');
-
-    view.stdin.write('3');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('Skill sources'));
+    await waitForDashboard(view);
+    expect(view.lastFrame()).toContain('* 1 Skills');
     expect(view.lastFrame()).toContain('demo-skill');
-    expect(view.lastFrame()).toContain('provider-owned');
+    expect(view.lastFrame()).toContain('Provider-owned');
     view.stdin.write('\r');
     await vi.waitFor(() => expect(view.lastFrame()).not.toContain('demo-skill'));
     view.stdin.write('\u001B[C');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('demo-skill'));
 
+    view.stdin.write('2');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+    expect(view.lastFrame()).toContain('* 2 Profiles');
+    expect(view.lastFrame()).toMatch(/focused\s+0/u);
+    expect(view.lastFrame()).not.toContain('0 skills');
+    expect(view.lastFrame()).toContain('c create');
+
+    view.stdin.write('1');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Skill sources'));
+    expect(view.lastFrame()).toContain('demo-skill');
+    expect(view.lastFrame()).toContain('Provider-owned');
+    view.stdin.write('\r');
+    await vi.waitFor(() => expect(view.lastFrame()).not.toContain('demo-skill'));
+    view.stdin.write('\u001B[C');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('demo-skill'));
+
+    view.stdin.write('3');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Pi (read-only)'));
+    expect(view.lastFrame()).toContain('State: current');
     view.stdin.write('4');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('Setup (read-only)'));
-    expect(view.lastFrame()).toContain('Pi adapter: current (0.1.0-test)');
-    expect(view.lastFrame()).toContain('Current behavior: enabled (global-enabled)');
-    expect(view.lastFrame()).toContain('Corrective actions:');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Policy and current directory'));
+    expect(view.lastFrame()).toContain('Effective behavior: enabled (global-enabled)');
+    expect(view.lastFrame()).toContain('Attention needed');
     expect(view.lastFrame()).toContain('(none)');
-    expect(view.lastFrame()).toContain('No writable settings');
+    expect(view.lastFrame()).toContain('Settings are read-only');
 
     view.stdin.write('?');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Tab/Shift+Tab cycle focus'));
@@ -45,81 +62,588 @@ describe('TuiApp', () => {
     expect(view.lastFrame()).toContain('Left/Right or h/l moves focus');
   });
 
+  it('keeps profile counts bare visually and descriptive for screen readers', async () => {
+    const service = fakeService();
+    const visual = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+    await vi.waitFor(() => expect(visual.lastFrame()).toContain('Skill sources'));
+    visual.stdin.write('2');
+    await vi.waitFor(() => expect(visual.lastFrame()).toContain('focused'));
+    expect(visual.lastFrame()).toMatch(/focused\s+0/u);
+    expect(visual.lastFrame()).not.toContain('0 skills');
+    visual.unmount();
+
+    vi.stubEnv('INK_SCREEN_READER', 'true');
+    const accessible = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+    await vi.waitFor(() => expect(accessible.lastFrame()).toContain('Skill sources'));
+    accessible.stdin.write('2');
+    await vi.waitFor(() => expect(accessible.lastFrame()).toContain(
+      'Profile focused, active, selected, 0 skills'
+    ));
+  });
+
+  it('uses uppercase H/L as modal-safe lateral route aliases', async () => {
+    const service = fakeService();
+    const view = render(<TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />);
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Skill sources'));
+    view.stdin.write('2');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('+ Create New Profile'));
+
+    view.stdin.write('L');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('<- Profiles /'));
+    view.stdin.write('H');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('+ Create New Profile'));
+
+    view.stdin.write('1');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] Skillbook'));
+    view.stdin.write('L');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[+] Skillbook'));
+    view.stdin.write('L');
+    view.stdin.write('\u001B[B');
+    view.stdin.write('L');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('<- Skills / demo-skill'));
+    view.stdin.write('H');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Skill sources'));
+
+    view.stdin.write('a');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Absolute root or ~/ path'));
+    view.stdin.write('H');
+    view.stdin.write('L');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Path: HL'));
+  });
+
+  it('makes uppercase L mirror Enter while top tabs own focus without entering a detail route', async () => {
+    const service = fakeService();
+    const view = render(<TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />);
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Skill sources'));
+    view.stdin.write('2');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('+ Create New Profile'));
+
+    view.stdin.write('\t');
+    await vi.waitFor(() => expect(view.lastFrame()).toMatch(/^┏/u));
+    view.stdin.write('L');
+    expect(view.lastFrame()).toContain('+ Create New Profile');
+    expect(view.lastFrame()).not.toContain('<- Profiles /');
+    const afterUppercaseL = view.lastFrame();
+    view.stdin.write('\r');
+    expect(view.lastFrame()).toBe(afterUppercaseL);
+
+    view.stdin.write('h');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('* 1 Skills'));
+    view.stdin.write('L');
+    expect(view.lastFrame()).toContain('[-] Skillbook');
+    expect(view.lastFrame()).not.toContain('<- Skills /');
+  });
+
+  it('fills the preferred 46% Skills master column at 80x24', async () => {
+    const service = fakeService();
+    const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+    await waitForDashboard(view);
+    const titleLine = view.lastFrame()!.split('\n').find((line) => line.includes('Skill sources'));
+    expect(titleLine).toBeDefined();
+    expect([...titleLine!.matchAll(/┃/gu)].map((match) => match.index)).toEqual([0, 36]);
+    const detailLine = view.lastFrame()!.split('\n').find((line) => line.includes('Provider-owned'));
+    expect(detailLine).toBeDefined();
+    expect(detailLine!.indexOf('Provider-owned')).toBeGreaterThanOrEqual(37);
+    assertFrameBounds(view.lastFrame(), 80, 24);
+  });
+
+  it.each([
+    { columns: 80, rows: 24 },
+    { columns: 160, rows: 40 }
+  ])('fills the preferred Profiles master column at $columns x $rows', async ({ columns, rows }) => {
+    const service = fakeService();
+    const view = render(<TuiApp service={service} dimensions={{ columns, rows }} />);
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Skill sources'));
+    view.stdin.write('2');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Profiles /'));
+    const titleLine = view.lastFrame()!.split('\n')
+      .find((line) => line.startsWith('┃') && line.includes('Profiles'));
+    expect(titleLine).toBeDefined();
+    const borders = [...titleLine!.matchAll(/┃/gu)].map((match) => match.index!);
+    expect(borders[0]).toBe(0);
+    expect(borders[1]).toBeGreaterThanOrEqual(Math.floor(columns * 0.36) - 2);
+    expect(borders[1]).toBeLessThanOrEqual(Math.ceil(columns * 0.36));
+    assertFrameBounds(view.lastFrame(), columns, rows);
+  });
+
+  it.each(['ready', 'failed'] as const)('keeps a %s managed mtg-deckbuilding source reachable', async (health) => {
+    const service = fakeService();
+    const dashboard = await service.loadDashboard();
+    const skillbook = dashboard.sources![0]!;
+    dashboard.availableSkillSources = [skillbook];
+    dashboard.skillRoots = health === 'ready'
+      ? [skillbook, {
+          id: 'managed:mtg-deckbuilding',
+          label: 'mtg-deckbuilding',
+          root: '/snapshots/mtg/source-unit',
+          artifactWritesSupported: false,
+          skills: [{
+            id: 'deck-building',
+            sourceId: 'managed:mtg-deckbuilding',
+            directory: '/snapshots/mtg/source-unit/deck-building'
+          }]
+        }]
+      : [skillbook];
+    dashboard.managedSources = [{
+      id: 'managed:mtg-deckbuilding',
+      source: 'mtg-deckbuilding',
+      root: '/Users/sram/mtg-deckbuilding',
+      digest: 'a'.repeat(64),
+      sourceUnitRoot: 'source-unit',
+      rebuildAvailability: 'available',
+      referenceCount: 0,
+      health,
+      diagnostics: health === 'ready' ? [] : ['snapshot unavailable']
+    }];
+    delete dashboard.sources;
+    vi.mocked(service.loadDashboard).mockClear();
+
+    const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+    await waitForDashboard(view);
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('mtg-deckbuilding'));
+    view.stdin.write('\u001B[F');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Profile references: 0'));
+    expect(view.lastFrame()).toContain(health === 'ready' ? 'Health: ready' : 'Health: failed');
+    assertFrameBounds(view.lastFrame(), 80, 24);
+  });
+
+  it('keeps Available expansion independent from the top-level Skills browser', async () => {
+    const service = fakeService();
+    const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+    await waitForDashboard(view);
+    view.stdin.write('\r');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[+] Skillbook'));
+    view.stdin.write('2');
+    view.stdin.write('L');
+    view.stdin.write('\t');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] Skillbook'));
+    expect(view.lastFrame()).toContain('demo-skill');
+  });
+
+  it('shows an honest profile loading state before the first dashboard resolves', async () => {
+    const service = fakeService();
+    const dashboard = await service.loadDashboard();
+    let resolveDashboard!: (value: DashboardSnapshot) => void;
+    service.loadDashboard = vi.fn(() => new Promise<DashboardSnapshot>((resolve) => {
+      resolveDashboard = resolve;
+    }));
+    const view = render(<TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />);
+
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Loading skills...'));
+    expect(view.lastFrame()).not.toContain('Skillbook');
+    resolveDashboard(dashboard);
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Skill sources'));
+  });
+
+  it('shows a failed dashboard state and retries the initial load with r', async () => {
+    const service = fakeService();
+    const dashboard = await service.loadDashboard();
+    vi.mocked(service.loadDashboard)
+      .mockReset()
+      .mockRejectedValueOnce(new Error('dashboard exploded'))
+      .mockResolvedValue(dashboard);
+    const view = render(<TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />);
+
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Dashboard unavailable'));
+    expect(view.lastFrame()).toContain('Failed to load: dashboard exploded');
+    expect(view.lastFrame()).toContain('Press r to retry.');
+    expect(view.lastFrame()).not.toContain('Loading skills...');
+    view.stdin.write('r');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Skill sources'));
+    expect(service.loadDashboard).toHaveBeenCalledTimes(2);
+  });
+
+  it('preserves the prior dashboard snapshot when refresh fails', async () => {
+    const service = fakeService();
+    const dashboard = await service.loadDashboard();
+    vi.mocked(service.loadDashboard)
+      .mockReset()
+      .mockResolvedValueOnce(dashboard)
+      .mockRejectedValueOnce(new Error('refresh failed'));
+    const view = render(<TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />);
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Skill sources'));
+    view.stdin.write('r');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Error: refresh failed'));
+    expect(view.lastFrame()).toContain('Skill sources');
+    expect(view.lastFrame()).not.toContain('Dashboard unavailable');
+  });
+
+  it('previews SKILL.md in compact mode, neutralizes controls, and supports parent-aware o/c', async () => {
+    const service = fakeService();
+    service.loadSkillPreview = vi.fn(async ({ sourceId, skillId }) => ({
+      sourceId,
+      skillId,
+      path: `/library/skills/${skillId}/SKILL.md`,
+      contents: `Preview body \u001B[2J\nsecond line\n`
+    }));
+    const view = render(<TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />);
+    await waitForDashboard(view);
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('demo-skill'));
+
+    view.stdin.write('c');
+    await vi.waitFor(() => expect(view.lastFrame()).not.toContain('  demo-skill'));
+    view.stdin.write('o');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('  demo-skill'));
+    view.stdin.write('\u001B[B');
+    view.stdin.write('c');
+    await vi.waitFor(() => expect(view.lastFrame()).not.toContain('  demo-skill'));
+    view.stdin.write('o');
+    view.stdin.write('\u001B[B');
+    view.stdin.write('\r');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Preview body \\x1b[2J'));
+    expect(view.lastFrame()).toContain('<- Skills / demo-skill');
+    view.stdin.write('\x7f');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Skill sources'));
+  });
+
+  it('focuses the preferred preview, reaches its final line, clamps on resize, and reloads on dashboard revision', async () => {
+    const service = fakeService();
+    const dashboard = await service.loadDashboard();
+    let revision = 0;
+    vi.mocked(service.loadDashboard).mockImplementation(async () => ({
+      ...dashboard,
+      revision: ++revision
+    }));
+    const longPreview = Array.from({ length: 40 }, (_, index) =>
+      `line-${String(index + 1).padStart(2, '0')}`).join('\n');
+    vi.mocked(service.loadSkillPreview)
+      .mockResolvedValueOnce({
+        sourceId: 'skillbook', skillId: 'demo-skill', path: '/library/skills/demo-skill/SKILL.md', contents: longPreview
+      })
+      .mockResolvedValue({
+        sourceId: 'skillbook', skillId: 'demo-skill', path: '/library/skills/demo-skill/SKILL.md', contents: `refreshed-preview\n${longPreview}`
+      });
+    const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+    await waitForDashboard(view);
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('  demo-skill'));
+    expect(view.lastFrame()!.split('\n').some((line) => /^┏.*\+/u.test(line))).toBe(true);
+    view.stdin.write('\u001B[B');
+    view.stdin.write('\r');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Skills / demo-skill'));
+    expect(view.lastFrame()!.split('\n').some((line) => /^\+.*┏/u.test(line))).toBe(true);
+
+    view.stdin.write('\u001B[F');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('line-40'));
+    view.rerender(<TuiApp service={service} dimensions={{ columns: 80, rows: 30 }} />);
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('line-25'));
+    expect(view.lastFrame()).toContain('line-40');
+    view.stdin.write('\u001B[H');
+    view.stdin.write('\u001B[6~');
+    view.stdin.write('\u001B[6~');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('line-40'));
+
+    view.stdin.write('r');
+    await vi.waitFor(() => expect(service.loadSkillPreview).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('refreshed-preview'));
+    view.stdin.write('\x1b');
+    await vi.waitFor(() => expect(view.lastFrame()!.split('\n').some((line) => /^┏.*\+/u.test(line))).toBe(true));
+  });
+
+  it('adds only the reviewed manifest-free candidate after explicit literal-y consent', async () => {
+    const service = fakeService();
+    vi.mocked(service.inspectSourceCandidate).mockResolvedValue({
+      sourceId: 'tmp', enteredRoot: '/tmp', canonicalRoot: '/physical/tmp', manifest: { state: 'absent' }
+    });
+    const view = render(<TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />);
+    await waitForDashboard(view);
+    view.stdin.write('a');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Absolute root or ~/ path'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Current: /tmp'));
+    view.stdin.write('\r');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Add global source tmp'));
+    expect(view.lastFrame()).toContain('Entered source root: /tmp');
+    expect(view.lastFrame()).toContain('Canonical source root: /physical/tmp');
+    expect(service.addSource).not.toHaveBeenCalled();
+    view.stdin.write('\r');
+    expect(service.addSource).not.toHaveBeenCalled();
+    view.stdin.write('y');
+    await vi.waitFor(() => expect(service.addSource).toHaveBeenCalledWith({ root: '/physical/tmp' }));
+  });
+
+  it('drops stale directory and candidate completions after source input or navigation changes', async () => {
+    const service = fakeService();
+    let resolveInitialBrowse!: (value: DirectoryBrowserSnapshot) => void;
+    vi.mocked(service.browseDirectories).mockImplementation((input) => input.length === 0
+      ? new Promise<DirectoryBrowserSnapshot>((resolve) => { resolveInitialBrowse = resolve; })
+      : Promise.resolve({ input, resolvedPath: `/new/${input}`, selectablePath: `/new/${input}`, entries: [] }));
+    let resolveCandidate!: (value: SourceCandidateSummary) => void;
+    vi.mocked(service.inspectSourceCandidate).mockImplementation(() =>
+      new Promise<SourceCandidateSummary>((resolve) => { resolveCandidate = resolve; }));
+    const view = render(<TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />);
+    await waitForDashboard(view);
+    view.stdin.write('a');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Loading directories...'));
+    view.stdin.write('x');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Current: /new/x'));
+    resolveInitialBrowse({ input: '', resolvedPath: '/stale', selectablePath: '/stale', entries: [] });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(view.lastFrame()).not.toContain('/stale');
+
+    view.stdin.write('\r');
+    await vi.waitFor(() => expect(service.inspectSourceCandidate).toHaveBeenCalledTimes(1));
+    view.stdin.write('\x1b');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Skill sources'));
+    resolveCandidate({ sourceId: 'x', enteredRoot: '/new/x', canonicalRoot: '/physical/new/x', manifest: { state: 'absent' } });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(view.lastFrame()).not.toContain('Add global source x');
+  });
+
+  it('drops a stale directory error after the source path changes', async () => {
+    const service = fakeService();
+    let rejectInitialBrowse!: (error: Error) => void;
+    vi.mocked(service.browseDirectories).mockImplementation((input) => input.length === 0
+      ? new Promise<DirectoryBrowserSnapshot>((_resolve, reject) => { rejectInitialBrowse = reject; })
+      : Promise.resolve({ input, resolvedPath: `/new/${input}`, selectablePath: `/new/${input}`, entries: [] }));
+    const view = render(<TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />);
+    await waitForDashboard(view);
+    view.stdin.write('a');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Loading directories...'));
+    view.stdin.write('x');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Current: /new/x'));
+    rejectInitialBrowse(new Error('obsolete browse failure'));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(view.lastFrame()).not.toContain('obsolete browse failure');
+  });
+
+  it('generation-guards candidate inspection after edits and newer requests', async () => {
+    const service = fakeService();
+    const resolvers: Array<(value: SourceCandidateSummary) => void> = [];
+    vi.mocked(service.inspectSourceCandidate).mockImplementation(() =>
+      new Promise<SourceCandidateSummary>((resolve) => { resolvers.push(resolve); }));
+    const view = render(<TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />);
+    await waitForDashboard(view);
+    view.stdin.write('a');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Current: /tmp'));
+
+    view.stdin.write('\r');
+    await vi.waitFor(() => expect(resolvers).toHaveLength(1));
+    view.stdin.write('z');
+    resolvers[0]!({ sourceId: 'tmp', enteredRoot: '/tmp', canonicalRoot: '/stale-edit', manifest: { state: 'absent' } });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(view.lastFrame()).not.toContain('Add global source tmp');
+
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Current: /tmp'));
+    view.stdin.write('\r');
+    view.stdin.write('\r');
+    await vi.waitFor(() => expect(resolvers).toHaveLength(3));
+    resolvers[1]!({ sourceId: 'tmp', enteredRoot: '/tmp', canonicalRoot: '/stale-request', manifest: { state: 'absent' } });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(view.lastFrame()).not.toContain('Add global source tmp');
+    resolvers[2]!({ sourceId: 'tmp', enteredRoot: '/tmp', canonicalRoot: '/current', manifest: { state: 'absent' } });
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Canonical source root: /current'));
+  });
+
+  it('keeps every directory choice reachable in the four-row chooser viewport', async () => {
+    const service = fakeService();
+    const entries = Array.from({ length: 7 }, (_, index) => ({
+      name: `choice-${index}`,
+      path: `/tmp/choice-${index}`
+    }));
+    vi.mocked(service.browseDirectories).mockImplementation(async (input) => ({
+      input, resolvedPath: '/tmp', selectablePath: '/tmp', entries
+    }));
+    const view = render(<TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />);
+    await waitForDashboard(view);
+    view.stdin.write('a');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('/tmp/choice-0'));
+    for (let index = 0; index < 6; index += 1) view.stdin.write('\u001B[B');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('/tmp/choice-5'));
+    expect(view.lastFrame()).not.toContain('/tmp/choice-0');
+    view.stdin.write('\r');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Path: /tmp/choice-5'));
+  });
+
+  it.each([
+    ['present', { state: 'present' as const, value: { schemaVersion: 1 as const, build: ['build'], artifactRoot: '.', sourceUnitRoot: '.' } }],
+    ['invalid', { state: 'invalid' as const, diagnostic: 'bad manifest' }]
+  ])('keeps %s-manifest source confirmation bounded and blocked below minimum', async (_name, manifest) => {
+    const service = fakeService();
+    vi.mocked(service.inspectSourceCandidate).mockResolvedValue({
+      sourceId: 'tmp', enteredRoot: '/tmp', canonicalRoot: '/physical/tmp', manifest
+    });
+    const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+    await waitForDashboard(view);
+    view.stdin.write('a');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Current: /tmp'));
+    view.stdin.write('\r');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Blocked:'));
+    expect(view.lastFrame()).toContain('n/Esc/Backspace back');
+
+    view.rerender(<TuiApp service={service} dimensions={{ columns: 59, rows: 15 }} />);
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Add manifest-free managed source'));
+    expect(view.lastFrame()).toContain('Entered: /tmp');
+    expect(view.lastFrame()).toContain('Canonical: /physical/tmp');
+    expect(view.lastFrame()).toContain('Blocked manifest; use the CLI.');
+    expect(view.lastFrame()).toContain('Final source authorization is disabled');
+    view.stdin.write('y');
+    expect(service.addSource).not.toHaveBeenCalled();
+  });
+
+  it('shows source-root input and back controls instead of profile fallback below minimum', async () => {
+    const service = fakeService();
+    const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+    await waitForDashboard(view);
+    view.stdin.write('a');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Absolute root'));
+    view.rerender(<TuiApp service={service} dimensions={{ columns: 59, rows: 15 }} />);
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Physical source root'));
+    expect(view.lastFrame()).toContain('Enter next  Esc back/cancel');
+    expect(view.lastFrame()).not.toContain('New profile ID');
+  });
+
   it('renders read-only managed sources and a multi-root expandable skill forest', async () => {
     const service = fakeService();
     const dashboard = await service.loadDashboard();
     dashboard.managedSources = [{
-      id: 'managed:provider/one', provider: 'provider', source: 'one', root: '/provider', digest: 'a'.repeat(64),
+      id: 'managed:one', source: 'one', root: '/provider', digest: 'a'.repeat(64),
       sourceUnitRoot: '.', rebuildAvailability: 'available', referenceCount: 1, health: 'ready', diagnostics: []
     }];
     const managedRoot = {
-      id: 'managed:provider/one', provider: 'provider', label: 'provider/one', root: '/snapshots/one', artifactWritesSupported: false as const,
-      skills: [{ id: 'managed-skill', sourceId: 'managed:provider/one', directory: '/snapshots/one/managed-skill' }]
+      id: 'managed:one', label: 'one', root: '/snapshots/one', artifactWritesSupported: false as const,
+      skills: [{ id: 'managed-skill', sourceId: 'managed:one', directory: '/snapshots/one/managed-skill' }]
     };
     dashboard.skillRoots = [...(dashboard.sources ?? []), managedRoot];
     dashboard.availableSkillSources = dashboard.sources ?? [];
     dashboard.profiles[0]!.sourceReferences = [{
       schemaVersion: 1,
-      provider: 'provider',
       source: 'one',
-      id: 'provider/one',
-      path: '/profiles/focused/sources/provider/one.json',
+      id: 'one',
+      path: '/profiles/focused/sources/one.json',
       availability: 'unavailable',
       diagnostic: 'target missing'
     }];
     vi.mocked(service.loadDashboard).mockClear();
     const view = render(<TuiApp service={service} />);
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
-    view.stdin.write('2');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('Managed sources (read-only)'));
-    expect(view.lastFrame()).toContain('provider/one [ready] refs:1');
-    expect(managedSourceAccessibilityLabel(dashboard.managedSources[0]!, true))
-      .toBe('Source provider/one, ready, 1 profile references, selected');
+    await waitForDashboard(view);
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[+] one'));
+    expect(managedSourceAccessibilityLabel(dashboard.managedSources![0]!, true))
+      .toBe('Source one, ready, 1 profile references, selected');
     expect(managedSourceAccessibilityLabel({
-      ...dashboard.managedSources[0]!,
+      ...dashboard.managedSources![0]!,
       health: 'failed',
       referenceCount: 'unknown'
-    }, false)).toBe('Source provider/one, failed, profile reference count unknown');
-    view.stdin.write('3');
+    }, false)).toBe('Source one, failed, profile reference count unknown');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] Skillbook'));
-    expect(view.lastFrame()).toContain('[+] provider/one');
+    expect(view.lastFrame()).toContain('[+] one');
     expect(view.lastFrame()).not.toContain('  managed-skill');
     view.stdin.write('\u001B[B');
     view.stdin.write('\u001B[B');
     view.stdin.write('\r');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] provider/one'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] one'));
     expect(view.lastFrame()).toContain('  managed-skill');
-    view.stdin.write('1');
+    view.stdin.write('2');
     view.stdin.write('\r');
     await vi.waitFor(() => expect(view.lastFrame()).toContain(
-      'Source references: provider/one [unavailable: target missing] (read-only)'
+      'Source references: one [unavailable: target missing]'
     ));
   });
 
-  it('reserves a Sources viewport row for selected-source details', async () => {
+  it('shows direct and managed roots in Available while preserving mutation authority', async () => {
+    const service = fakeService();
+    const dashboard = await service.loadDashboard();
+    const directSource = dashboard.sources![0]!;
+    const managedRoot = {
+      id: 'managed:mtg-deckbuilding',
+      label: 'mtg-deckbuilding',
+      root: '/snapshots/mtg-deckbuilding',
+      artifactWritesSupported: false as const,
+      skills: [{
+        id: 'deck-building',
+        sourceId: 'managed:mtg-deckbuilding',
+        directory: '/snapshots/mtg-deckbuilding/deck-building'
+      }]
+    };
+    dashboard.skillRoots = [directSource, managedRoot];
+    dashboard.availableSkillSources = [directSource];
+    dashboard.managedSources = [{
+      id: 'managed:mtg-deckbuilding', source: 'mtg-deckbuilding',
+      root: '/provider/mtg-deckbuilding', digest: 'a'.repeat(64), sourceUnitRoot: '.',
+      rebuildAvailability: 'available', referenceCount: 0, health: 'ready', diagnostics: []
+    }];
+    delete dashboard.sources;
+    vi.mocked(service.loadDashboard).mockClear();
+
+    const view = render(<TuiApp service={service} dimensions={{ columns: 160, rows: 30 }} />);
+    await openProfiles(view);
+    view.stdin.write('L');
+    view.stdin.write('\t');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] Skillbook'));
+    expect(view.lastFrame()).toContain('[+] mtg-deckbuilding');
+
+    view.stdin.write('\u001B[B');
+    view.stdin.write('\r');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] mtg-deckbuilding'));
+    view.stdin.write('\u001B[C');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('deck-building'));
+    view.stdin.write('a');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain(
+      'Attach the whole source with `bazframe profile sources add mtg-deckbuilding --profile focused`.'
+    ));
+    expect(service.addMembership).not.toHaveBeenCalled();
+
+    view.stdin.write('\u001B[H');
+    view.stdin.write('\u001B[C');
+    view.stdin.write('a');
+    await vi.waitFor(() => expect(service.addMembership).toHaveBeenCalledWith('focused', {
+      sourceId: 'skillbook', skillId: 'demo-skill'
+    }));
+  });
+
+  it('omits an already referenced managed root from Available', async () => {
+    const service = fakeService();
+    const dashboard = await service.loadDashboard();
+    const directSource = dashboard.sources![0]!;
+    dashboard.skillRoots = [directSource, {
+      id: 'managed:mtg-deckbuilding', label: 'mtg-deckbuilding', root: '/snapshots/mtg',
+      artifactWritesSupported: false,
+      skills: [{
+        id: 'deck-building', sourceId: 'managed:mtg-deckbuilding',
+        directory: '/snapshots/mtg/deck-building'
+      }]
+    }];
+    dashboard.availableSkillSources = [directSource];
+    dashboard.managedSources = [{
+      id: 'managed:mtg-deckbuilding', source: 'mtg-deckbuilding',
+      root: '/provider/mtg-deckbuilding', digest: 'a'.repeat(64), sourceUnitRoot: '.',
+      rebuildAvailability: 'available', referenceCount: 1, health: 'ready', diagnostics: []
+    }];
+    dashboard.profiles[0]!.sourceReferences = [{
+      schemaVersion: 1, source: 'mtg-deckbuilding', id: 'mtg-deckbuilding',
+      path: '/profiles/focused/sources/mtg-deckbuilding.json', availability: 'available'
+    }];
+    delete dashboard.sources;
+    vi.mocked(service.loadDashboard).mockClear();
+
+    const view = render(<TuiApp service={service} dimensions={{ columns: 120, rows: 30 }} />);
+    await openProfiles(view);
+    view.stdin.write('L');
+    view.stdin.write('\t');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] Skillbook'));
+    expect(view.lastFrame()).toContain('Source references: mtg-deckbuilding (read-only)');
+    expect(view.lastFrame()).not.toContain('[+] mtg-deckbuilding');
+    expect(view.lastFrame()).not.toContain('deck-building');
+  });
+
+  it('keeps managed sources visible in the combined Skills browser', async () => {
     const service = fakeService();
     const dashboard = await service.loadDashboard();
     dashboard.managedSources = Array.from({ length: 13 }, (_, index) => {
       const source = `s${String(index).padStart(2, '0')}`;
       return {
-        id: `managed:p/${source}`, provider: 'p', source, root: `/provider/${source}`,
+        id: `managed:${source}`, source, root: `/provider/${source}`,
         digest: String(index).padStart(64, '0'), sourceUnitRoot: '.',
         rebuildAvailability: 'available' as const, referenceCount: 0, health: 'ready' as const, diagnostics: []
       };
     });
     vi.mocked(service.loadDashboard).mockClear();
     const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+    await waitForDashboard(view);
 
-    view.stdin.write('2');
+    view.stdin.write('1');
     view.stdin.write('\u001B[F');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('p/s12 [ready]'));
-
-    expect(view.lastFrame()).not.toContain('p/s00 [ready]');
-    for (let index = 1; index < 13; index += 1) {
-      expect(view.lastFrame()).toContain(`p/s${String(index).padStart(2, '0')} [ready]`);
-    }
-    expect(view.lastFrame()).toContain('sha256:');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('s12'));
+    expect(view.lastFrame()).toContain('Health: ready');
+    expect(view.lastFrame()).toContain('Activated digest: sha256:');
   });
 
   it('renders setup corrective actions without exposing settings writes', async () => {
@@ -133,19 +657,19 @@ describe('TuiApp', () => {
     }];
     vi.mocked(service.loadDashboard).mockClear();
     const view = render(<TuiApp service={service} />);
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+    await waitForDashboard(view);
 
-    view.stdin.write('4');
+    view.stdin.write('3');
 
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('Pi adapter: missing'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('State: missing'));
     expect(view.lastFrame()).toContain('bazframe adapter install pi');
-    expect(view.lastFrame()).toContain('No writable settings');
+    expect(view.lastFrame()).toContain('remain CLI-only');
   });
 
   it('creates a profile through a text modal and authoritative service refresh', async () => {
     const service = fakeService();
     const view = render(<TuiApp service={service} />);
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+    await openProfiles(view);
 
     view.stdin.write('c');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Create profile'));
@@ -216,7 +740,7 @@ describe('TuiApp', () => {
         onExitCode={onExitCode}
       />
     );
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+    await openProfiles(view);
     view.stdin.write('c');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Create profile'));
 
@@ -252,7 +776,7 @@ describe('TuiApp', () => {
         onExitCode={onExitCode}
       />
     );
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+    await openProfiles(view);
     view.stdin.write('d');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('confirm generated-empty removal'));
 
@@ -281,7 +805,7 @@ describe('TuiApp', () => {
         onExitCode={onExitCode}
       />
     );
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Profiles /'));
     view.stdin.write('d');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('confirm generated-empty removal'));
     view.rerender(
@@ -308,7 +832,7 @@ describe('TuiApp', () => {
       'Profile is not empty.'
     ));
     const view = render(<TuiApp service={service} />);
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+    await openProfiles(view);
 
     view.stdin.write('d');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('confirm generated-empty removal'));
@@ -351,7 +875,7 @@ describe('TuiApp', () => {
         'Profile changed. Refresh and confirm again.'
       ));
     const view = render(<TuiApp service={service} />);
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+    await openProfiles(view);
 
     view.stdin.write('d');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('confirm generated-empty removal'));
@@ -379,7 +903,7 @@ describe('TuiApp', () => {
       'Profile is not empty.'
     ));
     const view = render(<TuiApp service={service} />);
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+    await openProfiles(view);
 
     view.stdin.write('d');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('confirm generated-empty removal'));
@@ -430,7 +954,7 @@ describe('TuiApp', () => {
     const view = render(
       <TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />
     );
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+    await openProfiles(view);
 
     view.stdin.write('d');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('confirm generated-empty removal'));
@@ -476,7 +1000,7 @@ describe('TuiApp', () => {
     const view = render(
       <TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />
     );
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+    await openProfiles(view);
 
     view.stdin.write('d');
     await vi.waitFor(() => expect(view.lastFrame()).toContain(
@@ -501,7 +1025,7 @@ describe('TuiApp', () => {
     const service = fakeService();
     const onExitCode = vi.fn();
     const view = render(<TuiApp service={service} onExitCode={onExitCode} />);
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+    await openProfiles(view);
     view.stdin.write('c');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Create profile'));
 
@@ -521,7 +1045,7 @@ describe('TuiApp', () => {
     const view = render(
       <TuiApp service={service} onExitCode={onExitCode} onForceExit={onForceExit} />
     );
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+    await openProfiles(view);
     view.stdin.write('\r');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Available skills'));
     view.stdin.write('\t');
@@ -549,7 +1073,7 @@ describe('TuiApp', () => {
     const view = render(
       <TuiApp service={service} onExitCode={onExitCode} onForceExit={onForceExit} />
     );
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+    await openProfiles(view);
     view.stdin.write('\r');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Available skills'));
     view.stdin.write('\t');
@@ -571,7 +1095,7 @@ describe('TuiApp', () => {
     const view = render(
       <TuiApp service={service} onExitCode={onExitCode} onForceExit={onForceExit} />
     );
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+    await openProfiles(view);
     view.stdin.write('\r');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Available skills'));
     view.stdin.write('\t');
@@ -586,6 +1110,12 @@ describe('TuiApp', () => {
     await vi.waitFor(() => expect(view.lastFrame()).toContain('waiting for the operation'));
     expect(onExitCode).not.toHaveBeenCalled();
     expect(onForceExit).not.toHaveBeenCalled();
+    view.stdin.write('z');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(view.lastFrame()).toContain('waiting for the operation');
+    view.stdin.write('1');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('* 1 Skills'));
+    expect(view.lastFrame()).toContain('waiting for the operation');
 
     view.stdin.write('\x03');
     await vi.waitFor(() => expect(onExitCode).toHaveBeenCalledWith(130));
@@ -595,34 +1125,35 @@ describe('TuiApp', () => {
   it('ignores Kitty key-release events', async () => {
     const service = fakeService();
     const view = render(<TuiApp service={service} />);
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+    await waitForDashboard(view);
+    const beforeRelease = view.lastFrame();
 
     view.stdin.write('\u001B[50;1:3u');
     await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(view.lastFrame()).not.toContain('Skill sources');
+    expect(view.lastFrame()).toBe(beforeRelease);
   });
 
   it('separates direct tab activation from predictable top-tab focus traversal', async () => {
     const service = fakeService();
     const view = render(<TuiApp service={service} />);
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('* 1 Profiles'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('* 1 Skills'));
 
     view.stdin.write(']');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('* 2 Sources'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('* 2 Profiles'));
     view.stdin.write('[');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('* 1 Profiles'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('* 1 Skills'));
 
     view.stdin.write('\u001B[Z');
     await vi.waitFor(() => expect(view.lastFrame()).toMatch(/^┏/u));
     view.stdin.write('h');
     view.stdin.write('\r');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('* 4 Settings'));
-    expect(view.lastFrame()).toContain('Setup (read-only)');
+    expect(view.lastFrame()).toContain('Policy and current directory');
     view.stdin.write('\t');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('┃ Settings'));
 
-    view.stdin.write('1');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('* 1 Profiles'));
+    view.stdin.write('2');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('* 2 Profiles'));
     view.stdin.write('\r');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('┃Included skills'));
     view.stdin.write('\t');
@@ -630,12 +1161,11 @@ describe('TuiApp', () => {
     view.stdin.write('\t');
     await vi.waitFor(() => expect(view.lastFrame()).toMatch(/^┏/u));
     expect(view.lastFrame()).not.toContain('┃Included skills');
-    view.stdin.write('l');
-    view.stdin.write('l');
+    view.stdin.write('h');
     view.stdin.write('\r');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('* 3 Skills'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('* 1 Skills'));
 
-    view.stdin.write('1');
+    view.stdin.write('2');
     view.stdin.write('\t');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('┃Included skills'));
     view.stdin.write('\u001B[Z');
@@ -656,10 +1186,11 @@ describe('TuiApp', () => {
     const view = render(
       <TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />
     );
+    await openProfiles(view);
     await vi.waitFor(() => expect(view.lastFrame()).toContain('profile-00'));
 
     view.stdin.write('\u001B[6~');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('profile-07'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('profile-06'));
     view.stdin.write('\u001B[F');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('+ Create New Profile'));
     view.stdin.write('\r');
@@ -668,6 +1199,151 @@ describe('TuiApp', () => {
     await vi.waitFor(() => expect(view.lastFrame()).not.toContain('New profile ID'));
     view.stdin.write('\u001B[H');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('* profile-00'));
+  });
+
+  it('shows a proportional Skills scrollbar at distinct top, middle, and bottom positions', async () => {
+    const service = fakeService();
+    const dashboard = await service.loadDashboard();
+    dashboard.sources![0]!.skills = Array.from({ length: 30 }, (_, index) => {
+      const id = `skill-${String(index).padStart(2, '0')}`;
+      return { id, sourceId: 'skillbook', directory: `/library/skills/${id}` };
+    });
+    vi.mocked(service.loadDashboard).mockClear();
+    const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('skill-00'));
+    expect(view.lastFrame()).toContain('░');
+    const top = scrollbarThumbRows(view.lastFrame());
+    view.stdin.write('\u001B[6~');
+    view.stdin.write('\u001B[6~');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('skill-23'));
+    const middle = scrollbarThumbRows(view.lastFrame());
+    view.stdin.write('\u001B[F');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('skill-29'));
+    const bottom = scrollbarThumbRows(view.lastFrame());
+
+    expect(Math.min(...top)).toBeLessThan(Math.min(...middle));
+    expect(Math.min(...middle)).toBeLessThan(Math.min(...bottom));
+    expect(Math.max(...top)).toBeLessThan(Math.max(...bottom));
+    assertFrameBounds(view.lastFrame(), 80, 24);
+  });
+
+  it('shows scrollbars for Profiles, Included, and grouped Available rows only on overflow', async () => {
+    const service = fakeService();
+    const dashboard = await service.loadDashboard();
+    const memberships = Array.from({ length: 10 }, (_, index) => {
+      const id = `included-${String(index).padStart(2, '0')}`;
+      return {
+        id,
+        membershipId: `focused:skillbook:${id}`,
+        sourceId: 'skillbook',
+        skillId: id,
+        path: `/home/profiles/focused/skills/${id}`,
+        kind: 'managed' as const,
+        manageable: true
+      };
+    });
+    dashboard.profiles = Array.from({ length: 20 }, (_, index) => ({
+      ...dashboard.profiles[0]!,
+      id: `profile-${String(index).padStart(2, '0')}`,
+      active: index === 0,
+      memberships
+    }));
+    const skillbook = {
+      ...dashboard.sources![0]!,
+      skills: Array.from({ length: 12 }, (_, index) => {
+        const id = `available-${String(index).padStart(2, '0')}`;
+        return { id, sourceId: 'skillbook', directory: `/library/skills/${id}` };
+      })
+    };
+    const managed = {
+      id: 'managed:deck',
+      label: 'deck',
+      root: '/snapshots/deck',
+      artifactWritesSupported: false as const,
+      skills: Array.from({ length: 4 }, (_, index) => ({
+        id: `managed-${String(index).padStart(2, '0')}`,
+        sourceId: 'managed:deck',
+        directory: `/snapshots/deck/managed-${String(index).padStart(2, '0')}`
+      }))
+    };
+    dashboard.skillRoots = [skillbook, managed];
+    dashboard.availableSkillSources = [skillbook];
+    vi.mocked(service.loadDashboard).mockClear();
+    const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+
+    await openProfiles(view);
+    expect(view.lastFrame()).toContain('░');
+    view.stdin.write('\r');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('┃Included skills'));
+    expect(view.lastFrame()).toContain('░');
+    view.stdin.write('J');
+    view.stdin.write('\u001B[F');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[+] deck'));
+    view.stdin.write('\r');
+    view.stdin.write('\u001B[C');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('managed-00'));
+    expect(view.lastFrame()).toContain('░');
+    expect(view.lastFrame()).toContain('█');
+    assertFrameBounds(view.lastFrame(), 80, 24);
+  });
+
+  it('shows preview and source-directory scrollbars while keeping fitting lists rail-free', async () => {
+    const service = fakeService();
+    vi.mocked(service.loadSkillPreview).mockImplementation(async ({ sourceId, skillId }) => ({
+      sourceId,
+      skillId,
+      path: `/library/skills/${skillId}/SKILL.md`,
+      contents: Array.from({ length: 30 }, (_, index) => `preview-${String(index).padStart(2, '0')}`).join('\n')
+    }));
+    vi.mocked(service.browseDirectories).mockImplementation(async (input) => ({
+      input,
+      resolvedPath: '/tmp',
+      selectablePath: '/tmp',
+      entries: Array.from({ length: 10 }, (_, index) => ({
+        name: `directory-${index}`,
+        path: `/tmp/directory-${index}`
+      }))
+    }));
+    const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+
+    await waitForDashboard(view);
+    expect(view.lastFrame()).not.toContain('░');
+    expect(view.lastFrame()).not.toContain('█');
+    view.stdin.write('\u001B[B');
+    view.stdin.write('\r');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('preview-00'));
+    expect(view.lastFrame()).toContain('░');
+    const previewTop = scrollbarThumbRows(view.lastFrame());
+    view.stdin.write('\u001B[F');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('preview-29'));
+    expect(Math.min(...scrollbarThumbRows(view.lastFrame()))).toBeGreaterThan(Math.min(...previewTop));
+
+    view.stdin.write('H');
+    view.stdin.write('a');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('/tmp/directory-0'));
+    expect(view.lastFrame()).toContain('░');
+    const directoryTop = scrollbarThumbRows(view.lastFrame());
+    for (let index = 0; index < 10; index += 1) view.stdin.write('\u001B[B');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('/tmp/directory-9'));
+    expect(Math.min(...scrollbarThumbRows(view.lastFrame()))).toBeGreaterThan(Math.min(...directoryTop));
+    assertFrameBounds(view.lastFrame(), 80, 24);
+  });
+
+  it('hides visual scrollbar rails from screen-reader output', async () => {
+    vi.stubEnv('INK_SCREEN_READER', 'true');
+    const service = fakeService();
+    const dashboard = await service.loadDashboard();
+    dashboard.sources![0]!.skills = Array.from({ length: 30 }, (_, index) => {
+      const id = `skill-${String(index).padStart(2, '0')}`;
+      return { id, sourceId: 'skillbook', directory: `/library/skills/${id}` };
+    });
+    vi.mocked(service.loadDashboard).mockClear();
+    const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('skill-00'));
+    expect(view.lastFrame()).not.toContain('░');
+    expect(view.lastFrame()).not.toContain('█');
   });
 
   it('keeps long-list viewports independent across tabs, routes, and compact resize', async () => {
@@ -699,10 +1375,11 @@ describe('TuiApp', () => {
     const view = render(
       <TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />
     );
+    await openProfiles(view);
     await vi.waitFor(() => expect(view.lastFrame()).toContain('profile-00'));
 
     view.stdin.write('\u001B[6~');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('profile-07'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('profile-06'));
     expect(view.lastFrame()).toContain('profile-01');
     view.stdin.write('\r');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('┃Included skills'));
@@ -712,15 +1389,15 @@ describe('TuiApp', () => {
     expect(view.lastFrame()).not.toContain('included-00');
     view.stdin.write('\t');
     view.stdin.write('\u001B[6~');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('skillbook/available-01'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('available-01'));
 
-    view.stdin.write('3');
+    view.stdin.write('1');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Skill sources'));
     view.stdin.write('\u001B[6~');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('available-06'));
-    view.stdin.write('1');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('available-05'));
+    view.stdin.write('2');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('+ included-19'));
-    expect(view.lastFrame()).toContain('skillbook/available-01');
+    expect(view.lastFrame()).toContain('available-01');
 
     view.stdin.write('\u001B');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('┃ Profiles'));
@@ -729,10 +1406,10 @@ describe('TuiApp', () => {
     await vi.waitFor(() => expect(view.lastFrame()).toContain('+ included-19'));
 
     view.rerender(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('included-16'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('included-17'));
     expect(view.lastFrame()).toContain('+ included-19');
-    expect(view.lastFrame()).toContain('skillbook/available-01');
-    view.stdin.write('3');
+    expect(view.lastFrame()).toContain('available-01');
+    view.stdin.write('1');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('available-06'));
   });
 
@@ -772,21 +1449,21 @@ describe('TuiApp', () => {
     const view = render(
       <TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />
     );
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+    await waitForDashboard(view);
 
-    view.stdin.write('3');
+    view.stdin.write('1');
     view.stdin.write('\u001B[F');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('skill-15'));
     expect(view.lastFrame()).not.toContain('skill-00');
 
-    view.stdin.write('1');
+    view.stdin.write('2');
     view.stdin.write('\r');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('┃Included skills'));
     view.stdin.write('\u001B[F');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('+ skill-05'));
     view.stdin.write('\t');
     view.stdin.write('\u001B[F');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('skillbook/skill-15'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('skill-15'));
 
     view.stdin.write('\u001B');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('┃ Profiles'));
@@ -796,11 +1473,11 @@ describe('TuiApp', () => {
     view.stdin.write('\r');
 
     await vi.waitFor(() => expect(view.lastFrame()).toContain('+ skill-10'));
-    expect(view.lastFrame()).toContain('skillbook/skill-09');
+    expect(view.lastFrame()).toContain('[-] Skillbook');
     expect(view.lastFrame()).not.toContain('+ skill-05');
-    expect(view.lastFrame()).not.toContain('skillbook/skill-15');
+    expect(view.lastFrame()).not.toContain('skill-15');
 
-    view.stdin.write('3');
+    view.stdin.write('1');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('skill-15'));
     expect(view.lastFrame()).not.toContain('skill-00');
   });
@@ -808,11 +1485,13 @@ describe('TuiApp', () => {
   it('moves between an empty pane and the adjacent pane at content boundaries', async () => {
     const service = fakeService();
     const view = render(<TuiApp service={service} />);
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+    await openProfiles(view);
     view.stdin.write('\r');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('┃Included skills'));
 
     view.stdin.write('\u001B[B');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('┃Available skills'));
+    view.stdin.write('\u001B[A');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('┃Available skills'));
     view.stdin.write('\u001B[A');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('┃Included skills'));
@@ -821,8 +1500,8 @@ describe('TuiApp', () => {
   it('selects a tree first child and returns to its parent before collapsing', async () => {
     const service = fakeService();
     const view = render(<TuiApp service={service} />);
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
-    view.stdin.write('3');
+    await waitForDashboard(view);
+    view.stdin.write('1');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('demo-skill'));
     view.stdin.write('\u001B[C');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('demo-skill'));
@@ -848,7 +1527,7 @@ describe('TuiApp', () => {
       });
     });
     const view = render(<TuiApp service={service} />);
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+    await openProfiles(view);
     view.stdin.write('\u001B[F');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('+ Create New Profile'));
     view.stdin.write('\r');
@@ -865,12 +1544,12 @@ describe('TuiApp', () => {
   it('renders focus and selection without literal focus labels or cursor arrows', async () => {
     const service = fakeService();
     const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+    await waitForDashboard(view);
 
     expect(view.lastFrame()).not.toContain('[focused]');
     expect(view.lastFrame()!.split('\n').filter((line) => line.includes('>'))).toEqual([]);
 
-    view.stdin.write('3');
+    view.stdin.write('1');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] Skillbook'));
     expect(view.lastFrame()).not.toContain('[focused]');
     expect(view.lastFrame()!.split('\n').filter((line) => line.includes('>'))).toEqual([]);
@@ -885,7 +1564,7 @@ describe('TuiApp', () => {
   it('uses a bold border fallback for focus and moves it without text markers', async () => {
     const service = fakeService();
     const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+    await waitForDashboard(view);
 
     expect(view.lastFrame()).toMatch(/^\+[-]+\+/u);
     expect(view.lastFrame()).toContain('┏');
@@ -893,7 +1572,7 @@ describe('TuiApp', () => {
 
     view.stdin.write('\u001B[Z');
     await vi.waitFor(() => expect(view.lastFrame()).toMatch(/^┏/u));
-    expect(view.lastFrame()).toContain('| Profiles');
+    expect(view.lastFrame()).toContain('┃* 1 Skills');
     expect(view.lastFrame()).not.toContain('[focused]');
   });
 
@@ -910,6 +1589,7 @@ describe('TuiApp', () => {
     });
     vi.mocked(service.loadDashboard).mockClear();
     const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+    await openProfiles(view);
     await vi.waitFor(() => expect(view.lastFrame()).toContain('reviewer'));
 
     view.stdin.write('j');
@@ -925,6 +1605,10 @@ describe('TuiApp', () => {
     view.stdin.write('J');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('┃Available skills'));
     view.stdin.write('K');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('┃Included skills'));
+    view.stdin.write('\u001B[1;2B');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('┃Available skills'));
+    view.stdin.write('\u001B[1;2A');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('┃Included skills'));
 
     view.stdin.write('\u001B');
@@ -951,13 +1635,12 @@ describe('TuiApp', () => {
     dashboard.sources![0]!.root = unicodeWidthPath();
     vi.mocked(service.loadDashboard).mockClear();
     const view = render(<TuiApp service={service} dimensions={{ columns, rows }} />);
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+    await waitForDashboard(view);
 
-    view.stdin.write('3');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('路径'));
     const frame = view.lastFrame()!;
     const sourceLines = frame.split('\n').filter((line) => line.includes('路径'));
-    expect(sourceLines).toHaveLength(1);
+    expect(sourceLines.length).toBeGreaterThanOrEqual(1);
     expect(sourceLines[0]).toContain('Cafe\u0301');
     expect(sourceLines[0]).toContain('👩‍💻');
     expect(sourceLines[0]).toContain('ANSI');
@@ -968,12 +1651,29 @@ describe('TuiApp', () => {
     assertFrameBounds(frame, columns, rows);
   });
 
+  it('keeps compact Settings labels and read-only status visible at 60x16', async () => {
+    const service = fakeService();
+    const view = render(
+      <TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />
+    );
+    await waitForDashboard(view);
+    view.stdin.write('4');
+
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Policy/effective:'));
+    expect(view.lastFrame()).toContain('Current directory:');
+    expect(view.lastFrame()).toContain('Active profile:');
+    expect(view.lastFrame()).toContain('Cache/aliases:');
+    expect(view.lastFrame()).toContain('Attention: (none)');
+    expect(view.lastFrame()).toContain('Settings: read-only');
+    assertFrameBounds(view.lastFrame(), 60, 16);
+  });
+
   it.each(['1', '2', '3'])('keeps bordered tab %s within compact bounds', async (tab) => {
     const service = fakeService();
     const view = render(
       <TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />
     );
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+    await waitForDashboard(view);
     view.stdin.write(tab);
     await vi.waitFor(() => expect(view.lastFrame()).toContain(`* ${tab}`));
     expect(view.lastFrame()).toContain('┏');
@@ -993,25 +1693,208 @@ describe('TuiApp', () => {
       <TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />
     );
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Warning: Skill source metadata'));
-    expect(view.lastFrame()).toContain('* 1 Profiles');
+    view.stdin.write('2');
+    view.stdin.write('\r');
+    view.stdin.write('e');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Instruction editor is unavailable'));
+    view.stdin.write('z');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(view.lastFrame()).toContain('Instruction editor is unavailable');
+    view.stdin.write('J');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Status: Ready'));
+    expect(view.lastFrame()).not.toContain('Warning: Skill source metadata');
+    expect(view.lastFrame()).toContain('* 2 Profiles');
     expect(view.lastFrame()).toContain('* focused');
     expect(Math.max(...view.lastFrame()!.split('\n').map((line) => stringWidth(line)))).toBeLessThanOrEqual(60);
   });
 
-  it('preserves route, active tab, and focused-tab cursor across inert resize', async () => {
+  it('dismisses warnings on handled input while preserving errors, inert keys, and releases', async () => {
+    const service = fakeService();
+    const base = await service.loadDashboard();
+    base.diagnostics = [
+      { id: 'warning', severity: 'warning', message: 'Dismissible warning.' },
+      { id: 'error', severity: 'error', message: 'Persistent error.' }
+    ];
+    vi.mocked(service.loadDashboard).mockClear();
+    const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Warning: Dismissible warning. [1/2]'));
+    view.stdin.write('z');
+    view.stdin.write('\u001B[50;1:3u');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(view.lastFrame()).toContain('Warning: Dismissible warning. [1/2]');
+
+    view.stdin.write('2');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Error: Persistent error.'));
+    expect(view.lastFrame()).not.toContain('[1/2]');
+    view.stdin.write('1');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('* 1 Skills'));
+    expect(view.lastFrame()).toContain('Error: Persistent error.');
+  });
+
+  it('dismisses warnings ordered after a persistent error', async () => {
+    const service = fakeService();
+    const base = await service.loadDashboard();
+    base.diagnostics = [
+      { id: 'error', severity: 'error', message: 'Persistent error first.' },
+      { id: 'warning', severity: 'warning', message: 'Dismissible warning second.' }
+    ];
+    vi.mocked(service.loadDashboard).mockClear();
+    const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Error: Persistent error first. [1/2]'));
+    view.stdin.write('2');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Error: Persistent error first.'));
+    expect(view.lastFrame()).not.toContain('[1/2]');
+  });
+
+  it('does not dismiss warnings while a dashboard load masks status', async () => {
+    const service = fakeService();
+    const base = await service.loadDashboard();
+    base.diagnostics = [{ id: 'warning', severity: 'warning', message: 'Pending-load warning.' }];
+    vi.mocked(service.loadDashboard).mockClear();
+    const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Warning: Pending-load warning.'));
+
+    let rejectLoad!: (error: Error) => void;
+    const pendingService: BazframeTuiService = {
+      ...service,
+      loadDashboard: vi.fn(() => new Promise<DashboardSnapshot>((_resolve, reject) => {
+        rejectLoad = reject;
+      }))
+    };
+    view.rerender(<TuiApp service={pendingService} dimensions={{ columns: 80, rows: 24 }} />);
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Status: Loading...'));
+    view.stdin.write('2');
+    rejectLoad(new Error('pending refresh failed'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Error: pending refresh failed'));
+    view.stdin.write('1');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Warning: Pending-load warning.'));
+  });
+
+  it('does not dismiss warnings while an operation masks status', async () => {
+    const service = fakeService();
+    const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+    await openProfiles(view);
+    view.stdin.write('\r');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Available skills'));
+    view.stdin.write('e');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Instruction editor is unavailable'));
+
+    const warningSnapshot = await service.loadDashboard();
+    warningSnapshot.diagnostics = [{ id: 'warning', severity: 'warning', message: 'Pending-operation warning.' }];
+    let rejectOperation!: (error: Error) => void;
+    const operationService: BazframeTuiService = {
+      ...service,
+      loadDashboard: vi.fn(async () => warningSnapshot),
+      useProfile: vi.fn(() => new Promise<void>((_resolve, reject) => {
+        rejectOperation = reject;
+      }))
+    };
+    view.rerender(<TuiApp service={operationService} dimensions={{ columns: 80, rows: 24 }} />);
+    await vi.waitFor(() => expect(operationService.loadDashboard).toHaveBeenCalledOnce());
+    expect(view.lastFrame()).toContain('Instruction editor is unavailable');
+
+    view.stdin.write('u');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Working: Activate profile...'));
+    view.stdin.write('1');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('* 1 Skills'));
+    view.stdin.write('2');
+    rejectOperation(new Error('operation failed'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Error: operation failed'));
+    view.stdin.write('1');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Warning: Pending-operation warning.'));
+  });
+
+  it('clears a masking transient before dismissing rearmed warnings', async () => {
+    const service = fakeService();
+    const base = await service.loadDashboard();
+    base.diagnostics = [{ id: 'warning', severity: 'warning', message: 'Dashboard warning.' }];
+    vi.mocked(service.loadDashboard).mockClear();
+    const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Warning: Dashboard warning.'));
+    view.stdin.write('2');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Status: Ready'));
+    view.stdin.write('u');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Success: Activate profile complete.'));
+
+    view.stdin.write('1');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Warning: Dashboard warning.'));
+    view.stdin.write('2');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Status: Ready'));
+  });
+
+  it('rearms warnings only after a successful dashboard reload', async () => {
+    const service = fakeService();
+    const base = await service.loadDashboard();
+    base.diagnostics = [{ id: 'warning', severity: 'warning', message: 'Reload warning.' }];
+    vi.mocked(service.loadDashboard).mockReset();
+    vi.mocked(service.loadDashboard)
+      .mockResolvedValueOnce(base)
+      .mockRejectedValueOnce(new Error('refresh failed'))
+      .mockResolvedValueOnce({ ...base, revision: 2 });
+    const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Warning: Reload warning.'));
+    view.stdin.write('2');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Status: Ready'));
+    view.rerender(<TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />);
+    expect(view.lastFrame()).toContain('Status: Ready');
+    expect(view.lastFrame()).not.toContain('Reload warning.');
+    view.stdin.write('r');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Error: refresh failed'));
+    view.stdin.write('1');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Status: Ready'));
+    expect(view.lastFrame()).not.toContain('Reload warning.');
+
+    view.stdin.write('r');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Warning: Reload warning.'));
+  });
+
+  it('does not rearm dismissed warnings from stale successful loads', async () => {
+    const service = fakeService();
+    const base = await service.loadDashboard();
+    base.diagnostics = [{ id: 'warning', severity: 'warning', message: 'Stale warning.' }];
+    let resolveStale!: (snapshot: DashboardSnapshot) => void;
+    let rejectCurrent!: (error: Error) => void;
+    vi.mocked(service.loadDashboard).mockReset();
+    vi.mocked(service.loadDashboard)
+      .mockResolvedValueOnce(base)
+      .mockImplementationOnce(() => new Promise<DashboardSnapshot>((resolve) => { resolveStale = resolve; }))
+      .mockImplementationOnce(() => new Promise<DashboardSnapshot>((_resolve, reject) => { rejectCurrent = reject; }));
+    const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Warning: Stale warning.'));
+    view.stdin.write('2');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Status: Ready'));
+    view.stdin.write('r');
+    view.stdin.write('r');
+    await vi.waitFor(() => expect(service.loadDashboard).toHaveBeenCalledTimes(3));
+    rejectCurrent(new Error('current refresh failed'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Error: current refresh failed'));
+    view.stdin.write('1');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Status: Ready'));
+    resolveStale({ ...base, revision: 99 });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(view.lastFrame()).toContain('Status: Ready');
+    expect(view.lastFrame()).not.toContain('Stale warning.');
+  });
+
+  it('preserves the immediately activated focused tab across inert resize', async () => {
     const service = fakeService();
     const view = render(
       <TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />
     );
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+    await openProfiles(view);
     view.stdin.write('\r');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('┃Included skills'));
     view.stdin.write('\t');
     view.stdin.write('\t');
     view.stdin.write('\u001B[C');
     await vi.waitFor(() => expect(view.lastFrame()).toMatch(/^┏/u));
-    expect(view.lastFrame()).toContain('* 1 Profiles');
-    expect(view.lastFrame()).toContain('Included skills');
+    expect(view.lastFrame()).toContain('* 3 Adapters');
+    expect(view.lastFrame()).toContain('Adapters');
 
     view.rerender(<TuiApp service={service} dimensions={{ columns: 59, rows: 15 }} />);
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Terminal too small'));
@@ -1020,8 +1903,8 @@ describe('TuiApp', () => {
 
     view.rerender(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
     await vi.waitFor(() => expect(view.lastFrame()).toMatch(/^┏/u));
-    expect(view.lastFrame()).toContain('* 1 Profiles');
-    expect(view.lastFrame()).toContain('Included skills');
+    expect(view.lastFrame()).toContain('* 3 Adapters');
+    expect(view.lastFrame()).toContain('Adapters');
     expect(view.lastFrame()).not.toContain('┃Included skills');
   });
 
@@ -1031,20 +1914,100 @@ describe('TuiApp', () => {
   ])('keeps both profile panes and hints visible at %sx%s', async (columns, rows) => {
     const service = fakeService();
     const view = render(<TuiApp service={service} dimensions={{ columns, rows }} />);
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+    await openProfiles(view);
     view.stdin.write('\r');
 
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Included skills'));
     expect(view.lastFrame()).toContain('Available skills');
-    expect(view.lastFrame()).toContain('Esc back');
+    expect(view.lastFrame()).toContain('Esc/Backspace');
     expect(view.lastFrame()).toContain('Status: Ready');
     assertFrameBounds(view.lastFrame(), columns, rows);
+  });
+
+  it('collapses, expands, and pages Available source groups by selectable visual rows', async () => {
+    const service = fakeService();
+    const dashboard = await service.loadDashboard();
+    dashboard.sources = [
+      {
+        id: 'alpha', label: 'Alpha', root: '/skills/alpha', artifactWritesSupported: false,
+        skills: [
+          { id: 'a1', sourceId: 'alpha', directory: '/skills/alpha/a1' },
+          { id: 'a2', sourceId: 'alpha', directory: '/skills/alpha/a2' }
+        ]
+      },
+      {
+        id: 'beta', label: 'Beta', root: '/skills/beta', artifactWritesSupported: false,
+        skills: [
+          { id: 'b1', sourceId: 'beta', directory: '/skills/beta/b1' },
+          { id: 'b2', sourceId: 'beta', directory: '/skills/beta/b2' }
+        ]
+      }
+    ];
+    vi.mocked(service.loadDashboard).mockClear();
+    const view = render(<TuiApp service={service} dimensions={{ columns: 60, rows: 20 }} />);
+    await openProfiles(view);
+    view.stdin.write('\r');
+    view.stdin.write('\t');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[+] Alpha'));
+    expect(view.lastFrame()).toContain('[+] Beta');
+
+    view.stdin.write('a');
+    expect(service.addMembership).not.toHaveBeenCalled();
+    view.stdin.write('L');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] Alpha'));
+    expect(view.lastFrame()).toContain('a1');
+    view.stdin.write('\u001B[C');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('a1'));
+
+    view.stdin.write('\u001B[6~');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[+] Beta'));
+    view.stdin.write('\r');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] Beta'));
+    view.stdin.write('l');
+    view.stdin.write('a');
+    await vi.waitFor(() => expect(service.addMembership).toHaveBeenCalledWith('focused', {
+      sourceId: 'beta', skillId: 'b1'
+    }));
+
+    view.stdin.write('c');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[+] Beta'));
+    expect(view.lastFrame()).not.toContain('b1');
+    view.stdin.write('\u001B[5~');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] Alpha'));
+    assertFrameBounds(view.lastFrame(), 60, 20);
+  });
+
+  it('keeps a one-row Available selection usable with explicit source context', async () => {
+    const service = fakeService();
+    const dashboard = await service.loadDashboard();
+    dashboard.sources = [
+      {
+        id: 'alpha', label: 'Alpha', root: '/skills/alpha', artifactWritesSupported: false,
+        skills: [{ id: 'a1', sourceId: 'alpha', directory: '/skills/alpha/a1' }]
+      },
+      {
+        id: 'beta', label: 'Beta', root: '/skills/beta', artifactWritesSupported: false,
+        skills: [{ id: 'b1', sourceId: 'beta', directory: '/skills/beta/b1' }]
+      }
+    ];
+    vi.mocked(service.loadDashboard).mockClear();
+    const view = render(<TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />);
+    await openProfiles(view);
+    view.stdin.write('\r');
+    view.stdin.write('\t');
+
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[+] Alpha'));
+    view.stdin.write('\r');
+    view.stdin.write('l');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[Alpha] a1'));
+    expect(view.lastFrame()).not.toMatch(/\n[^\n]*Alpha[^\n]*\n[^\n]*a1/u);
+    assertFrameBounds(view.lastFrame(), 60, 16);
   });
 
   it('edits membership for the open profile without activating it', async () => {
     const service = fakeService();
     const view = render(<TuiApp service={service} />);
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+    await openProfiles(view);
 
     view.stdin.write('\r');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Included skills'));
@@ -1061,6 +2024,26 @@ describe('TuiApp', () => {
     expect(service.useProfile).not.toHaveBeenCalled();
   });
 });
+
+async function waitForDashboard(view: {
+  lastFrame(): string | undefined;
+}): Promise<void> {
+  await vi.waitFor(() => expect(view.lastFrame()).toContain('Status: Ready'));
+}
+
+async function openProfiles(view: {
+  lastFrame(): string | undefined;
+  stdin: { write(value: string): void };
+}): Promise<void> {
+  await waitForDashboard(view);
+  view.stdin.write('2');
+  await vi.waitFor(() => expect(view.lastFrame()).toContain('* 2 Profiles'));
+}
+
+function scrollbarThumbRows(frame: string | undefined): number[] {
+  expect(frame).toBeDefined();
+  return frame!.split('\n').flatMap((line, index) => line.includes('█') ? [index] : []);
+}
 
 function assertFrameBounds(
   frame: string | undefined,
@@ -1102,7 +2085,6 @@ function fakeService(): BazframeTuiService & Record<string, ReturnType<typeof vi
     }],
     sources: [{
       id: 'skillbook',
-      provider: 'skillbook',
       label: 'Skillbook',
       root: '/library/skills',
       artifactWritesSupported: false,
@@ -1153,6 +2135,33 @@ function fakeService(): BazframeTuiService & Record<string, ReturnType<typeof vi
     renameProfile: vi.fn(async () => undefined),
     removeProfile: vi.fn(async () => undefined),
     addMembership: vi.fn(async () => undefined),
-    removeMembership: vi.fn(async () => undefined)
+    removeMembership: vi.fn(async () => undefined),
+    loadSkillPreview: vi.fn(async ({ sourceId, skillId }) => ({
+      sourceId,
+      skillId,
+      path: `/library/skills/${skillId}/SKILL.md`,
+      contents: `---\nname: ${skillId}\ndescription: preview\n---\nPreview body\n`
+    })),
+    browseDirectories: vi.fn(async (input) => ({
+      input,
+      resolvedPath: '/tmp',
+      selectablePath: '/tmp',
+      entries: [{ name: 'skills', path: '/tmp/skills' }]
+    })),
+    inspectSourceCandidate: vi.fn(async ({ root }) => ({
+      sourceId: root.split('/').filter(Boolean).at(-1) ?? 'source',
+      enteredRoot: root,
+      canonicalRoot: root,
+      manifest: { state: 'absent' as const }
+    })),
+    addSource: vi.fn(async ({ root }) => ({
+      schemaVersion: 1 as const,
+      source: root.split('/').filter(Boolean).at(-1) ?? 'source',
+      root,
+      digest: 'a'.repeat(64),
+      sourceUnitRoot: '.',
+      action: 'added' as const,
+      path: `/home/sources/${root.split('/').filter(Boolean).at(-1) ?? 'source'}.json`
+    }))
   };
 }

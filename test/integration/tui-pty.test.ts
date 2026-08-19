@@ -23,7 +23,7 @@ describe('packed-style TUI terminal lifecycle', () => {
 
     expect(result.status, JSON.stringify(result)).toBe(0);
     expect(result.output).toContain('\u001B[?1049h');
-    expect(result.output).toContain('focused');
+    expect(result.output).toContain('Skill sources');
     expect(result.output).toContain('\u001B[?1049l');
     expect(result.output).toContain('\u001B[?25h');
     expect(result.stderr).toBe('');
@@ -46,14 +46,12 @@ describe('packed-style TUI terminal lifecycle', () => {
       INK_SCREEN_READER: 'true'
     }, [
       { afterOutput: 'Status: Ready', input: '\t' },
-      { afterOutput: 'Profiles tab, selected, focused', input: '\u001B[C' },
-      { afterOutput: 'Sources tab, focused', input: '\u001B[C' },
-      { afterOutput: 'Skills tab, focused', input: 'q' }
+      { afterOutput: 'Skills tab, selected, focused', input: '\u001B[C' },
+      { afterOutput: 'Profiles tab, selected, focused', input: 'q' }
     ]);
     expect(screenReaderResult.status, JSON.stringify(screenReaderResult)).toBe(0);
     expect(screenReaderResult.output).toContain('Profiles tab, selected, focused');
-    expect(screenReaderResult.output).toContain('Skills tab, focused');
-    expect(screenReaderResult.output).not.toContain('Skills tab, selected');
+    expect(screenReaderResult.output).toContain('Skills tab, selected, focused');
     expect(screenReaderResult.output).toContain('Profile focused, active, selected');
     expect(screenReaderResult.output).toContain('Create new profile');
     expect(screenReaderResult.output).toContain('Status: Ready');

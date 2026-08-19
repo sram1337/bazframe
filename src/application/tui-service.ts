@@ -1,5 +1,5 @@
 import { lstat, readdir, readlink, realpath } from 'node:fs/promises';
-import { isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { readUtf8InstructionFile } from '../core/content.js';
 import { BazframeError, errorCode } from '../core/errors.js';
 import {
@@ -23,7 +23,7 @@ import {
   readActiveProfile,
   selectProfile
 } from '../profiles/profile-store.js';
-import { isSafeSkillId } from '../skills/skill-id.js';
+import { assertSafeSkillId, isSafeSkillId } from '../skills/skill-id.js';
 import { listAvailableSkills } from '../skills/skill-library.js';
 import { inspectStatus, type StatusInspection } from '../status/status.js';
 import {
@@ -33,6 +33,9 @@ import {
   type SourceDiagnostic
 } from '../source-units/source-unit-resolver.js';
 import { resolvePhysicalRelativeDirectory, verifySourceSnapshot } from '../source-units/source-snapshot.js';
+import { readOptionalSourceBuildManifest, type SourceBuildManifest } from '../source-units/source-build-manifest.js';
+import { canonicalPhysicalSourceRoot } from '../sources/source-store.js';
+import { addSource as addGlobalSource, type SourceLifecycleResult } from '../sources/source-lifecycle.js';
 import {
   captureProfileSourceReferenceBulkIndex,
   profileSourceReferenceKey,
@@ -90,7 +93,6 @@ export interface SkillSummary {
 
 export interface SkillSourceSummary {
   id: string;
-  provider: string;
   label: string;
   root: string;
   canonicalRoot?: string;
@@ -100,7 +102,6 @@ export interface SkillSourceSummary {
 
 export interface ManagedSourceSummary {
   id: string;
-  provider: string;
   source: string;
   root: string;
   digest: string;
@@ -141,6 +142,37 @@ export interface SkillReference {
   skillId: string;
 }
 
+export interface SkillPreview extends SkillReference {
+  path: string;
+  contents: string;
+}
+
+export interface DirectoryBrowserEntry {
+  name: string;
+  path: string;
+}
+
+export interface DirectoryBrowserSnapshot {
+  input: string;
+  resolvedPath: string;
+  selectablePath?: string;
+  entries: DirectoryBrowserEntry[];
+}
+
+export interface SourceCandidateSummary {
+  sourceId: string;
+  enteredRoot: string;
+  canonicalRoot: string;
+  manifest:
+    | { state: 'absent' }
+    | { state: 'present'; value: SourceBuildManifest }
+    | { state: 'invalid'; diagnostic: string };
+}
+
+export interface SourceAddRequest {
+  root: string;
+}
+
 export interface MembershipReference extends SkillReference {
   membershipId: string;
 }
@@ -154,6 +186,10 @@ export interface BazframeTuiService {
   removeProfile(profileId: string, authorization: ProfileRemovalAuthorization): Promise<void>;
   addMembership(profileId: string, skill: SkillReference): Promise<void>;
   removeMembership(profileId: string, membership: MembershipReference): Promise<void>;
+  loadSkillPreview(skill: SkillReference): Promise<SkillPreview>;
+  browseDirectories(input: string): Promise<DirectoryBrowserSnapshot>;
+  inspectSourceCandidate(request: SourceAddRequest): Promise<SourceCandidateSummary>;
+  addSource(request: SourceAddRequest): Promise<SourceLifecycleResult>;
 }
 
 export interface BazframeTuiServiceOptions extends ProfileSkillMembershipOptions {
@@ -215,8 +251,185 @@ export function createBazframeTuiService(
         );
       }
       await removeProfileSkill(options, profileId, membership.skillId);
+    },
+    async loadSkillPreview(skill) {
+      return loadSkillPreview(options, skill);
+    },
+    async browseDirectories(input) {
+      return browseDirectories(options, input);
+    },
+    async inspectSourceCandidate(request) {
+      const enteredRoot = expandBrowserPath(options, request.root);
+      const canonicalRoot = await canonicalPhysicalSourceRoot(enteredRoot);
+      const sourceId = basename(canonicalRoot);
+      assertSafeSkillId(sourceId);
+      try {
+        const manifest = await readOptionalSourceBuildManifest(canonicalRoot);
+        return {
+          sourceId,
+          enteredRoot,
+          canonicalRoot,
+          manifest: manifest === undefined
+            ? { state: 'absent' }
+            : { state: 'present', value: manifest }
+        };
+      } catch (error) {
+        return {
+          sourceId,
+          enteredRoot,
+          canonicalRoot,
+          manifest: { state: 'invalid', diagnostic: messageFor(error) }
+        };
+      }
+    },
+    async addSource(request) {
+      const root = expandBrowserPath(options, request.root);
+      return addGlobalSource(options, root, { declaredBuild: 'reject' });
     }
   };
+}
+
+async function loadSkillPreview(
+  options: BazframeTuiServiceOptions,
+  reference: SkillReference
+): Promise<SkillPreview> {
+  assertSafeSkillId(reference.skillId);
+  let definitionPath: string | undefined;
+  if (reference.sourceId === SKILLBOOK_SOURCE_ID) {
+    const listed = await listAvailableSkills(options);
+    if (!listed.skillIds.includes(reference.skillId)) {
+      throw new BazframeError(
+        'SKILL_PREVIEW_STALE',
+        `Skill is no longer available from Skillbook: ${reference.skillId}`
+      );
+    }
+    definitionPath = join(listed.skillsRoot, reference.skillId, 'SKILL.md');
+  } else if (reference.sourceId.startsWith('managed:')) {
+    const sourceId = reference.sourceId.slice('managed:'.length);
+    if (!isSafeSkillId(sourceId)) {
+      throw new BazframeError('SKILL_SOURCE_UNKNOWN', `Unknown skill source: ${reference.sourceId}`);
+    }
+    const global = await inspectGlobalSources(options.bazframeHome);
+    const source = global.sources.find((item) => item.record.source === sourceId);
+    if (source === undefined || source.diagnostics.length > 0) {
+      throw new BazframeError(
+        'SKILL_PREVIEW_STALE',
+        `Managed source is unavailable: ${sourceId}`
+      );
+    }
+    definitionPath = source.skills.find((skill) => skill.name === reference.skillId)?.definitionPath;
+  } else {
+    throw new BazframeError('SKILL_SOURCE_UNKNOWN', `Unknown skill source: ${reference.sourceId}`);
+  }
+  if (definitionPath === undefined) {
+    throw new BazframeError(
+      'SKILL_PREVIEW_STALE',
+      `Skill is no longer available: ${reference.sourceId}/${reference.skillId}`
+    );
+  }
+  return {
+    ...reference,
+    path: definitionPath,
+    contents: await readUtf8InstructionFile(definitionPath, 'Skill definition')
+  };
+}
+
+async function browseDirectories(
+  options: BazframeTuiServiceOptions,
+  input: string
+): Promise<DirectoryBrowserSnapshot> {
+  const resolvedPath = expandBrowserPath(options, input);
+  await assertNoExplicitAncestorSymlink(
+    resolvedPath,
+    input.length === 0
+      ? resolvedPath
+      : input === '~' || input.startsWith('~/')
+        ? expandBrowserPath(options, '~')
+        : undefined
+  );
+  let listRoot: string;
+  let selectablePath: string | undefined;
+  let prefix = '';
+  try {
+    const metadata = await lstat(resolvedPath);
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      throw new BazframeError(
+        'SOURCE_BROWSER_PATH_INVALID',
+        `Path must be a physical directory: ${resolvedPath}`
+      );
+    }
+    listRoot = await canonicalPhysicalSourceRoot(resolvedPath);
+    selectablePath = resolvedPath;
+  } catch (error) {
+    if (errorCode(error) !== 'ENOENT') throw error;
+    const parent = dirname(resolvedPath);
+    prefix = basename(resolvedPath);
+    listRoot = await canonicalPhysicalSourceRoot(parent);
+  }
+  const entries: DirectoryBrowserEntry[] = [];
+  for (const entry of (await readdir(listRoot, { withFileTypes: true }))
+    .sort((left, right) => lexicalCompare(left.name, right.name))) {
+    if (!entry.name.startsWith(prefix)) continue;
+    const path = join(listRoot, entry.name);
+    const metadata = await lstat(path);
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) continue;
+    entries.push({ name: entry.name, path });
+  }
+  return {
+    input,
+    resolvedPath,
+    ...(selectablePath === undefined ? {} : { selectablePath }),
+    entries
+  };
+}
+
+async function assertNoExplicitAncestorSymlink(
+  path: string,
+  implicitRoot?: string
+): Promise<void> {
+  const ancestors: string[] = [];
+  for (
+    let current = path;
+    dirname(current) !== current && current !== implicitRoot;
+    current = dirname(current)
+  ) {
+    ancestors.push(current);
+  }
+  for (const ancestor of ancestors.reverse()) {
+    try {
+      if ((await lstat(ancestor)).isSymbolicLink()) {
+        throw new BazframeError(
+          'SOURCE_BROWSER_PATH_INVALID',
+          `Path traverses a symbolic link instead of physical directories: ${ancestor}`
+        );
+      }
+    } catch (error) {
+      if (errorCode(error) === 'ENOENT') continue;
+      throw error;
+    }
+  }
+}
+
+function expandBrowserPath(options: BazframeTuiServiceOptions, input: string): string {
+  const value = input.length === 0 ? options.cwd : input;
+  if (value === '~' || value.startsWith('~/')) {
+    const userHome = options.userHome ?? options.environment.HOME;
+    if (userHome === undefined || !isAbsolute(userHome)) {
+      throw new BazframeError('SOURCE_BROWSER_PATH_INVALID', 'Cannot expand ~ without an absolute user home.');
+    }
+    return value === '~' ? resolve(userHome) : resolve(userHome, value.slice(2));
+  }
+  if (value.startsWith('~') || !isAbsolute(value)) {
+    throw new BazframeError(
+      'SOURCE_BROWSER_PATH_INVALID',
+      'Source paths must be absolute or use only the exact ~ or ~/ prefix.'
+    );
+  }
+  return resolve(value);
+}
+
+function messageFor(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function inspectDashboard(
@@ -227,7 +440,7 @@ async function inspectDashboard(
   const activeProfileId = await inspectActiveProfile(options.bazframeHome, diagnostics);
   const skillbook = await inspectSkillbookSource(options, diagnostics);
   const global = await inspectGlobalSources(options.bazframeHome);
-  for (const item of global.diagnostics) diagnostics.push({ id: `managed-source-${item.providerId}-${item.sourceId}`, severity: 'error', message: `${item.providerId}/${item.sourceId}:${item.path} ${item.category}` });
+  for (const item of global.diagnostics) diagnostics.push({ id: `managed-source-${item.sourceId}`, severity: 'error', message: `${item.sourceId}:${item.path} ${item.category}` });
   const managedSources: ManagedSourceSummary[] = [];
   const managedRoots: SkillSourceSummary[] = [];
   const referenceIndex = await captureProfileSourceReferenceBulkIndex(options.bazframeHome);
@@ -239,8 +452,8 @@ async function inspectDashboard(
   const referenceIndexReady = referenceIndex.diagnostics.length === 0;
   for (const item of global.sources) {
     const record = item.record;
-    const referenceKey = profileSourceReferenceKey(record.provider, record.source);
-    const id = `managed:${record.provider}/${record.source}`;
+    const referenceKey = profileSourceReferenceKey(record.source);
+    const id = `managed:${record.source}`;
     const sourceDiagnostics = [
       ...item.diagnostics.map((entry) => `${entry.path} ${entry.category}`),
       ...(referenceIndexReady ? [] : ['reference index unavailable'])
@@ -248,7 +461,6 @@ async function inspectDashboard(
     const sourceHealthy = item.diagnostics.length === 0 && referenceIndexReady;
     managedSources.push({
       id,
-      provider: record.provider,
       source: record.source,
       root: record.root,
       digest: record.digest,
@@ -268,8 +480,7 @@ async function inspectDashboard(
       );
       managedRoots.push({
         id,
-        provider: record.provider,
-        label: `${record.provider}/${record.source}`,
+        label: record.source,
         root: immutableRoot,
         artifactWritesSupported: false,
         skills: item.skills.map((skill) => ({ id: skill.name, sourceId: id, directory: skill.baseDir }))
@@ -356,7 +567,6 @@ async function inspectSkillbookSource(
     }
     return {
       id: SKILLBOOK_SOURCE_ID,
-      provider: 'skillbook',
       label: 'Skillbook',
       root: listed.skillsRoot,
       ...(canonicalRoot === undefined ? {} : { canonicalRoot }),
@@ -472,7 +682,7 @@ async function inspectProfiles(
       for (const item of referenceNamespace.references) {
         try {
           readableReferences.push({
-            reference: await readProfileSourceReference(bazframeHome, entry.name, item.provider, item.source),
+            reference: await readProfileSourceReference(bazframeHome, entry.name, item.source),
             path: item.path
           });
         } catch (error) {
@@ -489,7 +699,7 @@ async function inspectProfiles(
           : { availability: 'unavailable' as const, diagnostic: namespaceDiagnostic };
         sourceReferences.push({
           ...item.reference,
-          id: `${item.reference.provider}/${item.reference.source}`,
+          id: item.reference.source,
           path: item.path,
           ...availability
         });
@@ -516,14 +726,12 @@ function inspectReferenceAvailability(
   reference: ProfileSourceReference,
   globalSources: { sources: GlobalSourceInspection[]; diagnostics: SourceDiagnostic[] }
 ): Pick<ProfileSourceReferenceSummary, 'availability' | 'diagnostic'> {
-  const source = globalSources.sources.find((item) =>
-    item.record.provider === reference.provider && item.record.source === reference.source
-  );
+  const source = globalSources.sources.find((item) => item.record.source === reference.source);
   if (source !== undefined && source.diagnostics.length === 0) {
     return { availability: 'available' };
   }
   const failures = source?.diagnostics ?? globalSources.diagnostics.filter((item) =>
-    item.providerId === reference.provider && item.sourceId === reference.source
+    item.sourceId === reference.source
   );
   return {
     availability: 'unavailable',

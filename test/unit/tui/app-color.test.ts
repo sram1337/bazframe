@@ -18,7 +18,7 @@ describe('TuiApp focus border color', () => {
     delete process.env.NO_COLOR;
     process.env.FORCE_COLOR = '1';
     const colored = await renderIsolatedApp();
-    await vi.waitFor(() => expect(colored.lastFrame()).toContain('Profiles'));
+    await vi.waitFor(() => expect(colored.lastFrame()).toContain('Status: Ready'));
     expect(colored.lastFrame()).toContain('\u001B[36m');
     expect(colored.lastFrame()).toContain('┏');
     colored.cleanup();
@@ -27,7 +27,7 @@ describe('TuiApp focus border color', () => {
     process.env.NO_COLOR = '1';
     vi.resetModules();
     const noColor = await renderIsolatedApp();
-    await vi.waitFor(() => expect(noColor.lastFrame()).toContain('Profiles'));
+    await vi.waitFor(() => expect(noColor.lastFrame()).toContain('Status: Ready'));
     expect(noColor.lastFrame()).not.toContain('\u001B[36m');
     expect(noColor.lastFrame()).toContain('┏');
     noColor.stdin.write('?');
@@ -41,7 +41,9 @@ describe('TuiApp focus border color', () => {
     delete process.env.NO_COLOR;
     process.env.FORCE_COLOR = '1';
     const app = await renderIsolatedApp();
-    await vi.waitFor(() => expect(app.lastFrame()).toContain('Profiles'));
+    await vi.waitFor(() => expect(app.lastFrame()).toContain('Status: Ready'));
+    app.stdin.write('2');
+    await vi.waitFor(() => expect(app.lastFrame()).toContain('* 2 Profiles'));
 
     const expectFocusedOverlay = (label: string) => {
       expect(app.lastFrame()).toContain(label);
@@ -96,7 +98,18 @@ async function renderIsolatedApp() {
     renameProfile: vi.fn(),
     removeProfile: vi.fn(),
     addMembership: vi.fn(),
-    removeMembership: vi.fn()
+    removeMembership: vi.fn(),
+    loadSkillPreview: vi.fn(async ({ sourceId, skillId }) => ({
+      sourceId, skillId, path: `/skills/${skillId}/SKILL.md`, contents: `# ${skillId}\n`
+    })),
+    browseDirectories: vi.fn(async (input) => ({ input, resolvedPath: '/tmp', selectablePath: '/tmp', entries: [] })),
+    inspectSourceCandidate: vi.fn(async ({ root }) => ({
+      sourceId: root.split('/').filter(Boolean).at(-1) ?? 'source', enteredRoot: root, canonicalRoot: root, manifest: { state: 'absent' as const }
+    })),
+    addSource: vi.fn(async ({ root }) => ({
+      schemaVersion: 1 as const, source: root.split('/').filter(Boolean).at(-1) ?? 'source', root,
+      digest: 'a'.repeat(64), sourceUnitRoot: '.', action: 'added' as const, path: '/sources/source.json'
+    }))
   } satisfies BazframeTuiService;
   const view = testing.render(createElement(TuiApp, {
     service,

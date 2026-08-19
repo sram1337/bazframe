@@ -146,12 +146,12 @@ Set `SKILLBOOK_LIBRARY` to another absolute library path when your skills live e
 
 ### Add a related collection of skills
 
-A managed source is a named collection of Agent Skills that share files, scripts, or dependencies. Bazframe copies a prepared collection into an immutable snapshot. Profiles refer to the source by its provider and source names; the global source record selects the active snapshot.
+A managed source is a named collection of Agent Skills that share files, scripts, or dependencies. Bazframe copies a prepared collection into an immutable snapshot. Its name is exactly the canonical input directory's basename; profiles refer to that one name and the global source record selects the active snapshot.
 
 This example creates an already-prepared source containing one skill:
 
 ```bash
-TOOLKIT="$HOME/bazframe-toolkit-example"
+TOOLKIT="$HOME/example-toolkit"
 mkdir -p "$TOOLKIT/review-code"
 cat > "$TOOLKIT/review-code/SKILL.md" <<'EOF'
 ---
@@ -164,19 +164,19 @@ description: Review a change for correctness and maintainability.
 Inspect the change, verify its behavior, and report actionable findings.
 EOF
 
-bazframe sources add local example-toolkit "$TOOLKIT"
-bazframe profile sources add local example-toolkit
+bazframe sources add "$TOOLKIT"
+bazframe profile sources add example-toolkit
 bazframe profile sources
 ```
 
-Here `local` is a provider namespace chosen for the example, and `example-toolkit` is the source name. Both are stable lowercase identifiers used together as the source identity.
+Here `example-toolkit` is derived from the selected directory name. Bazframe rejects invalid or already-registered basenames rather than normalizing or disambiguating them.
 
 After `/bazframe reload`, `/bazframe info` should report one profile source reference and list `review-code` under derived effective skills.
 
 Run an explicit build after changing the input collection:
 
 ```bash
-bazframe sources build local example-toolkit
+bazframe sources build example-toolkit
 ```
 
 Already-prepared directories work directly. A source that requires preparation can include `bazframe-source.json` with a build command and artifact paths. `sources add` and `sources build` run that declared command as your user. See [Managed source composition](docs/design.md#global-managed-sources-and-profile-composition) for the manifest and snapshot contract.
@@ -195,13 +195,13 @@ bazframe projects         # inspect repository settings
 
 ## Terminal interface
 
-`bazframe tui` opens a keyboard-driven interface for profile lifecycle and individual skill membership. It also displays managed sources, profile source references, available skills, and setup health.
+`bazframe tui` opens a keyboard-driven `Skills`, `Profiles`, `Adapters`, `Settings` interface. Preferred layouts show profile and skill/source master-detail panes; compact layouts drill into profile details and plain-text `SKILL.md` previews with Esc/Backspace return. The interface preserves explicit inactive-profile membership editing and keeps adapter/settings status read-only.
 
 ```bash
 bazframe tui
 ```
 
-Press `?` for its key guide. Use `bazframe sources` and `bazframe profile sources` for managed-source changes.
+Press `?` for its key guide. In Skills, `o`/`c` expand or collapse a source and `a` can add an already-prepared physical root only when no build manifest is present; the source name is derived from that root. The final literal `y` creates no profile reference. Declared builds, rebuild/remove, and profile-source reference changes remain available through `bazframe sources` and `bazframe profile sources`.
 
 ## Command map
 

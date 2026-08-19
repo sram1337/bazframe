@@ -47,7 +47,34 @@ export function createBazframeTuiService() {
       await mutation;
       writeMarker('mutation-resolved');
     },
-    removeMembership: async () => undefined
+    removeMembership: async () => undefined,
+    loadSkillPreview: async ({ sourceId, skillId }) => ({
+      sourceId,
+      skillId,
+      path: '/fixture/library/skills/demo-skill/SKILL.md',
+      contents: '---\nname: demo-skill\ndescription: fixture\n---\n\nTUI-PREVIEW-SENTINEL\n'
+    }),
+    browseDirectories: async (input) => ({
+      input,
+      resolvedPath: '/fixture',
+      selectablePath: '/fixture',
+      entries: []
+    }),
+    inspectSourceCandidate: async ({ root }) => ({
+      sourceId: root.split('/').filter(Boolean).at(-1) ?? 'source',
+      enteredRoot: root,
+      canonicalRoot: root,
+      manifest: { state: 'absent' }
+    }),
+    addSource: async ({ root }) => ({
+      schemaVersion: 1,
+      source: root.split('/').filter(Boolean).at(-1) ?? 'source',
+      root,
+      digest: 'a'.repeat(64),
+      sourceUnitRoot: '.',
+      action: 'added',
+      path: `/fixture/sources/${root.split('/').filter(Boolean).at(-1) ?? 'source'}.json`
+    })
   };
 }
 
@@ -107,7 +134,7 @@ function dashboard() {
   };
   if (scenario === 'fatal-render') {
     Object.defineProperty(value, 'status', {
-      enumerable: true,
+      enumerable: false,
       get() {
         throw new Error('fatal renderer fixture');
       }

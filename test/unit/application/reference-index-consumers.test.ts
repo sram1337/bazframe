@@ -44,7 +44,7 @@ describe('bulk profile-reference index overview consumers', () => {
 
     expect(status).toBe(0);
     expect(referenceMocks.captureBulk).toHaveBeenCalledTimes(1);
-    expect(stdout).toContain('provider/source [failed]');
+    expect(stdout).toContain('source [failed]');
     expect(stdout).toContain('references:unknown');
     expect(stdout.match(/raced-profile:\. invalid-reference/gu)).toHaveLength(1);
   });
@@ -68,7 +68,7 @@ describe('bulk profile-reference index overview consumers', () => {
 
     expect(referenceMocks.captureBulk).toHaveBeenCalledTimes(1);
     expect(dashboard.managedSources).toEqual([expect.objectContaining({
-      id: 'managed:provider/source',
+      id: 'managed:source',
       referenceCount: 3,
       health: 'ready',
       diagnostics: []
@@ -80,12 +80,12 @@ describe('bulk profile-reference index overview consumers', () => {
 function capturedIndex(withDiagnostic: boolean) {
   return {
     profileIdsBySource: new Map([
-      [profileSourceReferenceKey('provider', 'source'), ['one', 'two', 'three']]
+      [profileSourceReferenceKey('source'), ['one', 'two', 'three']]
     ]),
     diagnostics: withDiagnostic
       ? [{
           profileId: 'raced-profile',
-          diagnostic: { provider: '<unknown-provider>', source: '<unknown-source>', path: '.' }
+          diagnostic: { source: '<unknown-source>', path: '.' }
         }]
       : [],
     identity: 'captured-once'
@@ -102,9 +102,9 @@ async function setup(): Promise<{
   const home = directory.path('home');
   await addProfile(home, 'focused');
   await writeActiveProfile(home, 'focused');
-  const provider = await realpath(await directory.mkdir('provider'));
-  await directory.write('provider/demo/SKILL.md', '---\nname: demo\ndescription: demo\n---\n');
-  await addSource({ bazframeHome: home }, 'provider', 'source', provider);
+  const source = await realpath(await directory.mkdir('source'));
+  await directory.write('source/demo/SKILL.md', '---\nname: demo\ndescription: demo\n---\n');
+  await addSource({ bazframeHome: home }, source);
   return {
     directory,
     home,

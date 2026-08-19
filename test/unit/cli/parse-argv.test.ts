@@ -102,25 +102,31 @@ describe('parseArgv', () => {
 
   it('parses only global source lifecycle and profile reference grammar', () => {
     expect(parseArgv(['sources'])).toEqual({ kind: 'command', command: { name: 'sources-overview' } });
-    expect(parseArgv(['sources', 'add', 'provider', 'source', '/absolute/root'])).toEqual({
-      kind: 'command', command: { name: 'sources-add', providerId: 'provider', sourceId: 'source', sourceRoot: '/absolute/root' }
+    expect(parseArgv(['sources', 'add', '/absolute/root'])).toEqual({
+      kind: 'command', command: { name: 'sources-add', sourceRoot: '/absolute/root' }
     });
-    expect(parseArgv(['sources', 'build', 'provider', 'source'])).toEqual({ kind: 'command', command: { name: 'sources-build', providerId: 'provider', sourceId: 'source' } });
-    expect(parseArgv(['sources', 'remove', 'provider', 'source'])).toEqual({ kind: 'command', command: { name: 'sources-remove', providerId: 'provider', sourceId: 'source' } });
+    expect(parseArgv(['sources', 'build', 'source'])).toEqual({ kind: 'command', command: { name: 'sources-build', sourceId: 'source' } });
+    expect(parseArgv(['sources', 'remove', 'source'])).toEqual({ kind: 'command', command: { name: 'sources-remove', sourceId: 'source' } });
     expect(parseArgv(['profile', 'sources'])).toEqual({ kind: 'command', command: { name: 'profile-sources-overview' } });
-    expect(parseArgv(['profile', 'sources', 'add', 'provider', 'source'])).toEqual({ kind: 'command', command: { name: 'profile-sources-add', providerId: 'provider', sourceId: 'source' } });
-    expect(parseArgv(['profile', 'sources', 'add', 'provider', 'source', '--profile', 'reviewer'])).toEqual({ kind: 'command', command: { name: 'profile-sources-add', providerId: 'provider', sourceId: 'source', profileId: 'reviewer' } });
-    expect(parseArgv(['profile', 'sources', 'remove', 'provider', 'source'])).toEqual({ kind: 'command', command: { name: 'profile-sources-remove', providerId: 'provider', sourceId: 'source' } });
+    expect(parseArgv(['profile', 'sources', 'add', 'source'])).toEqual({ kind: 'command', command: { name: 'profile-sources-add', sourceId: 'source' } });
+    expect(parseArgv(['profile', 'sources', 'add', 'source', '--profile', 'reviewer'])).toEqual({ kind: 'command', command: { name: 'profile-sources-add', sourceId: 'source', profileId: 'reviewer' } });
+    expect(parseArgv(['profile', 'sources', 'remove', 'source'])).toEqual({ kind: 'command', command: { name: 'profile-sources-remove', sourceId: 'source' } });
     expect(parseArgv(['help', 'sources', 'build'])).toEqual({ kind: 'help', topic: 'sources-build' });
     for (const argv of [
       ['source'],
-      ['profile', 'sources', 'build', 'provider', 'source'],
-      ['profile', 'sources', 'add', 'provider', 'source', '/old-root'],
-      ['sources', 'add', 'provider', 'source', 'relative'],
-      ['sources', 'add', 'Bad', 'source', '/root'],
-      ['sources', 'remove', 'provider'],
-      ['profile', 'sources', 'remove', 'provider', 'source', '--profile'],
-      ['profile', 'sources', 'remove', 'provider', 'source', '--profile', 'Bad']
+      ['profile', 'sources', 'build', 'source'],
+      ['sources', 'add', 'provider', '/root'],
+      ['sources', 'add', 'provider', 'source', '/root'],
+      ['sources', 'build', 'provider', 'source'],
+      ['sources', 'remove', 'provider', 'source'],
+      ['profile', 'sources', 'add', 'provider', 'source'],
+      ['profile', 'sources', 'add', 'provider', 'source', '--profile', 'reviewer'],
+      ['profile', 'sources', 'remove', 'provider', 'source'],
+      ['profile', 'sources', 'remove', 'provider', 'source', '--profile', 'reviewer'],
+      ['sources', 'add', 'relative'],
+      ['sources', 'remove', 'Bad'],
+      ['profile', 'sources', 'remove', 'source', '--profile'],
+      ['profile', 'sources', 'remove', 'source', '--profile', 'Bad']
     ]) expect(parseArgv(argv)).toMatchObject({ kind: 'usage-error' });
   });
 

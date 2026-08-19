@@ -207,17 +207,17 @@ describe('Bazframe status', () => {
       'bazframe-home/profiles/focused/skills/review/SKILL.md',
       '---\ndescription: fallback flat name\n---\n'
     );
-    const provider = await realpath(await directory.mkdir('provider'));
+    const provider = await realpath(await directory.mkdir('source'));
     await directory.write(
-      'provider/derived/SKILL.md',
+      'source/derived/SKILL.md',
       '---\nname: review\ndescription: derived\n---\n'
     );
     const snapshot = await publishSourceSnapshot(directory.path('bazframe-home'), provider);
     const descriptorPath = await directory.write(
-      'bazframe-home/sources/provider/source.json',
-      encodeGlobalSource({ schemaVersion: 1, provider: 'provider', source: 'source', root: provider, digest: snapshot.digest, sourceUnitRoot: '.' })
+      'bazframe-home/sources/source.json',
+      encodeGlobalSource({ schemaVersion: 1, source: 'source', root: provider, digest: snapshot.digest, sourceUnitRoot: '.' })
     );
-    await directory.write('bazframe-home/profiles/focused/sources/provider/source.json', encodeProfileSourceReference({ schemaVersion: 1, provider: 'provider', source: 'source' }));
+    await directory.write('bazframe-home/profiles/focused/sources/source.json', encodeProfileSourceReference({ schemaVersion: 1, source: 'source' }));
 
     const ownedBefore = await captureProviderManifest([descriptorPath]);
     const providerBefore = await captureProviderManifest([provider]);
@@ -234,7 +234,6 @@ describe('Bazframe status', () => {
       derivedSkillCount: 0,
       sourceDiagnostics: [{
         category: 'duplicate-name',
-        providerId: 'provider',
         sourceId: 'source',
         path: 'derived/SKILL.md',
         name: 'review'
@@ -247,22 +246,22 @@ describe('Bazframe status', () => {
     const options = await statusOptions(directory);
     await readyProfile(directory, options);
     await installPiAdapter(options);
-    const provider = await realpath(await directory.mkdir('provider-rebuild'));
-    await directory.write('provider-rebuild/alpha/SKILL.md', '---\nname: alpha\ndescription: alpha\n---\n');
+    const provider = await realpath(await directory.mkdir('source'));
+    await directory.write('source/alpha/SKILL.md', '---\nname: alpha\ndescription: alpha\n---\n');
     await directory.write(
-      'bazframe-home/sources/provider/source.json',
-      encodeGlobalSource({ schemaVersion: 1, provider: 'provider', source: 'source', root: provider, digest: '0'.repeat(64), sourceUnitRoot: '.' })
+      'bazframe-home/sources/source.json',
+      encodeGlobalSource({ schemaVersion: 1, source: 'source', root: provider, digest: '0'.repeat(64), sourceUnitRoot: '.' })
     );
     await directory.write(
-      'bazframe-home/profiles/focused/sources/provider/source.json',
-      encodeProfileSourceReference({ schemaVersion: 1, provider: 'provider', source: 'source' })
+      'bazframe-home/profiles/focused/sources/source.json',
+      encodeProfileSourceReference({ schemaVersion: 1, source: 'source' })
     );
 
     const status = await buildStatus(options);
 
     expect(status.exitStatus).toBe(3);
-    expect(status.text).toContain('provider/source: failed; rebuild available;');
-    expect(status.text).toContain('Build the sources with: `bazframe sources build provider source`.');
+    expect(status.text).toContain('source: failed; rebuild available;');
+    expect(status.text).toContain('Build the sources with: `bazframe sources build source`.');
   });
 
   it('keeps flat status ready while reporting a scoped source-unit failure', async () => {
@@ -270,14 +269,15 @@ describe('Bazframe status', () => {
     const options = await statusOptions(directory);
     await readyProfile(directory, options);
     await installPiAdapter(options);
-    const missingRoot = directory.path('missing-provider');
+    const missingRoot = directory.path('source');
     for (const source of ['another', 'source']) {
-      await directory.write(`bazframe-home/sources/provider/${source}.json`, encodeGlobalSource({ schemaVersion: 1, provider: 'provider', source, root: missingRoot, digest: '0'.repeat(64), sourceUnitRoot: '.' }));
-      await directory.write(`bazframe-home/profiles/focused/sources/provider/${source}.json`, encodeProfileSourceReference({ schemaVersion: 1, provider: 'provider', source }));
+      const root = await realpath(await directory.mkdir(source));
+      await directory.write(`bazframe-home/sources/${source}.json`, encodeGlobalSource({ schemaVersion: 1, source, root, digest: '0'.repeat(64), sourceUnitRoot: '.' }));
+      await directory.write(`bazframe-home/profiles/focused/sources/${source}.json`, encodeProfileSourceReference({ schemaVersion: 1, source }));
     }
 
     const descriptorPath = directory.path(
-      'bazframe-home/sources/provider/source.json'
+      'bazframe-home/sources/source.json'
     );
     const ownedBefore = await captureProviderManifest([descriptorPath]);
     const before = await captureProviderManifest([missingRoot]);
@@ -292,15 +292,15 @@ describe('Bazframe status', () => {
       directSourceUnitCount: 2,
       derivedSkillCount: 0,
       sourceDiagnostics: [{
-        category: 'broken-snapshot', providerId: 'provider', sourceId: 'another', path: '.'
+        category: 'broken-snapshot', sourceId: 'another', path: '.'
       }, {
-        category: 'broken-snapshot', providerId: 'provider', sourceId: 'source', path: '.'
+        category: 'broken-snapshot', sourceId: 'source', path: '.'
       }]
     });
     expect(statusExitStatus(inspection)).toBe(3);
-    expect(formatStatus(inspection)).toContain('Source failures:\n  - provider/another:. broken-snapshot\n  - provider/source:. broken-snapshot');
+    expect(formatStatus(inspection)).toContain('Source failures:\n  - another:. broken-snapshot\n  - source:. broken-snapshot');
     expect(formatStatus(inspection)).toContain(
-      'Inspect referenced-source failures with `bazframe profile sources`.'
+      'Build the sources with: `bazframe sources build another`, `bazframe sources build source`.'
     );
   });
 

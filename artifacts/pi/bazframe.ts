@@ -15,7 +15,7 @@ import {
 	type FileHandle,
 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
 	getAgentDir,
 	loadSkillsFromDir,
@@ -34,7 +34,6 @@ const PROFILE_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const SKILL_ALIAS_SUFFIX = "-x-bazframe";
 const SOURCE_LIMITS = { depth: 8, entries: 256, skills: 64 } as const;
-const UNKNOWN_PROVIDER_ID = "<unknown-provider>";
 const UNKNOWN_SOURCE_ID = "<unknown-source>";
 const CONTEXT_FILE_NAMES = ["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"];
 const GIT_ENVIRONMENT_VARIABLES = [
@@ -93,18 +92,15 @@ interface InstructionFile {
 	content: string;
 }
 
-interface SourceDescriptorV2 {
-	schemaVersion: 2;
-	providerId: string;
+interface SourceDescriptor {
+	schemaVersion: 1;
 	sourceId: string;
 	sourceRoot: string;
 	snapshotDigest: string;
 	sourceUnitRoot: string;
 }
-type SourceDescriptor = SourceDescriptorV2;
 interface DirectSourceUnit {
-	schemaVersion: 2;
-	providerId: string;
+	schemaVersion: 1;
 	sourceId: string;
 	sourceRoot?: string;
 	snapshotDigest?: string;
@@ -118,7 +114,6 @@ interface DerivedSkill {
 	name: string;
 	baseDir: string;
 	definitionPath: string;
-	providerId: string;
 	sourceId: string;
 	sourceRoot: string;
 	relativePath: string;
@@ -129,7 +124,6 @@ interface SourceDiagnostic {
 	category: "invalid-reference" | "invalid-source" | "broken-root" | "broken-snapshot" | "limit-exceeded" | "internal-symlink"
 		| "unsupported-entry" | "mixed-root" | "invalid-definition" | "duplicate-name"
 		| "pi-loader" | "io-error";
-	providerId: string;
 	sourceId: string;
 	path: string;
 	limit?: "depth" | "entries" | "skills";
@@ -495,12 +489,11 @@ function safeSourceId(value: string): boolean {
 
 function sourceDiagnostic(
 	category: SourceDiagnostic["category"],
-	providerId: string,
 	sourceId: string,
 	path: string,
 	extra: Partial<SourceDiagnostic> = {},
 ): SourceDiagnostic {
-	return { category, providerId, sourceId, path, ...extra };
+	return { category, sourceId, path, ...extra };
 }
 
 function failSource(diagnostic: SourceDiagnostic | SourceDiagnostic[]): never {
@@ -526,51 +519,49 @@ class InvalidGlobalSource extends Error {}
 async function validateSourceReference(
 	bazframeHome: string,
 	profileId: string,
-	providerId: string,
 	sourceId: string,
 	expectedReferenceIdentity: SourcePhysicalIdentity,
 ): Promise<void> {
-	if (!PROFILE_ID.test(profileId) || profileId.length > 64 || !safeSourceId(providerId) || !safeSourceId(sourceId)) {
+	if (!PROFILE_ID.test(profileId) || profileId.length > 64 || !safeSourceId(sourceId)) {
 		throw new InvalidSourceReference("Invalid profile source reference identity.");
 	}
 	const profilesPath = join(bazframeHome, "profiles");
 	const profilePath = join(profilesPath, profileId);
 	const sourcesPath = join(profilePath, "sources");
-	const providerPath = join(sourcesPath, providerId);
-	const path = join(providerPath, `${sourceId}.json`);
+	const path = join(sourcesPath, `${sourceId}.json`);
 	try {
 		const value = await readStableSourceJson(
-			[bazframeHome, profilesPath, profilePath, sourcesPath, providerPath],
+			[bazframeHome, profilesPath, profilePath, sourcesPath],
 			path,
 			"Profile source reference",
 			expectedReferenceIdentity,
 		);
-		if (!hasExactKeys(value, ["schemaVersion", "provider", "source"])
-			|| value.schemaVersion !== 1 || value.provider !== providerId || value.source !== sourceId) throw new Error("invalid reference fields");
+		if (!hasExactKeys(value, ["schemaVersion", "source"])
+			|| value.schemaVersion !== 1 || value.source !== sourceId) throw new Error("invalid reference fields");
 	} catch (error) { throw new InvalidSourceReference(`Invalid profile source reference: ${path}`, { cause: error }); }
 }
 
 async function readSourceDescriptor(
-	providerId: string,
 	sourceId: string,
 	bazframeHome: string,
 ): Promise<SourceDescriptor> {
-	if (!safeSourceId(providerId) || !safeSourceId(sourceId)) throw new InvalidGlobalSource("Invalid global source identity.");
-	const globalPath = join(bazframeHome, "sources", providerId, `${sourceId}.json`);
+	if (!safeSourceId(sourceId)) throw new InvalidGlobalSource("Invalid global source identity.");
+	const globalPath = join(bazframeHome, "sources", `${sourceId}.json`);
 	let candidate: Record<string, unknown>;
 	try {
 		candidate = await readStableSourceJson(
-			[bazframeHome, join(bazframeHome, "sources"), join(bazframeHome, "sources", providerId)],
+			[bazframeHome, join(bazframeHome, "sources")],
 			globalPath,
 			"Global source",
 		);
-		if (!hasExactKeys(candidate, ["schemaVersion", "provider", "source", "root", "digest", "sourceUnitRoot"])
-			|| candidate.schemaVersion !== 1 || candidate.provider !== providerId || candidate.source !== sourceId
+		if (!hasExactKeys(candidate, ["schemaVersion", "source", "root", "digest", "sourceUnitRoot"])
+			|| candidate.schemaVersion !== 1 || candidate.source !== sourceId
 			|| typeof candidate.root !== "string" || !isAbsolute(candidate.root) || candidate.root.includes("\0") || resolve(candidate.root) !== candidate.root
+			|| basename(candidate.root) !== sourceId
 			|| typeof candidate.digest !== "string" || !/^[a-f0-9]{64}$/u.test(candidate.digest)
 			|| !portableSourceRelativePath(candidate.sourceUnitRoot)) throw new Error("invalid global source fields");
 	} catch (error) { throw new InvalidGlobalSource(`Invalid global source: ${globalPath}`, { cause: error }); }
-	return { schemaVersion: 2, providerId, sourceId, sourceRoot: candidate.root as string, snapshotDigest: candidate.digest as string, sourceUnitRoot: candidate.sourceUnitRoot as string };
+	return { schemaVersion: 1, sourceId, sourceRoot: candidate.root as string, snapshotDigest: candidate.digest as string, sourceUnitRoot: candidate.sourceUnitRoot as string };
 }
 
 async function readStableSourceJson(
@@ -621,7 +612,7 @@ interface SourceOpenDirectory {
 }
 
 async function sourceNamespace(profileDirectory: string): Promise<{
-	descriptors: { providerId: string; sourceId: string; path: string; identity: SourcePhysicalIdentity }[];
+	descriptors: { sourceId: string; path: string; identity: SourcePhysicalIdentity }[];
 	diagnostics: SourceDiagnostic[];
 }> {
 	const rootPath = join(profileDirectory, "sources");
@@ -639,68 +630,21 @@ async function sourceNamespace(profileDirectory: string): Promise<{
 	let root: SourceOpenDirectory | undefined;
 	try {
 		root = await openSourceDirectory(rootPath, sourceIdentity(rootMetadata));
-		const providerNames = await enumerateSourceDirectory(root);
 		const diagnostics: SourceDiagnostic[] = [];
-		const providers: Array<{ id: string; identity: SourcePhysicalIdentity }> = [];
-		for (const name of providerNames) {
+		const descriptors: { sourceId: string; path: string; identity: SourcePhysicalIdentity }[] = [];
+		for (const name of await enumerateSourceDirectory(root)) {
+			const sourceId = sourceDescriptorId(name);
+			const childPath = join(rootPath, name);
 			let child;
-			try { child = await lstat(join(rootPath, name), { bigint: true }); } catch {
-				diagnostics.push(sourceDiagnostic(
-					"invalid-reference",
-					safeSourceId(name) ? name : UNKNOWN_PROVIDER_ID,
-					UNKNOWN_SOURCE_ID,
-					name,
-				));
+			try { child = await lstat(childPath, { bigint: true }); } catch {
+				diagnostics.push(sourceDiagnostic("invalid-reference", sourceId ?? UNKNOWN_SOURCE_ID, name));
 				continue;
 			}
-			if (!safeSourceId(name) || child.isSymbolicLink() || !child.isDirectory()) {
-				diagnostics.push(sourceDiagnostic(
-					"invalid-reference",
-					safeSourceId(name) ? name : UNKNOWN_PROVIDER_ID,
-					UNKNOWN_SOURCE_ID,
-					name,
-				));
+			if (sourceId === undefined || child.isSymbolicLink() || !child.isFile()) {
+				diagnostics.push(sourceDiagnostic("invalid-reference", sourceId ?? UNKNOWN_SOURCE_ID, name));
 				continue;
 			}
-			providers.push({ id: name, identity: sourceIdentity(child) });
-		}
-
-		const descriptors: { providerId: string; sourceId: string; path: string; identity: SourcePhysicalIdentity }[] = [];
-		for (const provider of providers) {
-			const providerPath = join(rootPath, provider.id);
-			let openedProvider: SourceOpenDirectory | undefined;
-			try {
-				openedProvider = await openSourceDirectory(providerPath, provider.identity);
-				for (const name of await enumerateSourceDirectory(openedProvider)) {
-					const sourceId = sourceDescriptorId(name);
-					const childPath = join(providerPath, name);
-					let child;
-					try { child = await lstat(childPath, { bigint: true }); } catch {
-						diagnostics.push(sourceDiagnostic(
-							"invalid-reference",
-							provider.id,
-							sourceId ?? UNKNOWN_SOURCE_ID,
-							`${provider.id}/${name}`,
-						));
-						continue;
-					}
-					if (sourceId === undefined || child.isSymbolicLink() || !child.isFile()) {
-						diagnostics.push(sourceDiagnostic(
-							"invalid-reference",
-							provider.id,
-							sourceId ?? UNKNOWN_SOURCE_ID,
-							`${provider.id}/${name}`,
-						));
-						continue;
-					}
-					descriptors.push({ providerId: provider.id, sourceId, path: childPath, identity: sourceIdentity(child) });
-				}
-				await assertSourceDirectoryStable(openedProvider);
-			} catch {
-				diagnostics.push(sourceDiagnostic("invalid-reference", provider.id, UNKNOWN_SOURCE_ID, provider.id));
-			} finally {
-				await openedProvider?.handle.close().catch(() => undefined);
-			}
+			descriptors.push({ sourceId, path: childPath, identity: sourceIdentity(child) });
 		}
 		for (const descriptor of descriptors) {
 			try {
@@ -710,12 +654,7 @@ async function sourceNamespace(profileDirectory: string): Promise<{
 					throw new Error("descriptor namespace entry changed");
 				}
 			} catch {
-				diagnostics.push(sourceDiagnostic(
-					"invalid-reference",
-					descriptor.providerId,
-					descriptor.sourceId,
-					`${descriptor.providerId}/${descriptor.sourceId}.json`,
-				));
+				diagnostics.push(sourceDiagnostic("invalid-reference", descriptor.sourceId, `${descriptor.sourceId}.json`));
 			}
 		}
 		await assertSourceDirectoryStable(root);
@@ -728,12 +667,12 @@ async function sourceNamespace(profileDirectory: string): Promise<{
 }
 
 function invalidSourceNamespaceRoot(): {
-	descriptors: { providerId: string; sourceId: string; path: string; identity: SourcePhysicalIdentity }[];
+	descriptors: { sourceId: string; path: string; identity: SourcePhysicalIdentity }[];
 	diagnostics: SourceDiagnostic[];
 } {
 	return {
 		descriptors: [],
-		diagnostics: [sourceDiagnostic("invalid-reference", UNKNOWN_PROVIDER_ID, UNKNOWN_SOURCE_ID, ".")],
+		diagnostics: [sourceDiagnostic("invalid-reference", UNKNOWN_SOURCE_ID, ".")],
 	};
 }
 
@@ -934,25 +873,25 @@ function sourceManifestCompare(left: string, right: string): number {
 async function resolveDirectSource(direct: DirectSourceUnit, bazframeHome: string): Promise<DerivedSkill[]> {
 	let root: string;
 	if (direct.snapshotDigest === undefined || direct.sourceUnitRoot === undefined) {
-		failSource(sourceDiagnostic("invalid-source", direct.providerId, direct.sourceId, `${direct.providerId}/${direct.sourceId}.json`));
+		failSource(sourceDiagnostic("invalid-source", direct.sourceId, `${direct.sourceId}.json`));
 	}
 	try { root = await verifiedSnapshotSourceRoot(bazframeHome, direct.snapshotDigest, direct.sourceUnitRoot); }
-	catch { failSource(sourceDiagnostic("broken-snapshot", direct.providerId, direct.sourceId, ".")); }
+	catch { failSource(sourceDiagnostic("broken-snapshot", direct.sourceId, ".")); }
 	try {
 		const metadata = await lstat(root);
 		if (metadata.isSymbolicLink() || !metadata.isDirectory() || await realpath(root) !== root) {
-			failSource(sourceDiagnostic("broken-root", direct.providerId, direct.sourceId, "."));
+			failSource(sourceDiagnostic("broken-root", direct.sourceId, "."));
 		}
 	} catch (error) {
 		if (error instanceof SourceResolutionFailure) throw error;
-		failSource(sourceDiagnostic("broken-root", direct.providerId, direct.sourceId, "."));
+		failSource(sourceDiagnostic("broken-root", direct.sourceId, "."));
 	}
 	let entryCount = 0;
 	let skillCount = 0;
 	const rootDefinition = await physicalSourceRootDefinition(direct, root);
 	const derived: DerivedSkill[] = [];
 	const diagnostic = (category: SourceDiagnostic["category"], path: string, extra = {}) =>
-		sourceDiagnostic(category, direct.providerId, direct.sourceId, path, extra);
+		sourceDiagnostic(category, direct.sourceId, path, extra);
 
 	async function visit(directory: string, relativeDirectory: string, depth: number): Promise<void> {
 		let names: string[];
@@ -1019,7 +958,6 @@ async function resolveDirectSource(direct: DirectSourceUnit, bazframeHome: strin
 				name: skill.name,
 				baseDir: skill.baseDir,
 				definitionPath: skill.filePath,
-				providerId: direct.providerId,
 				sourceId: direct.sourceId,
 				sourceRoot: root,
 				relativePath: path,
@@ -1045,13 +983,12 @@ async function physicalSourceRootDefinition(direct: DirectSourceUnit, root: stri
 		return !metadata.isSymbolicLink() && metadata.isFile();
 	} catch (error) {
 		if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
-		failSource(sourceDiagnostic("io-error", direct.providerId, direct.sourceId, "SKILL.md"));
+		failSource(sourceDiagnostic("io-error", direct.sourceId, "SKILL.md"));
 	}
 }
 
 function sortSourceDiagnostics(diagnostics: SourceDiagnostic[]): SourceDiagnostic[] {
-	return diagnostics.sort((left, right) => codeUnitCompare(left.providerId, right.providerId)
-		|| codeUnitCompare(left.sourceId, right.sourceId)
+	return diagnostics.sort((left, right) => codeUnitCompare(left.sourceId, right.sourceId)
 		|| codeUnitCompare(left.path, right.path)
 		|| codeUnitCompare(left.category, right.category)
 		|| (left.diagnosticIndex ?? 0) - (right.diagnosticIndex ?? 0)
@@ -1077,13 +1014,8 @@ async function loadProfileSources(
 	}
 	const profileId = profileDirectory.split(sep).at(-1)!;
 	for (const item of namespace.descriptors) {
-		try { await validateSourceReference(bazframeHome, profileId, item.providerId, item.sourceId, item.identity); } catch {
-			diagnostics.push(sourceDiagnostic(
-				"invalid-reference",
-				item.providerId,
-				item.sourceId,
-				`${item.providerId}/${item.sourceId}.json`,
-			));
+		try { await validateSourceReference(bazframeHome, profileId, item.sourceId, item.identity); } catch {
+			diagnostics.push(sourceDiagnostic("invalid-reference", item.sourceId, `${item.sourceId}.json`));
 		}
 	}
 	if (diagnostics.length > 0) {
@@ -1091,8 +1023,7 @@ async function loadProfileSources(
 	}
 	for (const item of namespace.descriptors) {
 		const referenceDirect: DirectSourceUnit = {
-			schemaVersion: 2,
-			providerId: item.providerId,
+			schemaVersion: 1,
 			sourceId: item.sourceId,
 			descriptorPath: item.path,
 			preparationState: "failed",
@@ -1100,13 +1031,8 @@ async function loadProfileSources(
 		};
 		directSourceUnits.push(referenceDirect);
 		let descriptor: SourceDescriptor;
-		try { descriptor = await readSourceDescriptor(item.providerId, item.sourceId, bazframeHome); } catch {
-			diagnostics.push(sourceDiagnostic(
-				"invalid-source",
-				item.providerId,
-				item.sourceId,
-				`${item.providerId}/${item.sourceId}.json`,
-			));
+		try { descriptor = await readSourceDescriptor(item.sourceId, bazframeHome); } catch {
+			diagnostics.push(sourceDiagnostic("invalid-source", item.sourceId, `${item.sourceId}.json`));
 			continue;
 		}
 		const direct: DirectSourceUnit = {
@@ -1119,7 +1045,7 @@ async function loadProfileSources(
 		try { candidates.push({ direct, skills: await resolveDirectSource(direct, bazframeHome) }); } catch (error) {
 			direct.preparationState = "failed";
 			if (error instanceof SourceResolutionFailure) diagnostics.push(...error.diagnostics);
-			else diagnostics.push(sourceDiagnostic("io-error", item.providerId, item.sourceId, "."));
+			else diagnostics.push(sourceDiagnostic("io-error", item.sourceId, "."));
 		}
 	}
 	const names = new Map<string, DerivedSkill[]>();
@@ -1133,14 +1059,14 @@ async function loadProfileSources(
 	for (const [name, skills] of [...names.entries()].sort(([left], [right]) => codeUnitCompare(left, right))) {
 		if (!flatNames.has(name) && skills.length < 2) continue;
 		for (const skill of skills) {
-			duplicateUnits.add(`${skill.providerId}\0${skill.sourceId}`);
-			diagnostics.push(sourceDiagnostic("duplicate-name", skill.providerId, skill.sourceId, skill.relativePath, { name }));
+			duplicateUnits.add(skill.sourceId);
+			diagnostics.push(sourceDiagnostic("duplicate-name", skill.sourceId, skill.relativePath, { name }));
 		}
 	}
 	return {
 		directSourceUnits,
 		derivedSkills: candidates
-			.filter(({ direct }) => !duplicateUnits.has(`${direct.providerId}\0${direct.sourceId}`))
+			.filter(({ direct }) => !duplicateUnits.has(direct.sourceId))
 			.flatMap((candidate) => candidate.skills),
 		diagnostics: sortSourceDiagnostics(diagnostics),
 	};
@@ -1460,7 +1386,7 @@ function contextPaths(options: BuildSystemPromptOptions): string[] {
 }
 
 function formatSourceFailure(diagnostic: SourceDiagnostic): string {
-	const identity = `${diagnostic.providerId}/${diagnostic.sourceId}:${diagnostic.path}`;
+	const identity = `${diagnostic.sourceId}:${diagnostic.path}`;
 	if (diagnostic.category === "limit-exceeded") {
 		return `${identity} ${diagnostic.category} (${diagnostic.limit})`;
 	}
@@ -1477,7 +1403,7 @@ function sourceCorrectiveActions(profile: ProfileState | undefined): string[] {
 	if (profile === undefined) return ["  (none)"];
 	const builds = profile.directSourceUnits
 		.filter((source) => source.preparationState === "failed" && source.rebuildAvailability === "available")
-		.map((source) => `  - bazframe sources build ${source.providerId} ${source.sourceId}`);
+		.map((source) => `  - bazframe sources build ${source.sourceId}`);
 	if (builds.length > 0) return builds;
 	return profile.sourceDiagnostics.length > 0 ? ["  - Inspect referenced-source failures with `bazframe profile sources`."] : ["  (none)"];
 }
@@ -1525,13 +1451,13 @@ function info(state: AdapterState, pi: ExtensionAPI, ctx: ExtensionCommandContex
 		...(profile === undefined || profile.directSourceUnits.length === 0
 			? ["  (none)"]
 			: profile.directSourceUnits.map((source) => source.snapshotDigest === undefined
-				? `  - ${source.providerId}/${source.sourceId} (failed; target unavailable)`
-				: `  - ${source.providerId}/${source.sourceId} -> ${source.sourceRoot} (${source.preparationState}; rebuild:${source.rebuildAvailability}; sha256:${source.snapshotDigest}; root:${source.sourceUnitRoot})`)),
+				? `  - ${source.sourceId} (failed; target unavailable)`
+				: `  - ${source.sourceId} -> ${source.sourceRoot} (${source.preparationState}; rebuild:${source.rebuildAvailability}; sha256:${source.snapshotDigest}; root:${source.sourceUnitRoot})`)),
 		`Derived effective skills: ${profile?.derivedSkills.length ?? 0}`,
 		...(profile === undefined || profile.derivedSkills.length === 0
 			? ["  (none)"]
 			: profile.derivedSkills.map((skill) =>
-				`  - ${skill.name} (${skill.providerId}/${skill.sourceId}:${skill.relativePath})`)),
+				`  - ${skill.name} (${skill.sourceId}:${skill.relativePath})`)),
 		`Source failures: ${profile?.sourceDiagnostics.length ?? 0}`,
 		...(profile === undefined || profile.sourceDiagnostics.length === 0
 			? ["  (none)"]

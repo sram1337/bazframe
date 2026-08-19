@@ -24,9 +24,11 @@ The user continues to invoke Pi directly. Absent global state means enabled in b
 
 ## TUI direction
 
-Bazframe's first interactive management UI is a keyboard-first terminal UI with no sidebar, launched explicitly as `bazframe tui`. Its top navigation contains `Profiles`, `Sources`, `Skills`, and `Settings`. The implemented management slice provides guarded profile lifecycle actions, a two-pane selected-profile direct-membership editor, a read-only multi-root skill-source browser and global managed-source view, and structured read-only setup status with corrective actions. It calls typed application services rather than spawning CLI subprocesses, and explicit profile targeting never silently changes the active selection.
+Bazframe's first interactive management UI is a keyboard-first terminal UI with no sidebar, launched explicitly as `bazframe tui`. Its top navigation is `Skills`, `Profiles`, `Adapters`, and `Settings`. Preferred layouts show responsive master-detail views for the combined skill/source browser and selected profiles; compact layouts drill into profile details and plain-text `SKILL.md` previews with visible breadcrumbs and Esc/Backspace return. Managed sources and skills remain distinct domain projections even though they share the Skills tab. Adapter and Settings views remain read-only.
 
-[`tui-design.md`](tui-design.md) records the implemented boundary, interaction model, safety requirements, tests, and remaining review gates. Runtime `ink@7.1.1` and `react@19.2.8` are exact pins and load lazily only after CLI dispatch to `bazframe tui`. Deterministic tests cover compact/resize/exit/accessibility behavior and cell-aware bounds; a real macOS pseudo-terminal smoke covers alternate-screen entry/restoration; and the packed-package gate includes an interactive smoke when `script` is available. This does not make the TUI production-ready. The implemented shell keeps active top-tab state separate from a keyboard-focused top-tab cursor and body/pane focus, and reducer-owned per-view viewport offsets preserve stable-row visibility across navigation, refresh, routing, tab changes, and resize. Managed source and profile-reference mutations remain CLI-only; the TUI reads global sources, profile references, and activated snapshot skills without running builds. Editor launch, settings writes, additional real sources, and provider move/rename remain open. Automated evidence covers macOS direct-PTY/local-tmux and Linux arm64 digest-pinned-base container direct-PTY/tmux/loopback-SSH, with Linux package/tool versions recorded per run. The local installed-tarball tmux gate now also proves actual Ink render-error rejection with exit `1`, diagnostic and terminal restoration/cleanup, plus `80x24`/`60x16` CJK, combining-mark, emoji-ZWJ, ANSI-SGR, and long-unbroken-path cell bounds. Windows Terminal, representative remote SSH, terminal/font/locale ambiguous-width differences, and manual assistive-technology evidence remain open.
+[`tui-design.md`](tui-design.md) records the implemented boundary, interaction model, safety requirements, tests, and remaining review gates. Runtime `ink@7.1.1` and `react@19.2.8` are exact pins and load lazily only after CLI dispatch to `bazframe tui`. The TUI calls typed application services rather than spawning CLI subprocesses, and explicit profile targeting never silently changes the active selection. It may add one global managed source from a selected physical, already-prepared input root only when no `bazframe-source.json` build declaration is present; the source name is the canonical root basename. The core rechecks and refuses every declared build with CLI guidance; successful TUI addition snapshots the complete selected tree and never adds a profile reference. Provider acquisition, declared-build execution, source rebuild/remove, profile-reference mutation, editor launch, settings/adapter writes, and provider move/rename remain outside this slice.
+
+Deterministic tests cover compact/resize/exit/accessibility behavior, cell-aware bounds, source-add consent, and terminal-control-neutralized previews. Real terminal gates cover alternate-screen lifecycle and same-width vertical-growth origin. This does not make the TUI production-ready. Windows Terminal, representative remote SSH, terminal/font/locale ambiguous-width differences, and manual assistive-technology evidence remain open.
 
 ## Core objects
 
@@ -50,11 +52,10 @@ profiles/<id>/
 ├── skills/
 │   └── <skill>/SKILL.md
 └── sources/                              # optional global-source references
-    └── <providerId>/
-        └── <sourceId>.json
+    └── <sourceId>.json
 ```
 
-The profile-local `AGENTS.md` contains personal coding-agent instructions. Each materialized flat skill is an Agent Skills-compatible directory, including any supporting files used by its `SKILL.md`. Each profile source file contains only exact provider/source identity. The matching global source record owns the provider input root, activated snapshot digest, and snapshot-relative source-unit root; effective child skills are derived from that activated snapshot rather than mutable provider input.
+The profile-local `AGENTS.md` contains personal coding-agent instructions. Each materialized flat skill is an Agent Skills-compatible directory, including any supporting files used by its `SKILL.md`. Each profile source file contains only one exact source identity. The matching global source record owns the external input root, activated snapshot digest, and snapshot-relative source-unit root; effective child skills are derived from that activated snapshot rather than mutable input.
 
 The first slice has one global active profile selected by `bazframe profile use <profile>`; `bazframe use <profile>` remains a compatibility alias. `profile add` creates a physical profile directory containing a zero-byte physical `AGENTS.md` and an empty physical `skills/` directory without activating it. `profile list` prints valid physical profile IDs and `profile current` prints only the selected ID for scripts. Bare `bazframe profile` and `bazframe profiles` instead render the human profile overview: valid profiles in lexical order, an explicit active marker, current-selection state, and the available profile commands.
 
@@ -163,7 +164,7 @@ Only Pi 0.82.x has an implemented and evidenced adapter contract. A future adapt
 
 ## Global managed sources and profile composition
 
-Managed sources are top-level Bazframe objects. A source owns provider input identity, one explicit build declaration, and one activated immutable content-addressed snapshot. Profiles do not own or duplicate source objects; they contain references to global sources and compose the referenced sources' activated skills with their direct flat skills.
+Managed sources are top-level Bazframe objects. A source owns one canonical external input identity, one explicit build declaration, and one activated immutable content-addressed snapshot. Profiles do not own or duplicate source objects; they contain references to global sources and compose the referenced sources' activated skills with their direct flat skills.
 
 Build execution is explicit only. It occurs during `sources add` and `sources build`, never during overview, status, TUI load/refresh, Pi startup, `/bazframe reload`, or skill invocation. Providers retain acquisition, credentials, mutable runtime data, publication, dependencies, and child-command behavior. Bazframe owns declared build execution, snapshot publication and verification, activation, references, and composition validation. Selecting or rebuilding a source consents to the declared build running with ordinary user-process authority; Bazframe provides no sandbox.
 
@@ -172,7 +173,7 @@ Build execution is explicit only. It occurs during `sources add` and `sources bu
 A global source object is stored at:
 
 ```text
-<BAZFRAME_HOME>/sources/<provider>/<source>.json
+<BAZFRAME_HOME>/sources/<source>.json
 ```
 
 Its exact schema-v1 object is:
@@ -180,7 +181,6 @@ Its exact schema-v1 object is:
 ```json
 {
   "schemaVersion": 1,
-  "provider": "provider-id",
   "source": "source-id",
   "root": "/canonical/absolute/provider-input",
   "digest": "<lowercase-sha256>",
@@ -191,7 +191,7 @@ Its exact schema-v1 object is:
 A profile reference is stored at:
 
 ```text
-<BAZFRAME_HOME>/profiles/<profile>/sources/<provider>/<source>.json
+<BAZFRAME_HOME>/profiles/<profile>/sources/<source>.json
 ```
 
 Its exact schema-v1 object is:
@@ -199,12 +199,11 @@ Its exact schema-v1 object is:
 ```json
 {
   "schemaVersion": 1,
-  "provider": "provider-id",
   "source": "source-id"
 }
 ```
 
-Both namespaces use safe 1–64 character lowercase hyphenated IDs, exact fields, physical regular non-link files, UTF-8, identity revalidation, and deterministic lexical inspection. Existing pre-alpha `profiles/<profile>/source-units/` content is inert ordinary profile content: source code never reads, migrates, or falls back to it.
+Both namespaces use one safe 1–64 character lowercase hyphenated source ID, exact fields, physical regular non-link files, UTF-8, identity revalidation, and deterministic lexical inspection. The source ID is exactly `basename(realpath(<absolute-root>))`; Bazframe rejects unsafe names and occupied IDs without normalization or fallback. Existing pre-alpha nested/provider-shaped state and `profiles/<profile>/source-units/` content have no migration path: nested current-state entries fail validation, while `source-units/` remains inert ordinary profile content.
 
 A provider input may contain the exact physical `bazframe-source.json` build declaration already specified by the source-build manifest contract:
 
@@ -227,22 +226,22 @@ The only managed-source commands are:
 
 ```text
 bazframe sources
-bazframe sources add <provider> <source> <absolute-root>
-bazframe sources build <provider> <source>
-bazframe sources remove <provider> <source>
+bazframe sources add <absolute-root>
+bazframe sources build <source>
+bazframe sources remove <source>
 
 bazframe profile sources
-bazframe profile sources add <provider> <source> [--profile <profile>]
-bazframe profile sources remove <provider> <source> [--profile <profile>]
+bazframe profile sources add <source> [--profile <profile>]
+bazframe profile sources remove <source> [--profile <profile>]
 ```
 
 There is no singular `source` alias and no legacy profile-local build/add-root command.
 
-Global add explicitly builds, validates, snapshots, and activates a source without requiring a profile. Re-adding an exact source/root is a no-op. Global build prepares a candidate and validates it against every profile that references that identity. If the candidate would introduce a structural, Pi-loader, or duplicate conflict in any dependent profile, activation is rejected for everyone and the previous global record/digest remains active. Unrelated pre-existing failures do not alone block activation, but malformed or raced reference namespaces fail closed because Bazframe cannot prove the complete dependent set.
+Global add derives the source ID from the canonical root basename, then explicitly builds, validates, snapshots, and activates it without requiring a profile. Any occupied source ID, including an exact same-root re-add, is rejected. Global build prepares a candidate and validates it against every profile that references that identity. If the candidate would introduce a structural, Pi-loader, or duplicate conflict in any dependent profile, activation is rejected for everyone and the previous global record/digest remains active. Unrelated pre-existing failures do not alone block activation, but malformed or raced reference namespaces fail closed because Bazframe cannot prove the complete dependent set.
 
 Profile reference add validates the global object, snapshot, and prospective profile without building. Reference remove deletes only the named reference and does not require the global object or provider input. Neither changes active profile selection.
 
-Global source removal is refused while any profile references it and reports the sorted dependent profiles. Once unreferenced, removal unlinks only the global JSON object; provider input, provider namespace directory, and immutable snapshots remain untouched. All source and reference writers take the global state lock; a one-profile reference write then takes that profile's source lock.
+Global source removal is refused while any profile references it and reports the sorted dependent profiles. Once unreferenced, removal unlinks only the global JSON object; external input and immutable snapshots remain untouched. All source and reference writers take the global state lock; a one-profile reference write then takes that profile's source lock.
 
 ### Runtime discovery and conflicts
 
@@ -250,7 +249,7 @@ Runtime reads only references from the active profile, joins them to global reco
 
 Traversal retains depth 8, 256 visited entries, and 64 effective children per source; lexical DFS; skipped `.git`/`node_modules`; no-follow containment; source-atomic failures; Pi 0.82-authoritative Agent Skills loading; exact diagnostic ordering; and profile-wide duplicate semantics. Flat/source conflicts preserve flat skills and withhold the derived unit. Source/source conflicts withhold every involved source. Pi command collisions remain adapter-specific and use the existing one deterministic alias attempt.
 
-`bazframe sources` reports every global source, including unreferenced health, root, digest, source-unit root, rebuild availability, derived children/failures, and reference count. `bazframe profile sources`, `bazframe status`, and `/bazframe info` report active-profile references, effective derived children, and scoped failures. Active status corrective actions use `bazframe sources build <provider> <source>`; unreferenced source failures do not require active-runtime attention.
+`bazframe sources` reports every global source, including unreferenced health, root, digest, source-unit root, rebuild availability, derived children/failures, and reference count. `bazframe profile sources`, `bazframe status`, and `/bazframe info` report active-profile references, effective derived children, and scoped failures. Active status corrective actions use `bazframe sources build <source>`; unreferenced source failures do not require active-runtime attention.
 
 ## Ownership
 
@@ -282,12 +281,12 @@ bazframe profile skills
 bazframe profile skills add <skill> [--profile <profile>]
 bazframe profile skills remove <skill> [--profile <profile>]
 bazframe sources
-bazframe sources add <provider> <source> <absolute-root>
-bazframe sources build <provider> <source>
-bazframe sources remove <provider> <source>
+bazframe sources add <absolute-root>
+bazframe sources build <source>
+bazframe sources remove <source>
 bazframe profile sources
-bazframe profile sources add <provider> <source> [--profile <profile>]
-bazframe profile sources remove <provider> <source> [--profile <profile>]
+bazframe profile sources add <source> [--profile <profile>]
+bazframe profile sources remove <source> [--profile <profile>]
 
 bazframe tui
 bazframe skill | skills
@@ -307,7 +306,7 @@ Bare singular and plural resources produce human overviews. Scoped verbs mutate 
 
 CLI color is presentation-only: it is enabled automatically for terminal streams, disabled for pipes and redirects, disabled when `NO_COLOR` is present, and explicitly enabled by nonzero `FORCE_COLOR` only when `NO_COLOR` is absent. Headings, active/current state, warnings, errors, and command hints retain text and symbols that remain understandable without color.
 
-Adapter installation is explicit and orthogonal to global/project policy. Global and project disable operations require neither adapter nor profile. Global enable validates runtime setup before removing disabled state. Project enable validates runtime setup because it makes the current worktree effective-enabled, including when it overrides global disable. Profile skill add/remove mutate only flat direct membership in the active or explicitly targeted profile. Global source add/build explicitly prepare and activate snapshots; profile source add/remove change references only. Managed-source mutation has no singular alias or TUI action.
+Adapter installation is explicit and orthogonal to global/project policy. Global and project disable operations require neither adapter nor profile. Global enable validates runtime setup before removing disabled state. Project enable validates runtime setup because it makes the current worktree effective-enabled, including when it overrides global disable. Profile skill add/remove mutate only flat direct membership in the active or explicitly targeted profile. Global source add/build explicitly prepare and activate snapshots; profile source add/remove change references only. Managed-source mutation has no singular CLI alias. The TUI exposes only bounded global add for manifest-free already-prepared roots; declared builds and every other source/reference mutation remain CLI-only.
 
 For adapter installation, `--force` repairs a drifted artifact only when a valid Bazframe ownership manifest identifies the destination. For `profile remove`, `--force` separately authorizes deletion of all content under the named non-active physical profile; it never extends authority to symlink targets.
 
@@ -327,9 +326,9 @@ A default-enabled session validates flat profile state as before and reports act
 
 Product work now focuses on:
 
-- completing the TUI's remaining source-tree/viewport interaction work after the separate top-tab focus model;
+- completing deeper source-tree navigation beyond the current source/skill master-detail view;
 - retaining the global source-object and profile-reference lifecycle, declared builds, immutable snapshots, all-dependent activation validation, and snapshot-based bounded discovery;
-- keeping editor launch, settings writes, TUI source mutation, additional provider operations, and provider move/rename behind their explicit ownership and lifecycle decisions;
+- keeping editor launch, settings/adapter writes, declared-build execution in the TUI, source rebuild/remove, profile-reference mutation, additional provider operations, and provider move/rename behind their explicit ownership and lifecycle decisions;
 - retaining Linux and local tmux evidence while validating Windows Terminal, representative remote SSH, terminal/font/locale width differences, and manual assistive-technology behavior before any production-ready TUI claim;
 - preserving flat direct-membership behavior while adding the smallest explicit source preparation lifecycle.
 

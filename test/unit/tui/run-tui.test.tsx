@@ -85,6 +85,10 @@ describe('TUI process termination lifecycle', () => {
 
     await expect(runTui(options({ stderr, terminateProcess }))).resolves.toBe(130);
 
+    expect(renderMock.mock.calls.at(-1)?.[1]).toMatchObject({
+      alternateScreen: true,
+      incrementalRendering: false
+    });
     expect(instance.unmount).toHaveBeenCalledOnce();
     expect(stderr.write).not.toHaveBeenCalled();
     expect(terminateProcess).not.toHaveBeenCalled();

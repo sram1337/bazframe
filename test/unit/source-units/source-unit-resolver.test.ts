@@ -1,4 +1,5 @@
 import { chmod, mkdir, readFile, realpath, rename, symlink, writeFile } from 'node:fs/promises';
+import { basename } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { measureProviderOperation } from '../../helpers/provider-manifest.js';
 import { createTempDirectory, type TempDirectory } from '../../helpers/temp-directory.js';
@@ -8,7 +9,6 @@ import { encodeProfileSourceReference } from '../../../src/profiles/profile-sour
 import {
   loadFlatSkillIdentities,
   resolveProfileSourceUnits,
-  UNKNOWN_PROVIDER_ID,
   UNKNOWN_SOURCE_ID,
   type DefinitionLoader
 } from '../../../src/source-units/source-unit-resolver.js';
@@ -28,17 +28,17 @@ async function fixture(): Promise<{ directory: TempDirectory; profile: string }>
 
 async function descriptor(
   directory: TempDirectory,
-  providerId: string,
-  sourceId: string,
+  _providerId: string,
+  _sourceId: string,
   root: string
 ): Promise<void> {
   const sourceRoot = await realpath(root);
+  const sourceId = basename(sourceRoot);
   const snapshot = await publishSourceSnapshot(directory.root, sourceRoot);
   await directory.write(
-    `sources/${providerId}/${sourceId}.json`,
+    `sources/${sourceId}.json`,
     encodeGlobalSource({
       schemaVersion: 1,
-      provider: providerId,
       source: sourceId,
       root: sourceRoot,
       digest: snapshot.digest,
@@ -46,8 +46,8 @@ async function descriptor(
     })
   );
   await directory.write(
-    `profiles/profile/sources/${providerId}/${sourceId}.json`,
-    encodeProfileSourceReference({ schemaVersion: 1, provider: providerId, source: sourceId })
+    `profiles/profile/sources/${sourceId}.json`,
+    encodeProfileSourceReference({ schemaVersion: 1, source: sourceId })
   );
 }
 
@@ -135,14 +135,14 @@ describe('source-unit resolver', () => {
       () => resolveProfileSourceUnits(profile, [])
     );
 
-    expect(result.directSourceUnits.map((item) => `${item.providerId}/${item.sourceId}`)).toEqual([
-      'one-provider/standalone',
-      'two-provider/grouping'
+    expect(result.directSourceUnits.map((item) => item.sourceId)).toEqual([
+      'grouping',
+      'standalone'
     ]);
     expect(result.derivedSkills.map((item) => [item.name, item.relativePath])).toEqual([
-      ['standalone', 'SKILL.md'],
       ['nested', 'alpha/nested/SKILL.md'],
-      ['zeta', 'zeta/SKILL.md']
+      ['zeta', 'zeta/SKILL.md'],
+      ['standalone', 'SKILL.md']
     ]);
     expect(result.diagnostics).toEqual([]);
   });
@@ -186,7 +186,6 @@ describe('source-unit resolver', () => {
       derivedSkills: [],
       diagnostics: [{
         category: 'invalid-reference',
-        providerId: UNKNOWN_PROVIDER_ID,
         sourceId: UNKNOWN_SOURCE_ID,
         path: '.'
       }]
@@ -204,64 +203,26 @@ describe('source-unit resolver', () => {
       derivedSkills: [],
       diagnostics: [{
         category: 'invalid-reference',
-        providerId: UNKNOWN_PROVIDER_ID,
         sourceId: UNKNOWN_SOURCE_ID,
         path: '.'
       }]
     });
   });
 
-  it('reports every reachable namespace-shape problem and does not inspect valid-shaped siblings', async () => {
+  it('reports every reachable flat namespace-shape problem and does not inspect siblings', async () => {
     const { directory, profile } = await fixture();
-    await directory.mkdir('profiles/profile/sources/good-provider');
-    await directory.write('profiles/profile/sources/good-provider/bad.txt', '{}');
-    await directory.mkdir('profiles/profile/sources/good-provider/child.json');
-    await directory.write('profiles/profile/sources/Unsafe/source.json', '{}');
-    await directory.write('profiles/profile/sources/file-provider', 'not a directory');
-    const inaccessibleRoot = directory.path('does-not-exist');
-    await directory.write(
-      'profiles/profile/sources/good-provider/good.json',
-      `${JSON.stringify({
-        schemaVersion: 1,
-        providerId: 'good-provider',
-        sourceId: 'good',
-        sourceRoot: inaccessibleRoot
-      })}\n`
-    );
+    await directory.mkdir('profiles/profile/sources/legacy-provider');
+    await directory.write('profiles/profile/sources/bad.txt', '{}');
+    await directory.mkdir('profiles/profile/sources/child.json');
 
-    const result = await discoverPreservingProvider(
-      profile,
-      [inaccessibleRoot],
-      () => resolveProfileSourceUnits(profile, [])
-    );
+    const result = await discoverPreservingProvider(profile, [], () => resolveProfileSourceUnits(profile, []));
 
     expect(result.directSourceUnits).toEqual([]);
     expect(result.derivedSkills).toEqual([]);
     expect(result.diagnostics).toEqual([
-      {
-        category: 'invalid-reference',
-        providerId: UNKNOWN_PROVIDER_ID,
-        sourceId: UNKNOWN_SOURCE_ID,
-        path: 'Unsafe'
-      },
-      {
-        category: 'invalid-reference',
-        providerId: 'file-provider',
-        sourceId: UNKNOWN_SOURCE_ID,
-        path: 'file-provider'
-      },
-      {
-        category: 'invalid-reference',
-        providerId: 'good-provider',
-        sourceId: UNKNOWN_SOURCE_ID,
-        path: 'good-provider/bad.txt'
-      },
-      {
-        category: 'invalid-reference',
-        providerId: 'good-provider',
-        sourceId: 'child',
-        path: 'good-provider/child.json'
-      }
+      { category: 'invalid-reference', sourceId: UNKNOWN_SOURCE_ID, path: 'bad.txt' },
+      { category: 'invalid-reference', sourceId: UNKNOWN_SOURCE_ID, path: 'legacy-provider' },
+      { category: 'invalid-reference', sourceId: 'child', path: 'child.json' }
     ]);
   });
 
@@ -281,8 +242,7 @@ describe('source-unit resolver', () => {
     expect(result.derivedSkills).toEqual([]);
     expect(result.diagnostics).toEqual([{
       category: 'mixed-root',
-      providerId: 'provider',
-      sourceId: 'source',
+      sourceId: 'mixed-precedence',
       path: '.child/SKILL.md'
     }]);
   });
@@ -306,7 +266,6 @@ describe('source-unit resolver', () => {
     expect(result.derivedSkills.map((item) => item.name)).toEqual(['good-child']);
     expect(result.diagnostics).toEqual([{
       category: 'mixed-root',
-      providerId: 'provider',
       sourceId: 'mixed',
       path: 'child/SKILL.md'
     }]);
@@ -347,7 +306,6 @@ describe('source-unit resolver', () => {
     expect(result.diagnostics).toEqual([
       {
         category: 'limit-exceeded',
-        providerId: 'provider',
         sourceId: 'deep',
         path: 'd1/d2/d3/d4/d5/d6/d7/d8/d9',
         limit: 'depth'
@@ -408,14 +366,12 @@ describe('source-unit resolver', () => {
     expect(result.diagnostics).toEqual([
       {
         category: 'limit-exceeded',
-        providerId: 'provider',
         sourceId: 'entries-over',
         path: 'f256',
         limit: 'entries'
       },
       {
         category: 'limit-exceeded',
-        providerId: 'provider',
         sourceId: 'skills-over',
         path: 's064/SKILL.md',
         limit: 'skills'
@@ -440,8 +396,7 @@ describe('source-unit resolver', () => {
     expect(result.derivedSkills).toEqual([]);
     expect(result.diagnostics).toEqual([{
       category: 'invalid-definition',
-      providerId: 'provider',
-      sourceId: 'source',
+      sourceId: 'invalid-definition',
       path: 'SKILL.md'
     }]);
   });
@@ -461,8 +416,7 @@ describe('source-unit resolver', () => {
     expect(result.derivedSkills).toEqual([]);
     expect(result.diagnostics).toEqual([{
       category: 'pi-loader',
-      providerId: 'provider',
-      sourceId: 'source',
+      sourceId: 'missing-description',
       path: 'SKILL.md',
       diagnosticIndex: 0,
       message: 'description is required'
@@ -498,7 +452,6 @@ describe('source-unit resolver', () => {
     expect(result.diagnostics).toEqual([
       {
         category: 'pi-loader',
-        providerId: 'provider',
         sourceId: 'first',
         path: 'SKILL.md',
         diagnosticIndex: 0,
@@ -506,7 +459,6 @@ describe('source-unit resolver', () => {
       },
       {
         category: 'pi-loader',
-        providerId: 'provider',
         sourceId: 'first',
         path: 'SKILL.md',
         diagnosticIndex: 1,
@@ -514,7 +466,6 @@ describe('source-unit resolver', () => {
       },
       {
         category: 'pi-loader',
-        providerId: 'provider',
         sourceId: 'second',
         path: 'SKILL.md',
         diagnosticIndex: 0,
@@ -548,23 +499,23 @@ describe('source-unit resolver', () => {
 
     expect(result.derivedSkills).toEqual([]);
     expect(result.diagnostics).toEqual([
-      { category: 'duplicate-name', providerId: 'provider', sourceId: 'one', path: 'a/SKILL.md', name: 'shared' },
-      { category: 'duplicate-name', providerId: 'provider', sourceId: 'one', path: 'b/SKILL.md', name: 'within' },
-      { category: 'duplicate-name', providerId: 'provider', sourceId: 'one', path: 'c/SKILL.md', name: 'within' },
-      { category: 'duplicate-name', providerId: 'provider', sourceId: 'three', path: 'SKILL.md', name: 'flat-name' },
-      { category: 'duplicate-name', providerId: 'provider', sourceId: 'two', path: 'SKILL.md', name: 'shared' }
+      { category: 'duplicate-name', sourceId: 'one', path: 'a/SKILL.md', name: 'shared' },
+      { category: 'duplicate-name', sourceId: 'one', path: 'b/SKILL.md', name: 'within' },
+      { category: 'duplicate-name', sourceId: 'one', path: 'c/SKILL.md', name: 'within' },
+      { category: 'duplicate-name', sourceId: 'three', path: 'SKILL.md', name: 'flat-name' },
+      { category: 'duplicate-name', sourceId: 'two', path: 'SKILL.md', name: 'shared' }
     ]);
   });
 
   it('fails closed when an activated snapshot is corrupt', async () => {
     const { directory, profile } = await fixture(); const root = await directory.mkdir('corrupt'); await directory.write('corrupt/SKILL.md', skill('corrupt'));
     await descriptor(directory, 'provider', 'corrupt', root);
-    const stored = JSON.parse(await readFile(directory.path('sources/provider/corrupt.json'), 'utf8')) as { digest: string };
+    const stored = JSON.parse(await readFile(directory.path('sources/corrupt.json'), 'utf8')) as { digest: string };
     const artifact = directory.path('source-snapshots/sha256', stored.digest, 'artifact', 'SKILL.md');
     await chmod(artifact, 0o600); await writeFile(artifact, 'changed');
     const result = await resolveProfileSourceUnits(profile, []);
     expect(result.derivedSkills).toEqual([]);
-    expect(result.diagnostics).toEqual([{ category: 'broken-snapshot', providerId: 'provider', sourceId: 'corrupt', path: '.' }]);
+    expect(result.diagnostics).toEqual([{ category: 'broken-snapshot', sourceId: 'corrupt', path: '.' }]);
     expect(result.directSourceUnits[0]).toMatchObject({ preparationState: 'failed' });
   });
 
@@ -594,7 +545,7 @@ describe('source-unit resolver', () => {
     const root = await directory.mkdir('valid-backed');
     await directory.write('valid-backed/SKILL.md', skill('valid-backed'));
     await descriptor(directory, 'provider', 'source', root);
-    await directory.write('profiles/profile/sources/provider/broken.json', '{');
+    await directory.write('profiles/profile/sources/broken.json', '{');
 
     const result = await resolveProfileSourceUnits(profile, []);
 
@@ -603,24 +554,23 @@ describe('source-unit resolver', () => {
       derivedSkills: [],
       diagnostics: [{
         category: 'invalid-reference',
-        providerId: 'provider',
         sourceId: 'broken',
-        path: 'provider/broken.json'
+        path: 'broken.json'
       }]
     });
   });
 
   it('does not resolve global targets after finding a malformed sibling reference', async () => {
     const { directory, profile } = await fixture();
-    await directory.write('profiles/profile/sources/provider/broken.json', '{');
+    await directory.write('profiles/profile/sources/broken.json', '{');
     await directory.write(
-      'profiles/profile/sources/provider/malformed.json',
-      encodeProfileSourceReference({ schemaVersion: 1, provider: 'provider', source: 'malformed' })
+      'profiles/profile/sources/malformed.json',
+      encodeProfileSourceReference({ schemaVersion: 1, source: 'malformed' })
     );
-    await directory.write('sources/provider/malformed.json', '{}\n');
+    await directory.write('sources/malformed.json', '{}\n');
     await directory.write(
-      'profiles/profile/sources/provider/missing.json',
-      encodeProfileSourceReference({ schemaVersion: 1, provider: 'provider', source: 'missing' })
+      'profiles/profile/sources/missing.json',
+      encodeProfileSourceReference({ schemaVersion: 1, source: 'missing' })
     );
 
     const result = await resolveProfileSourceUnits(profile, []);
@@ -629,7 +579,7 @@ describe('source-unit resolver', () => {
       directSourceUnits: [],
       derivedSkills: [],
       diagnostics: [
-        { category: 'invalid-reference', providerId: 'provider', sourceId: 'broken', path: 'provider/broken.json' }
+        { category: 'invalid-reference', sourceId: 'broken', path: 'broken.json' }
       ]
     });
   });
@@ -640,8 +590,8 @@ describe('source-unit resolver', () => {
     await descriptor(directory, 'provider', 'empty', empty);
     const missing = directory.path('missing');
     await directory.write(
-      'profiles/profile/sources/provider/missing.json',
-      encodeProfileSourceReference({ schemaVersion: 1, provider: 'provider', source: 'missing' })
+      'profiles/profile/sources/missing.json',
+      encodeProfileSourceReference({ schemaVersion: 1, source: 'missing' })
     );
 
     const result = await discoverPreservingProvider(
@@ -653,9 +603,8 @@ describe('source-unit resolver', () => {
     expect(result.derivedSkills).toEqual([]);
     expect(result.diagnostics).toEqual([{
       category: 'invalid-source',
-      providerId: 'provider',
       sourceId: 'missing',
-      path: 'provider/missing.json'
+      path: 'missing.json'
     }]);
   });
 });

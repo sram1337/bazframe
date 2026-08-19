@@ -102,8 +102,8 @@ export const PROFILE_HELP = [
   '  bazframe profiles',
   '  bazframe profile skills',
   '  bazframe profile sources',
-  '  bazframe profile sources add <provider> <source> [--profile <profile>]',
-  '  bazframe profile sources remove <provider> <source> [--profile <profile>]',
+  '  bazframe profile sources add <source> [--profile <profile>]',
+  '  bazframe profile sources remove <source> [--profile <profile>]',
   '  bazframe profile add <profile>',
   '  bazframe profile duplicate <source> <new>',
   '  bazframe profile remove <profile> [--force]',
@@ -215,31 +215,31 @@ export const PROFILE_SKILLS_REMOVE_HELP = [
 export const SOURCES_HELP = [
   'Usage:',
   '  bazframe sources',
-  '  bazframe sources add <provider> <source> <absolute-root>',
-  '  bazframe sources build <provider> <source>',
-  '  bazframe sources remove <provider> <source>',
+  '  bazframe sources add <absolute-root>',
+  '  bazframe sources build <source>',
+  '  bazframe sources remove <source>',
   '',
   'Manage global source objects and their activated immutable snapshots.',
   'Add and build explicitly run a declared provider build; inspection never runs builds.',
   'Remove is refused while any profile references the source.',
   ''
 ].join('\n');
-export const SOURCES_ADD_HELP = ['Usage: bazframe sources add <provider> <source> <absolute-root>', '', 'Explicitly build, validate, snapshot, and activate a new global source.', ''].join('\n');
-export const SOURCES_BUILD_HELP = ['Usage: bazframe sources build <provider> <source>', '', 'Explicitly rebuild a global source. Activation is rejected if any referencing profile would become invalid.', ''].join('\n');
-export const SOURCES_REMOVE_HELP = ['Usage: bazframe sources remove <provider> <source>', '', 'Remove only an unreferenced global source record. Provider inputs and immutable snapshots are preserved.', ''].join('\n');
+export const SOURCES_ADD_HELP = ['Usage: bazframe sources add <absolute-root>', '', 'Derive the source name from the canonical root directory, then explicitly build, validate, snapshot, and activate it.', 'Invalid or already-registered directory names are rejected without normalization.', ''].join('\n');
+export const SOURCES_BUILD_HELP = ['Usage: bazframe sources build <source>', '', 'Explicitly rebuild a global source. Activation is rejected if any referencing profile would become invalid.', ''].join('\n');
+export const SOURCES_REMOVE_HELP = ['Usage: bazframe sources remove <source>', '', 'Remove only an unreferenced global source record. Source inputs and immutable snapshots are preserved.', ''].join('\n');
 
 export const PROFILE_SOURCES_HELP = [
   'Usage:',
   '  bazframe profile sources',
-  '  bazframe profile sources add <provider> <source> [--profile <profile>]',
-  '  bazframe profile sources remove <provider> <source> [--profile <profile>]',
+  '  bazframe profile sources add <source> [--profile <profile>]',
+  '  bazframe profile sources remove <source> [--profile <profile>]',
   '',
   'Inspect or change references from a profile to global sources.',
   'Reference changes never build a source or change active selection.',
   ''
 ].join('\n');
-export const PROFILE_SOURCES_ADD_HELP = ['Usage: bazframe profile sources add <provider> <source> [--profile <profile>]', '', 'Add a validated reference to an existing global source.', ''].join('\n');
-export const PROFILE_SOURCES_REMOVE_HELP = ['Usage: bazframe profile sources remove <provider> <source> [--profile <profile>]', '', 'Remove only the profile-owned reference. The global source, provider input, and snapshots are preserved.', ''].join('\n');
+export const PROFILE_SOURCES_ADD_HELP = ['Usage: bazframe profile sources add <source> [--profile <profile>]', '', 'Add a validated reference to an existing global source.', ''].join('\n');
+export const PROFILE_SOURCES_REMOVE_HELP = ['Usage: bazframe profile sources remove <source> [--profile <profile>]', '', 'Remove only the profile-owned reference. The global source, source input, and snapshots are preserved.', ''].join('\n');
 
 export const ADD_HELP = [
   'Usage: bazframe add <skill>',

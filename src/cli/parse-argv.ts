@@ -16,12 +16,12 @@ export type Command =
   | { name: 'skills-overview' }
   | { name: 'profile-skills-overview' }
   | { name: 'sources-overview' }
-  | { name: 'sources-add'; providerId: string; sourceId: string; sourceRoot: string }
-  | { name: 'sources-build'; providerId: string; sourceId: string }
-  | { name: 'sources-remove'; providerId: string; sourceId: string }
+  | { name: 'sources-add'; sourceRoot: string }
+  | { name: 'sources-build'; sourceId: string }
+  | { name: 'sources-remove'; sourceId: string }
   | { name: 'profile-sources-overview' }
-  | { name: 'profile-sources-add'; providerId: string; sourceId: string; profileId?: string }
-  | { name: 'profile-sources-remove'; providerId: string; sourceId: string; profileId?: string }
+  | { name: 'profile-sources-add'; sourceId: string; profileId?: string }
+  | { name: 'profile-sources-remove'; sourceId: string; profileId?: string }
   | { name: 'projects-overview' }
   | { name: 'global-overview' }
   | { name: 'adapters-overview' }
@@ -242,13 +242,13 @@ function parseProfileSources(args: readonly string[]): ParseResult {
   if (subcommand !== 'add' && subcommand !== 'remove') return usageError('profile sources requires `add` or `remove`.', 'profile-sources');
   const topic: HelpTopic = `profile-sources-${subcommand}`;
   if (rest.length === 1 && HELP_FLAGS.has(rest[0])) return { kind: 'help', topic };
-  const hasExplicitProfile = rest.length === 4 && rest[2] === '--profile';
-  if (!(rest.length === 2 || hasExplicitProfile)) return usageError(`profile sources ${subcommand} requires <provider> <source> followed only by optional --profile <profile>.`, topic);
-  const [providerId, sourceId] = rest;
-  if (!isSafeSkillId(providerId) || !isSafeSkillId(sourceId)) return invalidSourceIds(topic);
-  const profileId = hasExplicitProfile ? rest[3] : undefined;
+  const hasExplicitProfile = rest.length === 3 && rest[1] === '--profile';
+  if (!(rest.length === 1 || hasExplicitProfile)) return usageError(`profile sources ${subcommand} requires <source> followed only by optional --profile <profile>.`, topic);
+  const sourceId = rest[0];
+  if (!isSafeSkillId(sourceId)) return invalidSourceId(topic);
+  const profileId = hasExplicitProfile ? rest[2] : undefined;
   if (profileId !== undefined && !isSafeProfileId(profileId)) return invalidProfileId(topic);
-  return { kind: 'command', command: { name: `profile-sources-${subcommand}`, providerId, sourceId, ...(profileId === undefined ? {} : { profileId }) } as Command };
+  return { kind: 'command', command: { name: `profile-sources-${subcommand}`, sourceId, ...(profileId === undefined ? {} : { profileId }) } as Command };
 }
 
 function parseSources(args: readonly string[]): ParseResult {
@@ -258,20 +258,19 @@ function parseSources(args: readonly string[]): ParseResult {
   if (!new Set(['add', 'build', 'remove']).has(subcommand)) return usageError('sources requires `add`, `build`, or `remove`.', 'sources');
   const topic = `sources-${subcommand}` as HelpTopic;
   if (rest.length === 1 && HELP_FLAGS.has(rest[0])) return { kind: 'help', topic };
-  const required = subcommand === 'add' ? 3 : 2;
-  if (rest.length !== required) return usageError(`sources ${subcommand} requires ${subcommand === 'add' ? '<provider> <source> <absolute-root>' : '<provider> <source>'}.`, topic);
-  const [providerId, sourceId] = rest;
-  if (!isSafeSkillId(providerId) || !isSafeSkillId(sourceId)) return invalidSourceIds(topic);
+  if (rest.length !== 1) return usageError(`sources ${subcommand} requires ${subcommand === 'add' ? '<absolute-root>' : '<source>'}.`, topic);
   if (subcommand === 'add') {
-    const sourceRoot = rest[2];
+    const sourceRoot = rest[0];
     if (!isAbsolute(sourceRoot) || sourceRoot.includes('\0')) return usageError('Source root must be a non-empty absolute path without NUL bytes.', topic);
-    return { kind: 'command', command: { name: 'sources-add', providerId, sourceId, sourceRoot } };
+    return { kind: 'command', command: { name: 'sources-add', sourceRoot } };
   }
-  return { kind: 'command', command: { name: `sources-${subcommand}`, providerId, sourceId } as Command };
+  const sourceId = rest[0];
+  if (!isSafeSkillId(sourceId)) return invalidSourceId(topic);
+  return { kind: 'command', command: { name: `sources-${subcommand}`, sourceId } as Command };
 }
 
-function invalidSourceIds(topic: HelpTopic): ParseResult {
-  return usageError('Provider and source IDs must be 1-64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen.', topic);
+function invalidSourceId(topic: HelpTopic): ParseResult {
+  return usageError('Source IDs must be 1-64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen.', topic);
 }
 
 function invalidProfileId(topic: HelpTopic): ParseResult {

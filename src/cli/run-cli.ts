@@ -318,7 +318,7 @@ async function runCommand(
     const referenceIndex = await captureProfileSourceReferenceBulkIndex(bazframeHome);
     const referenceCounts = new Map<string, number | 'unknown'>();
     for (const source of inspection.sources) {
-      const key = profileSourceReferenceKey(source.record.provider, source.record.source);
+      const key = profileSourceReferenceKey(source.record.source);
       referenceCounts.set(
         key,
         referenceIndex.diagnostics.length > 0
@@ -392,10 +392,10 @@ async function runCommand(
   if (command.name === 'sources-add' || command.name === 'sources-build' || command.name === 'sources-remove') {
     const options = { bazframeHome, environment };
     const result = command.name === 'sources-add'
-      ? await addSource(options, command.providerId, command.sourceId, command.sourceRoot)
+      ? await addSource(options, command.sourceRoot)
       : command.name === 'sources-build'
-        ? await buildSource(options, command.providerId, command.sourceId)
-        : await removeSource(options, command.providerId, command.sourceId);
+        ? await buildSource(options, command.sourceId)
+        : await removeSource(options, command.sourceId);
     writeStdout(formatSourceLifecycleResult(result));
     return EXIT_STATUS.success;
   }
@@ -403,11 +403,11 @@ async function runCommand(
     const options = { bazframeHome };
     const result = command.name === 'profile-sources-add'
       ? command.profileId === undefined
-        ? await addActiveProfileSourceReference(options, command.providerId, command.sourceId)
-        : await addProfileSourceReference(options, command.profileId, command.providerId, command.sourceId)
+        ? await addActiveProfileSourceReference(options, command.sourceId)
+        : await addProfileSourceReference(options, command.profileId, command.sourceId)
       : command.profileId === undefined
-        ? await removeActiveProfileSourceReference(options, command.providerId, command.sourceId)
-        : await removeProfileSourceReference(options, command.profileId, command.providerId, command.sourceId);
+        ? await removeActiveProfileSourceReference(options, command.sourceId)
+        : await removeProfileSourceReference(options, command.profileId, command.sourceId);
     writeStdout(formatSourceReferenceResult(result, command.profileId !== undefined));
     return EXIT_STATUS.success;
   }
@@ -722,7 +722,7 @@ function formatProfileSkillsOverview(
 function formatSourcesOverview(
   inspection: { sources: GlobalSourceInspection[]; diagnostics: SourceDiagnostic[] },
   referenceCounts: ReadonlyMap<string, number | 'unknown'>,
-  referenceDiagnostics: ReadonlyArray<{ profileId: string; diagnostic: { provider: string; source: string; path: string } }>,
+  referenceDiagnostics: ReadonlyArray<{ profileId: string; diagnostic: { source: string; path: string } }>,
   colors: CliColors
 ): string {
   const sourceDiagnostics = [
@@ -733,24 +733,24 @@ function formatSourcesOverview(
     colors.heading('Global sources'),
     ...(inspection.sources.length === 0 ? [colors.muted('  (none)')] : inspection.sources.flatMap((source) => {
       const record = source.record;
-      const referenceCount = referenceCounts.get(`${record.provider}/${record.source}`) ?? 'unknown';
+      const referenceCount = referenceCounts.get(record.source) ?? 'unknown';
       const health = source.diagnostics.length === 0 && referenceCount !== 'unknown' ? 'ready' : 'failed';
       const skills = source.skills;
       return [
-        `  - ${record.provider}/${record.source} [${health}] -> ${record.root} (sha256:${record.digest}; root:${record.sourceUnitRoot}; rebuild:${source.rebuildAvailability}; references:${referenceCount}; skills:${source.skills.length})`,
+        `  - ${record.source} [${health}] -> ${record.root} (sha256:${record.digest}; root:${record.sourceUnitRoot}; rebuild:${source.rebuildAvailability}; references:${referenceCount}; skills:${source.skills.length})`,
         ...skills.map((skill) => `      - ${skill.name} (${skill.relativePath})`)
       ];
     })),
     ...(sourceDiagnostics.length === 0 ? [] : [colors.heading('Source failures:'), ...sourceDiagnostics.map((diagnostic) => colors.warning(`  - ${formatSourceDiagnostic(diagnostic)}`))]),
     ...(referenceDiagnostics.length === 0 ? [] : [
       colors.heading('Reference index failures:'),
-      ...referenceDiagnostics.map((item) => colors.warning(`  - ${item.profileId}:${item.diagnostic.path} invalid-reference (${item.diagnostic.provider}/${item.diagnostic.source})`))
+      ...referenceDiagnostics.map((item) => colors.warning(`  - ${item.profileId}:${item.diagnostic.path} invalid-reference (${item.diagnostic.source})`))
     ]),
     '',
     colors.heading('Commands:'),
-    colors.command('  bazframe sources add <provider> <source> <absolute-root>'),
-    colors.command('  bazframe sources build <provider> <source>'),
-    colors.command('  bazframe sources remove <provider> <source>'),
+    colors.command('  bazframe sources add <absolute-root>'),
+    colors.command('  bazframe sources build <source>'),
+    colors.command('  bazframe sources remove <source>'),
     ''
   ].join('\n');
 }
@@ -767,13 +767,13 @@ function formatProfileSourcesOverview(
     ...(composition.directSourceUnits.length === 0
       ? [colors.muted('  (none)')]
       : composition.directSourceUnits.map((source) => source.snapshotDigest === undefined
-        ? `  - ${source.providerId}/${source.sourceId} (target unavailable)`
-        : `  - ${source.providerId}/${source.sourceId} (sha256:${source.snapshotDigest}; root:${source.sourceUnitRoot})`)),
+        ? `  - ${source.sourceId} (target unavailable)`
+        : `  - ${source.sourceId} (sha256:${source.snapshotDigest}; root:${source.sourceUnitRoot})`)),
     colors.heading('Derived effective skills:'),
     ...(composition.derivedSkills.length === 0
       ? [colors.muted('  (none)')]
       : composition.derivedSkills.map((skill) =>
-          `  - ${skill.name} (${skill.providerId}/${skill.sourceId}:${skill.relativePath})`)),
+          `  - ${skill.name} (${skill.sourceId}:${skill.relativePath})`)),
     colors.heading('Source failures:'),
     ...(composition.diagnostics.length === 0
       ? [colors.muted('  (none)')]
@@ -781,8 +781,8 @@ function formatProfileSourcesOverview(
           colors.warning(`  - ${formatSourceDiagnostic(diagnostic)}`))),
     '',
     colors.heading('Commands:'),
-    colors.command('  bazframe profile sources add <provider> <source> [--profile <profile>]'),
-    colors.command('  bazframe profile sources remove <provider> <source> [--profile <profile>]'),
+    colors.command('  bazframe profile sources add <source> [--profile <profile>]'),
+    colors.command('  bazframe profile sources remove <source> [--profile <profile>]'),
     ''
   ].join('\n');
 }
@@ -895,8 +895,8 @@ function formatMembershipResult(
 function formatSourceLifecycleResult(result: SourceLifecycleResult): string {
   return [
     `Global source: ${result.action}`,
-    `Source: ${result.provider}/${result.source}`,
-    `Provider root: ${result.root}`,
+    `Source: ${result.source}`,
+    `Source root: ${result.root}`,
     `Snapshot: ${result.digest}`,
     `Source-unit root: ${result.sourceUnitRoot}`,
     `Record: ${result.path}`,
@@ -908,7 +908,7 @@ function formatSourceReferenceResult(result: ProfileSourceReferenceResult, expli
   return [
     `Profile source reference: ${result.action}`,
     `${explicitlyTargeted ? 'Profile' : 'Active profile'}: ${result.profileId}`,
-    `Source: ${result.provider}/${result.source}`,
+    `Source: ${result.source}`,
     `Reference: ${result.path}`,
     ''
   ].join('\n');

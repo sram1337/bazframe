@@ -13,68 +13,68 @@ const skill = (name: string, description = name) => `---\nname: ${name}\ndescrip
 describe('global source CLI', () => {
   it('adds one global source, references it, rebuilds explicitly, and removes only after detach', async () => {
     const fixture = await setup();
-    const provider = await realpath(await fixture.directory.mkdir('provider'));
-    await fixture.directory.write('provider/alpha/SKILL.md', skill('zeta', 'first'));
-    const added = await runCli(['sources', 'add', 'provider', 'source', provider], fixture.cwd, fixture.environment);
+    const provider = await realpath(await fixture.directory.mkdir('source'));
+    await fixture.directory.write('source/alpha/SKILL.md', skill('zeta', 'first'));
+    const added = await runCli(['sources', 'add', provider], fixture.cwd, fixture.environment);
     expect(added).toMatchObject({ status: 0, stderr: '' });
     expect(added.stdout).toContain('Global source: added');
     const initialGlobalOverview = await runCli(['sources'], fixture.cwd, fixture.environment);
     expect(initialGlobalOverview.stdout).toContain('      - zeta (alpha/SKILL.md)');
-    expect((await runCli(['profile', 'sources', 'add', 'provider', 'source'], fixture.cwd, fixture.environment)).stdout).toContain('Profile source reference: added');
+    expect((await runCli(['profile', 'sources', 'add', 'source'], fixture.cwd, fixture.environment)).stdout).toContain('Profile source reference: added');
     const overview = await runCli(['profile', 'sources'], fixture.cwd, fixture.environment);
     expect(overview.stdout).toContain('Profile source references');
-    expect(overview.stdout).toContain('zeta (provider/source:alpha/SKILL.md)');
+    expect(overview.stdout).toContain('zeta (source:alpha/SKILL.md)');
 
-    const recordPath = fixture.directory.path('home/sources/provider/source.json');
+    const recordPath = fixture.directory.path('home/sources/source.json');
     const beforeProviderChange = await readFile(recordPath, 'utf8');
-    await fixture.directory.write('provider/beta/SKILL.md', skill('aardvark'));
-    expect((await runCli(['profile', 'sources'], fixture.cwd, fixture.environment)).stdout).not.toContain('aardvark (provider/source');
+    await fixture.directory.write('source/beta/SKILL.md', skill('aardvark'));
+    expect((await runCli(['profile', 'sources'], fixture.cwd, fixture.environment)).stdout).not.toContain('aardvark (source');
     expect(await readFile(recordPath, 'utf8')).toBe(beforeProviderChange);
-    expect((await runCli(['sources', 'build', 'provider', 'source'], fixture.cwd, fixture.environment)).stdout).toContain('Global source: built');
-    expect((await runCli(['profile', 'sources'], fixture.cwd, fixture.environment)).stdout).toContain('aardvark (provider/source:beta/SKILL.md)');
+    expect((await runCli(['sources', 'build', 'source'], fixture.cwd, fixture.environment)).stdout).toContain('Global source: built');
+    expect((await runCli(['profile', 'sources'], fixture.cwd, fixture.environment)).stdout).toContain('aardvark (source:beta/SKILL.md)');
     const rebuiltGlobalOverview = await runCli(['sources'], fixture.cwd, fixture.environment);
     expect(rebuiltGlobalOverview.stdout).toContain('      - zeta (alpha/SKILL.md)');
     expect(rebuiltGlobalOverview.stdout).toContain('      - aardvark (beta/SKILL.md)');
     expect(rebuiltGlobalOverview.stdout.indexOf('zeta (alpha/SKILL.md)'))
       .toBeLessThan(rebuiltGlobalOverview.stdout.indexOf('aardvark (beta/SKILL.md)'));
 
-    const refused = await runCli(['sources', 'remove', 'provider', 'source'], fixture.cwd, fixture.environment);
+    const refused = await runCli(['sources', 'remove', 'source'], fixture.cwd, fixture.environment);
     expect(refused.status).toBe(1); expect(refused.stderr).toContain('referenced by profiles: focused');
-    await runCli(['profile', 'sources', 'remove', 'provider', 'source'], fixture.cwd, fixture.environment);
-    expect((await runCli(['sources', 'remove', 'provider', 'source'], fixture.cwd, fixture.environment)).stdout).toContain('Global source: removed');
-    expect(await readFile(fixture.directory.path('provider/alpha/SKILL.md'), 'utf8')).toContain('first');
+    await runCli(['profile', 'sources', 'remove', 'source'], fixture.cwd, fixture.environment);
+    expect((await runCli(['sources', 'remove', 'source'], fixture.cwd, fixture.environment)).stdout).toContain('Global source: removed');
+    expect(await readFile(fixture.directory.path('source/alpha/SKILL.md'), 'utf8')).toContain('first');
   });
 
   it('rejects a rebuild that would conflict in one of two referencing profiles', async () => {
     const fixture = await setup();
     await runCli(['profile', 'add', 'reviewer'], fixture.cwd, fixture.environment);
-    const provider = await realpath(await fixture.directory.mkdir('provider'));
-    await fixture.directory.write('provider/alpha/SKILL.md', skill('alpha'));
-    await runCli(['sources', 'add', 'provider', 'shared', provider], fixture.cwd, fixture.environment);
-    await runCli(['profile', 'sources', 'add', 'provider', 'shared'], fixture.cwd, fixture.environment);
-    await runCli(['profile', 'sources', 'add', 'provider', 'shared', '--profile', 'reviewer'], fixture.cwd, fixture.environment);
+    const provider = await realpath(await fixture.directory.mkdir('shared'));
+    await fixture.directory.write('shared/alpha/SKILL.md', skill('alpha'));
+    await runCli(['sources', 'add', provider], fixture.cwd, fixture.environment);
+    await runCli(['profile', 'sources', 'add', 'shared'], fixture.cwd, fixture.environment);
+    await runCli(['profile', 'sources', 'add', 'shared', '--profile', 'reviewer'], fixture.cwd, fixture.environment);
     await fixture.directory.write('home/profiles/reviewer/skills/beta/SKILL.md', skill('beta'));
-    await fixture.directory.write('provider/beta/SKILL.md', skill('beta'));
-    const recordPath = fixture.directory.path('home/sources/provider/shared.json');
+    await fixture.directory.write('shared/beta/SKILL.md', skill('beta'));
+    const recordPath = fixture.directory.path('home/sources/shared.json');
     const before = await readFile(recordPath, 'utf8');
-    const result = await runCli(['sources', 'build', 'provider', 'shared'], fixture.cwd, fixture.environment);
+    const result = await runCli(['sources', 'build', 'shared'], fixture.cwd, fixture.environment);
     expect(result.status).toBe(1); expect(result.stderr).toContain('reviewer');
     expect(await readFile(recordPath, 'utf8')).toBe(before);
   });
 
   it('reports global source health and reference-index failures', async () => {
     const fixture = await setup();
-    const provider = await realpath(await fixture.directory.mkdir('provider'));
-    await fixture.directory.write('provider/alpha/SKILL.md', skill('alpha'));
-    await runCli(['sources', 'add', 'provider', 'source', provider], fixture.cwd, fixture.environment);
+    const provider = await realpath(await fixture.directory.mkdir('source'));
+    await fixture.directory.write('source/alpha/SKILL.md', skill('alpha'));
+    await runCli(['sources', 'add', provider], fixture.cwd, fixture.environment);
     const record = JSON.parse(await readFile(
-      fixture.directory.path('home/sources/provider/source.json'), 'utf8'
+      fixture.directory.path('home/sources/source.json'), 'utf8'
     )) as { digest: string };
     await fixture.directory.write('home/profiles/broken-profile', 'not a profile directory');
 
     const indexFailure = await runCli(['sources'], fixture.cwd, fixture.environment);
     expect(indexFailure.status).toBe(0);
-    expect(indexFailure.stdout).toContain('provider/source [failed]');
+    expect(indexFailure.stdout).toContain('source [failed]');
     expect(indexFailure.stdout).toContain('references:unknown');
     expect(indexFailure.stdout).toContain('Reference index failures:');
 
@@ -86,7 +86,7 @@ describe('global source CLI', () => {
     const overview = await runCli(['sources'], fixture.cwd, fixture.environment);
 
     expect(overview.status).toBe(0);
-    expect(overview.stdout).toContain('provider/source [failed]');
+    expect(overview.stdout).toContain('source [failed]');
     expect(overview.stdout).toContain('references:unknown');
     expect(overview.stdout).toContain('broken-snapshot');
     expect(overview.stdout).toContain('Reference index failures:');
@@ -96,18 +96,18 @@ describe('global source CLI', () => {
   it('keeps valid profile references visible when their global target is missing', async () => {
     const fixture = await setup();
     await fixture.directory.write(
-      'home/profiles/focused/sources/provider/missing.json',
-      '{\n  "schemaVersion": 1,\n  "provider": "provider",\n  "source": "missing"\n}\n'
+      'home/profiles/focused/sources/missing.json',
+      '{\n  "schemaVersion": 1,\n  "source": "missing"\n}\n'
     );
 
     const overview = await runCli(['profile', 'sources'], fixture.cwd, fixture.environment);
     const status = await runCli(['status'], fixture.cwd, fixture.environment);
 
-    expect(overview.stdout).toContain('provider/missing (target unavailable)');
-    expect(overview.stdout).toContain('provider/missing:provider/missing.json invalid-source');
+    expect(overview.stdout).toContain('missing (target unavailable)');
+    expect(overview.stdout).toContain('missing:missing.json invalid-source');
     expect(status.stdout).toContain('Profile source references: 1');
-    expect(status.stdout).toContain('provider/missing: failed; target unavailable');
-    expect(status.stdout).toContain('provider/missing:provider/missing.json invalid-source');
+    expect(status.stdout).toContain('missing: failed; target unavailable');
+    expect(status.stdout).toContain('missing:missing.json invalid-source');
   });
 
   it('keeps old profile-local source-units inert', async () => {
@@ -123,9 +123,16 @@ describe('global source CLI', () => {
     const fixture = await setup();
     expect((await runCli(['sources'], fixture.cwd, fixture.environment)).status).toBe(0);
     for (const argv of [
-      ['source'], ['profile', 'sources', 'build', 'provider', 'source'],
-      ['profile', 'sources', 'add', 'provider', 'source', '/old-root'],
-      ['sources', 'add', 'provider', 'source', 'relative']
+      ['source'], ['profile', 'sources', 'build', 'source'],
+      ['sources', 'add', 'provider', 'source'],
+      ['sources', 'add', 'provider', 'source', '/root'],
+      ['sources', 'build', 'provider', 'source'],
+      ['sources', 'remove', 'provider', 'source'],
+      ['profile', 'sources', 'add', 'provider', 'source'],
+      ['profile', 'sources', 'add', 'provider', 'source', '--profile', 'reviewer'],
+      ['profile', 'sources', 'remove', 'provider', 'source'],
+      ['profile', 'sources', 'remove', 'provider', 'source', '--profile', 'reviewer'],
+      ['sources', 'add', 'relative']
     ]) {
       const result = await runCli(argv, fixture.cwd, fixture.environment);
       expect(result.status).toBe(2); expect(result.stderr).toContain('error:');

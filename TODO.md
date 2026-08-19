@@ -23,7 +23,7 @@
 - [x] Define the first semantic composition contract: runtime-native repository harness material remains a separate provenance-preserving layer, while Bazframe adds the active personal profile without stored merging or repository-selected profile state.
 - [x] Define the bounded current-slice conflict policy: opaque provenance-preserving instruction layers with deterministic transport order and no semantic resolution; exact profile duplicate boundaries; Pi 0.82 runtime-cache aliases with truncation and visible no-fallback collision failure; and mandatory explicit behavior without profile-identity mutation for any future adapter.
 - [x] Decide against Bazframe inter-skill dependency schema or automation for the current product: the Agent Skills specification has no dependency field, shared resources/runtime packages remain provider-owned, and any future namespaced validate-only sidecar requires separate evidence and approval.
-- [ ] Collaboratively spec a `/swarm-leader` skill with the user that codifies one parent leader delegating subagent planning, implementation, independent review, validation, and fix passes; specification only before any implementation.
+- [x] Collaboratively spec and add the `swarm`, `long`, and `nsn` skills to the active Bazframe profile through Skillbook; `nsn` bundles its explanatory reference locally.
 
 ## Global managed sources and profile references
 
@@ -32,8 +32,9 @@
 - [x] Validate shared-source activation against every referencing profile and refuse referenced deletion atomically.
 - [x] Resolve only active-profile references at runtime while retaining snapshot security, bounds, Pi validation, and collisions.
 - [x] Bring status, standalone Pi, pack, real-Pi, CLI/TUI agreement, and documentation to global-source parity.
-- [x] Add the read-only Sources tab, profile reference display, and multi-root Skills forest with exact `[+]`/`[-]` markers and indented children.
+- [x] Add read-only managed-source details to Skills, profile reference display, and the multi-root Skills forest with exact `[+]`/`[-]` markers and indented children.
 - [x] Complete follow-up independent re-review; fail closed on malformed profile reference namespaces in production/Pi, keep unavailable TUI references visible, use one bulk reference-index snapshot per CLI/TUI overview, correct stale source/TUI terminology, and pass focused/full/real-Pi/local-terminal/Linux-terminal gates.
+- [x] Collapse managed-source identity to the exact canonical root basename with flat source-only records/references, one-argument add syntax, occupied-name rejection, no migration/fallback, and core/Pi/TUI parity.
 
 ## Terminal UI
 
@@ -44,7 +45,7 @@
 - [x] Pin Ink 7.1.1 with React 19.2.8 and load the TUI framework only from the lazy `bazframe tui` entry path (`docs/tui-framework-research.md`).
 - [x] Define typed application-service seams for profile lifecycle, selected-profile membership, and dashboard reads without spawning CLI subprocesses.
 - [x] Extend the typed application-service seam with structured read-only setup status and diagnostic isolation.
-- [x] Implement separate top-tab focus with deterministic Tab/Shift+Tab traversal and explicit Enter activation.
+- [x] Implement separate top-tab focus with deterministic Tab/Shift+Tab traversal and immediate focused-tab activation.
 - [x] Distinguish focus with consistent active borders and add portable Vim `h`/`j`/`k`/`l` plus profile-pane `J`/`K` navigation.
 - [x] Implement reducer-owned persistent viewport offsets for the profile list, both membership panes, and the Skills browser, including reconciliation and resize clamping.
 - [x] Implement the read-only Skills source browser with provider-owned move/rename disabled and explained.
@@ -55,6 +56,8 @@
 - [x] Pass the full `npm test` and packed real-Pi gates with the TUI dependencies and entrypoint present.
 - [x] Add CLI/TUI state-agreement integration coverage across profile lifecycle and inactive-profile membership while preserving provider artifacts.
 - [x] Complete independent interaction, safety, and accessibility code reviews; fix and re-review all reported blockers.
+- [x] Apply the August TUI usability reviews: responsive Skills/Profiles master-detail views, plain-text skill preview, combined source presentation, Adapters/Settings regrouping, back/breadcrumb and `o`/`c` navigation, honest loading, path-only manifest-free source add, height-aware compact panes, aligned profile counts, grouped Available skills, centralized hints, transient-message clearing, immediate tab activation, and same-width growth repaint coverage.
+- [x] Apply the follow-up TUI feedback: uppercase `H`/`L` route navigation, first-tab startup, preferred master panes that fill their allocated columns, bare profile skill counts, independently collapsible Available groups for every healthy browsable source, CLI guidance for whole-source attachment, snapshot-warning dismissal with persistent errors, proportional visual scrollbars for offset-driven content, and healthy/failed managed-source visibility coverage.
 - [ ] Complete the TUI production-readiness gate: macOS direct-PTY/local-tmux and Linux arm64 digest-pinned-base container direct-PTY/tmux/loopback-SSH resize, handled/fatal-render error, Ctrl+C, restoration, cleanup, and bounded CJK/combining/emoji-ZWJ/ANSI/long-path cell-width behavior are automated with run-recorded package/tool versions; Windows Terminal, representative remote SSH, terminal/font/locale ambiguous-width differences, and manual assistive-technology evidence remain open.
 
 ## Deferred candidates (not active work)

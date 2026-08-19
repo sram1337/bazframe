@@ -69,7 +69,7 @@ try {
     'skills',
     'profile-probe'
   );
-  const sourceProvider = join(temporaryRoot, 'source-provider');
+  const sourceProvider = join(temporaryRoot, 'source');
   const sourceSkill = join(sourceProvider, 'source-probe');
   const sourceDefinition = [
     '---',
@@ -141,30 +141,29 @@ try {
   run(executable, ['profile', 'use', 'focused'], temporaryRoot, environment);
   const profileCurrent = run(executable, ['profile', 'current'], temporaryRoot, environment);
   assert(profileCurrent.stdout === 'focused\n', 'Packed CLI current profile was incorrect.');
-  const sourceDescriptorPath = join(bazframeHome, 'sources', 'provider', 'source.json');
-  const sourceReferencePath = join(bazframeHome, 'profiles', 'focused', 'sources', 'provider', 'source.json');
+  const sourceDescriptorPath = join(bazframeHome, 'sources', 'source.json');
+  const sourceReferencePath = join(bazframeHome, 'profiles', 'focused', 'sources', 'source.json');
   const ownedBeforeSourceAdd = providerManifest(sourceDescriptorPath);
   const sourceBeforeAdd = providerManifest(sourceProvider);
-  const sourceAdded = run(executable, ['sources', 'add', 'provider', 'source', realpathSync(sourceProvider)], temporaryRoot, environment);
+  const sourceAdded = run(executable, ['sources', 'add', realpathSync(sourceProvider)], temporaryRoot, environment);
   assert(providerManifest(sourceProvider) === sourceBeforeAdd, 'Source add changed provider bytes.');
   assert(providerManifest(sourceDescriptorPath) !== ownedBeforeSourceAdd, 'Source add did not change global source state.');
   assert(sourceAdded.stdout.includes('Global source: added'), 'Packed CLI did not add global source.');
-  const referenceAdded = run(executable, ['profile', 'sources', 'add', 'provider', 'source'], temporaryRoot, environment);
+  const referenceAdded = run(executable, ['profile', 'sources', 'add', 'source'], temporaryRoot, environment);
   assert(referenceAdded.stdout.includes('Profile source reference: added'), 'Packed CLI did not add source reference.');
   assert(existsSync(sourceReferencePath), 'Profile source reference was not created.');
   const expectedSourceDescriptor = JSON.parse(readFileSync(sourceDescriptorPath, 'utf8'));
   assert(expectedSourceDescriptor.schemaVersion === 1
-    && expectedSourceDescriptor.provider === 'provider'
     && expectedSourceDescriptor.source === 'source'
     && expectedSourceDescriptor.root === realpathSync(sourceProvider)
     && /^[a-f0-9]{64}$/u.test(expectedSourceDescriptor.digest)
     && expectedSourceDescriptor.sourceUnitRoot === '.', 'Source add wrote an unexpected global record.');
-  const ownedBeforeIdempotentAdd = providerManifest(sourceDescriptorPath);
-  const sourceBeforeIdempotentAdd = providerManifest(sourceProvider);
-  const sourceCurrent = run(executable, ['sources', 'add', 'provider', 'source', realpathSync(sourceProvider)], temporaryRoot, environment);
-  assert(providerManifest(sourceProvider) === sourceBeforeIdempotentAdd, 'Idempotent source add changed provider bytes.');
-  assert(providerManifest(sourceDescriptorPath) === ownedBeforeIdempotentAdd, 'Idempotent source add changed global source state.');
-  assert(sourceCurrent.stdout.includes('Global source: current'), 'Packed CLI source add was not idempotent.');
+  const ownedBeforeOccupiedAdd = providerManifest(sourceDescriptorPath);
+  const sourceBeforeOccupiedAdd = providerManifest(sourceProvider);
+  const sourceOccupied = runFailure(executable, ['sources', 'add', realpathSync(sourceProvider)], temporaryRoot, environment);
+  assert(providerManifest(sourceProvider) === sourceBeforeOccupiedAdd, 'Occupied source add changed source bytes.');
+  assert(providerManifest(sourceDescriptorPath) === ownedBeforeOccupiedAdd, 'Occupied source add changed global source state.');
+  assert(sourceOccupied.stderr.includes('source name is already registered'), 'Packed CLI source add did not reject an occupied source name.');
   const added = run(
     executable,
     ['profile', 'skills', 'add', 'profile-probe'],
@@ -258,7 +257,7 @@ try {
   assert(!nonRpcBeforeBuild.stdout.includes('PACKED_LIVE_SOURCE'), 'A fresh non-RPC Pi run saw provider mutation before explicit build.');
 
   const sourceBeforeExplicitBuild = providerManifest(sourceProvider);
-  const rebuiltForLiveSource = run(executable, ['sources', 'build', 'provider', 'source'], temporaryRoot, environment);
+  const rebuiltForLiveSource = run(executable, ['sources', 'build', 'source'], temporaryRoot, environment);
   assert(rebuiltForLiveSource.stdout.includes('Global source: built'), 'Explicit source build did not activate the provider change.');
   assert(providerManifest(sourceProvider) === sourceBeforeExplicitBuild, 'Explicit snapshot-only build changed provider bytes.');
   const afterBuildBeforeReload = rpcCommandNames(await rpcClient.request({ type: 'get_commands' }));
@@ -286,7 +285,7 @@ try {
   ].join('\n'));
   assert(!rpcCommandNames(await rpcClient.request({ type: 'get_commands' })).includes('skill:rpc-reloaded-source'), 'RPC process saw a second provider mutation before build.');
   const providerBeforeRpcBuild = providerManifest(sourceProvider);
-  const rpcBuilt = run(executable, ['sources', 'build', 'provider', 'source'], temporaryRoot, environment);
+  const rpcBuilt = run(executable, ['sources', 'build', 'source'], temporaryRoot, environment);
   assert(rpcBuilt.stdout.includes('Global source: built'), 'Explicit RPC-era source build did not activate.');
   assert(providerManifest(sourceProvider) === providerBeforeRpcBuild, 'RPC-era source build changed provider bytes.');
   assert(!rpcCommandNames(await rpcClient.request({ type: 'get_commands' })).includes('skill:rpc-reloaded-source'), 'RPC process saw second rebuilt source before reload.');
@@ -469,14 +468,14 @@ try {
 
   const ownedBeforeSourceRemove = providerManifest(sourceDescriptorPath);
   const sourceBeforeRemove = providerManifest(sourceProvider);
-  const sourceRemoved = run(executable, ['profile', 'sources', 'remove', 'provider', 'source'], temporaryRoot, environment);
+  const sourceRemoved = run(executable, ['profile', 'sources', 'remove', 'source'], temporaryRoot, environment);
   assert(providerManifest(sourceProvider) === sourceBeforeRemove, 'Source detach changed provider bytes.');
   assert(providerManifest(sourceDescriptorPath) === ownedBeforeSourceRemove, 'Source detach changed global source state.');
   assert(sourceRemoved.stdout.includes('Profile source reference: removed'), 'Packed CLI did not remove source reference.');
   assert(!existsSync(sourceReferencePath), 'Source detach left the profile reference.');
-  const sourceAbsent = run(executable, ['profile', 'sources', 'remove', 'provider', 'source'], temporaryRoot, environment);
+  const sourceAbsent = run(executable, ['profile', 'sources', 'remove', 'source'], temporaryRoot, environment);
   assert(sourceAbsent.stdout.includes('Profile source reference: absent'), 'Source detach retry was not absent.');
-  const globalRemoved = run(executable, ['sources', 'remove', 'provider', 'source'], temporaryRoot, environment);
+  const globalRemoved = run(executable, ['sources', 'remove', 'source'], temporaryRoot, environment);
   assert(globalRemoved.stdout.includes('Global source: removed'), 'Packed CLI did not remove unreferenced global source.');
   assert(!existsSync(sourceDescriptorPath), 'Global source removal left its record.');
 
@@ -674,6 +673,17 @@ function rpcCommandNames(response) {
   return commands.map((command) => command.name).sort();
 }
 
+function runFailure(executable, args, cwd, environment) {
+  const result = spawnSync(executable, args, {
+    cwd,
+    env: environment,
+    encoding: 'utf8',
+    shell: false
+  });
+  if (result.status === 0) throw new Error(`${executable} ${args.join(' ')} unexpectedly succeeded.`);
+  return result;
+}
+
 function run(executable, args, cwd, environment) {
   const result = spawnSync(executable, args, {
     cwd,
@@ -692,7 +702,7 @@ function run(executable, args, cwd, environment) {
 }
 
 function runPiPreservingProvider(providerRoot, cwd, environment, extraArgs, prompt) {
-  const descriptorPath = join(environment.BAZFRAME_HOME, 'sources', 'provider', 'source.json');
+  const descriptorPath = join(environment.BAZFRAME_HOME, 'sources', 'source.json');
   const aliasRoot = join(
     environment.BAZFRAME_HOME,
     'adapter-cache',

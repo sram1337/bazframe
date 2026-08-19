@@ -187,7 +187,7 @@ export async function inspectStatus(options: StatusOptions): Promise<StatusInspe
         if (sources.diagnostics.length > 0) {
           const buildRequired = sources.directSourceUnits
             .filter((source) => source.preparationState === 'failed' && source.rebuildAvailability === 'available')
-            .map((source) => `bazframe sources build ${source.providerId} ${source.sourceId}`);
+            .map((source) => `bazframe sources build ${source.sourceId}`);
           corrections.set('source-units', {
             id: 'source-units',
             message: buildRequired.length === 0
@@ -312,13 +312,13 @@ export function formatStatus(status: StatusInspection): string {
     `Flat direct skills: ${flatSkillCount}`,
     `Profile source references: ${directSourceUnitCount}`,
     ...directSourceUnits.map((source) => source.snapshotDigest === undefined
-      ? `  - ${source.providerId}/${source.sourceId}: ${source.preparationState}; target unavailable`
-      : `  - ${source.providerId}/${source.sourceId}: ${source.preparationState}; rebuild ${source.rebuildAvailability}; sha256:${source.snapshotDigest}; root:${source.sourceUnitRoot}`),
+      ? `  - ${source.sourceId}: ${source.preparationState}; target unavailable`
+      : `  - ${source.sourceId}: ${source.preparationState}; rebuild ${source.rebuildAvailability}; sha256:${source.snapshotDigest}; root:${source.sourceUnitRoot}`),
     `Derived effective skills: ${derivedSkillCount}`,
     ...(derivedSkills.length === 0
       ? ['  (none)']
       : derivedSkills.map((skill) =>
-          `  - ${skill.name} (${skill.providerId}/${skill.sourceId}:${skill.relativePath})`)),
+          `  - ${skill.name} (${skill.sourceId}:${skill.relativePath})`)),
     'Source failures:',
     ...(sourceDiagnostics.length === 0
       ? ['  (none)']

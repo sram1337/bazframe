@@ -9,16 +9,27 @@ export interface PreparedSourceUnit {
   buildExecuted: boolean;
 }
 
+export interface SourcePreparationPolicy {
+  declaredBuild?: 'execute' | 'reject';
+}
+
 export async function prepareSourceUnit(
   bazframeHome: string,
-  providerRoot: string,
-  environment: NodeJS.ProcessEnv = process.env
+  sourceRoot: string,
+  environment: NodeJS.ProcessEnv = process.env,
+  policy: SourcePreparationPolicy = {}
 ): Promise<PreparedSourceUnit> {
-  const manifest = await readOptionalSourceBuildManifest(providerRoot);
-  if (manifest !== undefined) await executeBuild(manifest.build, providerRoot, environment);
+  const manifest = await readOptionalSourceBuildManifest(sourceRoot);
+  if (manifest !== undefined && policy.declaredBuild === 'reject') {
+    throw new BazframeError(
+      'SOURCE_BUILD_REQUIRES_CLI',
+      'This source declares a build. Use `bazframe sources add <absolute-root>` in a terminal so the unsandboxed build and its output remain visible.'
+    );
+  }
+  if (manifest !== undefined) await executeBuild(manifest.build, sourceRoot, environment);
   const artifactRelative = manifest?.artifactRoot ?? '.';
   const sourceUnitRoot = manifest?.sourceUnitRoot ?? '.';
-  const artifactRoot = await resolvePhysicalRelativeDirectory(providerRoot, artifactRelative);
+  const artifactRoot = await resolvePhysicalRelativeDirectory(sourceRoot, artifactRelative);
   await resolvePhysicalRelativeDirectory(artifactRoot, sourceUnitRoot);
   const snapshot = await publishSourceSnapshot(bazframeHome, artifactRoot);
   await resolvePhysicalRelativeDirectory(snapshot.artifactRoot, sourceUnitRoot);

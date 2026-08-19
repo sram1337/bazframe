@@ -1,16 +1,15 @@
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, open, readdir, realpath, type FileHandle } from 'node:fs/promises';
-import { isAbsolute, join, resolve } from 'node:path';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 import { BazframeError, errorCode } from '../core/errors.js';
 import { isSafeSkillId } from '../skills/skill-id.js';
 import { isPortableSourceRelativePath } from '../source-units/source-build-manifest.js';
 
-const SOURCE_KEYS = ['digest', 'provider', 'root', 'schemaVersion', 'source', 'sourceUnitRoot'] as const;
+const SOURCE_KEYS = ['digest', 'root', 'schemaVersion', 'source', 'sourceUnitRoot'] as const;
 
 export interface GlobalSourceRecord {
   schemaVersion: 1;
-  provider: string;
   source: string;
   root: string;
   digest: string;
@@ -26,14 +25,12 @@ export interface GlobalSourceRecordSnapshot {
 }
 
 export interface GlobalSourcePath {
-  provider: string;
   source: string;
   path: string;
   relativePath: string;
 }
 
 export interface SourceNamespaceDiagnostic {
-  provider: string;
   source: string;
   path: string;
 }
@@ -43,21 +40,16 @@ export interface GlobalSourceNamespace {
   diagnostics: SourceNamespaceDiagnostic[];
 }
 
-export const UNKNOWN_PROVIDER = '<unknown-provider>';
 export const UNKNOWN_SOURCE = '<unknown-source>';
 
 export function globalSourcesDirectory(home: string): string { return join(home, 'sources'); }
-export function globalSourceProviderDirectory(home: string, provider: string): string {
-  return join(globalSourcesDirectory(home), provider);
-}
-export function globalSourcePath(home: string, provider: string, source: string): string {
-  return join(globalSourceProviderDirectory(home, provider), `${source}.json`);
+export function globalSourcePath(home: string, source: string): string {
+  return join(globalSourcesDirectory(home), `${source}.json`);
 }
 
 export function encodeGlobalSource(record: GlobalSourceRecord): string {
   return `${JSON.stringify({
     schemaVersion: 1,
-    provider: record.provider,
     source: record.source,
     root: record.root,
     digest: record.digest,
@@ -65,7 +57,7 @@ export function encodeGlobalSource(record: GlobalSourceRecord): string {
   }, null, 2)}\n`;
 }
 
-export function decodeGlobalSource(value: unknown, expectedProvider?: string, expectedSource?: string): GlobalSourceRecord {
+export function decodeGlobalSource(value: unknown, expectedSource?: string): GlobalSourceRecord {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw invalid('source must be a JSON object');
   const candidate = value as Record<string, unknown>;
   const keys = Object.keys(candidate).sort();
@@ -73,18 +65,16 @@ export function decodeGlobalSource(value: unknown, expectedProvider?: string, ex
     throw invalid('source must contain exactly the schema-v1 fields');
   }
   if (candidate.schemaVersion !== 1) throw invalid('unsupported schemaVersion');
-  if (typeof candidate.provider !== 'string' || !isSafeSkillId(candidate.provider)) throw invalid('provider is invalid');
   if (typeof candidate.source !== 'string' || !isSafeSkillId(candidate.source)) throw invalid('source is invalid');
-  if (expectedProvider !== undefined && candidate.provider !== expectedProvider) throw invalid('provider does not match source path');
   if (expectedSource !== undefined && candidate.source !== expectedSource) throw invalid('source does not match source path');
   if (typeof candidate.root !== 'string' || candidate.root.includes('\0') || !isAbsolute(candidate.root) || resolve(candidate.root) !== candidate.root) {
     throw invalid('root must be a canonical absolute path');
   }
+  if (basename(candidate.root) !== candidate.source) throw invalid('source must match the canonical root basename');
   if (typeof candidate.digest !== 'string' || !/^[a-f0-9]{64}$/u.test(candidate.digest)) throw invalid('digest must be lowercase SHA-256');
   if (typeof candidate.sourceUnitRoot !== 'string' || !isPortableSourceRelativePath(candidate.sourceUnitRoot)) throw invalid('sourceUnitRoot is invalid');
   return {
     schemaVersion: 1,
-    provider: candidate.provider,
     source: candidate.source,
     root: candidate.root,
     digest: candidate.digest,
@@ -92,17 +82,15 @@ export function decodeGlobalSource(value: unknown, expectedProvider?: string, ex
   };
 }
 
-export async function readGlobalSource(home: string, provider: string, source: string): Promise<GlobalSourceRecord> {
-  return (await readGlobalSourceSnapshot(home, provider, source)).record;
+export async function readGlobalSource(home: string, source: string): Promise<GlobalSourceRecord> {
+  return (await readGlobalSourceSnapshot(home, source)).record;
 }
 
-export async function readGlobalSourceSnapshot(home: string, provider: string, source: string): Promise<GlobalSourceRecordSnapshot> {
-  if (!isSafeSkillId(provider)) throw invalid('provider is invalid');
+export async function readGlobalSourceSnapshot(home: string, source: string): Promise<GlobalSourceRecordSnapshot> {
   if (!isSafeSkillId(source)) throw invalid('source is invalid');
   const rootPath = globalSourcesDirectory(home);
-  const providerPath = globalSourceProviderDirectory(home, provider);
-  const path = globalSourcePath(home, provider, source);
-  const directoryPaths = [home, rootPath, providerPath];
+  const path = globalSourcePath(home, source);
+  const directoryPaths = [home, rootPath];
   const directories: OpenDirectory[] = [];
   let handle: FileHandle | undefined;
   try {
@@ -126,7 +114,7 @@ export async function readGlobalSourceSnapshot(home: string, provider: string, s
     try { value = JSON.parse(text); }
     catch (error) { throw new BazframeError('SOURCE_RECORD_INVALID', 'Global source is not valid JSON.', { cause: error }); }
     return {
-      record: decodeGlobalSource(value, provider, source),
+      record: decodeGlobalSource(value, source),
       path,
       device: before.dev,
       inode: before.ino,
@@ -174,37 +162,19 @@ async function scanNamespace(rootPath: string): Promise<GlobalSourceNamespace> {
   let root: OpenDirectory | undefined;
   try {
     root = await openDirectory(rootPath, identity(rootMetadata));
-    const providers = await enumerateDirectory(root);
     const sources: GlobalSourcePath[] = [];
     const diagnostics: SourceNamespaceDiagnostic[] = [];
-    for (const providerName of providers) {
-      const providerPath = join(rootPath, providerName);
-      let providerMetadata;
-      try { providerMetadata = await lstat(providerPath, { bigint: true }); }
-      catch { diagnostics.push(diag(isSafeSkillId(providerName) ? providerName : UNKNOWN_PROVIDER, UNKNOWN_SOURCE, providerName)); continue; }
-      if (!isSafeSkillId(providerName) || providerMetadata.isSymbolicLink() || !providerMetadata.isDirectory()) {
-        diagnostics.push(diag(isSafeSkillId(providerName) ? providerName : UNKNOWN_PROVIDER, UNKNOWN_SOURCE, providerName));
+    for (const name of await enumerateDirectory(root)) {
+      const source = sourceFromName(name);
+      const path = join(rootPath, name);
+      let child;
+      try { child = await lstat(path); }
+      catch { diagnostics.push(diag(source ?? UNKNOWN_SOURCE, name)); continue; }
+      if (source === undefined || child.isSymbolicLink() || !child.isFile()) {
+        diagnostics.push(diag(source ?? UNKNOWN_SOURCE, name));
         continue;
       }
-      let provider: OpenDirectory | undefined;
-      try {
-        provider = await openDirectory(providerPath, identity(providerMetadata));
-        for (const name of await enumerateDirectory(provider)) {
-          const source = sourceFromName(name);
-          const path = join(providerPath, name);
-          let child;
-          try { child = await lstat(path); }
-          catch { diagnostics.push(diag(providerName, source ?? UNKNOWN_SOURCE, `${providerName}/${name}`)); continue; }
-          if (source === undefined || child.isSymbolicLink() || !child.isFile()) {
-            diagnostics.push(diag(providerName, source ?? UNKNOWN_SOURCE, `${providerName}/${name}`));
-            continue;
-          }
-          sources.push({ provider: providerName, source, path, relativePath: `${providerName}/${name}` });
-        }
-        await assertDirectoryStable(provider);
-      } catch {
-        diagnostics.push(diag(providerName, UNKNOWN_SOURCE, providerName));
-      } finally { await provider?.handle.close().catch(() => undefined); }
+      sources.push({ source, path, relativePath: name });
     }
     await assertDirectoryStable(root);
     return { sources, diagnostics };
@@ -251,8 +221,8 @@ function sourceFromName(name: string): string | undefined {
   const source = name.slice(0, -5);
   return isSafeSkillId(source) ? source : undefined;
 }
-function invalidRoot(): GlobalSourceNamespace { return { sources: [], diagnostics: [diag(UNKNOWN_PROVIDER, UNKNOWN_SOURCE, '.')] }; }
-function diag(provider: string, source: string, path: string): SourceNamespaceDiagnostic { return { provider, source, path }; }
+function invalidRoot(): GlobalSourceNamespace { return { sources: [], diagnostics: [diag(UNKNOWN_SOURCE, '.')] }; }
+function diag(source: string, path: string): SourceNamespaceDiagnostic { return { source, path }; }
 function invalid(detail: string): BazframeError { return new BazframeError('SOURCE_RECORD_INVALID', `Invalid global source: ${detail}.`); }
 function formatCode(error: unknown): string { const code = errorCode(error); return code === undefined ? '' : ` (${code})`; }
 function compare(left: string, right: string): number { return left < right ? -1 : left > right ? 1 : 0; }

@@ -7,17 +7,14 @@ import { isSafeProfileId } from './profile-id.js';
 import { isSafeSkillId } from '../skills/skill-id.js';
 import { profileDirectory } from './profile-store.js';
 
-const REFERENCE_KEYS = ['provider', 'schemaVersion', 'source'] as const;
-export const UNKNOWN_REFERENCE_PROVIDER = '<unknown-provider>';
+const REFERENCE_KEYS = ['schemaVersion', 'source'] as const;
 export const UNKNOWN_REFERENCE_SOURCE = '<unknown-source>';
 
 export interface ProfileSourceReference {
   schemaVersion: 1;
-  provider: string;
   source: string;
 }
 export interface ProfileSourceReferencePath {
-  provider: string;
   source: string;
   path: string;
   relativePath: string;
@@ -30,7 +27,6 @@ export interface ProfileSourceReferenceSnapshot {
   contentSha256: string;
 }
 export interface ProfileSourceReferenceDiagnostic {
-  provider: string;
   source: string;
   path: string;
 }
@@ -54,42 +50,35 @@ export interface ProfileSourceReferenceBulkIndex {
 export function profileSourcesDirectory(home: string, profileId: string): string {
   return join(profileDirectory(home, profileId), 'sources');
 }
-export function profileSourceProviderDirectory(home: string, profileId: string, provider: string): string {
-  return join(profileSourcesDirectory(home, profileId), provider);
-}
-export function profileSourceReferencePath(home: string, profileId: string, provider: string, source: string): string {
-  return join(profileSourceProviderDirectory(home, profileId, provider), `${source}.json`);
+export function profileSourceReferencePath(home: string, profileId: string, source: string): string {
+  return join(profileSourcesDirectory(home, profileId), `${source}.json`);
 }
 export function encodeProfileSourceReference(reference: ProfileSourceReference): string {
-  return `${JSON.stringify({ schemaVersion: 1, provider: reference.provider, source: reference.source }, null, 2)}\n`;
+  return `${JSON.stringify({ schemaVersion: 1, source: reference.source }, null, 2)}\n`;
 }
-export function decodeProfileSourceReference(value: unknown, expectedProvider?: string, expectedSource?: string): ProfileSourceReference {
+export function decodeProfileSourceReference(value: unknown, expectedSource?: string): ProfileSourceReference {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw invalid('reference must be a JSON object');
   const candidate = value as Record<string, unknown>;
   const keys = Object.keys(candidate).sort();
   if (keys.length !== REFERENCE_KEYS.length || !keys.every((key, index) => key === REFERENCE_KEYS[index])) throw invalid('reference must contain exactly the schema-v1 fields');
   if (candidate.schemaVersion !== 1) throw invalid('unsupported schemaVersion');
-  if (typeof candidate.provider !== 'string' || !isSafeSkillId(candidate.provider)) throw invalid('provider is invalid');
   if (typeof candidate.source !== 'string' || !isSafeSkillId(candidate.source)) throw invalid('source is invalid');
-  if (expectedProvider !== undefined && candidate.provider !== expectedProvider) throw invalid('provider does not match reference path');
   if (expectedSource !== undefined && candidate.source !== expectedSource) throw invalid('source does not match reference path');
-  return { schemaVersion: 1, provider: candidate.provider, source: candidate.source };
+  return { schemaVersion: 1, source: candidate.source };
 }
-export async function readProfileSourceReference(home: string, profileId: string, provider: string, source: string): Promise<ProfileSourceReference> {
-  return (await readProfileSourceReferenceSnapshot(home, profileId, provider, source)).reference;
+export async function readProfileSourceReference(home: string, profileId: string, source: string): Promise<ProfileSourceReference> {
+  return (await readProfileSourceReferenceSnapshot(home, profileId, source)).reference;
 }
-export async function readProfileSourceReferenceSnapshot(home: string, profileId: string, provider: string, source: string): Promise<ProfileSourceReferenceSnapshot> {
+export async function readProfileSourceReferenceSnapshot(home: string, profileId: string, source: string): Promise<ProfileSourceReferenceSnapshot> {
   if (!isSafeProfileId(profileId)) throw invalid('profile is invalid');
-  if (!isSafeSkillId(provider)) throw invalid('provider is invalid');
   if (!isSafeSkillId(source)) throw invalid('source is invalid');
   const directoryPaths = [
     home,
     join(home, 'profiles'),
     profileDirectory(home, profileId),
-    profileSourcesDirectory(home, profileId),
-    profileSourceProviderDirectory(home, profileId, provider)
+    profileSourcesDirectory(home, profileId)
   ];
-  const path = profileSourceReferencePath(home, profileId, provider, source);
+  const path = profileSourceReferencePath(home, profileId, source);
   const directories: OpenDirectory[] = [];
   let handle: FileHandle | undefined;
   try {
@@ -113,7 +102,7 @@ export async function readProfileSourceReferenceSnapshot(home: string, profileId
     try { value = JSON.parse(text); }
     catch (error) { throw new BazframeError('SOURCE_REFERENCE_INVALID', 'Profile source reference is not valid JSON.', { cause: error }); }
     return {
-      reference: decodeProfileSourceReference(value, provider, source),
+      reference: decodeProfileSourceReference(value, source),
       path,
       device: before.dev,
       inode: before.ino,
@@ -139,23 +128,22 @@ export async function scanProfileSourceReferences(home: string, profileId: strin
 interface DirectoryIdentity { device: bigint; inode: bigint }
 interface OpenDirectory { path: string; handle: FileHandle; identity: DirectoryIdentity }
 
-export function profileSourceReferenceKey(provider: string, source: string): string {
-  return `${provider}/${source}`;
+export function profileSourceReferenceKey(source: string): string {
+  return source;
 }
 
-export async function findReferencingProfiles(home: string, provider: string, source: string): Promise<ReferencingProfiles> {
-  const { profileIds, diagnostics } = await captureProfileSourceReferenceIndex(home, provider, source);
+export async function findReferencingProfiles(home: string, source: string): Promise<ReferencingProfiles> {
+  const { profileIds, diagnostics } = await captureProfileSourceReferenceIndex(home, source);
   return { profileIds, diagnostics };
 }
 
 export async function captureProfileSourceReferenceIndex(
   home: string,
-  provider: string,
   source: string
 ): Promise<ProfileSourceReferenceIndex> {
   const bulk = await captureProfileSourceReferenceBulkIndex(home);
   return {
-    profileIds: [...(bulk.profileIdsBySource.get(profileSourceReferenceKey(provider, source)) ?? [])],
+    profileIds: [...(bulk.profileIdsBySource.get(profileSourceReferenceKey(source)) ?? [])],
     diagnostics: bulk.diagnostics,
     identity: bulk.identity
   };
@@ -201,14 +189,14 @@ export async function captureProfileSourceReferenceBulkIndex(
         for (const diagnostic of namespace.diagnostics) diagnostics.push({ profileId, diagnostic });
         for (const path of namespace.references) {
           try {
-            const snapshot = await readProfileSourceReferenceSnapshot(home, profileId, path.provider, path.source);
-            identityParts.push(`reference:${profileId}/${path.relativePath}:${snapshot.device}:${snapshot.inode}:${snapshot.contentSha256}:${snapshot.reference.provider}/${snapshot.reference.source}`);
-            const key = profileSourceReferenceKey(snapshot.reference.provider, snapshot.reference.source);
+            const snapshot = await readProfileSourceReferenceSnapshot(home, profileId, path.source);
+            identityParts.push(`reference:${profileId}/${path.relativePath}:${snapshot.device}:${snapshot.inode}:${snapshot.contentSha256}:${snapshot.reference.source}`);
+            const key = profileSourceReferenceKey(snapshot.reference.source);
             const profileIds = profileIdsBySource.get(key) ?? [];
             profileIds.push(profileId);
             profileIdsBySource.set(key, profileIds);
           } catch {
-            diagnostics.push({ profileId, diagnostic: diag(path.provider, path.source, path.relativePath) });
+            diagnostics.push({ profileId, diagnostic: diag(path.source, path.relativePath) });
             identityParts.push(`reference:${profileId}/${path.relativePath}:invalid`);
           }
         }
@@ -242,36 +230,19 @@ async function scanReferenceRoot(rootPath: string): Promise<ProfileSourceReferen
   let root: OpenDirectory | undefined;
   try {
     root = await openDirectory(rootPath, identity(rootMetadata));
-    const providers = await enumerateDirectory(root);
     const references: ProfileSourceReferencePath[] = [];
     const diagnostics: ProfileSourceReferenceDiagnostic[] = [];
-    for (const providerName of providers) {
-      const providerPath = join(rootPath, providerName);
-      let providerMetadata;
-      try { providerMetadata = await lstat(providerPath, { bigint: true }); }
-      catch { diagnostics.push(diag(isSafeSkillId(providerName) ? providerName : UNKNOWN_REFERENCE_PROVIDER, UNKNOWN_REFERENCE_SOURCE, providerName)); continue; }
-      if (!isSafeSkillId(providerName) || providerMetadata.isSymbolicLink() || !providerMetadata.isDirectory()) {
-        diagnostics.push(diag(isSafeSkillId(providerName) ? providerName : UNKNOWN_REFERENCE_PROVIDER, UNKNOWN_REFERENCE_SOURCE, providerName));
+    for (const name of await enumerateDirectory(root)) {
+      const source = sourceFromName(name);
+      const path = join(rootPath, name);
+      let child;
+      try { child = await lstat(path); }
+      catch { diagnostics.push(diag(source ?? UNKNOWN_REFERENCE_SOURCE, name)); continue; }
+      if (source === undefined || child.isSymbolicLink() || !child.isFile()) {
+        diagnostics.push(diag(source ?? UNKNOWN_REFERENCE_SOURCE, name));
         continue;
       }
-      let provider: OpenDirectory | undefined;
-      try {
-        provider = await openDirectory(providerPath, identity(providerMetadata));
-        for (const name of await enumerateDirectory(provider)) {
-          const source = sourceFromName(name);
-          const path = join(providerPath, name);
-          let child;
-          try { child = await lstat(path); }
-          catch { diagnostics.push(diag(providerName, source ?? UNKNOWN_REFERENCE_SOURCE, `${providerName}/${name}`)); continue; }
-          if (source === undefined || child.isSymbolicLink() || !child.isFile()) {
-            diagnostics.push(diag(providerName, source ?? UNKNOWN_REFERENCE_SOURCE, `${providerName}/${name}`));
-            continue;
-          }
-          references.push({ provider: providerName, source, path, relativePath: `${providerName}/${name}` });
-        }
-        await assertDirectoryStable(provider);
-      } catch { diagnostics.push(diag(providerName, UNKNOWN_REFERENCE_SOURCE, providerName)); }
-      finally { await provider?.handle.close().catch(() => undefined); }
+      references.push({ source, path, relativePath: name });
     }
     await assertDirectoryStable(root);
     return { references, diagnostics };
@@ -318,8 +289,8 @@ function bulkIndexed(
   identityParts: string[]
 ): ProfileSourceReferenceBulkIndex {
   const sortedDiagnostics = [...diagnostics].sort((left, right) => compare(
-    `${left.profileId}\0${left.diagnostic.provider}\0${left.diagnostic.source}\0${left.diagnostic.path}`,
-    `${right.profileId}\0${right.diagnostic.provider}\0${right.diagnostic.source}\0${right.diagnostic.path}`
+    `${left.profileId}\0${left.diagnostic.source}\0${left.diagnostic.path}`,
+    `${right.profileId}\0${right.diagnostic.source}\0${right.diagnostic.path}`
   ));
   const sortedProfileIdsBySource = new Map(
     [...profileIdsBySource.entries()]
@@ -328,7 +299,7 @@ function bulkIndexed(
   );
   const material = [
     ...identityParts.sort(compare),
-    ...sortedDiagnostics.map((item) => `diagnostic:${item.profileId}:${item.diagnostic.provider}:${item.diagnostic.source}:${item.diagnostic.path}`)
+    ...sortedDiagnostics.map((item) => `diagnostic:${item.profileId}:${item.diagnostic.source}:${item.diagnostic.path}`)
   ].join('\n');
   return {
     profileIdsBySource: sortedProfileIdsBySource,
@@ -341,11 +312,11 @@ function invalidProfileBulkIndex(): ProfileSourceReferenceBulkIndex {
 }
 function identityText(value: DirectoryIdentity): string { return `${value.device}:${value.inode}`; }
 function indexDiagnostic(profileId: string): ReferencingProfiles['diagnostics'][number] {
-  return { profileId, diagnostic: diag(UNKNOWN_REFERENCE_PROVIDER, UNKNOWN_REFERENCE_SOURCE, '.') };
+  return { profileId, diagnostic: diag(UNKNOWN_REFERENCE_SOURCE, '.') };
 }
 function sourceFromName(name: string): string | undefined { if (!name.endsWith('.json')) return undefined; const source = name.slice(0, -5); return isSafeSkillId(source) ? source : undefined; }
-function invalidRoot(): ProfileSourceReferenceNamespace { return { references: [], diagnostics: [diag(UNKNOWN_REFERENCE_PROVIDER, UNKNOWN_REFERENCE_SOURCE, '.')] }; }
-function diag(provider: string, source: string, path: string): ProfileSourceReferenceDiagnostic { return { provider, source, path }; }
+function invalidRoot(): ProfileSourceReferenceNamespace { return { references: [], diagnostics: [diag(UNKNOWN_REFERENCE_SOURCE, '.')] }; }
+function diag(source: string, path: string): ProfileSourceReferenceDiagnostic { return { source, path }; }
 function invalid(detail: string): BazframeError { return new BazframeError('SOURCE_REFERENCE_INVALID', `Invalid profile source reference: ${detail}.`); }
 function formatCode(error: unknown): string { const code = errorCode(error); return code === undefined ? '' : ` (${code})`; }
 function compare(left: string, right: string): number { return left < right ? -1 : left > right ? 1 : 0; }

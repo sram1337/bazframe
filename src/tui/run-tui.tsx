@@ -48,7 +48,7 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
       stderr: options.stderr,
       alternateScreen: !screenReader,
       debug: screenReader,
-      incrementalRendering: !screenReader,
+      incrementalRendering: false,
       isScreenReaderEnabled: screenReader,
       exitOnCtrlC: false
       }
