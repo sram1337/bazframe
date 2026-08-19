@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { lstat, mkdir, symlink } from 'node:fs/promises';
+import { lstat, mkdir, realpath, symlink } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { snapshotFilesystem } from '../helpers/filesystem-snapshot.js';
@@ -18,17 +18,16 @@ describe('profile management CLI', () => {
     const directory = await createTempDirectory('bazframe profile integration ');
     temporaryDirectories.push(directory);
     const home = directory.path('home');
-    const library = directory.path('skillbook');
+    const provider = directory.path('provider');
     const cwd = await directory.mkdir('outside git');
     await directory.write(
-      'skillbook/skills/demo-skill/SKILL.md',
+      'provider/demo-skill/SKILL.md',
       '---\nname: demo-skill\ndescription: Demo.\n---\n'
     );
-    await directory.write('skillbook/skills/demo-skill/support.txt', 'keep');
+    await directory.write('provider/demo-skill/support.txt', 'keep');
     const environment = {
       ...process.env,
-      BAZFRAME_HOME: home,
-      SKILLBOOK_LIBRARY: library
+      BAZFRAME_HOME: home
     };
     const run = (args: string[]) => runCli(args, cwd, environment);
 
@@ -48,11 +47,14 @@ describe('profile management CLI', () => {
     expect(profileOverview.stdout).toContain('bazframe profile current');
     expect((await run(['profiles'])).stdout).toBe(profileOverview.stdout);
     expect((await run(['profile', 'current'])).stdout).toBe('focused\n');
-    expect((await run(['add', 'demo-skill'])).stdout)
+    const providerSkill = await realpath(directory.path('provider/demo-skill'));
+    expect((await run(['add', 'skill', providerSkill])).stdout)
+      .toContain('Default skill registration: added');
+    expect((await run(['profile', 'skills', 'add', 'demo-skill'])).stdout)
       .toContain('Profile skill membership: added');
     await directory.write('home/profiles/focused/AGENTS.md', 'focused instructions');
     await directory.write('home/profiles/focused/notes/detail.txt', 'detail');
-    const providerBefore = await snapshotFilesystem(library);
+    const providerBefore = await snapshotFilesystem(provider);
     const sourceBefore = await snapshotFilesystem(directory.path('home/profiles/focused'));
 
     const duplicated = await run(['profile', 'duplicate', 'focused', 'focused-copy']);
@@ -89,7 +91,7 @@ describe('profile management CLI', () => {
     expect(forced.stdout).toContain('Profile lifecycle: removed');
     await expect(lstat(directory.path('home/profiles/reviewer')))
       .rejects.toMatchObject({ code: 'ENOENT' });
-    expect(await snapshotFilesystem(library)).toEqual(providerBefore);
+    expect(await snapshotFilesystem(provider)).toEqual(providerBefore);
     expect((await run(['profile', 'remove', 'reviewer'])).stdout)
       .toContain('Profile lifecycle: absent');
   });

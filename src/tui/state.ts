@@ -106,8 +106,8 @@ export const initialTuiState: TuiState = {
   availableOffset: 0,
   skillsBrowserOffset: 0,
   skillPreviewOffset: 0,
-  expandedSourceIds: ['skillbook'],
-  expandedAvailableSourceIds: ['skillbook']
+  expandedSourceIds: ['default'],
+  expandedAvailableSourceIds: ['default']
 };
 
 export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
@@ -537,12 +537,12 @@ function browserIdsFor(
   expandedSourceIds: readonly string[]
 ): string[] {
   const roots = snapshot.skillRoots ?? snapshot.sources ?? [];
-  const skillbook = roots.filter((source) => source.id === 'skillbook');
+  const defaultSource = roots.filter((source) => source.id === 'default');
   const managed = (snapshot.managedSources ?? []).map((source) =>
     roots.find((root) => root.id === source.id) ?? { id: source.id, skills: [] });
   const managedIds = new Set(managed.map((source) => source.id));
-  const remaining = roots.filter((source) => source.id !== 'skillbook' && !managedIds.has(source.id));
-  return [...skillbook, ...managed, ...remaining].flatMap((source) => [
+  const remaining = roots.filter((source) => source.id !== 'default' && !managedIds.has(source.id));
+  return [...defaultSource, ...managed, ...remaining].flatMap((source) => [
     `source:${source.id}`,
     ...(expandedSourceIds.includes(source.id)
       ? source.skills.map((skill) => `${skill.sourceId}:${skill.id}`)

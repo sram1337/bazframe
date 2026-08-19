@@ -14,16 +14,17 @@ describe('parseArgv', () => {
       kind: 'command',
       command: { name: 'use', profileId: 'focused' }
     });
-    expect(parseArgv(['add', 'review-skill'])).toEqual({
-      kind: 'command',
-      command: { name: 'add', skillId: 'review-skill' }
+    expect(parseArgv(['add', 'skill', '/absolute/review-skill'])).toEqual({
+      kind: 'command', command: { name: 'default-skill-add', skillRoot: '/absolute/review-skill' }
     });
-    expect(parseArgv(['remove', 'review-skill'])).toEqual({
-      kind: 'command',
-      command: { name: 'remove', skillId: 'review-skill' }
+    expect(parseArgv(['remove', 'skill', 'review-skill'])).toEqual({
+      kind: 'command', command: { name: 'default-skill-remove', skillId: 'review-skill' }
     });
-    expect(parseArgv(['add', '--help'])).toEqual({ kind: 'help', topic: 'add' });
-    expect(parseArgv(['remove', '--help'])).toEqual({ kind: 'help', topic: 'remove' });
+    expect(parseArgv(['add', 'skill', '--help'])).toEqual({ kind: 'help', topic: 'add-skill' });
+    expect(parseArgv(['remove', 'skill', '--help'])).toEqual({ kind: 'help', topic: 'remove-skill' });
+    expect(parseArgv(['add', '--help'])).toMatchObject({ kind: 'usage-error' });
+    expect(parseArgv(['remove', '--help'])).toMatchObject({ kind: 'usage-error' });
+    expect(parseArgv(['help', 'add', 'skill'])).toEqual({ kind: 'help', topic: 'add-skill' });
     expect(parseArgv(['pi', '--help'])).toEqual({ kind: 'help', topic: 'pi' });
     expect(parseArgv(['adapter', '--help'])).toEqual({ kind: 'help', topic: 'adapter' });
     expect(parseArgv(['global', '--help'])).toEqual({ kind: 'help', topic: 'global' });
@@ -73,22 +74,22 @@ describe('parseArgv', () => {
       kind: 'command', command: { name: 'profile-skills-overview' }
     });
     expect(parseArgv(['profile', 'skills', 'add', 'review-skill'])).toEqual({
-      kind: 'command', command: { name: 'add', skillId: 'review-skill' }
+      kind: 'command', command: { name: 'profile-skill-add', skillId: 'review-skill' }
     });
     expect(parseArgv(['profile', 'skills', 'remove', 'review-skill'])).toEqual({
-      kind: 'command', command: { name: 'remove', skillId: 'review-skill' }
+      kind: 'command', command: { name: 'profile-skill-remove', skillId: 'review-skill' }
     });
     expect(parseArgv([
       'profile', 'skills', 'add', 'review-skill', '--profile', 'reviewer'
     ])).toEqual({
       kind: 'command',
-      command: { name: 'add', skillId: 'review-skill', profileId: 'reviewer' }
+      command: { name: 'profile-skill-add', skillId: 'review-skill', profileId: 'reviewer' }
     });
     expect(parseArgv([
       'profile', 'skills', 'remove', 'review-skill', '--profile', 'reviewer'
     ])).toEqual({
       kind: 'command',
-      command: { name: 'remove', skillId: 'review-skill', profileId: 'reviewer' }
+      command: { name: 'profile-skill-remove', skillId: 'review-skill', profileId: 'reviewer' }
     });
     expect(parseArgv(['profile', 'skills', '--help'])).toEqual({
       kind: 'help', topic: 'profile-skills'
@@ -149,12 +150,8 @@ describe('parseArgv', () => {
     ]) {
       expect(parseArgv(argv)).toMatchObject({ kind: 'usage-error' });
     }
-    expect(parseArgv(['add', 'review-skill'])).toMatchObject({
-      kind: 'command', command: { name: 'add', skillId: 'review-skill' }
-    });
-    expect(parseArgv(['remove', 'review-skill'])).toMatchObject({
-      kind: 'command', command: { name: 'remove', skillId: 'review-skill' }
-    });
+    expect(parseArgv(['add', 'review-skill'])).toMatchObject({ kind: 'usage-error' });
+    expect(parseArgv(['remove', 'review-skill'])).toMatchObject({ kind: 'usage-error' });
   });
 
   it('parses resource overviews, repository commands, and status', () => {
@@ -258,6 +255,15 @@ describe('parseArgv', () => {
       ['profile', 'skills', 'remove', 'review-skill', '--other', 'reviewer'],
       ['add', 'review-skill', '--profile', 'reviewer'],
       ['remove', 'review-skill', '--profile', 'reviewer'],
+      ['add', 'skills', '/absolute/root'],
+      ['add', 'skill'],
+      ['add', 'skill', 'relative'],
+      ['add', 'skill', '/absolute/root', 'extra'],
+      ['remove', 'skills', 'review-skill'],
+      ['remove', 'skill'],
+      ['remove', 'skill', 'Bad'],
+      ['skill', 'add', '/absolute/root'],
+      ['skills', 'add', '/absolute/root'],
       ['tui', 'extra']
     ]) {
       expect(parseArgv(argv)).toMatchObject({ kind: 'usage-error' });

@@ -175,36 +175,36 @@ describe('TUI state', () => {
   it('tracks Skills and Available source expansion independently', () => {
     const collapsed = tuiReducer(initialTuiState, {
       type: 'toggle-source',
-      id: 'skillbook',
+      id: 'default',
       expanded: false
     });
     expect(collapsed.expandedSourceIds).toEqual([]);
-    expect(collapsed.expandedAvailableSourceIds).toEqual(['skillbook']);
+    expect(collapsed.expandedAvailableSourceIds).toEqual(['default']);
     const expanded = tuiReducer(collapsed, {
       type: 'toggle-source',
-      id: 'skillbook',
+      id: 'default',
       expanded: true
     });
-    expect(expanded.expandedSourceIds).toEqual(['skillbook']);
+    expect(expanded.expandedSourceIds).toEqual(['default']);
 
     const availableCollapsed = tuiReducer({
       ...expanded,
-      availableSkillId: 'skillbook:one'
+      availableSkillId: 'default:one'
     }, {
       type: 'toggle-available-source',
-      id: 'skillbook',
+      id: 'default',
       expanded: false,
-      rowIds: ['@source:skillbook', '@source:other'],
+      rowIds: ['@source:default', '@source:other'],
       viewportRows: 3
     });
     expect(availableCollapsed.expandedAvailableSourceIds).toEqual([]);
-    expect(availableCollapsed.expandedSourceIds).toEqual(['skillbook']);
-    expect(availableCollapsed.availableSkillId).toBe('@source:skillbook');
+    expect(availableCollapsed.expandedSourceIds).toEqual(['default']);
+    expect(availableCollapsed.availableSkillId).toBe('@source:default');
   });
 
   it('selects unreferenced browsable roots for Available without granting direct membership', () => {
     const dashboard = snapshot(['focused'], []);
-    const skillbook = dashboard.sources![0]!;
+    const defaultSource = dashboard.sources![0]!;
     const managed = {
       id: 'managed:mtg-deckbuilding', label: 'mtg-deckbuilding', root: '/snapshots/mtg',
       artifactWritesSupported: false as const,
@@ -213,28 +213,28 @@ describe('TUI state', () => {
         directory: '/snapshots/mtg/deck-building'
       }]
     };
-    dashboard.availableSkillSources = [skillbook];
-    dashboard.skillRoots = [skillbook, managed];
+    dashboard.availableSkillSources = [defaultSource];
+    dashboard.skillRoots = [defaultSource, managed];
 
     expect(availableSourcesForProfile(dashboard, dashboard.profiles[0])
-      .map((source) => source.id)).toEqual(['skillbook', 'managed:mtg-deckbuilding']);
+      .map((source) => source.id)).toEqual(['default', 'managed:mtg-deckbuilding']);
 
     dashboard.profiles[0]!.sourceReferences = [{
       schemaVersion: 1, source: 'mtg-deckbuilding', id: 'mtg-deckbuilding',
       path: '/profiles/focused/sources/mtg-deckbuilding.json', availability: 'available'
     }];
     expect(availableSourcesForProfile(dashboard, dashboard.profiles[0])
-      .map((source) => source.id)).toEqual(['skillbook']);
-    expect(dashboard.availableSkillSources.map((source) => source.id)).toEqual(['skillbook']);
+      .map((source) => source.id)).toEqual(['default']);
+    expect(dashboard.availableSkillSources.map((source) => source.id)).toEqual(['default']);
   });
 
   it('constructs Available visual rows from browsable sources and expansion state', () => {
     const sources = [
       {
-        id: 'skillbook', label: 'Skillbook', root: '/skills', artifactWritesSupported: false as const,
+        id: 'default', label: '(default)', root: '/skills', artifactWritesSupported: false as const,
         skills: [
-          { id: 'included', sourceId: 'skillbook', directory: '/skills/included' },
-          { id: 'free', sourceId: 'skillbook', directory: '/skills/free' }
+          { id: 'included', sourceId: 'default', directory: '/skills/included' },
+          { id: 'free', sourceId: 'default', directory: '/skills/free' }
         ]
       },
       {
@@ -242,11 +242,11 @@ describe('TUI state', () => {
         skills: [{ id: 'second', sourceId: 'other', directory: '/other/second' }]
       }
     ];
-    const rows = availableRowsFor(sources, new Set(['included']), ['skillbook']);
+    const rows = availableRowsFor(sources, new Set(['included']), ['default']);
     expect(rows.map((row) => row.id)).toEqual([
-      '@source:skillbook', 'skillbook:free', '@source:other'
+      '@source:default', 'default:free', '@source:other'
     ]);
-    expect(rows[0]).toMatchObject({ kind: 'source', expanded: true, label: 'Skillbook' });
+    expect(rows[0]).toMatchObject({ kind: 'source', expanded: true, label: '(default)' });
     expect(rows[2]).toMatchObject({ kind: 'source', expanded: false, label: 'Other' });
   });
 
@@ -273,14 +273,14 @@ describe('TUI state', () => {
       ids: membershipIds,
       viewportRows: VIEWPORT_ROWS.included
     });
-    const availableCompositeIds = availableIds.map((id) => `skillbook:${id}`);
+    const availableCompositeIds = availableIds.map((id) => `default:${id}`);
     state = tuiReducer(state, {
       type: 'select-available',
       id: availableCompositeIds[10],
       ids: availableCompositeIds,
       viewportRows: VIEWPORT_ROWS.available
     });
-    const browserIds = ['source:skillbook', ...availableCompositeIds];
+    const browserIds = ['source:default', ...availableCompositeIds];
     state = tuiReducer(state, {
       type: 'select-browser-skill',
       id: availableCompositeIds[15],
@@ -321,15 +321,15 @@ describe('TUI state', () => {
 
   it('reconciles both panes from authoritative IDs when opening a different profile', () => {
     const focusedIncluded = ids('focused-member', 8);
-    const focusedAvailable = ids('z-available', 10).map((id) => `skillbook:${id}`);
+    const focusedAvailable = ids('z-available', 10).map((id) => `default:${id}`);
     const reviewerIncluded = ids('reviewer-member', 4);
-    const reviewerAvailable = ids('a-available', 5).map((id) => `skillbook:${id}`);
+    const reviewerAvailable = ids('a-available', 5).map((id) => `default:${id}`);
     const viewportRows = { ...VIEWPORT_ROWS, profileList: 1 };
     let state: TuiState = {
       ...initialTuiState,
       selectedProfileId: 'focused',
       profileListOffset: 1,
-      browserSkillId: 'skillbook:browser-09',
+      browserSkillId: 'default:browser-09',
       skillsBrowserOffset: 7
     };
     state = tuiReducer(state, {
@@ -351,7 +351,7 @@ describe('TUI state', () => {
       id: 'reviewer',
       profileIds: ['focused', 'reviewer'],
       includedIds: reviewerIncluded,
-      availableRowIds: ['@source:skillbook', ...reviewerAvailable],
+      availableRowIds: ['@source:default', ...reviewerAvailable],
       viewportRows,
       openEditor: true
     });
@@ -360,11 +360,11 @@ describe('TUI state', () => {
       selectedProfileId: 'reviewer',
       profileRoute: 'editor',
       includedSkillId: 'reviewer-member-00',
-      availableSkillId: '@source:skillbook',
+      availableSkillId: '@source:default',
       profileListOffset: 1,
       includedOffset: 0,
       availableOffset: 0,
-      browserSkillId: 'skillbook:browser-09',
+      browserSkillId: 'default:browser-09',
       skillsBrowserOffset: 7
     });
     expect(focusedIncluded).not.toContain(state.includedSkillId);
@@ -392,7 +392,7 @@ describe('TUI state', () => {
       ids: membershipIds,
       viewportRows: VIEWPORT_ROWS.included
     });
-    const availableCompositeIds = availableIds.map((id) => `skillbook:${id}`);
+    const availableCompositeIds = availableIds.map((id) => `default:${id}`);
     state = tuiReducer(state, {
       type: 'select-available',
       id: availableCompositeIds[18],
@@ -402,7 +402,7 @@ describe('TUI state', () => {
     state = tuiReducer(state, {
       type: 'select-browser-skill',
       id: availableCompositeIds[18],
-      ids: ['source:skillbook', ...availableCompositeIds],
+      ids: ['source:default', ...availableCompositeIds],
       viewportRows: VIEWPORT_ROWS.skillsBrowser
     });
 
@@ -418,8 +418,8 @@ describe('TUI state', () => {
     expect(state).toMatchObject({
       selectedProfileId: 'profile-07',
       includedSkillId: 'included-05',
-      availableSkillId: '@source:skillbook',
-      browserSkillId: 'skillbook:available-04',
+      availableSkillId: '@source:default',
+      browserSkillId: 'default:available-04',
       profileListOffset: 4,
       includedOffset: 2,
       availableOffset: 0,
@@ -449,7 +449,7 @@ describe('TUI state', () => {
       ids: membershipIds,
       viewportRows: 4
     });
-    const availableCompositeIds = availableIds.map((id) => `skillbook:${id}`);
+    const availableCompositeIds = availableIds.map((id) => `default:${id}`);
     state = tuiReducer(state, {
       type: 'select-available',
       id: availableCompositeIds[20],
@@ -459,7 +459,7 @@ describe('TUI state', () => {
     state = tuiReducer(state, {
       type: 'select-browser-skill',
       id: availableCompositeIds[25],
-      ids: ['source:skillbook', ...availableCompositeIds],
+      ids: ['source:default', ...availableCompositeIds],
       viewportRows: 6
     });
     expect(state).toMatchObject({
@@ -532,8 +532,8 @@ function snapshot(
       membershipWritable: true,
       memberships: membershipIds.map((skillId) => ({
         id: skillId,
-        membershipId: `${id}:skillbook:${skillId}`,
-        sourceId: 'skillbook',
+        membershipId: `${id}:default:${skillId}`,
+        sourceId: 'default',
         skillId,
         path: `/profiles/${id}/skills/${skillId}`,
         kind: 'managed' as const,
@@ -541,13 +541,13 @@ function snapshot(
       }))
     })),
     sources: [{
-      id: 'skillbook',
-      label: 'Skillbook',
+      id: 'default',
+      label: '(default)',
       root: '/skills',
       artifactWritesSupported: false,
       skills: availableIds.map((id) => ({
         id,
-        sourceId: 'skillbook',
+        sourceId: 'default',
         directory: `/skills/${id}`
       }))
     }],

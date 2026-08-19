@@ -2436,7 +2436,7 @@ function sourceBrowserRows(
   expandedSourceIds: readonly string[]
 ): SourceBrowserRow[] {
   const roots = snapshot.skillRoots ?? snapshot.sources ?? [];
-  const skillbook = roots.filter((source) => source.id === 'skillbook');
+  const defaultSource = roots.filter((source) => source.id === 'default');
   const managed = (snapshot.managedSources ?? []).map((source) =>
     roots.find((root) => root.id === source.id) ?? {
       id: source.id,
@@ -2446,8 +2446,8 @@ function sourceBrowserRows(
       skills: []
     });
   const managedIds = new Set(managed.map((source) => source.id));
-  const remaining = roots.filter((source) => source.id !== 'skillbook' && !managedIds.has(source.id));
-  return [...skillbook, ...managed, ...remaining].flatMap((source): SourceBrowserRow[] => {
+  const remaining = roots.filter((source) => source.id !== 'default' && !managedIds.has(source.id));
+  return [...defaultSource, ...managed, ...remaining].flatMap((source): SourceBrowserRow[] => {
     const expanded = expandedSourceIds.includes(source.id);
     return [{
       id: `source:${source.id}`,

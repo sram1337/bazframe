@@ -119,14 +119,14 @@ function dashboard() {
       memberships: []
     }],
     sources: [{
-      id: 'skillbook',
-      provider: 'skillbook',
-      label: scenario === 'unicode-width' ? 'U' : 'Skillbook',
+      id: 'default',
+      provider: 'default',
+      label: scenario === 'unicode-width' ? 'U' : '(default)',
       root: scenario === 'unicode-width' ? unicodeWidthRoot : '/fixture/library/skills',
       artifactWritesSupported: false,
       skills: [{
         id: 'demo-skill',
-        sourceId: 'skillbook',
+        sourceId: 'default',
         directory: '/fixture/library/skills/demo-skill'
       }]
     }],

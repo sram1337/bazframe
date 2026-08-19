@@ -1,4 +1,4 @@
-import { lstat, readlink, rm, symlink } from 'node:fs/promises';
+import { lstat, readlink, realpath, rename, rm, symlink } from 'node:fs/promises';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   addActiveProfileSkill,
@@ -21,7 +21,7 @@ const temporaryDirectories: TempDirectory[] = [];
 interface Fixture {
   directory: TempDirectory;
   home: string;
-  library: string;
+  provider: string;
   source: string;
   membership: string;
   options: ProfileSkillMembershipOptions;
@@ -38,10 +38,10 @@ afterEach(async () => {
 });
 
 describe('profile skill membership', () => {
-  it('adds, discovers, and removes an absolute membership idempotently without changing Skillbook', async () => {
+  it('adds, discovers, and removes a parallel absolute membership without changing provider content', async () => {
     if (process.platform === 'win32') return;
     const fixture = await createFixture();
-    const beforeLibrary = await snapshotFilesystem(fixture.library);
+    const beforeProvider = await snapshotFilesystem(fixture.provider);
 
     await expect(addActiveProfileSkill(fixture.options, 'demo-skill')).resolves
       .toMatchObject({ action: 'added', profileId: 'focused', skillId: 'demo-skill' });
@@ -52,14 +52,14 @@ describe('profile skill membership', () => {
 
     await expect(addActiveProfileSkill(fixture.options, 'demo-skill')).resolves
       .toMatchObject({ action: 'current' });
-    expect(await snapshotFilesystem(fixture.library)).toEqual(beforeLibrary);
+    expect(await snapshotFilesystem(fixture.provider)).toEqual(beforeProvider);
 
     await expect(removeActiveProfileSkill(fixture.options, 'demo-skill')).resolves
       .toMatchObject({ action: 'removed' });
     await expect(lstat(fixture.membership)).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(removeActiveProfileSkill(fixture.options, 'demo-skill')).resolves
       .toMatchObject({ action: 'absent' });
-    expect(await snapshotFilesystem(fixture.library)).toEqual(beforeLibrary);
+    expect(await snapshotFilesystem(fixture.provider)).toEqual(beforeProvider);
   });
 
   it('accepts identity scalars with comments without validating unrelated schema', async () => {
@@ -97,7 +97,7 @@ describe('profile skill membership', () => {
       await expect(lstat(fixture.membership)).rejects.toMatchObject({ code: 'ENOENT' });
       if (index === malformed.length - 1) {
         await expect(addActiveProfileSkill(fixture.options, 'demo-skill'))
-          .rejects.toThrow(/declares frontmatter name/u);
+          .rejects.toThrow(/declares name/u);
       }
     }
 
@@ -148,7 +148,7 @@ describe('profile skill membership', () => {
     expect(await readlink(foreign.membership)).toBe(foreignTarget);
   });
 
-  it('requires existing physical profile parents and a physical Skillbook source', async () => {
+  it('requires existing physical profile parents and a valid default registration target', async () => {
     if (process.platform === 'win32') return;
     const missingSkills = await createFixture();
     await rm(missingSkills.directory.path('home/profiles/focused/skills'), { recursive: true });
@@ -181,7 +181,44 @@ describe('profile skill membership', () => {
     await linkedSource.directory.write('provider-source/SKILL.md', skillDefinition('demo-skill'));
     await symlink(linkedSource.directory.path('provider-source'), linkedSource.source);
     await expect(addActiveProfileSkill(linkedSource.options, 'demo-skill'))
-      .rejects.toThrow(/Skillbook skill must be an existing physical directory/u);
+      .rejects.toThrow();
+  });
+
+  it('rejects substituted profile skill parents without mutating foreign namespaces', async () => {
+    if (process.platform === 'win32') return;
+    const addFixture = await createFixture();
+    const addForeign = await addFixture.directory.mkdir('foreign-skills');
+    addFixture.options.testHooks = {
+      beforeCommit: async () => {
+        await rename(
+          addFixture.directory.path('home/profiles/focused/skills'),
+          addFixture.directory.path('home/profiles/focused/skills-original')
+        );
+        await symlink(addForeign, addFixture.directory.path('home/profiles/focused/skills'));
+      }
+    };
+    await expect(addActiveProfileSkill(addFixture.options, 'demo-skill'))
+      .rejects.toThrow(/namespace changed/u);
+    await expect(lstat(addFixture.directory.path('foreign-skills/demo-skill')))
+      .rejects.toMatchObject({ code: 'ENOENT' });
+
+    const removeFixture = await createFixture();
+    await symlink(removeFixture.source, removeFixture.membership, 'dir');
+    const removeForeign = await removeFixture.directory.mkdir('foreign-skills');
+    await symlink(removeFixture.source, removeFixture.directory.path('foreign-skills/demo-skill'), 'dir');
+    removeFixture.options.testHooks = {
+      beforeCommit: async () => {
+        await rename(
+          removeFixture.directory.path('home/profiles/focused/skills'),
+          removeFixture.directory.path('home/profiles/focused/skills-original')
+        );
+        await symlink(removeForeign, removeFixture.directory.path('home/profiles/focused/skills'));
+      }
+    };
+    await expect(removeActiveProfileSkill(removeFixture.options, 'demo-skill'))
+      .rejects.toThrow(/namespace changed/u);
+    expect(await readlink(removeFixture.directory.path('foreign-skills/demo-skill')))
+      .toBe(removeFixture.source);
   });
 
   it('removes an exact expected broken membership without requiring provider content', async () => {
@@ -237,25 +274,24 @@ async function createFixture(
 ): Promise<Fixture> {
   const directory = await temporary();
   const home = directory.path('home');
-  const library = directory.path('skillbook library');
-  const source = directory.path('skillbook library/skills/demo-skill');
+  const provider = directory.path('provider');
+  let source = directory.path('provider/demo-skill');
   const membership = directory.path('home/profiles/focused/skills/demo-skill');
   await directory.write('home/profiles/focused/AGENTS.md', 'profile\n');
   await directory.mkdir('home/profiles/focused/skills');
-  await directory.write('skillbook library/skills/demo-skill/SKILL.md', definition);
-  await directory.write('skillbook library/skills/demo-skill/support.txt', 'support\n');
-  await directory.write('skillbook library/skillbook.lock.json', '{"schema":1}\n');
+  await directory.write('provider/demo-skill/SKILL.md', definition);
+  await directory.write('provider/demo-skill/support.txt', 'support\n');
+  source = await realpath(source);
+  await directory.mkdir('home/skills');
+  await symlink(source, directory.path('home/skills/demo-skill'), 'dir');
   await writeActiveProfile(home, 'focused');
   return {
     directory,
     home,
-    library,
+    provider,
     source,
     membership,
-    options: {
-      bazframeHome: home,
-      environment: { SKILLBOOK_LIBRARY: library }
-    }
+    options: { bazframeHome: home }
   };
 }
 

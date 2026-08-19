@@ -1,9 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  resolveBazframeHome,
-  resolvePiAgentDirectory,
-  resolveSkillbookLibrary
-} from '../../../src/state/paths.js';
+import { resolveBazframeHome, resolvePiAgentDirectory } from '../../../src/state/paths.js';
 
 describe('external state paths', () => {
   it('resolves Bazframe and Pi defaults from the user home', () => {
@@ -18,24 +14,9 @@ describe('external state paths', () => {
       .toBe('/tmp/pi agent');
   });
 
-  it('resolves Skillbook roots in canonical, deprecated, then default order', () => {
-    expect(resolveSkillbookLibrary({}, '/users/alice')).toBe('/users/alice/.skillbook');
-    expect(resolveSkillbookLibrary({
-      SKILLBOOK_LOCK_LIBRARY: '/tmp/deprecated/../legacy'
-    }, '/ignored')).toBe('/tmp/legacy');
-    expect(resolveSkillbookLibrary({
-      SKILLBOOK_LIBRARY: '/tmp/current',
-      SKILLBOOK_LOCK_LIBRARY: '/tmp/legacy'
-    }, '/ignored')).toBe('/tmp/current');
-  });
-
-  it('rejects an invalid selected Skillbook root instead of falling back', () => {
-    expect(() => resolveSkillbookLibrary({
-      SKILLBOOK_LIBRARY: '',
-      SKILLBOOK_LOCK_LIBRARY: '/tmp/legacy'
-    })).toThrow(/SKILLBOOK_LIBRARY must be a non-empty absolute path/u);
-    expect(() => resolveSkillbookLibrary({ SKILLBOOK_LOCK_LIBRARY: 'relative' }))
-      .toThrow(/SKILLBOOK_LOCK_LIBRARY must be an absolute path/u);
+  it('ignores unrelated environment variables when resolving Bazframe home', () => {
+    expect(resolveBazframeHome({ UNRELATED_LIBRARY: '/tmp/other' }, '/users/alice'))
+      .toBe('/users/alice/.bazframe');
   });
 
   it('rejects empty, relative, and NUL-containing overrides', () => {

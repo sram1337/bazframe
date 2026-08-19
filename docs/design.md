@@ -34,11 +34,22 @@ Deterministic tests cover compact/resize/exit/accessibility behavior, cell-aware
 
 ### Skill
 
-A skill is an Agent Skills-compatible directory supplied through a configured skill root. Bazframe consumes this standard filesystem interface without depending on Skillbook, Git, npm, or any other particular acquisition and versioning provider.
+A skill is an Agent Skills-compatible directory supplied through a configured skill root. Bazframe consumes this standard filesystem interface independently of any acquisition, versioning, or publication provider.
 
 ### Skill packs
 
 Skill packs are deferred. Bazframe will not introduce pack behavior unless a later product decision expands its responsibility beyond direct profile composition.
+
+### Default direct-skill catalog
+
+The `(default)` catalog is the Bazframe-home registry for individually selectable live skills:
+
+```text
+<BAZFRAME_HOME>/skills/
+└── <skill> -> /canonical/external/<skill>
+```
+
+It is a direct-skill catalog, not a managed source object. Managed sources use explicit builds, immutable snapshots, and whole-source references; `(default)` registrations remain live external directories and support individual profile membership.
 
 ### Profile
 
@@ -59,9 +70,9 @@ The profile-local `AGENTS.md` contains personal coding-agent instructions. Each 
 
 The first slice has one global active profile selected by `bazframe profile use <profile>`; `bazframe use <profile>` remains a compatibility alias. `profile add` creates a physical profile directory containing a zero-byte physical `AGENTS.md` and an empty physical `skills/` directory without activating it. `profile list` prints valid physical profile IDs and `profile current` prints only the selected ID for scripts. Bare `bazframe profile` and `bazframe profiles` instead render the human profile overview: valid profiles in lexical order, an explicit active marker, current-selection state, and the available profile commands.
 
-`profile duplicate <source> <new>` copies all content from a physical source profile without resolving children or provider targets, preserves symlinks verbatim, refuses profile-root symlinks and occupied destinations, leaves the active selection unchanged, and publishes the new profile only after a complete staged copy. `profile rename <old> <new>` preserves profile content without resolving its children or provider targets, refuses symlink roots and replacement, and updates the active selection when renaming the active profile. `profile remove <id>` always refuses the active profile, even when its directory is missing. Without `--force`, removal accepts only the exact generated-empty shape; `--force` is explicit authorization to recursively delete a non-active physical profile. Recursive deletion unlinks membership symlinks without following or mutating Skillbook targets. Actual profile creation, duplication, removal, and identity-changing rename clear disposable alias cache for affected new or existing IDs; idempotent add and same-ID rename preserve live cache. Lifecycle mutations use the global state lock before any profile-specific lock and apply to Pi on the next startup or `/reload`.
+`profile duplicate <source> <new>` copies all content from a physical source profile without resolving children or provider targets, preserves symlinks verbatim, refuses profile-root symlinks and occupied destinations, leaves the active selection unchanged, and publishes the new profile only after a complete staged copy. `profile rename <old> <new>` preserves profile content without resolving its children or provider targets, refuses symlink roots and replacement, and updates the active selection when renaming the active profile. `profile remove <id>` always refuses the active profile, even when its directory is missing. Without `--force`, removal accepts only the exact generated-empty shape; `--force` is explicit authorization to recursively delete a non-active physical profile. Recursive deletion unlinks membership symlinks without following or mutating provider targets. Actual profile creation, duplication, removal, and identity-changing rename clear disposable alias cache for affected new or existing IDs; idempotent add and same-ID rename preserve live cache. Lifecycle mutations use the global state lock before any profile-specific lock and apply to Pi on the next startup or `/reload`.
 
-Direct membership is managed canonically with `bazframe profile skills add <skill> [--profile <profile>]` and `bazframe profile skills remove <skill> [--profile <profile>]`. Omission targets the active profile; an explicit target changes that profile without changing or requiring the active selection. Top-level `add` and `remove` remain active-profile-only compatibility aliases. Bare `bazframe profile skills` lists immediate skill entries discovered in the active profile and shows membership commands; Pi remains authoritative for full runtime validation. Packs are outside the current scope.
+Direct membership is managed canonically with `bazframe profile skills add <skill> [--profile <profile>]` and `bazframe profile skills remove <skill> [--profile <profile>]`. Omission targets the active profile; an explicit target changes that profile without changing or requiring the active selection. There are no top-level membership aliases. Bare `bazframe profile skills` lists immediate skill entries discovered in the active profile and shows membership commands; Pi remains authoritative for full runtime validation. Packs are outside the current scope.
 
 ### Project defaults and overrides
 
@@ -138,13 +149,17 @@ This order and encoding are a transport/provenance contract, not semantic preced
 
 For the first production slice, Bazframe discovers profile membership from the profile directory, validates skill resources through Pi's Agent Skills loader, exposes them to the runtime, projects collision aliases, and reports diagnostics.
 
-Skillbook owns skill acquisition, copying into its library, versioning, updating, publication, and deletion. Bazframe owns only profile membership. The approved first membership slice resolves Skillbook's library from `SKILLBOOK_LIBRARY`, then the deprecated `SKILLBOOK_LOCK_LIBRARY`, then `~/.skillbook`.
+Bazframe's built-in direct-skill catalog is the `(default)` source rooted at `<BAZFRAME_HOME>/skills`. Each entry `<skill>` is an absolute symlink to one canonical external physical Agent Skill root. The canonical target basename and declared frontmatter `name` must exactly equal the safe skill ID. Bazframe owns only the catalog and profile links: it never copies, updates, polls, rewrites, or deletes provider content. Provider changes are live on the next Pi startup or `/bazframe reload`.
 
-`bazframe skills` and its singular alias `bazframe skill` list valid, directly addable skills in the resolved Skillbook library. The overview identifies the resolved source, uses lexical order, reports invalid neighbors as warnings, and does not include Pi-native or profile-only skills.
+`bazframe add skill <absolute-root>` registers one validated external skill in `(default)`. The same exact canonical target is idempotently current; any physical, relative, broken, malformed, or different occupied registration is rejected. Targets inside `BAZFRAME_HOME` are refused to prevent ownership cycles. `bazframe remove skill <skill>` removes only the catalog link, is absent-idempotent, and refuses every valid profile dependency or unverifiable reference index. A broken absolute registration remains removable only after all literal-target profile memberships are gone. These lifecycles hold the global state lock, revalidate immediately before publication or unlink, and retain the documented final-syscall race against non-cooperating writers.
 
-`bazframe profile skills add <skill> [--profile <profile>]` adds the named Skillbook skill to the active or explicitly targeted profile as an absolute directory symlink under `profiles/<id>/skills/`. `bazframe profile skills remove <skill> [--profile <profile>]` removes only that verified membership symlink. Both commands are idempotent and must preserve Skillbook's skill directory and lockfile. Bazframe refuses physical entries, foreign or mismatched symlinks, replacement, copy fallback, and unsafe names. The Skillbook directory ID must match the skill's declared Agent Skills name. Membership-time parsing validates only that identity; Pi's Agent Skills loader remains authoritative for the complete schema when the skill enters a session. A missing add target compares its safe ID with valid available skills and offers bounded edit-distance suggestions before pointing to `bazframe skills`.
+`bazframe skills` and its singular alias list only valid `(default)` registrations in lexical order with their external targets and diagnostics. Managed-source-derived and Pi-native skills are not part of this catalog.
 
-Existing physical profile skill directories remain readable for compatibility but are not managed by these commands. Packs, manifests, export, and Windows link fallback are outside this slice.
+`bazframe profile skills add <skill> [--profile <profile>]` resolves the named `(default)` registration and creates a parallel absolute symlink under `profiles/<id>/skills/` directly to the same canonical provider target—never a link chain. Removal accepts only an exact parallel link matching the current registration. Both operations are idempotent, preserve provider content, and take the state lock before the profile membership lock. Bazframe refuses physical, relative, foreign, mismatched, or unregistered entries. A missing add target offers bounded suggestions from valid `(default)` registrations.
+
+Existing physical profile skill directories and foreign links remain runtime-readable but are unmanaged. There is no provider-specific environment reader, release migration, copy fallback, or Windows link fallback. Managed sources remain separate explicit build/snapshot objects with whole-source profile references.
+
+Bazframe ships its own Agent Skills-compatible usage artifact from tracked `skills/bazframe/` to generated `dist/skills/bazframe/`. The npm package carries only the generated copy. This product-owned documentation artifact can be registered through `bazframe add skill <installed-package>/dist/skills/bazframe`; it is not a general skill/profile export feature and does not perform acquisition or membership changes during build or installation.
 
 Profile skills enter Pi through `resources_discover`.
 
@@ -256,7 +271,6 @@ Traversal retains depth 8, 256 visited entries, and 64 effective children per so
 | Owner | Resources |
 |---|---|
 | User | profile content and instructions, source-provider choices, explicit selection/build consent, and provider inputs; `profile remove --force` authorizes Bazframe to delete only the named non-active physical profile content |
-| Skillbook | flat skill acquisition, library copies, versioning, updating, publication, deletion, lockfile, and Agent Skills-compatible source directories |
 | Other source providers | provider input bytes, acquisition, versioning, updates, dependencies, build declaration, publication, deletion, mutable runtime data, credentials, and child-command behavior |
 | Bazframe | profile lifecycle operations, flat direct membership links, global source objects, profile source references, declared build execution, prepared-artifact staging, immutable content-addressed snapshots, all-dependent atomic activation, referenced-delete refusal, snapshot validation and child derivation, profile selection and resolution, runtime projection, active-profile state, global policy, project overrides, adapter manifest, installed adapter artifact, diagnostics, and generated alias cache |
 | Repository | worktree files and project instructions |
@@ -277,6 +291,8 @@ bazframe profile rename <old> <new>
 bazframe profile use <profile>
 bazframe profile list
 bazframe profile current
+bazframe add skill <absolute-root>
+bazframe remove skill <skill>
 bazframe profile skills
 bazframe profile skills add <skill> [--profile <profile>]
 bazframe profile skills remove <skill> [--profile <profile>]
@@ -302,7 +318,7 @@ bazframe adapter uninstall pi
 bazframe status
 ```
 
-Bare singular and plural resources produce human overviews. Scoped verbs mutate the named resource. Concise `profile list` and `profile current` outputs remain available for scripts. Top-level `use`, `add`, and `remove` remain compatibility aliases. Old `init`/`uninit` forms fail with migration guidance to `project enable`/`disable`, while `bazframe pi` remains only as the documented deprecated launcher. Root help stays intentionally small and points to `bazframe help <resource>` or `<resource> --help` for the detailed grammar.
+Bare singular and plural resources produce human overviews. Scoped verbs mutate the named resource. Concise `profile list` and `profile current` outputs remain available for scripts. Top-level `use` remains a compatibility alias; top-level `add skill` and `remove skill` exclusively manage `(default)` catalog registrations. Old `init`/`uninit` forms fail with migration guidance to `project enable`/`disable`, while `bazframe pi` remains only as the documented deprecated launcher. Root help stays intentionally small and points to `bazframe help <resource>` or `<resource> --help` for the detailed grammar.
 
 CLI color is presentation-only: it is enabled automatically for terminal streams, disabled for pipes and redirects, disabled when `NO_COLOR` is present, and explicitly enabled by nonzero `FORCE_COLOR` only when `NO_COLOR` is absent. Headings, active/current state, warnings, errors, and command hints retain text and symbols that remain understandable without color.
 

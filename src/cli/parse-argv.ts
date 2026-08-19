@@ -5,7 +5,7 @@ import { isSafeProfileId } from '../profiles/profile-id.js';
 import { isSafeSkillId } from '../skills/skill-id.js';
 
 export type HelpTopic =
-  | 'root' | 'use' | 'add' | 'remove' | 'pi' | 'adapter' | 'status' | 'global'
+  | 'root' | 'use' | 'add-skill' | 'remove-skill' | 'pi' | 'adapter' | 'status' | 'global'
   | 'profile' | 'profile-add' | 'profile-duplicate' | 'profile-remove' | 'profile-rename'
   | 'profile-use' | 'profile-list' | 'profile-current' | 'profile-skills'
   | 'profile-skills-add' | 'profile-skills-remove' | 'profile-sources'
@@ -26,8 +26,10 @@ export type Command =
   | { name: 'global-overview' }
   | { name: 'adapters-overview' }
   | { name: 'use'; profileId: string }
-  | { name: 'add'; skillId: string; profileId?: string }
-  | { name: 'remove'; skillId: string; profileId?: string }
+  | { name: 'default-skill-add'; skillRoot: string }
+  | { name: 'default-skill-remove'; skillId: string }
+  | { name: 'profile-skill-add'; skillId: string; profileId?: string }
+  | { name: 'profile-skill-remove'; skillId: string; profileId?: string }
   | { name: 'profile-add'; profileId: string }
   | { name: 'profile-duplicate'; sourceProfileId: string; profileId: string }
   | { name: 'profile-remove'; profileId: string; force: boolean }
@@ -80,7 +82,7 @@ export function parseArgv(argv: readonly string[]): ParseResult {
   if (first === 'adapter') return parseAdapter(rest);
   if (first === 'adapters') return parsePluralOverview(rest, 'adapters-overview', 'adapter');
   if (first === 'use') return parseUse(rest);
-  if (first === 'add' || first === 'remove') return parseMembership(first, rest, first, false);
+  if (first === 'add' || first === 'remove') return parseDefaultSkillLifecycle(first, rest);
   if (first === 'pi') return parsePi(rest);
   if (first === 'tui') return parseNoArgumentCommand('tui', rest, 'tui');
   if (first === 'init' || first === 'uninit') {
@@ -105,7 +107,7 @@ function parseHelp(args: readonly string[]): ParseResult {
     ['global', 'global'],
     ['adapter', 'adapter'], ['adapters', 'adapter'],
     ['status', 'status'], ['tui', 'tui'],
-    ['use', 'use'], ['add', 'add'], ['remove', 'remove'], ['pi', 'pi']
+    ['use', 'use'], ['add skill', 'add-skill'], ['remove skill', 'remove-skill'], ['pi', 'pi']
   ]).get(key);
   if (key === 'init' || key === 'uninit') return migrationError(key);
   return topic === undefined
@@ -232,7 +234,7 @@ function parseProfileSkills(args: readonly string[]): ParseResult {
   if (subcommand !== 'add' && subcommand !== 'remove') {
     return usageError('profile skills requires `add` or `remove`.', 'profile-skills');
   }
-  return parseMembership(subcommand, rest, `profile-skills-${subcommand}`, true);
+  return parseMembership(subcommand, rest, `profile-skills-${subcommand}`);
 }
 
 function parseProfileSources(args: readonly string[]): ParseResult {
@@ -280,39 +282,49 @@ function invalidProfileId(topic: HelpTopic): ParseResult {
   );
 }
 
+function parseDefaultSkillLifecycle(name: 'add' | 'remove', args: readonly string[]): ParseResult {
+  const topic: HelpTopic = name === 'add' ? 'add-skill' : 'remove-skill';
+  if (args.length === 2 && args[0] === 'skill' && HELP_FLAGS.has(args[1])) {
+    return { kind: 'help', topic };
+  }
+  if (args.length !== 2 || args[0] !== 'skill') {
+    return usageError(`${name} requires exactly \`skill\` followed by ${name === 'add' ? '<absolute-root>' : '<skill>'}.`, topic);
+  }
+  const value = args[1];
+  if (name === 'add') {
+    if (!isAbsolute(value) || value.length === 0 || value.includes('\0')) {
+      return usageError('Skill root must be a non-empty absolute path without NUL bytes.', topic);
+    }
+    return { kind: 'command', command: { name: 'default-skill-add', skillRoot: value } };
+  }
+  if (!isSafeSkillId(value)) return invalidSkillId(topic);
+  return { kind: 'command', command: { name: 'default-skill-remove', skillId: value } };
+}
+
 function parseMembership(
   name: 'add' | 'remove',
   args: readonly string[],
-  topic: HelpTopic,
-  allowExplicitProfile: boolean
+  topic: HelpTopic
 ): ParseResult {
-  if (args.length === 1 && HELP_FLAGS.has(args[0])) {
-    return { kind: 'help', topic };
-  }
-  const hasExplicitProfile = allowExplicitProfile
-    && args.length === 3
-    && args[1] === '--profile';
+  if (args.length === 1 && HELP_FLAGS.has(args[0])) return { kind: 'help', topic };
+  const hasExplicitProfile = args.length === 3 && args[1] === '--profile';
   if (!(args.length === 1 || hasExplicitProfile)) {
-    return usageError(
-      allowExplicitProfile
-        ? `${name} requires <skill> followed only by optional --profile <profile>.`
-        : `${name} requires exactly one <skill> argument.`,
-      topic
-    );
+    return usageError(`${name} requires <skill> followed only by optional --profile <profile>.`, topic);
   }
   const skillId = args[0];
-  if (!isSafeSkillId(skillId)) {
-    return usageError(
-      'Skill IDs must be 1-64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen.',
-      topic
-    );
-  }
+  if (!isSafeSkillId(skillId)) return invalidSkillId(topic);
   const profileId = hasExplicitProfile ? args[2] : undefined;
   if (profileId !== undefined && !isSafeProfileId(profileId)) return invalidProfileId(topic);
   return {
     kind: 'command',
-    command: profileId === undefined ? { name, skillId } : { name, skillId, profileId }
-  };
+    command: profileId === undefined
+      ? { name: `profile-skill-${name}`, skillId }
+      : { name: `profile-skill-${name}`, skillId, profileId }
+  } as ParseResult;
+}
+
+function invalidSkillId(topic: HelpTopic): ParseResult {
+  return usageError('Skill IDs must be 1-64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen.', topic);
 }
 
 function parseProject(args: readonly string[]): ParseResult {

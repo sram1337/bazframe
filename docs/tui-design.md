@@ -9,7 +9,7 @@ Bazframe's first graphical management surface is a keyboard-first terminal UI la
 - Make profiles, skill sources, and settings discoverable without sacrificing terminal-native workflows.
 - Work well locally, over SSH, and in ordinary developer terminals.
 - Keep navigation predictable with the keyboard and usable without a mouse.
-- Represent Skillbook and global managed-source snapshots as multiple read-only roots without redesigning the tree.
+- Represent the `(default)` direct-skill catalog and global managed-source snapshots as multiple read-only roots without redesigning the tree.
 - Preserve Bazframe's existing ownership, validation, and destructive-operation safeguards.
 
 ## Non-goals for the first slice
@@ -29,7 +29,7 @@ The source-add flow requires only a physical absolute or leading-`~/` root, cand
 
 Deterministic reducer/component/service tests cover compact and below-minimum layouts, preview isolation/control neutralization, source-add consent, resize state preservation, pane boundaries, guarded removal, graceful and forced exits, non-color state markers, and screen-reader output. CLI/TUI state-agreement integration coverage exercises profile lifecycle and inactive-profile membership while preserving provider artifacts. Real terminal coverage verifies alternate-screen entry/restoration, linear screen-reader output, and same-width height growth with the shell remaining on row zero.
 
-The top-tab focus model is separate from body/pane focus: `Tab` and `Shift+Tab` traverse focus, tab entry selects the current active tab without switching content, and `Left`/`Right` or `h`/`l` immediately activates the adjacent tab. Outside dialogs, uppercase `H`/`L` move one route back/forward like Backspace/Enter. Lists accept `j`/`k` as `Down`/`Up`, and the profile editor accepts portable `J`/`K` pane jumps. The reducer now owns persistent offsets for the profile list, Included pane, Available pane, and Skills browser, with stable-row visibility and authoritative shrink/resize clamping. Completed terminal evidence covers macOS direct PTY/local tmux and Linux arm64 digest-pinned-base container direct PTY/tmux/loopback SSH. Local installed-tarball tmux additionally proves real Ink fatal-render restoration and preferred/compact CJK, combining-mark, emoji-ZWJ, ANSI-SGR, and long-unbroken-path terminal-cell bounds. Still open are deeper source-tree behavior; canonical source identity and broken-root semantics for symlinked/retargeted Skillbook roots; editor launch; settings writes; provider move/rename; additional provider-specific browsing capabilities; Windows Terminal; representative remote SSH; terminal/locale ambiguous-width differences; and manual assistive-technology validation. These gaps preclude a production-ready claim.
+The top-tab focus model is separate from body/pane focus: `Tab` and `Shift+Tab` traverse focus, tab entry selects the current active tab without switching content, and `Left`/`Right` or `h`/`l` immediately activates the adjacent tab. Outside dialogs, uppercase `H`/`L` move one route back/forward like Backspace/Enter. Lists accept `j`/`k` as `Down`/`Up`, and the profile editor accepts portable `J`/`K` pane jumps. The reducer now owns persistent offsets for the profile list, Included pane, Available pane, and Skills browser, with stable-row visibility and authoritative shrink/resize clamping. Completed terminal evidence covers macOS direct PTY/local tmux and Linux arm64 digest-pinned-base container direct PTY/tmux/loopback SSH. Local installed-tarball tmux additionally proves real Ink fatal-render restoration and preferred/compact CJK, combining-mark, emoji-ZWJ, ANSI-SGR, and long-unbroken-path terminal-cell bounds. Still open are deeper source-tree behavior; editor launch; settings writes; provider move/rename; additional provider-specific browsing capabilities; Windows Terminal; representative remote SSH; terminal/locale ambiguous-width differences; and manual assistive-technology validation. These gaps preclude a production-ready claim.
 
 ## Application shell
 
@@ -54,7 +54,7 @@ Only the active tab's content occupies the body. An always-visible line below th
 The Skills tab is a tree navigator. Every configured skill source is a root node represented by its path. The tree must work with one root and with multiple roots:
 
 ```text
-▾ ~/.skillbook/skills/
+▾ (default)
   ▸ code-review
   ▾ testing
       SKILL.md
@@ -62,13 +62,13 @@ The Skills tab is a tree navigator. Every configured skill source is a root node
 ▸ ~/mySkillLibrary/skills/
 ```
 
-The current browser implements multiple independently expandable roots: Skillbook plus every global managed source. Healthy roots expose immediate valid skills; failed roots remain visible with health and diagnostics. At preferred size the bordered browser fills its 46% master column and is paired with source details or the selected skill's plain-text `SKILL.md` in the remaining 54%; at compact size Enter or `L` on a skill opens a preview route and `H`, Esc, or Backspace returns. `o` expands the owning source and `c` collapses it, including when a child is selected. Browsing files below a skill and descendant expansion remain future work.
+The current browser implements multiple independently expandable roots: the `(default)` catalog plus every global managed source. Healthy roots expose immediate valid skills; failed roots remain visible with health and diagnostics. At preferred size the bordered browser fills its 46% master column and is paired with source details or the selected skill's plain-text `SKILL.md` in the remaining 54%; at compact size Enter or `L` on a skill opens a preview route and `H`, Esc, or Backspace returns. `o` expands the owning source and `c` collapses it, including when a child is selected. Browsing files below a skill and descendant expansion remain future work.
 
 ### Target tree behavior
 
 - Source roots appear in deterministic configured order.
 - Root rows begin with exact `[-]` when expanded or `[+]` when collapsed; visible children begin with two ASCII spaces.
-- Skillbook starts expanded and managed roots start collapsed.
+- `(default)` starts expanded and managed roots start collapsed.
 - Skill directories and their children appear in deterministic lexical order.
 - `Enter` expands or collapses the selected expandable node.
 - Collapsed nodes retain their previous descendant expansion state when practical.
@@ -91,11 +91,11 @@ SkillSource
   diagnostics
 ```
 
-For the current provider, the displayed tree root is the resolved configuration path to `<Skillbook library>/skills`, not the parent library where provider metadata may live. The service also projects its `realpath` when the root exists, and the browser shows both when they differ. The adapter returns zero or one Skillbook source whose immediate valid skills may be linked into profiles but whose artifacts remain provider-owned and non-writable by Bazframe. Global managed source snapshots are additional read-only roots. Stable IDs use `managed:<source>` so rebuilds retain expansion and selection. Canonical authority for symlinked/retargeted roots and behavior for a missing or broken root remain unsettled, especially because removal must continue to recognize an expected broken membership without provider content.
+The distinguished direct-skill root has stable ID `default`, label `(default)`, and path `<BAZFRAME_HOME>/skills`. Its valid entries are absolute registrations to canonical external skill directories. Preview reads the external `SKILL.md`; profile membership is manageable only when its direct absolute target equals the matching registration target. Global managed source snapshots are additional read-only roots with stable IDs `managed:<source>`. Broken registrations remain diagnostic, and removal compares literal absolute targets so matching broken profile memberships still block catalog unlink.
 
 ### Move and rename ownership gate
 
-The requested move/rename behavior expands beyond Bazframe's current direct-membership ownership. Skillbook presently owns artifacts, IDs, updates, and lock state. Implementation is blocked until review settles:
+Move/rename behavior expands beyond Bazframe's link-only direct-membership ownership. External providers own artifact bytes, IDs, and updates. Implementation remains deferred until review settles:
 
 - which sources are writable by Bazframe;
 - whether moves may cross source roots or only occur within one root;
@@ -138,13 +138,13 @@ Profile: focused                                            [active]
 │  testing                                                     │
 └──────────────────────────────────────────────────────────────┘
 ┌─ Available skills ───────────────────────────────────────────┐
-│  ▾ ~/.skillbook/skills/                                      │
+│  ▾ (default)                                      │
 │      debugging                                               │
 │  ▸ ~/mySkillLibrary/skills/                                  │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-The top pane contains the profile's direct included skills. The lower pane groups every healthy browsable root that is available to the selected profile. Skillbook children support direct membership through `a`. An unreferenced managed source appears with its snapshot children for inspection; `a` reports the ordinary `bazframe profile sources add <source> --profile <profile>` command because the source is attached as one profile reference. Referenced managed sources leave Available and remain listed in the read-only Source references line. Adding and removing direct membership call the same verified membership APIs as the CLI.
+The top pane contains the profile's direct included skills. The lower pane groups every healthy browsable root that is available to the selected profile. `(default)` children support direct membership through `a`. An unreferenced managed source appears with its snapshot children for inspection; `a` reports the ordinary `bazframe profile sources add <source> --profile <profile>` command because the source is attached as one profile reference. Referenced managed sources leave Available and remain listed in the read-only Source references line. Adding and removing direct membership call the same verified membership APIs as the CLI.
 
 The current editor header shows profile identity and active state. Lifecycle actions are available from the profile list. Pressing `e` reports that instruction editing is unavailable; a later slice may open `AGENTS.md` in the configured editor after CLI discoverability and editor lifecycle are approved.
 
@@ -167,7 +167,7 @@ The proposed action keys are specified below. `Enter` continues to mean expand/c
 
 The read-only Adapters tab shows Pi adapter state, installed version, target, and adapter-specific corrective action. Settings groups the structured inspection used by `bazframe status` into policy/current directory, active profile, runtime cache, and non-adapter attention sections. A status failure is isolated as a typed diagnostic so profile and source reads can remain available. Neither tab defines writes.
 
-Managed-source identity, health, reference count, provider input, activated digest, source-unit root, rebuild availability, and diagnostics appear as source-root detail in Skills. Profile editors list source references read-only; flat Skillbook membership controls remain unchanged.
+Managed-source identity, health, reference count, provider input, activated digest, source-unit root, rebuild availability, and diagnostics appear as source-root detail in Skills. Profile editors list source references read-only; flat `(default)` membership controls remain unchanged.
 
 Potential write surfaces—editor command, configured sources and precedence, adapter paths, and policy—remain unapproved. The TUI must not invent a second settings format; writes require settled ownership, persistence, validation, and CLI interoperability.
 
@@ -425,7 +425,7 @@ Each slice updates `TODO.md`, passes the existing default and real-Pi gates when
 ### Recorded decisions
 
 1. **Framework — approved:** Ink 7.1.1 with React 19.2.8, exact initial pins, TUI-only dynamic loading, and framework-neutral application services.
-2. **Management scope — approved:** profile create/duplicate/use/rename/remove plus direct skill-membership add/remove for the selected profile and matching explicit-profile CLI commands, while Skillbook artifacts and lock state remain untouched.
+2. **Management scope — approved:** profile create/duplicate/use/rename/remove plus direct skill-membership add/remove for the selected profile and matching explicit-profile CLI commands, while external provider artifacts remain untouched.
 3. **Service boundary and safety — approved:** explicit-profile membership service, unambiguous source/member identity, one mutation at a time, no optimistic domain state, and parity with current guards and `--force` authorization.
 4. **Interaction and support targets — approved for implementation:** the revised top tabs, responsive master-detail/compact routes, source/skill/profile keymap, confirmations, preferred `80x24`, minimum `60x16`, inert below-minimum state, no-color/ASCII/screen-reader behavior, and component plus PTY test layers. Platform validation remains an acceptance task, not a claim of completed support.
 5. **Bounded source add — approved:** physical path browsing may add only a manifest-free already-prepared global source after literal-`y` consent; the source identity is the exact canonical root basename. Declared builds are core-refused and remain CLI-only; success creates no profile reference.

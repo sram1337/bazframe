@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
+import { realpath, rm, symlink } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createTempDirectory, type TempDirectory } from '../helpers/temp-directory.js';
@@ -28,19 +29,21 @@ describe('packed-style TUI terminal lifecycle', () => {
     expect(result.output).toContain('\u001B[?25h');
     expect(result.stderr).toBe('');
 
-    const errorResult = await runInPseudoTerminal({
-      ...fixture.environment,
-      SKILLBOOK_LIBRARY: 'relative-library'
-    }, [{
-      afterOutput: 'SKILLBOOK_LIBRARY must be an absolute path',
+    await rm(fixture.directory.path('home/skills'), { recursive: true });
+    await symlink(fixture.directory.path('provider'), fixture.directory.path('home/skills'));
+    const errorResult = await runInPseudoTerminal(fixture.environment, [{
+      afterOutput: 'Default skill catalog must be a physical directory',
       input: 'q'
     }]);
     expect(errorResult.status, JSON.stringify(errorResult)).toBe(0);
-    expect(errorResult.output).toContain('SKILLBOOK_LIBRARY must be an absolute path');
+    expect(errorResult.output).toContain('Default skill catalog must be a physical directory');
     expect(errorResult.output).toContain('\u001B[?1049h');
     expect(errorResult.output).toContain('\u001B[?1049l');
     expect(errorResult.output).toContain('\u001B[?25h');
 
+    await rm(fixture.directory.path('home/skills'));
+    await fixture.directory.mkdir('home/skills');
+    await symlink(await realpath(fixture.directory.path('provider/demo-skill')), fixture.directory.path('home/skills/demo-skill'));
     const screenReaderResult = await runInPseudoTerminal({
       ...fixture.environment,
       INK_SCREEN_READER: 'true'
@@ -80,21 +83,23 @@ describe('packed-style TUI terminal lifecycle', () => {
   });
 });
 
-async function terminalFixture(): Promise<{ environment: NodeJS.ProcessEnv }> {
+async function terminalFixture(): Promise<{ environment: NodeJS.ProcessEnv; directory: TempDirectory }> {
   const directory = await createTempDirectory('bazframe tui pty ');
   temporaryDirectories.push(directory);
   await directory.write('home/profiles/focused/AGENTS.md', 'focused\n');
   await directory.mkdir('home/profiles/focused/skills');
   await directory.write('home/active-profile', 'focused\n');
   await directory.write(
-    'library/skills/demo-skill/SKILL.md',
+    'provider/demo-skill/SKILL.md',
     '---\nname: demo-skill\ndescription: PTY fixture.\n---\n'
   );
+  await directory.mkdir('home/skills');
+  await symlink(await realpath(directory.path('provider/demo-skill')), directory.path('home/skills/demo-skill'));
   return {
+    directory,
     environment: {
       ...process.env,
       BAZFRAME_HOME: directory.path('home'),
-      SKILLBOOK_LIBRARY: directory.path('library'),
       NO_COLOR: '1'
     }
   };

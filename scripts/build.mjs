@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { chmod, rm } from 'node:fs/promises';
+import { chmod, cp, rm } from 'node:fs/promises';
 
 await rm(new URL('../dist', import.meta.url), { recursive: true, force: true });
 
@@ -13,4 +13,9 @@ if (result.status !== 0) {
   process.exit(typeof result.status === 'number' ? result.status : 1);
 }
 
+await cp(
+  new URL('../skills/bazframe', import.meta.url),
+  new URL('../dist/skills/bazframe', import.meta.url),
+  { recursive: true }
+);
 await chmod(new URL('../dist/cli.js', import.meta.url), 0o755);

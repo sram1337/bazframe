@@ -96,9 +96,10 @@ Within Git worktrees, project override wins over global policy. Project commands
 | `bazframe profile use <profile>` | Atomically validate and select the global active profile. |
 | `bazframe profile list` | Print runtime-valid physical profile IDs in lexical order for scripts. |
 | `bazframe profile current` | Print only the selected profile ID for scripts. |
-| `bazframe skill` / `skills` | List valid skills in the resolved Skillbook library. |
+| `bazframe skill` / `skills` | List valid registrations in the `(default)` catalog. |
+| `bazframe add skill <absolute-root>` / `remove skill <skill>` | Register or remove an unreferenced live external skill link. |
 | `bazframe profile skills` | List immediate skill entries discovered in the active profile; Pi performs full runtime validation. |
-| `bazframe profile skills add <skill>` | Add a Skillbook-backed link to the active profile. |
+| `bazframe profile skills add <skill>` | Add a registered `(default)` skill link to the active profile. |
 | `bazframe profile skills remove <skill>` | Remove only the verified active-profile membership link. |
 | `bazframe status` | Report adapter, effective project behavior, required profile state, and actionable problems. |
 
@@ -272,7 +273,7 @@ Instruction requirements:
 
 Skill requirements:
 
-- bare `skills` lists valid physical skills from the one resolved Skillbook root, warns about invalid neighbors, and does not claim provider lifecycle ownership;
+- bare `skills` lists valid live registrations from `<BAZFRAME_HOME>/skills`, warns about invalid neighbors, and does not claim provider lifecycle ownership;
 - missing add targets use bounded edit-distance matching to suggest valid available skills;
 - immediate children of profile `skills/` are loaded in lexical directory-name order;
 - Pi's public Agent Skills loader parses each skill;
@@ -411,7 +412,7 @@ Gate: install/build/typecheck/lint/unit/integration/pack/real-Pi checks pass fro
 | External state and codecs | Unit coverage for paths, symlinks, atomic replacement, locks, manifests, exact global policy, legacy inherit, disabled/enabled project state, hashing, and adapter ownership. |
 | Adapter lifecycle | Unit and packed-package checks cover install, idempotence, managed update, adoption, drift preservation, manifest-gated repair, occupied destinations, uninstall, and cache cleanup. |
 | Policy and status | Unit and fake-CLI integration cover global/project precedence, file-free defaults, enabled/disabled overrides, legacy compatibility, read-only status, malformed-state preservation, and stable worktrees. |
-| Profile and membership lifecycle | Unit and built-CLI integration cover create/duplicate/list/current/use/rename/remove, force guards, active and missing-active refusal, selection rollback, staged-copy cleanup, symlink policy, broken provider references, alias-cache cleanup/no-op preservation, Skillbook preservation, and strict CLI parsing. |
+| Profile and membership lifecycle | Unit and built-CLI integration cover create/duplicate/list/current/use/rename/remove, force guards, active and missing-active refusal, selection rollback, staged-copy cleanup, parallel catalog/profile link policy, broken provider references, alias-cache cleanup/no-op preservation, provider preservation, and strict CLI parsing. |
 | Runtime adapter | Packed Pi 0.82 probes cover context modes, profile skills, global disable, project enable/disable precedence, and stable repositories. Deterministic current-artifact tests cover the exact compact `/bazframe info` projection, context restoration reporting, effective skills and collisions, command registration, strict argument dispatch, awaited reload, and fail-closed behavior. The packed real-Pi gate does not claim live slash-command coverage. |
 | Packed real-Pi flow | `npm run test:real-pi` proves file-free defaults, global disable, project-enabled override, project-disabled override, both Pi context modes, provider preservation, and stable Git status. |
 

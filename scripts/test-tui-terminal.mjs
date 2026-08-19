@@ -5,8 +5,10 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
+  symlinkSync,
   writeFileSync
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -200,14 +202,14 @@ try {
 function runScenario(name, executable, packageRoot, drive, fixtureMode) {
   const scenarioRoot = join(temporaryRoot, `scenario-${name}`);
   const home = join(scenarioRoot, 'bazframe-home');
-  const library = join(scenarioRoot, 'skillbook');
+  const provider = join(scenarioRoot, 'provider');
   const piAgent = join(scenarioRoot, 'pi-agent');
   const receipt = join(scenarioRoot, 'receipt.txt');
   const receiptTemporary = join(scenarioRoot, 'receipt.tmp');
   const stderrPath = join(scenarioRoot, 'stderr.txt');
   const marker = join(scenarioRoot, 'fixture.pid');
   mkdirSync(scenarioRoot, { recursive: true });
-  copyState(stateRoot, home, library);
+  copyState(stateRoot, home, provider);
   mkdirSync(piAgent, { recursive: true });
   const command = fixtureMode === undefined
     ? shellQuote(executable) + ' tui'
@@ -221,7 +223,6 @@ function runScenario(name, executable, packageRoot, drive, fixtureMode) {
   const environment = [
     `HOME=${shellQuote(join(scenarioRoot, 'user-home'))}`,
     `BAZFRAME_HOME=${shellQuote(home)}`,
-    `SKILLBOOK_LIBRARY=${shellQuote(library)}`,
     `PI_CODING_AGENT_DIR=${shellQuote(piAgent)}`,
     'NO_COLOR=1',
     'TERM=xterm-256color'
@@ -298,22 +299,24 @@ function runScenario(name, executable, packageRoot, drive, fixtureMode) {
 function beginBlockingMutation(session, deadline) {
   sendLiteral(session, '2');
   actAndWaitForCurrentText(session, () => sendKey(session, 'Enter'), 'Available skills', deadline);
-  sendKey(session, 'Tab');
+  actAndWaitForCurrentText(session, () => sendKey(session, 'Tab'), '┃Available skills', deadline);
   actAndWaitForCurrentText(session, () => sendLiteral(session, 'a'), 'Add membership...', deadline);
 }
 
 function prepareState(root) {
   mkdirSync(join(root, 'home/profiles/focused/skills'), { recursive: true });
-  mkdirSync(join(root, 'library/skills/demo-skill'), { recursive: true });
+  mkdirSync(join(root, 'provider/demo-skill'), { recursive: true });
   writeFileSync(join(root, 'home/profiles/focused/AGENTS.md'), 'focused\n');
   writeFileSync(join(root, 'home/active-profile'), 'focused\n');
-  writeFileSync(join(root, 'library/skills/demo-skill/SKILL.md'), '---\nname: demo-skill\ndescription: Terminal validation fixture.\n---\n');
+  writeFileSync(join(root, 'provider/demo-skill/SKILL.md'), '---\nname: demo-skill\ndescription: Terminal validation fixture.\n---\n');
 }
 
-function copyState(root, home, library) {
+function copyState(root, home, provider) {
   mkdirSync(resolve(home, '..'), { recursive: true });
   execFileSync('cp', ['-R', join(root, 'home'), home]);
-  execFileSync('cp', ['-R', join(root, 'library'), library]);
+  execFileSync('cp', ['-R', join(root, 'provider'), provider]);
+  mkdirSync(join(home, 'skills'), { recursive: true });
+  symlinkSync(realpathSync(join(provider, 'demo-skill')), join(home, 'skills', 'demo-skill'), 'dir');
 }
 
 function capture(session) {

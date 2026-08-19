@@ -57,10 +57,7 @@ describe('bulk profile-reference index overview consumers', () => {
       bazframeHome: fixture.home,
       bazframeVersion: '0.1.0-test',
       cwd: fixture.directory.root,
-      environment: {
-        ...fixture.environment,
-        SKILLBOOK_LIBRARY: fixture.directory.path('skillbook')
-      },
+      environment: fixture.environment,
       userHome: fixture.directory.root
     });
 

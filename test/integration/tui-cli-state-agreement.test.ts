@@ -1,3 +1,4 @@
+import { realpath } from 'node:fs/promises';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createBazframeTuiService } from '../../src/application/tui-service.js';
 import { runCli } from '../../src/cli/run-cli.js';
@@ -15,22 +16,21 @@ describe('CLI and TUI service state agreement', () => {
     const directory = await createTempDirectory('bazframe state agreement ');
     temporaryDirectories.push(directory);
     const home = directory.path('home');
-    const library = directory.path('skillbook');
+    const provider = directory.path('provider');
     const cwd = await directory.mkdir('outside git');
-    await directory.write('skillbook/skills/demo-skill/SKILL.md', skill('demo-skill'));
-    await directory.write('skillbook/skills/demo-skill/support.txt', 'provider content\n');
+    await directory.write('provider/demo-skill/SKILL.md', skill('demo-skill'));
+    await directory.write('provider/demo-skill/support.txt', 'provider content\n');
     await directory.write(
-      'skillbook/skills/demo-skill/provider.json',
+      'provider/demo-skill/provider.json',
       '{"provider":"git","revision":"abc123"}\n'
     );
     await directory.write(
-      'skillbook/skillbook.lock.json',
+      'provider/provider.json',
       '{"schemaVersion":1,"skills":{"demo-skill":{"provider":"git","revision":"abc123"}}}\n'
     );
     const environment: NodeJS.ProcessEnv = {
       ...process.env,
       BAZFRAME_HOME: home,
-      SKILLBOOK_LIBRARY: library,
       PI_CODING_AGENT_DIR: directory.path('pi-agent'),
       NO_COLOR: '1'
     };
@@ -47,7 +47,7 @@ describe('CLI and TUI service state agreement', () => {
       environment,
       userHome: directory.root
     });
-    const providerBefore = await snapshotFilesystem(library);
+    const providerBefore = await snapshotFilesystem(provider);
 
     await service.createProfile('focused');
     expect(await cli(['profile', 'list'])).toMatchObject({
@@ -88,6 +88,8 @@ describe('CLI and TUI service state agreement', () => {
       stderr: ''
     });
 
+    const providerSkill = await realpath(directory.path('provider/demo-skill'));
+    expect(await cli(['add', 'skill', providerSkill])).toMatchObject({ status: 0, stderr: '' });
     expect(await cli([
       'profile', 'skills', 'add', 'demo-skill', '--profile', 'focused'
     ])).toMatchObject({ status: 0, stderr: '' });
@@ -97,7 +99,7 @@ describe('CLI and TUI service state agreement', () => {
       .find((profile) => profile.id === 'focused')
       ?.memberships.find((membership) => membership.skillId === 'demo-skill');
     expect(cliMembership).toMatchObject({
-      sourceId: 'skillbook',
+      sourceId: 'default',
       kind: 'managed',
       manageable: true
     });
@@ -112,7 +114,7 @@ describe('CLI and TUI service state agreement', () => {
     ])).toMatchObject({ status: 0, stdout: expect.stringContaining('absent'), stderr: '' });
 
     await service.addMembership('focused', {
-      sourceId: 'skillbook',
+      sourceId: 'default',
       skillId: 'demo-skill'
     });
     expect(await cli([
@@ -131,7 +133,7 @@ describe('CLI and TUI service state agreement', () => {
     expect(dashboard.activeProfileId).toBe('spare');
     expect(dashboard.profiles.find((profile) => profile.id === 'focused')?.memberships)
       .toEqual([]);
-    expect(await snapshotFilesystem(library)).toEqual(providerBefore);
+    expect(await snapshotFilesystem(provider)).toEqual(providerBefore);
   });
 
   it('shares manifest-free global source addition without implicit profile composition or provider mutation', async () => {
@@ -145,7 +147,6 @@ describe('CLI and TUI service state agreement', () => {
     const environment: NodeJS.ProcessEnv = {
       ...process.env,
       BAZFRAME_HOME: home,
-      SKILLBOOK_LIBRARY: directory.path('skillbook'),
       PI_CODING_AGENT_DIR: directory.path('pi-agent'),
       NO_COLOR: '1'
     };

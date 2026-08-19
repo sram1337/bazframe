@@ -6,16 +6,17 @@
 - [x] Define first-slice skill responsibilities: profile discovery, validation, runtime exposure, collision projection, and diagnostics.
 - [x] Keep skill acquisition, versioning, updating, and publication provider-owned; Bazframe consumes configured Agent Skills-compatible roots.
 - [x] Define profile, project, runtime, and effective-harness ownership for the first Pi slice (`docs/design.md`).
-- [x] Define Bazframe as the manager of profiles, direct skill membership, and profile application while Skillbook owns skill artifacts and lifecycle.
+- [x] Define Bazframe as the manager of profiles, provider-neutral direct-skill registrations and membership, and profile application while external providers own artifact bytes.
 - [x] Define and implement `use` semantics for global active-profile selection.
 - [x] Implement the `profile add/duplicate/remove/rename/use/list/current` lifecycle namespace with guarded destructive behavior.
-- [x] Define the first Skillbook-root resolution order and safe direct-membership representation (`docs/design.md`).
-- [x] Implement active-profile `add <skill>` and `remove <skill>` with verified symlink-only membership semantics.
+- [x] Replace the superseded external-library root with the provider-neutral `(default)` registration catalog under `BAZFRAME_HOME`.
+- [x] Implement exact `add skill <absolute-root>` / `remove skill <skill>` catalog lifecycle plus verified parallel profile membership links.
 - [x] Standardize the resource-oriented CLI overviews/help, available/profile skill listing, and missing-skill suggestions.
+- [x] Ship the tracked Agent Skills-compatible `bazframe` self-management skill as the generated package artifact `dist/skills/bazframe`.
 - [x] Add accessible terminal-aware color without changing piped or `NO_COLOR` output.
 - [x] Define first-slice Pi context ordering and native/profile skill-collision aliases.
 - [x] Implement the superseded first source-unit slice: profile-local schema-v1 live-root descriptors, bounded derivation, CLI-only membership, atomic source failures, and provider-owned preparation.
-- [x] Implement source-unit descriptor persistence and `bazframe profile sources` add/remove/overview without changing flat Skillbook membership, including no-follow descriptor reads, substitution revalidation, and retry pruning.
+- [x] Implement source-unit descriptor persistence and `bazframe profile sources` add/remove/overview without changing flat direct membership, including no-follow descriptor reads, substitution revalidation, and retry pruning.
 - [x] Implement no-follow, identity-checked bounded source-unit discovery, Pi 0.82-authoritative validation, complete-profile-set duplicate rejection, individual Pi projection, and separated status/`/bazframe info` reporting with acceptance coverage.
 - [x] Approve the replacement source lifecycle: explicit Bazframe build, immutable content-addressed snapshot activation, and snapshot-only runtime projection (`docs/design.md`).
 - [x] Replace redundant per-project opt-in registrations with project-over-global enable/disable policy and file-free enabled defaults.
@@ -23,7 +24,7 @@
 - [x] Define the first semantic composition contract: runtime-native repository harness material remains a separate provenance-preserving layer, while Bazframe adds the active personal profile without stored merging or repository-selected profile state.
 - [x] Define the bounded current-slice conflict policy: opaque provenance-preserving instruction layers with deterministic transport order and no semantic resolution; exact profile duplicate boundaries; Pi 0.82 runtime-cache aliases with truncation and visible no-fallback collision failure; and mandatory explicit behavior without profile-identity mutation for any future adapter.
 - [x] Decide against Bazframe inter-skill dependency schema or automation for the current product: the Agent Skills specification has no dependency field, shared resources/runtime packages remain provider-owned, and any future namespaced validate-only sidecar requires separate evidence and approval.
-- [x] Collaboratively spec and add the `swarm`, `long`, and `nsn` skills to the active Bazframe profile through Skillbook; `nsn` bundles its explanatory reference locally.
+- [x] Collaboratively spec and add the `swarm`, `long`, and `nsn` skills to the active Bazframe profile through their provider; `nsn` bundles its explanatory reference locally.
 
 ## Global managed sources and profile references
 
@@ -39,7 +40,7 @@
 ## Terminal UI
 
 - [x] Capture the initial no-sidebar, top-tab TUI interaction design (`docs/tui-design.md`).
-- [x] Define profile-local provider-neutral source-unit descriptors supporting zero or many direct memberships while preserving current Skillbook resolution; defer a global registry as unnecessary for the first slice.
+- [x] Define profile-local provider-neutral source-unit descriptors supporting zero or many direct memberships while preserving direct membership; defer a global registry as unnecessary for the first slice.
 - [x] Settle canonical source-unit identity and broken-root removal through strict versioned descriptors without following provider roots.
 - [x] Settle the first Settings-tab scope as structured read-only setup status.
 - [x] Pin Ink 7.1.1 with React 19.2.8 and load the TUI framework only from the lazy `bazframe tui` entry path (`docs/tui-framework-research.md`).
@@ -108,5 +109,5 @@
 ## Validation
 
 - [x] Specify and implement one approved minimal end-to-end user flow (`README.md`).
-- [x] Compare that flow with Skillbook, Vercel `skills`, Git, and a small wrapper (`docs/research/prototype-alternatives.md`).
+- [x] Compare that flow with external skill-library tools, Vercel `skills`, Git, and a small wrapper (`docs/research/prototype-alternatives.md`).
 - [x] Provisionally select TypeScript/Node ESM for the approved prototype; this is not a product-stack commitment.

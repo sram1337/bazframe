@@ -59,7 +59,13 @@ import {
 } from '../project/registration-store.js';
 import type { RepositoryProjectState } from '../project/registration.js';
 import { loadRootRepositoryInstructions } from '../project/repository-instructions.js';
-import { listAvailableSkills } from '../skills/skill-library.js';
+import {
+  addDefaultSkill,
+  DEFAULT_SKILL_SOURCE_LABEL,
+  inspectDefaultSkillCatalog,
+  removeDefaultSkill,
+  type DefaultSkillCatalogResult
+} from '../skills/default-skill-catalog.js';
 import {
   formatSourceDiagnostic,
   inspectGlobalSources,
@@ -293,11 +299,8 @@ async function runCommand(
     return EXIT_STATUS.success;
   }
   if (command.name === 'skills-overview') {
-    const result = await listAvailableSkills({
-      environment,
-      ...(dependencies.userHome === undefined ? {} : { userHome: dependencies.userHome })
-    });
-    writeStdout(formatSkillsOverview(result.skillsRoot, result.skillIds, stdoutColors));
+    const result = await inspectDefaultSkillCatalog(bazframeHome);
+    writeStdout(formatSkillsOverview(result.root, result.registrations, stdoutColors));
     for (const diagnostic of result.diagnostics) {
       writeStderr(`${stderrColors.warning('warning:')} ${diagnostic}\n`);
     }
@@ -411,17 +414,20 @@ async function runCommand(
     writeStdout(formatSourceReferenceResult(result, command.profileId !== undefined));
     return EXIT_STATUS.success;
   }
-  if (command.name === 'add' || command.name === 'remove') {
-    const options = {
-      bazframeHome,
-      environment,
-      ...(dependencies.userHome === undefined ? {} : { userHome: dependencies.userHome })
-    };
+  if (command.name === 'default-skill-add' || command.name === 'default-skill-remove') {
+    const result = command.name === 'default-skill-add'
+      ? await addDefaultSkill(bazframeHome, command.skillRoot)
+      : await removeDefaultSkill(bazframeHome, command.skillId);
+    writeStdout(formatDefaultSkillResult(result));
+    return EXIT_STATUS.success;
+  }
+  if (command.name === 'profile-skill-add' || command.name === 'profile-skill-remove') {
+    const options = { bazframeHome };
     const result = command.profileId === undefined
-      ? command.name === 'add'
+      ? command.name === 'profile-skill-add'
         ? await addActiveProfileSkill(options, command.skillId)
         : await removeActiveProfileSkill(options, command.skillId)
-      : command.name === 'add'
+      : command.name === 'profile-skill-add'
         ? await addProfileSkill(options, command.profileId, command.skillId)
         : await removeProfileSkill(options, command.profileId, command.skillId);
     writeStdout(formatMembershipResult(result, command.profileId !== undefined));
@@ -682,17 +688,20 @@ function formatProfilesOverview(
 
 function formatSkillsOverview(
   skillsRoot: string,
-  skillIds: readonly string[],
+  registrations: readonly { id: string; target: string }[],
   colors: CliColors
 ): string {
   return [
     colors.heading('Skills'),
-    `Source: ${skillsRoot}`,
-    ...(skillIds.length === 0
+    `Source: ${DEFAULT_SKILL_SOURCE_LABEL}`,
+    `Catalog: ${skillsRoot}`,
+    ...(registrations.length === 0
       ? [colors.muted('  (none)')]
-      : skillIds.map((skillId) => `  - ${skillId}`)),
+      : registrations.map((registration) => `  - ${registration.id} -> ${registration.target}`)),
     '',
     colors.heading('Commands:'),
+    colors.command('  bazframe add skill <absolute-root>'),
+    colors.command('  bazframe remove skill <skill>'),
     colors.command('  bazframe profile skills'),
     colors.command('  bazframe profile skills add <skill> [--profile <profile>]'),
     colors.command('  bazframe profile skills remove <skill> [--profile <profile>]'),
@@ -878,6 +887,16 @@ function formatProfileRename(result: ProfileRenameResult): string {
   ].join('\n');
 }
 
+function formatDefaultSkillResult(result: DefaultSkillCatalogResult): string {
+  return [
+    `Default skill registration: ${result.action}`,
+    `Skill: ${result.id}`,
+    `Registration: ${result.registrationPath}`,
+    `Target: ${result.target.length === 0 ? '(absent)' : result.target}`,
+    ''
+  ].join('\n');
+}
+
 function formatMembershipResult(
   result: ProfileSkillMembershipResult,
   explicitlyTargeted = false
@@ -946,8 +965,8 @@ function helpFor(topic: HelpTopic): string {
     case 'status': return STATUS_HELP;
     case 'tui': return TUI_HELP;
     case 'use': return USE_HELP;
-    case 'add': return ADD_HELP;
-    case 'remove': return REMOVE_HELP;
+    case 'add-skill': return ADD_HELP;
+    case 'remove-skill': return REMOVE_HELP;
     case 'profile': return PROFILE_HELP;
     case 'profile-add': return PROFILE_ADD_HELP;
     case 'profile-duplicate': return PROFILE_DUPLICATE_HELP;

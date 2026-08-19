@@ -113,14 +113,14 @@ The second command explains the safeguards around profile deletion.
 
 ### Add an individual skill
 
-An [Agent Skill](https://agentskills.io) is a directory containing a `SKILL.md` file with instructions for a coding agent. Direct skills are optional. The current workflow uses a Skillbook library: a local directory of installed skills at `~/.skillbook/skills` by default. You or a skill-library tool populate that directory; Bazframe manages profile membership.
+An [Agent Skill](https://agentskills.io) is a directory containing a `SKILL.md` file with instructions for a coding agent. Direct skills are optional. Bazframe's `(default)` catalog stores absolute links to canonical external skill directories; providers retain their content.
 
-To create a minimal local skill for this example:
+Create a minimal local skill for this example:
 
 ```bash
-SKILL_LIBRARY="${SKILLBOOK_LIBRARY:-$HOME/.skillbook}"
-mkdir -p "$SKILL_LIBRARY/skills/explain-code"
-cat > "$SKILL_LIBRARY/skills/explain-code/SKILL.md" <<'EOF'
+SKILL_ROOT="$HOME/example-skills/explain-code"
+mkdir -p "$SKILL_ROOT"
+cat > "$SKILL_ROOT/SKILL.md" <<'EOF'
 ---
 name: explain-code
 description: Explain unfamiliar code in plain language.
@@ -132,9 +132,10 @@ Describe the code's purpose, data flow, and important assumptions.
 EOF
 ```
 
-List the library and add the skill to the active profile:
+Register the external directory, then add the skill to the active profile:
 
 ```bash
+bazframe add skill "$SKILL_ROOT"
 bazframe skills
 bazframe profile skills add explain-code
 bazframe profile skills
@@ -142,7 +143,9 @@ bazframe profile skills
 
 After `/bazframe reload`, `/bazframe info` should report `Flat direct skills: 1` and list `explain-code`.
 
-Set `SKILLBOOK_LIBRARY` to another absolute library path when your skills live elsewhere.
+The catalog registration and profile membership are parallel links to the same provider directory. Provider changes are visible after a new Pi session or `/bazframe reload`. Remove the profile membership before `bazframe remove skill explain-code`; catalog removal is refused while any profile references it.
+
+Bazframe's npm package also ships `dist/skills/bazframe/`. Register that directory with `bazframe add skill <installed-package>/dist/skills/bazframe` when the self-management skill is desired.
 
 ### Add a related collection of skills
 
@@ -209,7 +212,8 @@ Press `?` for its key guide. In Skills, `o`/`c` expand or collapse a source and 
 |---|---|
 | Inspect profiles | `bazframe profiles` |
 | Select the active profile | `bazframe profile use <profile>` |
-| Browse individual skills | `bazframe skills` |
+| Register or remove individual skills | `bazframe add skill` / `bazframe remove skill` |
+| Browse registered individual skills | `bazframe skills` |
 | Manage profile skill membership | `bazframe profile skills` |
 | Manage shared skill collections | `bazframe sources` |
 | Manage profile source references | `bazframe profile sources` |
@@ -229,6 +233,7 @@ Bazframe stores user state in `~/.bazframe` by default:
 ```text
 ~/.bazframe/
 ├── active-profile
+├── skills/
 ├── profiles/
 ├── sources/
 ├── source-snapshots/
@@ -240,7 +245,6 @@ Bazframe stores user state in `~/.bazframe` by default:
 |---|---|---|
 | `BAZFRAME_HOME` | Bazframe profiles, settings, sources, snapshots, and adapter records | `~/.bazframe` |
 | `PI_CODING_AGENT_DIR` | Pi’s global configuration and extension directory | `~/.pi/agent` |
-| `SKILLBOOK_LIBRARY` | Library containing direct Agent Skills | `~/.skillbook` |
 
 Each override must be an absolute path.
 

@@ -39,9 +39,9 @@ describe('Bazframe TUI service', () => {
       .not.toThrow();
     expect(first.profiles.map((profile) => profile.id)).toEqual(['focused', 'reviewer']);
     expect(first.availableSkillSources).toMatchObject([{
-      id: 'skillbook',
+      id: 'default',
       artifactWritesSupported: false,
-      skills: [{ id: 'demo-skill', sourceId: 'skillbook' }]
+      skills: [{ id: 'demo-skill', sourceId: 'default' }]
     }]);
     expect(first.status).toMatchObject({
       state: 'available',
@@ -65,7 +65,7 @@ describe('Bazframe TUI service', () => {
     const fixture = await createFixture();
 
     await fixture.service.addMembership('reviewer', {
-      sourceId: 'skillbook',
+      sourceId: 'default',
       skillId: 'demo-skill'
     });
     expect(await readActiveProfile(fixture.home)).toBe('focused');
@@ -73,7 +73,7 @@ describe('Bazframe TUI service', () => {
       'home/profiles/reviewer/skills/demo-skill'
     ))).toBe(fixture.source);
     expect(await fixture.directory.readText(
-      'skillbook/skills/demo-skill/SKILL.md'
+      'provider/demo-skill/SKILL.md'
     )).toBe(skill('demo-skill'));
 
     const reviewer = (await fixture.service.loadDashboard()).profiles
@@ -89,7 +89,7 @@ describe('Bazframe TUI service', () => {
       'home/profiles/reviewer/skills/demo-skill'
     ))).rejects.toMatchObject({ code: 'ENOENT' });
     expect(await fixture.directory.readText(
-      'skillbook/skills/demo-skill/SKILL.md'
+      'provider/demo-skill/SKILL.md'
     )).toBe(skill('demo-skill'));
   });
 
@@ -123,8 +123,8 @@ describe('Bazframe TUI service', () => {
       skillId: 'demo-skill'
     })).rejects.toThrow(/Unknown skill source/u);
     await expect(fixture.service.removeMembership('reviewer', {
-      membershipId: 'focused:skillbook:demo-skill',
-      sourceId: 'skillbook',
+      membershipId: 'focused:default:demo-skill',
+      sourceId: 'default',
       skillId: 'demo-skill'
     })).rejects.toThrow(/Stale profile skill membership reference/u);
     expect((await lstat(fixture.directory.path('home/profiles/reviewer'))).isDirectory())
@@ -135,7 +135,7 @@ describe('Bazframe TUI service', () => {
     if (process.platform === 'win32') return;
     const fixture = await createFixture();
     await fixture.service.addMembership('reviewer', {
-      sourceId: 'skillbook',
+      sourceId: 'default',
       skillId: 'demo-skill'
     });
     const reviewed = (await fixture.service.loadDashboard()).profiles
@@ -174,39 +174,28 @@ describe('Bazframe TUI service', () => {
     expect(instructionsChanged.fingerprint).not.toBe(original.fingerprint);
 
     await fixture.service.addMembership('reviewer', {
-      sourceId: 'skillbook',
+      sourceId: 'default',
       skillId: 'demo-skill'
     });
     const membershipChanged = (await fixture.service.loadDashboard()).profiles
       .find((profile) => profile.id === 'reviewer')!.removalIdentity;
     expect(membershipChanged.fingerprint).not.toBe(instructionsChanged.fingerprint);
 
-    await fixture.directory.write('skillbook/skills/demo-skill/provider-only.txt', 'changed\n');
+    await fixture.directory.write('provider/demo-skill/provider-only.txt', 'changed\n');
     const providerChanged = (await fixture.service.loadDashboard()).profiles
       .find((profile) => profile.id === 'reviewer')!.removalIdentity;
     expect(providerChanged).toEqual(membershipChanged);
   });
 
-  it('projects display and canonical identity for a symlinked provider root', async () => {
-    if (process.platform === 'win32') return;
-    const directory = await temporary();
-    await directory.write('provider/skills/demo-skill/SKILL.md', skill('demo-skill'));
-    await symlink(directory.path('provider'), directory.path('library-link'), 'dir');
-    const service = createBazframeTuiService({
-      bazframeHome: directory.path('missing-home'),
-      bazframeVersion: '0.1.0-test',
-      cwd: directory.root,
-      environment: {
-        PI_CODING_AGENT_DIR: directory.path('pi-agent'),
-        SKILLBOOK_LIBRARY: directory.path('library-link')
-      },
-      userHome: directory.root
-    });
-
-    const source = (await service.loadDashboard()).availableSkillSources![0];
+  it('projects the physical default catalog and canonical external targets', async () => {
+    const fixture = await createFixture();
+    const source = (await fixture.service.loadDashboard()).availableSkillSources![0];
     expect(source).toMatchObject({
-      root: directory.path('library-link/skills'),
-      canonicalRoot: await realpath(directory.path('provider/skills'))
+      id: 'default',
+      label: '(default)',
+      root: fixture.directory.path('home/skills'),
+      canonicalRoot: await realpath(fixture.directory.path('home/skills')),
+      skills: [{ id: 'demo-skill', directory: fixture.source }]
     });
   });
 
@@ -289,12 +278,12 @@ describe('Bazframe TUI service', () => {
     }));
   });
 
-  it('loads authoritative Skillbook and immutable managed SKILL.md previews', async () => {
+  it('loads authoritative (default) and immutable managed SKILL.md previews', async () => {
     const fixture = await createFixture();
-    const skillbook = await fixture.service.loadSkillPreview({
-      sourceId: 'skillbook', skillId: 'demo-skill'
+    const defaultSkill = await fixture.service.loadSkillPreview({
+      sourceId: 'default', skillId: 'demo-skill'
     });
-    expect(skillbook.contents).toContain('# Skill');
+    expect(defaultSkill.contents).toContain('# Skill');
 
     const sourceRoot = await fixture.directory.mkdir('preview');
     await fixture.directory.write('preview/demo/SKILL.md', skill('managed-demo'));
@@ -378,60 +367,36 @@ describe('Bazframe TUI service', () => {
       bazframeHome: home,
       bazframeVersion: '0.1.0-test',
       cwd: directory.root,
-      environment: {
-        PI_CODING_AGENT_DIR: directory.path('pi-agent'),
-        SKILLBOOK_LIBRARY: directory.path('missing-library')
-      },
+      environment: { PI_CODING_AGENT_DIR: directory.path('pi-agent') },
       userHome: directory.root
     });
 
     await expect(service.loadDashboard()).resolves.toMatchObject({
       profiles: [],
-      availableSkillSources: [{ id: 'skillbook', skills: [] }],
+      availableSkillSources: [{ id: 'default', skills: [] }],
       status: { state: 'available' }
     });
     await expect(lstat(home)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it('keeps profiles and setup status available when source configuration is malformed', async () => {
+  it('keeps profiles and setup status available when the default catalog root is malformed', async () => {
     if (process.platform === 'win32') return;
     const fixture = await createFixture();
-    await symlink(fixture.source, fixture.directory.path(
-      'home/profiles/reviewer/skills/demo-skill'
-    ));
-    const service = createBazframeTuiService({
-      ...fixture.options,
-      environment: {
-        ...fixture.options.environment,
-        SKILLBOOK_LIBRARY: 'relative-library'
-      }
-    });
+    await symlink(fixture.source, fixture.directory.path('home/profiles/reviewer/skills/demo-skill'));
+    await rm(fixture.directory.path('home/skills'), { recursive: true });
+    await symlink(fixture.directory.path('provider'), fixture.directory.path('home/skills'));
 
-    const dashboard = await service.loadDashboard();
+    const dashboard = await fixture.service.loadDashboard();
 
     expect(dashboard.profiles.map((profile) => profile.id)).toEqual(['focused', 'reviewer']);
     expect(dashboard.availableSkillSources).toEqual([]);
-    expect(dashboard.status).toMatchObject({
-      state: 'available',
-      value: {
-        adapter: { state: 'missing' },
-        repository: { kind: 'outside-git' },
-        effectiveBehavior: { kind: 'outside-git', enabled: true, reason: 'global-enabled' },
-        profile: { state: 'ready', id: 'focused' }
-      }
-    });
+    expect(dashboard.status).toMatchObject({ state: 'available' });
     expect(dashboard.diagnostics).toContainEqual(expect.objectContaining({
-      id: 'skillbook-source',
-      message: expect.stringContaining('SKILLBOOK_LIBRARY must be an absolute path')
+      id: 'default-skill-source',
+      message: expect.stringContaining('physical directory')
     }));
     expect(dashboard.profiles.find((profile) => profile.id === 'reviewer')?.memberships)
-      .toMatchObject([{
-        skillId: 'demo-skill',
-        target: fixture.source,
-        kind: 'unmanaged',
-        manageable: false,
-        diagnostic: expect.stringContaining('membership authority cannot be verified')
-      }]);
+      .toMatchObject([{ skillId: 'demo-skill', kind: 'unmanaged', manageable: false }]);
   });
 
   it('keeps profile and skill reads available when setup inspection fails', async () => {
@@ -462,21 +427,22 @@ async function createFixture(): Promise<{
 }> {
   const directory = await temporary();
   const home = directory.path('home');
-  const library = directory.path('skillbook');
-  const source = directory.path('skillbook/skills/demo-skill');
+  let source = directory.path('provider/demo-skill');
   await directory.write('home/profiles/focused/AGENTS.md', 'focused\n');
   await directory.mkdir('home/profiles/focused/skills');
   await directory.write('home/profiles/reviewer/AGENTS.md', 'reviewer\n');
   await directory.mkdir('home/profiles/reviewer/skills');
-  await directory.write('skillbook/skills/demo-skill/SKILL.md', skill('demo-skill'));
+  await directory.write('provider/demo-skill/SKILL.md', skill('demo-skill'));
+  source = await realpath(source);
+  await directory.mkdir('home/skills');
+  await symlink(source, directory.path('home/skills/demo-skill'), 'dir');
   await writeActiveProfile(home, 'focused');
   const options = {
     bazframeHome: home,
     bazframeVersion: '0.1.0-test',
     cwd: directory.root,
     environment: {
-      PI_CODING_AGENT_DIR: directory.path('pi-agent'),
-      SKILLBOOK_LIBRARY: library
+      PI_CODING_AGENT_DIR: directory.path('pi-agent')
     },
     userHome: directory.root
   };

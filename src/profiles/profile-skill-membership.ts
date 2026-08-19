@@ -1,19 +1,21 @@
-import { lstat, readlink, symlink, unlink } from 'node:fs/promises';
-import { isAbsolute, join, resolve } from 'node:path';
+import { constants } from 'node:fs';
+import { lstat, open, readlink, symlink, unlink, type FileHandle } from 'node:fs/promises';
+import { isAbsolute, join } from 'node:path';
 import { readUtf8InstructionFile } from '../core/content.js';
 import { BazframeError, errorCode } from '../core/errors.js';
+import {
+  inspectDefaultSkillCatalog,
+  readDefaultSkillRegistration,
+  readDefaultSkillRegistrationLink,
+  suggestSkillIds
+} from '../skills/default-skill-catalog.js';
 import { assertSafeSkillId } from '../skills/skill-id.js';
-import { readSkillDeclaredName, SKILL_DEFINITION } from '../skills/skill-metadata.js';
-import { listAvailableSkills, suggestSkillIds } from '../skills/skill-library.js';
 import { withStateLock } from '../state/lock.js';
-import { resolveSkillbookLibrary } from '../state/paths.js';
 import { assertSafeProfileId } from './profile-id.js';
 import { profileDirectory, readActiveProfile } from './profile-store.js';
 
 export { readSkillDeclaredName } from '../skills/skill-metadata.js';
-
 export type ProfileSkillMembershipAction = 'added' | 'current' | 'removed' | 'absent';
-
 export interface ProfileSkillMembershipResult {
   action: ProfileSkillMembershipAction;
   profileId: string;
@@ -22,125 +24,82 @@ export interface ProfileSkillMembershipResult {
   membershipPath: string;
 }
 
+/** Deterministic namespace-substitution seam used only by lifecycle tests. */
+export interface ProfileSkillMembershipTestHooks {
+  beforeCommit?: () => void | Promise<void>;
+}
 export interface ProfileSkillMembershipOptions {
   bazframeHome: string;
-  environment: NodeJS.ProcessEnv;
-  userHome?: string;
+  testHooks?: ProfileSkillMembershipTestHooks;
 }
 
-export async function addActiveProfileSkill(
-  options: ProfileSkillMembershipOptions,
-  skillId: string
-): Promise<ProfileSkillMembershipResult> {
+interface DirectoryIdentity { device: bigint; inode: bigint }
+interface OpenDirectory { path: string; handle: FileHandle; identity: DirectoryIdentity }
+interface MembershipPaths {
+  profileId: string;
+  membershipPath: string;
+  parents: OpenDirectory[];
+}
+
+export async function addActiveProfileSkill(options: ProfileSkillMembershipOptions, skillId: string): Promise<ProfileSkillMembershipResult> {
   assertSafeSkillId(skillId);
   return addProfileSkillFor(options, undefined, skillId);
 }
-
-export async function addProfileSkill(
-  options: ProfileSkillMembershipOptions,
-  profileId: string,
-  skillId: string
-): Promise<ProfileSkillMembershipResult> {
-  assertSafeProfileId(profileId);
-  assertSafeSkillId(skillId);
+export async function addProfileSkill(options: ProfileSkillMembershipOptions, profileId: string, skillId: string): Promise<ProfileSkillMembershipResult> {
+  assertSafeProfileId(profileId); assertSafeSkillId(skillId);
   return addProfileSkillFor(options, profileId, skillId);
 }
-
-async function addProfileSkillFor(
-  options: ProfileSkillMembershipOptions,
-  profileId: string | undefined,
-  skillId: string
-): Promise<ProfileSkillMembershipResult> {
-  return withProfileMembershipLock(
-    options,
-    profileId,
-    skillId,
-    'bazframe profile skills add',
-    async (paths) => {
-      await assertAvailableSkillSource(options, paths.sourceDirectory, skillId);
-      const declaredName = await readSkillDeclaredName(paths.sourceDirectory);
-      if (declaredName !== skillId) {
-        throw new BazframeError(
-          'SKILL_NAME_MISMATCH',
-          `Skillbook skill ${JSON.stringify(skillId)} declares frontmatter name ${JSON.stringify(declaredName)} in ${join(paths.sourceDirectory, SKILL_DEFINITION)}.`
-        );
+async function addProfileSkillFor(options: ProfileSkillMembershipOptions, profileId: string | undefined, skillId: string): Promise<ProfileSkillMembershipResult> {
+  return withProfileMembershipLock(options, profileId, skillId, 'bazframe profile skills add', async (paths) => {
+    const registration = await resolveRegistration(options.bazframeHome, skillId);
+    const existing = await inspectMembership(paths.membershipPath, registration.target);
+    if (existing === 'current') return result(paths, registration.target, skillId, 'current');
+    await options.testHooks?.beforeCommit?.();
+    await assertParentsStable(paths.parents);
+    const current = await readDefaultSkillRegistration(options.bazframeHome, skillId);
+    if (current.target !== registration.target) throw changedRegistration(skillId);
+    await assertParentsStable(paths.parents);
+    try { await symlink(registration.target, paths.membershipPath, 'dir'); }
+    catch (error) {
+      if (errorCode(error) === 'EEXIST') {
+        const raced = await inspectMembership(paths.membershipPath, registration.target);
+        if (raced === 'current') return result(paths, registration.target, skillId, 'current');
       }
-
-      const existing = await inspectMembership(paths.membershipPath, paths.sourceDirectory);
-      if (existing === 'current') return result(paths, skillId, 'current');
-
-      try {
-        await symlink(paths.sourceDirectory, paths.membershipPath, 'dir');
-      } catch (error) {
-        if (errorCode(error) === 'EEXIST') {
-          const raced = await inspectMembership(paths.membershipPath, paths.sourceDirectory);
-          if (raced === 'current') return result(paths, skillId, 'current');
-        }
-        if (error instanceof BazframeError) throw error;
-        throw new BazframeError(
-          'PROFILE_SKILL_ADD_FAILED',
-          `Could not add profile skill membership ${paths.membershipPath}${formatErrorCode(error)}`,
-          { cause: error }
-        );
-      }
-      return result(paths, skillId, 'added');
+      if (error instanceof BazframeError) throw error;
+      throw new BazframeError('PROFILE_SKILL_ADD_FAILED', `Could not add profile skill membership ${paths.membershipPath}${formatCode(error)}`, { cause: error });
     }
-  );
+    await assertParentsStable(paths.parents);
+    return result(paths, registration.target, skillId, 'added');
+  });
 }
 
-export async function removeActiveProfileSkill(
-  options: ProfileSkillMembershipOptions,
-  skillId: string
-): Promise<ProfileSkillMembershipResult> {
+export async function removeActiveProfileSkill(options: ProfileSkillMembershipOptions, skillId: string): Promise<ProfileSkillMembershipResult> {
   assertSafeSkillId(skillId);
   return removeProfileSkillFor(options, undefined, skillId);
 }
-
-export async function removeProfileSkill(
-  options: ProfileSkillMembershipOptions,
-  profileId: string,
-  skillId: string
-): Promise<ProfileSkillMembershipResult> {
-  assertSafeProfileId(profileId);
-  assertSafeSkillId(skillId);
+export async function removeProfileSkill(options: ProfileSkillMembershipOptions, profileId: string, skillId: string): Promise<ProfileSkillMembershipResult> {
+  assertSafeProfileId(profileId); assertSafeSkillId(skillId);
   return removeProfileSkillFor(options, profileId, skillId);
 }
-
-async function removeProfileSkillFor(
-  options: ProfileSkillMembershipOptions,
-  profileId: string | undefined,
-  skillId: string
-): Promise<ProfileSkillMembershipResult> {
-  return withProfileMembershipLock(
-    options,
-    profileId,
-    skillId,
-    'bazframe profile skills remove',
-    async (paths) => {
-      const existing = await inspectMembership(paths.membershipPath, paths.sourceDirectory);
-      if (existing === 'absent') return result(paths, skillId, 'absent');
-
-      // Narrow the external-writer race before unlinking. Bazframe writers also hold both locks.
-      await inspectMembership(paths.membershipPath, paths.sourceDirectory);
-      try {
-        await unlink(paths.membershipPath);
-      } catch (error) {
-        if (errorCode(error) === 'ENOENT') return result(paths, skillId, 'absent');
-        throw new BazframeError(
-          'PROFILE_SKILL_REMOVE_FAILED',
-          `Could not remove profile skill membership ${paths.membershipPath}${formatErrorCode(error)}`,
-          { cause: error }
-        );
-      }
-      return result(paths, skillId, 'removed');
+async function removeProfileSkillFor(options: ProfileSkillMembershipOptions, profileId: string | undefined, skillId: string): Promise<ProfileSkillMembershipResult> {
+  return withProfileMembershipLock(options, profileId, skillId, 'bazframe profile skills remove', async (paths) => {
+    const registration = await readDefaultSkillRegistrationLink(options.bazframeHome, skillId);
+    const existing = await inspectMembership(paths.membershipPath, registration.target);
+    if (existing === 'absent') return result(paths, registration.target, skillId, 'absent');
+    await options.testHooks?.beforeCommit?.();
+    await assertParentsStable(paths.parents);
+    const current = await readDefaultSkillRegistrationLink(options.bazframeHome, skillId);
+    if (current.target !== registration.target) throw changedRegistration(skillId);
+    await inspectMembership(paths.membershipPath, registration.target);
+    await assertParentsStable(paths.parents);
+    try { await unlink(paths.membershipPath); }
+    catch (error) {
+      if (errorCode(error) === 'ENOENT') return result(paths, registration.target, skillId, 'absent');
+      throw new BazframeError('PROFILE_SKILL_REMOVE_FAILED', `Could not remove profile skill membership ${paths.membershipPath}${formatCode(error)}`, { cause: error });
     }
-  );
-}
-
-interface MembershipPaths {
-  profileId: string;
-  sourceDirectory: string;
-  membershipPath: string;
+    await assertParentsStable(paths.parents);
+    return result(paths, registration.target, skillId, 'removed');
+  });
 }
 
 async function withProfileMembershipLock<T>(
@@ -150,162 +109,105 @@ async function withProfileMembershipLock<T>(
   command: string,
   operation: (paths: MembershipPaths) => Promise<T>
 ): Promise<T> {
-  const stateLock = join(options.bazframeHome, 'locks', 'state.lock');
-  return withStateLock(
-    stateLock,
-    {
-      command,
-      target: requestedProfileId === undefined
-        ? join(options.bazframeHome, 'active-profile')
-        : profileDirectory(options.bazframeHome, requestedProfileId)
-    },
-    async () => {
-      const profileId = requestedProfileId ?? await readActiveProfile(options.bazframeHome);
-      const directory = profileDirectory(options.bazframeHome, profileId);
-      const skillsDirectory = join(directory, 'skills');
-      const library = resolveSkillbookLibrary(options.environment, options.userHome);
-      const sourceDirectory = resolve(library, 'skills', skillId);
-      const membershipPath = join(skillsDirectory, skillId);
-      const paths = { profileId, sourceDirectory, membershipPath };
-
-      return withStateLock(
-        join(options.bazframeHome, 'locks', 'profiles', `${profileId}.skills.lock`),
-        { command, target: membershipPath },
-        async () => {
-          await assertPhysicalDirectory(
-            join(options.bazframeHome, 'profiles'),
-            'Profiles directory'
-          );
-          await assertPhysicalDirectory(
-            directory,
-            requestedProfileId === undefined
-              ? `Active profile ${JSON.stringify(profileId)}`
-              : `Profile ${JSON.stringify(profileId)}`
-          );
-          await readUtf8InstructionFile(
-            join(directory, 'AGENTS.md'),
-            `Profile ${JSON.stringify(profileId)} instructions`
-          );
-          await assertPhysicalDirectory(skillsDirectory, 'Profile skills directory');
-          return operation(paths);
-        },
-        { managedRoot: options.bazframeHome }
-      );
-    },
-    { managedRoot: options.bazframeHome }
-  );
+  return withStateLock(join(options.bazframeHome, 'locks', 'state.lock'), {
+    command,
+    target: requestedProfileId === undefined ? join(options.bazframeHome, 'active-profile') : profileDirectory(options.bazframeHome, requestedProfileId)
+  }, async () => {
+    const profileId = requestedProfileId ?? await readActiveProfile(options.bazframeHome);
+    const directory = profileDirectory(options.bazframeHome, profileId);
+    const skillsDirectory = join(directory, 'skills');
+    const membershipPath = join(skillsDirectory, skillId);
+    return withStateLock(join(options.bazframeHome, 'locks', 'profiles', `${profileId}.skills.lock`), { command, target: membershipPath }, async () => {
+      const parents: OpenDirectory[] = [];
+      try {
+        parents.push(await openPhysicalDirectory(join(options.bazframeHome, 'profiles'), 'Profiles directory'));
+        parents.push(await openPhysicalDirectory(directory, requestedProfileId === undefined ? `Active profile ${JSON.stringify(profileId)}` : `Profile ${JSON.stringify(profileId)}`));
+        await readUtf8InstructionFile(join(directory, 'AGENTS.md'), `Profile ${JSON.stringify(profileId)} instructions`);
+        parents.push(await openPhysicalDirectory(skillsDirectory, 'Profile skills directory'));
+        await assertParentsStable(parents);
+        return await operation({ profileId, membershipPath, parents });
+      } finally {
+        for (const parent of [...parents].reverse()) await parent.handle.close().catch(() => undefined);
+      }
+    }, { managedRoot: options.bazframeHome });
+  }, { managedRoot: options.bazframeHome });
 }
 
-async function assertAvailableSkillSource(
-  options: ProfileSkillMembershipOptions,
-  sourceDirectory: string,
-  skillId: string
-): Promise<void> {
-  let metadata;
-  try {
-    metadata = await lstat(sourceDirectory);
-  } catch (error) {
-    if (errorCode(error) === 'ENOENT') {
-      const available = await listAvailableSkills(options);
+async function resolveRegistration(home: string, skillId: string) {
+  try { return await readDefaultSkillRegistration(home, skillId); }
+  catch (error) {
+    if (error instanceof BazframeError && error.code === 'DEFAULT_SKILL_NOT_FOUND') {
+      const available = await inspectDefaultSkillCatalog(home);
       const suggestions = suggestSkillIds(skillId, available.skillIds);
       const suggestion = suggestions.length === 0
-        ? ' Run `bazframe skills` to list available skills.'
-        : suggestions.length === 1
-          ? ` Did you mean ${JSON.stringify(suggestions[0])}?`
-          : ` Did you mean one of ${suggestions.map((candidate) => JSON.stringify(candidate)).join(', ')}?`;
-      throw new BazframeError(
-        'SKILL_NOT_FOUND',
-        `Skillbook skill ${JSON.stringify(skillId)} does not exist at ${sourceDirectory}.${suggestion}`,
-        { cause: error }
-      );
+        ? ' Run `bazframe skills` to list registered skills or `bazframe add skill <absolute-root>`.'
+        : suggestions.length === 1 ? ` Did you mean ${JSON.stringify(suggestions[0])}?`
+          : ` Did you mean one of ${suggestions.map((item) => JSON.stringify(item)).join(', ')}?`;
+      throw new BazframeError('SKILL_NOT_FOUND', `Default skill ${JSON.stringify(skillId)} is not registered.${suggestion}`, { cause: error });
     }
-    throw new BazframeError(
-      'DIRECTORY_READ_FAILED',
-      `Skillbook skill must be an existing physical directory: ${sourceDirectory}${formatErrorCode(error)}`,
-      { cause: error }
-    );
-  }
-  if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
-    throw new BazframeError(
-      'DIRECTORY_NOT_PHYSICAL',
-      `Skillbook skill must be an existing physical directory: ${sourceDirectory}`
-    );
+    throw error;
   }
 }
 
-async function assertPhysicalDirectory(path: string, label: string): Promise<void> {
+async function openPhysicalDirectory(path: string, label: string): Promise<OpenDirectory> {
   let metadata;
-  try {
-    metadata = await lstat(path);
-  } catch (error) {
-    throw new BazframeError(
-      'DIRECTORY_READ_FAILED',
-      `${label} must be an existing physical directory: ${path}${formatErrorCode(error)}`,
-      { cause: error }
-    );
+  try { metadata = await lstat(path, { bigint: true }); }
+  catch (error) {
+    throw new BazframeError('DIRECTORY_READ_FAILED', `${label} must be an existing physical directory: ${path}${formatCode(error)}`, { cause: error });
   }
   if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
-    throw new BazframeError(
-      'DIRECTORY_NOT_PHYSICAL',
-      `${label} must be an existing physical directory: ${path}`
-    );
+    throw new BazframeError('DIRECTORY_NOT_PHYSICAL', `${label} must be an existing physical directory: ${path}`);
+  }
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    const opened = await handle.stat({ bigint: true });
+    const directory = { path, handle, identity: identity(metadata) };
+    if (!opened.isDirectory() || !sameIdentity(identity(opened), directory.identity)) throw new Error('directory identity changed');
+    await assertDirectoryStable(directory);
+    return directory;
+  } catch (error) {
+    await handle?.close().catch(() => undefined);
+    if (error instanceof BazframeError) throw error;
+    throw new BazframeError('DIRECTORY_NOT_PHYSICAL', `${label} must remain a stable physical directory: ${path}${formatCode(error)}`, { cause: error });
   }
 }
 
-async function inspectMembership(
-  membershipPath: string,
-  expectedTarget: string
-): Promise<'absent' | 'current'> {
+async function assertParentsStable(parents: readonly OpenDirectory[]): Promise<void> {
+  for (const parent of [...parents].reverse()) await assertDirectoryStable(parent);
+}
+
+async function assertDirectoryStable(directory: OpenDirectory): Promise<void> {
+  const [opened, current] = await Promise.all([
+    directory.handle.stat({ bigint: true }), lstat(directory.path, { bigint: true })
+  ]);
+  if (!opened.isDirectory() || current.isSymbolicLink() || !current.isDirectory()
+    || !sameIdentity(identity(opened), directory.identity) || !sameIdentity(identity(current), directory.identity)) {
+    throw new BazframeError('PROFILE_SKILL_NAMESPACE_CHANGED', `Profile skill namespace changed while in use: ${directory.path}`);
+  }
+}
+
+async function inspectMembership(membershipPath: string, expectedTarget: string): Promise<'absent' | 'current'> {
   let metadata;
-  try {
-    metadata = await lstat(membershipPath);
-  } catch (error) {
+  try { metadata = await lstat(membershipPath); }
+  catch (error) {
     if (errorCode(error) === 'ENOENT') return 'absent';
-    throw new BazframeError(
-      'PROFILE_SKILL_READ_FAILED',
-      `Could not inspect profile skill entry: ${membershipPath}${formatErrorCode(error)}`,
-      { cause: error }
-    );
+    throw new BazframeError('PROFILE_SKILL_READ_FAILED', `Could not inspect profile skill entry: ${membershipPath}${formatCode(error)}`, { cause: error });
   }
-  if (!metadata.isSymbolicLink()) {
-    throw unmanagedMembership(membershipPath, 'is a physical entry');
-  }
-
+  if (!metadata.isSymbolicLink()) throw unmanagedMembership(membershipPath, 'is a physical entry');
   let target: string;
-  try {
-    target = await readlink(membershipPath);
-  } catch (error) {
-    throw new BazframeError(
-      'PROFILE_SKILL_READ_FAILED',
-      `Could not read profile skill membership link: ${membershipPath}${formatErrorCode(error)}`,
-      { cause: error }
-    );
-  }
-  if (!isAbsolute(target)) {
-    throw unmanagedMembership(membershipPath, `uses a relative target ${JSON.stringify(target)}`);
-  }
-  if (resolve(target) !== expectedTarget) {
-    throw unmanagedMembership(membershipPath, `targets ${JSON.stringify(target)}`);
-  }
+  try { target = await readlink(membershipPath); }
+  catch (error) { throw new BazframeError('PROFILE_SKILL_READ_FAILED', `Could not read profile skill membership link: ${membershipPath}${formatCode(error)}`, { cause: error }); }
+  if (!isAbsolute(target)) throw unmanagedMembership(membershipPath, `uses a relative target ${JSON.stringify(target)}`);
+  if (target !== expectedTarget) throw unmanagedMembership(membershipPath, `targets ${JSON.stringify(target)}`);
   return 'current';
 }
 
-function result(
-  paths: MembershipPaths,
-  skillId: string,
-  action: ProfileSkillMembershipAction
-): ProfileSkillMembershipResult {
-  return { action, skillId, ...paths };
+function identity(metadata: { dev: bigint; ino: bigint }): DirectoryIdentity { return { device: metadata.dev, inode: metadata.ino }; }
+function sameIdentity(left: DirectoryIdentity, right: DirectoryIdentity): boolean { return left.device === right.device && left.inode === right.inode; }
+function result(paths: MembershipPaths, sourceDirectory: string, skillId: string, action: ProfileSkillMembershipAction): ProfileSkillMembershipResult {
+  return { action, skillId, sourceDirectory, profileId: paths.profileId, membershipPath: paths.membershipPath };
 }
-
-function unmanagedMembership(path: string, detail: string): BazframeError {
-  return new BazframeError(
-    'PROFILE_SKILL_ENTRY_UNMANAGED',
-    `Refusing to change unmanaged profile skill entry ${path}: it ${detail}.`
-  );
-}
-
-function formatErrorCode(error: unknown): string {
-  const code = errorCode(error);
-  return code === undefined ? '' : ` (${code})`;
-}
+function unmanagedMembership(path: string, detail: string): BazframeError { return new BazframeError('PROFILE_SKILL_ENTRY_UNMANAGED', `Refusing to change unmanaged profile skill entry ${path}: it ${detail}.`); }
+function changedRegistration(skillId: string): BazframeError { return new BazframeError('DEFAULT_SKILL_CHANGED', `Default skill registration changed while updating profile membership: ${skillId}.`); }
+function formatCode(error: unknown): string { const code = errorCode(error); return code === undefined ? '' : ` (${code})`; }

@@ -24,7 +24,13 @@ import {
   selectProfile
 } from '../profiles/profile-store.js';
 import { assertSafeSkillId, isSafeSkillId } from '../skills/skill-id.js';
-import { listAvailableSkills } from '../skills/skill-library.js';
+import {
+  DEFAULT_SKILL_SOURCE_ID,
+  DEFAULT_SKILL_SOURCE_LABEL,
+  inspectDefaultSkillCatalog,
+  readDefaultSkillRegistration,
+  type DefaultSkillRegistration
+} from '../skills/default-skill-catalog.js';
 import { inspectStatus, type StatusInspection } from '../status/status.js';
 import {
   formatSourceDiagnostic,
@@ -195,10 +201,10 @@ export interface BazframeTuiService {
 export interface BazframeTuiServiceOptions extends ProfileSkillMembershipOptions {
   bazframeVersion: string;
   cwd: string;
+  environment: NodeJS.ProcessEnv;
+  userHome?: string;
   adapterArtifactUrl?: URL;
 }
-
-const SKILLBOOK_SOURCE_ID = 'skillbook';
 
 export function createBazframeTuiService(
   options: BazframeTuiServiceOptions
@@ -295,15 +301,13 @@ async function loadSkillPreview(
 ): Promise<SkillPreview> {
   assertSafeSkillId(reference.skillId);
   let definitionPath: string | undefined;
-  if (reference.sourceId === SKILLBOOK_SOURCE_ID) {
-    const listed = await listAvailableSkills(options);
-    if (!listed.skillIds.includes(reference.skillId)) {
-      throw new BazframeError(
-        'SKILL_PREVIEW_STALE',
-        `Skill is no longer available from Skillbook: ${reference.skillId}`
-      );
+  if (reference.sourceId === DEFAULT_SKILL_SOURCE_ID) {
+    try {
+      const registration = await readDefaultSkillRegistration(options.bazframeHome, reference.skillId);
+      definitionPath = join(registration.target, 'SKILL.md');
+    } catch (error) {
+      throw new BazframeError('SKILL_PREVIEW_STALE', `Skill is no longer available from (default): ${reference.skillId}`, { cause: error });
     }
-    definitionPath = join(listed.skillsRoot, reference.skillId, 'SKILL.md');
   } else if (reference.sourceId.startsWith('managed:')) {
     const sourceId = reference.sourceId.slice('managed:'.length);
     if (!isSafeSkillId(sourceId)) {
@@ -438,7 +442,7 @@ async function inspectDashboard(
 ): Promise<DashboardSnapshot> {
   const diagnostics: DashboardDiagnostic[] = [];
   const activeProfileId = await inspectActiveProfile(options.bazframeHome, diagnostics);
-  const skillbook = await inspectSkillbookSource(options, diagnostics);
+  const defaultCatalog = await inspectDefaultSkillSource(options, diagnostics);
   const global = await inspectGlobalSources(options.bazframeHome);
   for (const item of global.diagnostics) diagnostics.push({ id: `managed-source-${item.sourceId}`, severity: 'error', message: `${item.sourceId}:${item.path} ${item.category}` });
   const managedSources: ManagedSourceSummary[] = [];
@@ -489,13 +493,13 @@ async function inspectDashboard(
   }
   const profiles = await inspectProfiles(
     options.bazframeHome,
-    skillbook?.root,
+    defaultCatalog?.registrations ?? [],
     activeProfileId,
     global,
     diagnostics
   );
   const status = await inspectSetupStatus(options, diagnostics);
-  const availableSkillSources = skillbook === undefined ? [] : [skillbook];
+  const availableSkillSources = defaultCatalog === undefined ? [] : [defaultCatalog.source];
   return {
     revision,
     ...(activeProfileId === undefined ? {} : { activeProfileId }),
@@ -546,46 +550,42 @@ async function inspectActiveProfile(
   }
 }
 
-async function inspectSkillbookSource(
+async function inspectDefaultSkillSource(
   options: BazframeTuiServiceOptions,
   diagnostics: DashboardDiagnostic[]
-): Promise<SkillSourceSummary | undefined> {
+): Promise<{ source: SkillSourceSummary; registrations: DefaultSkillRegistration[] } | undefined> {
   try {
-    const listed = await listAvailableSkills(options);
+    const listed = await inspectDefaultSkillCatalog(options.bazframeHome);
     for (const [index, message] of listed.diagnostics.entries()) {
-      diagnostics.push({
-        id: `skillbook-${index}`,
-        severity: 'warning',
-        message
-      });
+      diagnostics.push({ id: `default-skill-${index}`, severity: 'warning', message });
     }
     let canonicalRoot: string | undefined;
-    try {
-      canonicalRoot = await realpath(listed.skillsRoot);
-    } catch (error) {
-      if (errorCode(error) !== 'ENOENT') throw error;
-    }
+    try { canonicalRoot = await realpath(listed.root); }
+    catch (error) { if (errorCode(error) !== 'ENOENT') throw error; }
     return {
-      id: SKILLBOOK_SOURCE_ID,
-      label: 'Skillbook',
-      root: listed.skillsRoot,
-      ...(canonicalRoot === undefined ? {} : { canonicalRoot }),
-      artifactWritesSupported: false,
-      skills: listed.skillIds.map((id) => ({
-        id,
-        sourceId: SKILLBOOK_SOURCE_ID,
-        directory: join(listed.skillsRoot, id)
-      }))
+      registrations: listed.registrations,
+      source: {
+        id: DEFAULT_SKILL_SOURCE_ID,
+        label: DEFAULT_SKILL_SOURCE_LABEL,
+        root: listed.root,
+        ...(canonicalRoot === undefined ? {} : { canonicalRoot }),
+        artifactWritesSupported: false,
+        skills: listed.registrations.map((registration) => ({
+          id: registration.id,
+          sourceId: DEFAULT_SKILL_SOURCE_ID,
+          directory: registration.target
+        }))
+      }
     };
   } catch (error) {
-    diagnostics.push(diagnostic('skillbook-source', error));
+    diagnostics.push(diagnostic('default-skill-source', error));
     return undefined;
   }
 }
 
 async function inspectProfiles(
   bazframeHome: string,
-  skillbookSkillsRoot: string | undefined,
+  defaultRegistrations: readonly DefaultSkillRegistration[],
   activeProfileId: string | undefined,
   globalSources: { sources: GlobalSourceInspection[]; diagnostics: SourceDiagnostic[] },
   diagnostics: DashboardDiagnostic[]
@@ -657,7 +657,7 @@ async function inspectProfiles(
           membershipWritable = true;
           memberships = await inspectMemberships(
             skillsDirectory,
-            skillbookSkillsRoot,
+            defaultRegistrations,
             diagnostics,
             entry.name
           );
@@ -743,7 +743,7 @@ function inspectReferenceAvailability(
 
 async function inspectMemberships(
   skillsDirectory: string,
-  skillbookSkillsRoot: string | undefined,
+  defaultRegistrations: readonly DefaultSkillRegistration[],
   diagnostics: DashboardDiagnostic[],
   profileId: string
 ): Promise<DirectMembership[]> {
@@ -787,13 +787,12 @@ async function inspectMemberships(
         continue;
       }
       const target = await readlink(path);
-      const managed = skillbookSkillsRoot !== undefined
-        && isAbsolute(target)
-        && resolve(target) === resolve(skillbookSkillsRoot, entry.name);
+      const registration = defaultRegistrations.find((item) => item.id === entry.name);
+      const managed = registration !== undefined && isAbsolute(target) && target === registration.target;
       memberships.push({
         id: entry.name,
         membershipId,
-        ...(managed ? { sourceId: SKILLBOOK_SOURCE_ID } : {}),
+        ...(managed ? { sourceId: DEFAULT_SKILL_SOURCE_ID } : {}),
         skillId: entry.name,
         path,
         target,
@@ -802,8 +801,8 @@ async function inspectMemberships(
         ...(managed
           ? {}
           : {
-              diagnostic: skillbookSkillsRoot === undefined
-                ? 'Skillbook source root is unavailable; membership authority cannot be verified.'
+              diagnostic: registration === undefined
+                ? '(default) registration is unavailable; membership authority cannot be verified.'
                 : isAbsolute(target)
                   ? `Foreign target: ${target}`
                   : `Relative target: ${target}`
@@ -829,11 +828,11 @@ function lexicalCompare(left: string, right: string): number {
 }
 
 function membershipProjectionId(profileId: string, skillId: string): string {
-  return `${profileId}:skillbook:${skillId}`;
+  return `${profileId}:default:${skillId}`;
 }
 
 function assertKnownSource(sourceId: string): void {
-  if (sourceId !== SKILLBOOK_SOURCE_ID) {
+  if (sourceId !== DEFAULT_SKILL_SOURCE_ID) {
     throw new BazframeError(
       'SKILL_SOURCE_UNKNOWN',
       `Unknown skill source: ${JSON.stringify(sourceId)}`

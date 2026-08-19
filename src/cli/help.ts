@@ -8,7 +8,7 @@ export const ROOT_HELP = [
   'Resources:',
   '  profiles   Manage profiles and the active selection',
   '  sources    Manage global built skill collections',
-  '  skills     Browse available Skillbook skills',
+  '  skills     Browse skills registered in the default catalog',
   '  projects   Manage per-project Bazframe policy overrides',
   '  global     Manage the global Bazframe policy',
   '  adapters   Manage coding-agent adapters',
@@ -16,6 +16,7 @@ export const ROOT_HELP = [
   '  tui        Open the interactive management interface',
   '',
   'Suggestions:',
+  '  bazframe add skill <absolute-root>',
   '  bazframe profiles',
   '  bazframe sources',
   '  bazframe skills',
@@ -177,8 +178,8 @@ export const SKILLS_HELP = [
   '  bazframe skill',
   '  bazframe skills',
   '',
-  'List valid skills in the resolved Skillbook library and show membership commands.',
-  'This does not list Pi-native skills or skills that exist only inside a profile.',
+  'List valid live external skill registrations in Bazframe\'s `(default)` catalog.',
+  'This does not list Pi-native skills or managed-source-derived skills.',
   'Use `bazframe profile skills` to inspect the active profile.',
   ''
 ].join('\n');
@@ -190,7 +191,7 @@ export const PROFILE_SKILLS_HELP = [
   '  bazframe profile skills remove <skill> [--profile <profile>]',
   '',
   'With no command, list immediate skill entries discovered in the active profile.',
-  'Add and remove manage only verified Skillbook-backed membership links.',
+  'Add and remove manage only verified memberships backed by `(default)` registrations.',
   'Use --profile to target a profile without changing the active selection.',
   ''
 ].join('\n');
@@ -198,17 +199,17 @@ export const PROFILE_SKILLS_HELP = [
 export const PROFILE_SKILLS_ADD_HELP = [
   'Usage: bazframe profile skills add <skill> [--profile <profile>]',
   '',
-  'Add a resolved Skillbook skill to the active or explicitly targeted profile as an absolute directory symlink.',
+  'Add a registered `(default)` skill to the active or explicitly targeted profile as a parallel absolute link to its external target.',
   'Bazframe checks skill identity; Pi validates the full Agent Skills schema at runtime.',
-  'Skillbook content and lock state are preserved.',
+  'Provider content is preserved.',
   ''
 ].join('\n');
 
 export const PROFILE_SKILLS_REMOVE_HELP = [
   'Usage: bazframe profile skills remove <skill> [--profile <profile>]',
   '',
-  'Remove only the verified Skillbook membership symlink from the active or explicitly targeted profile.',
-  'Physical and foreign profile entries and all Skillbook content are preserved.',
+  'Remove only a membership matching the current `(default)` registration.',
+  'Physical and foreign profile entries and provider content are preserved.',
   ''
 ].join('\n');
 
@@ -242,16 +243,18 @@ export const PROFILE_SOURCES_ADD_HELP = ['Usage: bazframe profile sources add <s
 export const PROFILE_SOURCES_REMOVE_HELP = ['Usage: bazframe profile sources remove <source> [--profile <profile>]', '', 'Remove only the profile-owned reference. The global source, source input, and snapshots are preserved.', ''].join('\n');
 
 export const ADD_HELP = [
-  'Usage: bazframe add <skill>',
+  'Usage: bazframe add skill <absolute-root>',
   '',
-  'Compatibility alias for `bazframe profile skills add <skill>`.',
+  'Register one canonical external Agent Skill root in Bazframe\'s `(default)` catalog.',
+  'Bazframe stores an absolute link and never copies or updates provider content.',
   ''
 ].join('\n');
 
 export const REMOVE_HELP = [
-  'Usage: bazframe remove <skill>',
+  'Usage: bazframe remove skill <skill>',
   '',
-  'Compatibility alias for `bazframe profile skills remove <skill>`.',
+  'Remove only an unreferenced `(default)` catalog registration.',
+  'Profile memberships and provider content are preserved.',
   ''
 ].join('\n');
 

@@ -45,6 +45,12 @@ try {
   assertExists(join(packageRoot, 'dist', 'sources', 'source-store.js'));
   assertExists(join(packageRoot, 'dist', 'sources', 'source-lifecycle.js'));
   assertExists(join(packageRoot, 'dist', 'source-units', 'source-unit-resolver.js'));
+  const packagedSkill = join(packageRoot, 'dist', 'skills', 'bazframe', 'SKILL.md');
+  assertExists(packagedSkill);
+  if (readFileSync(packagedSkill, 'utf8') !== readFileSync(join(projectRoot, 'skills', 'bazframe', 'SKILL.md'), 'utf8')) {
+    throw new Error('Packaged Bazframe skill does not exactly match its tracked source.');
+  }
+  assertMissing(join(packageRoot, 'skills', 'bazframe'));
   assertExists(join(packageRoot, 'artifacts', 'pi', 'bazframe.ts'));
   assertExists(join(packageRoot, 'README.md'));
   assertExists(join(packageRoot, 'docs', 'prototype.md'));
@@ -76,6 +82,18 @@ try {
   const executable = process.platform === 'win32'
     ? join(temporaryRoot, 'node_modules', '.bin', 'bazframe.cmd')
     : join(temporaryRoot, 'node_modules', '.bin', 'bazframe');
+  const packedCatalogHome = join(temporaryRoot, 'packed-catalog-home');
+  const registeredSkill = spawnSync(executable, ['add', 'skill', packagedSkill.replace(/\/SKILL\.md$/u, '')], {
+    encoding: 'utf8', shell: false, env: { ...process.env, BAZFRAME_HOME: packedCatalogHome }
+  });
+  if (registeredSkill.status !== 0 || !registeredSkill.stdout.includes('Default skill registration: added')) {
+    throw new Error(`Packed skill registration failed (${registeredSkill.status}).\nstdout: ${registeredSkill.stdout}\nstderr: ${registeredSkill.stderr}`);
+  }
+  const catalogLink = join(packedCatalogHome, 'skills', 'bazframe');
+  if (readFileSync(join(catalogLink, 'SKILL.md'), 'utf8') !== readFileSync(packagedSkill, 'utf8')) {
+    throw new Error('Packed catalog registration does not resolve the packaged skill bytes.');
+  }
+
   const result = spawnSync(executable, ['--version'], { encoding: 'utf8', shell: false });
   if (result.status !== 0 || result.stdout !== 'Bazframe 2 prototype 0.0.0-prototype.0\n') {
     throw new Error(
@@ -161,7 +179,6 @@ async function runPackedTui(executable, temporaryRoot) {
     env: {
       ...process.env,
       BAZFRAME_HOME: join(temporaryRoot, 'packed-tui-home'),
-      SKILLBOOK_LIBRARY: join(temporaryRoot, 'packed-skillbook'),
       NO_COLOR: '1'
     }
   });

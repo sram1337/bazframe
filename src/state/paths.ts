@@ -24,24 +24,6 @@ export function resolvePiAgentDirectory(
   );
 }
 
-export function resolveSkillbookLibrary(
-  environment: NodeJS.ProcessEnv,
-  userHome = homedir()
-): string {
-  if (environment.SKILLBOOK_LIBRARY !== undefined) {
-    return resolveConfiguredDirectory(
-      environment.SKILLBOOK_LIBRARY,
-      join(userHome, '.skillbook'),
-      'SKILLBOOK_LIBRARY'
-    );
-  }
-  return resolveConfiguredDirectory(
-    environment.SKILLBOOK_LOCK_LIBRARY,
-    join(userHome, '.skillbook'),
-    'SKILLBOOK_LOCK_LIBRARY'
-  );
-}
-
 function resolveConfiguredDirectory(
   configured: string | undefined,
   defaultPath: string,

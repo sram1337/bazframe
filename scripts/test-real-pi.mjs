@@ -60,8 +60,8 @@ try {
   const repository = join(temporaryRoot, 'repository');
   const nonGitDirectory = join(temporaryRoot, 'non-git-project');
   const capturePath = join(temporaryRoot, 'captures.jsonl');
-  const skillbookLibrary = join(temporaryRoot, 'skillbook-library');
-  const skillSource = join(skillbookLibrary, 'skills', 'profile-probe');
+  const directSkillProvider = join(temporaryRoot, 'direct-skill-provider');
+  const skillSource = join(directSkillProvider, 'profile-probe');
   const membership = join(
     bazframeHome,
     'profiles',
@@ -92,11 +92,9 @@ try {
     ''
   ].join('\n');
   const skillSupport = 'PACKED_SKILL_SUPPORT\n';
-  const skillbookLock = '{"schemaVersion":1,"provider":"skillbook"}\n';
   mkdirSync(skillSource, { recursive: true });
   writeFileSync(join(skillSource, 'SKILL.md'), skillDefinition);
   writeFileSync(join(skillSource, 'support.txt'), skillSupport);
-  writeFileSync(join(skillbookLibrary, 'skillbook.lock.json'), skillbookLock);
   mkdirSync(join(agentDirectory, 'extensions'), { recursive: true });
   writeFileSync(join(agentDirectory, 'AGENTS.md'), 'PACKED_GLOBAL_CONTEXT\n');
   writeFileSync(
@@ -124,7 +122,6 @@ try {
     ...process.env,
     BAZFRAME_HOME: bazframeHome,
     BAZFRAME_PI_PROBE_CAPTURE: capturePath,
-    SKILLBOOK_LIBRARY: skillbookLibrary,
     PI_CODING_AGENT_DIR: agentDirectory,
     PI_OFFLINE: '1',
     PI_SKIP_VERSION_CHECK: '1',
@@ -164,6 +161,10 @@ try {
   assert(providerManifest(sourceProvider) === sourceBeforeOccupiedAdd, 'Occupied source add changed source bytes.');
   assert(providerManifest(sourceDescriptorPath) === ownedBeforeOccupiedAdd, 'Occupied source add changed global source state.');
   assert(sourceOccupied.stderr.includes('source name is already registered'), 'Packed CLI source add did not reject an occupied source name.');
+  const registered = run(executable, ['add', 'skill', realpathSync(skillSource)], temporaryRoot, environment);
+  assert(registered.stdout.includes('Default skill registration: added'), 'Packed CLI did not register direct skill.');
+  const catalogRegistration = join(bazframeHome, 'skills', 'profile-probe');
+  assert(readlinkSync(catalogRegistration) === realpathSync(skillSource), 'Packed CLI catalog target is not canonical.');
   const added = run(
     executable,
     ['profile', 'skills', 'add', 'profile-probe'],
@@ -172,7 +173,7 @@ try {
   );
   assert(added.stdout.includes('Profile skill membership: added'), 'Packed CLI did not add membership.');
   assert(lstatSync(membership).isSymbolicLink(), 'Packed CLI membership is not a symlink.');
-  assert(readlinkSync(membership) === skillSource, 'Packed CLI membership target is not the Skillbook source.');
+  assert(readlinkSync(membership) === realpathSync(skillSource), 'Packed CLI membership target is not the direct provider source.');
   run(executable, ['adapter', 'install', 'pi'], temporaryRoot, environment);
   const ownedBeforeStatus = providerManifest(sourceDescriptorPath);
   const sourceBeforeStatus = providerManifest(sourceProvider);
@@ -239,6 +240,9 @@ try {
   assert(initialRpcCommands.includes('bazframe'), 'RPC process did not load /bazframe.');
   assert(initialRpcCommands.includes('skill:source-probe'), 'RPC process omitted the initial source skill.');
   assert(!initialRpcCommands.includes('skill:live-source'), 'RPC process saw a future provider change.');
+  const liveSkillDefinition = skillDefinition.replace('PACKED_PROFILE_SKILL', 'PACKED_PROFILE_SKILL_LIVE');
+  writeFileSync(join(skillSource, 'SKILL.md'), liveSkillDefinition);
+  assert(!JSON.stringify(await rpcClient.request({ type: 'get_commands' })).includes('PACKED_PROFILE_SKILL_LIVE'), 'RPC process saw live direct-skill provider mutation before reload.');
 
   const liveSource = join(sourceProvider, 'live-source');
   mkdirSync(liveSource);
@@ -269,8 +273,10 @@ try {
   assert(reloadResponse.success === true, 'RPC /bazframe reload did not return correlated success.');
   assert(providerManifest(sourceProvider) === providerBeforeRpcReload, 'RPC /bazframe reload changed provider bytes.');
   assert(ownedManifest(rpcOwnedRoots) === ownedBeforeRpcReload, 'RPC /bazframe reload changed Bazframe-owned state.');
-  const afterReloadCommands = rpcCommandNames(await rpcClient.request({ type: 'get_commands' }));
+  const afterReloadResponse = await rpcClient.request({ type: 'get_commands' });
+  const afterReloadCommands = rpcCommandNames(afterReloadResponse);
   assert(afterReloadCommands.includes('skill:live-source'), 'The same Pi process did not expose the rebuilt source after /bazframe reload.');
+  assert(JSON.stringify(afterReloadResponse).includes('PACKED_PROFILE_SKILL_LIVE'), 'The same Pi process did not expose live direct-skill provider changes after /bazframe reload.');
 
   const rpcReloadSource = join(sourceProvider, 'rpc-reloaded-source');
   mkdirSync(rpcReloadSource);
@@ -445,6 +451,8 @@ try {
   });
   assert(finalGitStatus === gitStatusBefore, 'Policy lifecycle changed Git status.');
 
+  const referencedCatalogRemove = runFailure(executable, ['remove', 'skill', 'profile-probe'], temporaryRoot, environment);
+  assert(referencedCatalogRemove.stderr.includes('referenced by profiles'), 'Packed CLI removed a referenced default skill.');
   const removed = run(
     executable,
     ['profile', 'skills', 'remove', 'profile-probe'],
@@ -453,17 +461,15 @@ try {
   );
   assert(removed.stdout.includes('Profile skill membership: removed'), 'Packed CLI did not remove membership.');
   assert(!existsSync(membership), 'Packed CLI remove left the profile membership.');
+  const catalogRemoved = run(executable, ['remove', 'skill', 'profile-probe'], temporaryRoot, environment);
+  assert(catalogRemoved.stdout.includes('Default skill registration: removed'), 'Packed CLI did not remove default registration.');
   assert(
-    readFileSync(join(skillSource, 'SKILL.md'), 'utf8') === skillDefinition,
-    'Packed CLI changed the Skillbook skill definition.'
+    readFileSync(join(skillSource, 'SKILL.md'), 'utf8') === liveSkillDefinition,
+    'Packed CLI changed the provider skill definition.'
   );
   assert(
     readFileSync(join(skillSource, 'support.txt'), 'utf8') === skillSupport,
-    'Packed CLI changed the Skillbook support file.'
-  );
-  assert(
-    readFileSync(join(skillbookLibrary, 'skillbook.lock.json'), 'utf8') === skillbookLock,
-    'Packed CLI changed the Skillbook lockfile.'
+    'Packed CLI changed the provider support file.'
   );
 
   const ownedBeforeSourceRemove = providerManifest(sourceDescriptorPath);
@@ -497,8 +503,9 @@ try {
     nonGitGlobalInheritance: true,
     profileSkill: true,
     profileLifecycle: true,
-    skillbookMembershipLifecycle: true,
-    skillbookProviderPreserved: true,
+    defaultCatalogMembershipLifecycle: true,
+    directSkillProviderPreserved: true,
+    liveDirectSkillReload: true,
     providerNeutralSourceProjection: true,
     explicitSnapshotRebuild: true,
     sameProcessRpcReload: true,

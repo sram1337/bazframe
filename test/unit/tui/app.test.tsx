@@ -94,9 +94,9 @@ describe('TuiApp', () => {
     await vi.waitFor(() => expect(view.lastFrame()).toContain('+ Create New Profile'));
 
     view.stdin.write('1');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] Skillbook'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] (default)'));
     view.stdin.write('L');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('[+] Skillbook'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[+] (default)'));
     view.stdin.write('L');
     view.stdin.write('\u001B[B');
     view.stdin.write('L');
@@ -130,7 +130,7 @@ describe('TuiApp', () => {
     view.stdin.write('h');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('* 1 Skills'));
     view.stdin.write('L');
-    expect(view.lastFrame()).toContain('[-] Skillbook');
+    expect(view.lastFrame()).toContain('[-] (default)');
     expect(view.lastFrame()).not.toContain('<- Skills /');
   });
 
@@ -169,10 +169,10 @@ describe('TuiApp', () => {
   it.each(['ready', 'failed'] as const)('keeps a %s managed mtg-deckbuilding source reachable', async (health) => {
     const service = fakeService();
     const dashboard = await service.loadDashboard();
-    const skillbook = dashboard.sources![0]!;
-    dashboard.availableSkillSources = [skillbook];
+    const defaultSource = dashboard.sources![0]!;
+    dashboard.availableSkillSources = [defaultSource];
     dashboard.skillRoots = health === 'ready'
-      ? [skillbook, {
+      ? [defaultSource, {
           id: 'managed:mtg-deckbuilding',
           label: 'mtg-deckbuilding',
           root: '/snapshots/mtg/source-unit',
@@ -183,7 +183,7 @@ describe('TuiApp', () => {
             directory: '/snapshots/mtg/source-unit/deck-building'
           }]
         }]
-      : [skillbook];
+      : [defaultSource];
     dashboard.managedSources = [{
       id: 'managed:mtg-deckbuilding',
       source: 'mtg-deckbuilding',
@@ -212,11 +212,11 @@ describe('TuiApp', () => {
     const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
     await waitForDashboard(view);
     view.stdin.write('\r');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('[+] Skillbook'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[+] (default)'));
     view.stdin.write('2');
     view.stdin.write('L');
     view.stdin.write('\t');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] Skillbook'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] (default)'));
     expect(view.lastFrame()).toContain('demo-skill');
   });
 
@@ -230,7 +230,7 @@ describe('TuiApp', () => {
     const view = render(<TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />);
 
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Loading skills...'));
-    expect(view.lastFrame()).not.toContain('Skillbook');
+    expect(view.lastFrame()).not.toContain('(default)');
     resolveDashboard(dashboard);
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Skill sources'));
   });
@@ -308,10 +308,10 @@ describe('TuiApp', () => {
       `line-${String(index + 1).padStart(2, '0')}`).join('\n');
     vi.mocked(service.loadSkillPreview)
       .mockResolvedValueOnce({
-        sourceId: 'skillbook', skillId: 'demo-skill', path: '/library/skills/demo-skill/SKILL.md', contents: longPreview
+        sourceId: 'default', skillId: 'demo-skill', path: '/library/skills/demo-skill/SKILL.md', contents: longPreview
       })
       .mockResolvedValue({
-        sourceId: 'skillbook', skillId: 'demo-skill', path: '/library/skills/demo-skill/SKILL.md', contents: `refreshed-preview\n${longPreview}`
+        sourceId: 'default', skillId: 'demo-skill', path: '/library/skills/demo-skill/SKILL.md', contents: `refreshed-preview\n${longPreview}`
       });
     const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
     await waitForDashboard(view);
@@ -523,7 +523,7 @@ describe('TuiApp', () => {
       health: 'failed',
       referenceCount: 'unknown'
     }, false)).toBe('Source one, failed, profile reference count unknown');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] Skillbook'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] (default)'));
     expect(view.lastFrame()).toContain('[+] one');
     expect(view.lastFrame()).not.toContain('  managed-skill');
     view.stdin.write('\u001B[B');
@@ -567,7 +567,7 @@ describe('TuiApp', () => {
     await openProfiles(view);
     view.stdin.write('L');
     view.stdin.write('\t');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] Skillbook'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] (default)'));
     expect(view.lastFrame()).toContain('[+] mtg-deckbuilding');
 
     view.stdin.write('\u001B[B');
@@ -585,7 +585,7 @@ describe('TuiApp', () => {
     view.stdin.write('\u001B[C');
     view.stdin.write('a');
     await vi.waitFor(() => expect(service.addMembership).toHaveBeenCalledWith('focused', {
-      sourceId: 'skillbook', skillId: 'demo-skill'
+      sourceId: 'default', skillId: 'demo-skill'
     }));
   });
 
@@ -618,7 +618,7 @@ describe('TuiApp', () => {
     await openProfiles(view);
     view.stdin.write('L');
     view.stdin.write('\t');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] Skillbook'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] (default)'));
     expect(view.lastFrame()).toContain('Source references: mtg-deckbuilding (read-only)');
     expect(view.lastFrame()).not.toContain('[+] mtg-deckbuilding');
     expect(view.lastFrame()).not.toContain('deck-building');
@@ -926,9 +926,9 @@ describe('TuiApp', () => {
     dashboard.profiles[0]!.directory = `/home/${longSegment}/focused`;
     dashboard.profiles[0]!.memberships = [
       {
-        id: 'skillbook:first',
+        id: 'default:first',
         membershipId: 'focused:first',
-        sourceId: 'skillbook',
+        sourceId: 'default',
         skillId: 'first',
         path: `/home/${longSegment}/first`,
         target: `/external/${longSegment}/first`,
@@ -936,9 +936,9 @@ describe('TuiApp', () => {
         manageable: true
       },
       {
-        id: 'skillbook:second',
+        id: 'default:second',
         membershipId: 'focused:second',
-        sourceId: 'skillbook',
+        sourceId: 'default',
         skillId: 'second',
         path: `/home/${longSegment}/second`,
         target: `/external/${longSegment}/second`,
@@ -982,9 +982,9 @@ describe('TuiApp', () => {
     dashboard.profiles[0]!.memberships = Array.from({ length: 24 }, (_, index) => {
       const skillId = `target-${String(index).padStart(2, '0')}`;
       return {
-        id: `skillbook:${skillId}`,
+        id: `default:${skillId}`,
         membershipId: `focused:${skillId}`,
-        sourceId: 'skillbook',
+        sourceId: 'default',
         skillId,
         path: `/home/profiles/focused/skills/${skillId}`,
         target: `/external/${skillId}-${longSegment}`,
@@ -1206,7 +1206,7 @@ describe('TuiApp', () => {
     const dashboard = await service.loadDashboard();
     dashboard.sources![0]!.skills = Array.from({ length: 30 }, (_, index) => {
       const id = `skill-${String(index).padStart(2, '0')}`;
-      return { id, sourceId: 'skillbook', directory: `/library/skills/${id}` };
+      return { id, sourceId: 'default', directory: `/library/skills/${id}` };
     });
     vi.mocked(service.loadDashboard).mockClear();
     const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
@@ -1235,8 +1235,8 @@ describe('TuiApp', () => {
       const id = `included-${String(index).padStart(2, '0')}`;
       return {
         id,
-        membershipId: `focused:skillbook:${id}`,
-        sourceId: 'skillbook',
+        membershipId: `focused:default:${id}`,
+        sourceId: 'default',
         skillId: id,
         path: `/home/profiles/focused/skills/${id}`,
         kind: 'managed' as const,
@@ -1249,11 +1249,11 @@ describe('TuiApp', () => {
       active: index === 0,
       memberships
     }));
-    const skillbook = {
+    const defaultSource = {
       ...dashboard.sources![0]!,
       skills: Array.from({ length: 12 }, (_, index) => {
         const id = `available-${String(index).padStart(2, '0')}`;
-        return { id, sourceId: 'skillbook', directory: `/library/skills/${id}` };
+        return { id, sourceId: 'default', directory: `/library/skills/${id}` };
       })
     };
     const managed = {
@@ -1267,8 +1267,8 @@ describe('TuiApp', () => {
         directory: `/snapshots/deck/managed-${String(index).padStart(2, '0')}`
       }))
     };
-    dashboard.skillRoots = [skillbook, managed];
-    dashboard.availableSkillSources = [skillbook];
+    dashboard.skillRoots = [defaultSource, managed];
+    dashboard.availableSkillSources = [defaultSource];
     vi.mocked(service.loadDashboard).mockClear();
     const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
 
@@ -1336,7 +1336,7 @@ describe('TuiApp', () => {
     const dashboard = await service.loadDashboard();
     dashboard.sources![0]!.skills = Array.from({ length: 30 }, (_, index) => {
       const id = `skill-${String(index).padStart(2, '0')}`;
-      return { id, sourceId: 'skillbook', directory: `/library/skills/${id}` };
+      return { id, sourceId: 'default', directory: `/library/skills/${id}` };
     });
     vi.mocked(service.loadDashboard).mockClear();
     const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
@@ -1353,8 +1353,8 @@ describe('TuiApp', () => {
       const id = `included-${String(index).padStart(2, '0')}`;
       return {
         id,
-        membershipId: `focused:skillbook:${id}`,
-        sourceId: 'skillbook',
+        membershipId: `focused:default:${id}`,
+        sourceId: 'default',
         skillId: id,
         path: `/home/profiles/focused/skills/${id}`,
         kind: 'managed' as const,
@@ -1369,7 +1369,7 @@ describe('TuiApp', () => {
     }));
     dashboard.sources![0]!.skills = Array.from({ length: 20 }, (_, index) => {
       const id = `available-${String(index).padStart(2, '0')}`;
-      return { id, sourceId: 'skillbook', directory: `/library/skills/${id}` };
+      return { id, sourceId: 'default', directory: `/library/skills/${id}` };
     });
     vi.mocked(service.loadDashboard).mockClear();
     const view = render(
@@ -1418,12 +1418,12 @@ describe('TuiApp', () => {
     const dashboard = await service.loadDashboard();
     const skills = Array.from({ length: 16 }, (_, index) => {
       const id = `skill-${String(index).padStart(2, '0')}`;
-      return { id, sourceId: 'skillbook', directory: `/library/skills/${id}` };
+      return { id, sourceId: 'default', directory: `/library/skills/${id}` };
     });
     const memberships = (profileId: string, skillIds: readonly string[]) => skillIds.map((skillId) => ({
-      id: `${profileId}:skillbook:${skillId}`,
-      membershipId: `${profileId}:skillbook:${skillId}`,
-      sourceId: 'skillbook',
+      id: `${profileId}:default:${skillId}`,
+      membershipId: `${profileId}:default:${skillId}`,
+      sourceId: 'default',
       skillId,
       path: `/home/profiles/${profileId}/skills/${skillId}`,
       kind: 'managed' as const,
@@ -1473,7 +1473,7 @@ describe('TuiApp', () => {
     view.stdin.write('\r');
 
     await vi.waitFor(() => expect(view.lastFrame()).toContain('+ skill-10'));
-    expect(view.lastFrame()).toContain('[-] Skillbook');
+    expect(view.lastFrame()).toContain('[-] (default)');
     expect(view.lastFrame()).not.toContain('+ skill-05');
     expect(view.lastFrame()).not.toContain('skill-15');
 
@@ -1506,7 +1506,7 @@ describe('TuiApp', () => {
     view.stdin.write('\u001B[C');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('demo-skill'));
     view.stdin.write('\u001B[D');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] Skillbook'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] (default)'));
     view.stdin.write('\r');
     await vi.waitFor(() => expect(view.lastFrame()).not.toContain('demo-skill'));
   });
@@ -1550,14 +1550,14 @@ describe('TuiApp', () => {
     expect(view.lastFrame()!.split('\n').filter((line) => line.includes('>'))).toEqual([]);
 
     view.stdin.write('1');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] Skillbook'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] (default)'));
     expect(view.lastFrame()).not.toContain('[focused]');
     expect(view.lastFrame()!.split('\n').filter((line) => line.includes('>'))).toEqual([]);
 
     view.stdin.write('\r');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('[+] Skillbook'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[+] (default)'));
     expect(view.lastFrame()!.split('\n').filter((line) => line.includes('[+]'))).toEqual([
-      expect.stringContaining('[+] Skillbook')
+      expect.stringContaining('[+] (default)')
     ]);
   });
 
@@ -2017,7 +2017,7 @@ describe('TuiApp', () => {
     view.stdin.write('a');
     await vi.waitFor(() => {
       expect(service.addMembership).toHaveBeenCalledWith('focused', {
-        sourceId: 'skillbook',
+        sourceId: 'default',
         skillId: 'demo-skill'
       });
     });
@@ -2084,13 +2084,13 @@ function fakeService(): BazframeTuiService & Record<string, ReturnType<typeof vi
       memberships: []
     }],
     sources: [{
-      id: 'skillbook',
-      label: 'Skillbook',
+      id: 'default',
+      label: '(default)',
       root: '/library/skills',
       artifactWritesSupported: false,
       skills: [{
         id: 'demo-skill',
-        sourceId: 'skillbook',
+        sourceId: 'default',
         directory: '/library/skills/demo-skill'
       }]
     }],
