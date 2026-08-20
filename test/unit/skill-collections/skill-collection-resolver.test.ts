@@ -3,15 +3,15 @@ import { basename } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { measureProviderOperation } from '../../helpers/provider-manifest.js';
 import { createTempDirectory, type TempDirectory } from '../../helpers/temp-directory.js';
-import { publishSourceSnapshot } from '../../../src/source-units/source-snapshot.js';
-import { encodeGlobalSource } from '../../../src/sources/source-store.js';
-import { encodeProfileSourceReference } from '../../../src/profiles/profile-source-reference.js';
+import { publishSkillSnapshot } from '../../../src/skill-collections/skill-snapshot.js';
+import { encodeLibrary, encodePackage } from '../../../src/skill-collections/skill-collection-store.js';
+import { encodeProfileCollectionReference } from '../../../src/profiles/profile-skill-collection-reference.js';
 import {
   loadFlatSkillIdentities,
-  resolveProfileSourceUnits,
-  UNKNOWN_SOURCE_ID,
+  resolveProfileSkillCollections,
+  UNKNOWN_COLLECTION_ID,
   type DefinitionLoader
-} from '../../../src/source-units/source-unit-resolver.js';
+} from '../../../src/skill-collections/skill-collection-resolver.js';
 
 const directories: TempDirectory[] = [];
 
@@ -29,25 +29,43 @@ async function fixture(): Promise<{ directory: TempDirectory; profile: string }>
 async function descriptor(
   directory: TempDirectory,
   _providerId: string,
-  _sourceId: string,
+  _collectionId: string,
   root: string
 ): Promise<void> {
-  const sourceRoot = await realpath(root);
-  const sourceId = basename(sourceRoot);
-  const snapshot = await publishSourceSnapshot(directory.root, sourceRoot);
+  await collectionDescriptor(directory, 'library', root);
+}
+
+async function collectionDescriptor(
+  directory: TempDirectory,
+  kind: 'library' | 'package',
+  root: string
+): Promise<void> {
+  const collectionRoot = await realpath(root);
+  const collectionId = basename(collectionRoot);
+  const snapshot = await publishSkillSnapshot(directory.root, collectionRoot);
   await directory.write(
-    `sources/${sourceId}.json`,
-    encodeGlobalSource({
-      schemaVersion: 1,
-      source: sourceId,
-      root: sourceRoot,
-      digest: snapshot.digest,
-      sourceUnitRoot: '.'
-    })
+    `${kind === 'library' ? 'libraries' : 'packages'}/${collectionId}.json`,
+    kind === 'library'
+      ? encodeLibrary({
+          schemaVersion: 1,
+          library: collectionId,
+          root: collectionRoot,
+          digest: snapshot.digest
+        })
+      : encodePackage({
+          schemaVersion: 1,
+          package: collectionId,
+          root: collectionRoot,
+          digest: snapshot.digest,
+          artifactRoot: '.',
+          skillsRoot: '.'
+        })
   );
   await directory.write(
-    `profiles/profile/sources/${sourceId}.json`,
-    encodeProfileSourceReference({ schemaVersion: 1, source: sourceId })
+    `profiles/profile/${kind === 'library' ? 'libraries' : 'packages'}/${collectionId}.json`,
+    encodeProfileCollectionReference(kind === 'library'
+      ? { schemaVersion: 1, library: collectionId }
+      : { schemaVersion: 1, package: collectionId })
   );
 }
 
@@ -62,7 +80,7 @@ async function discoverPreservingProvider<T>(
 ): Promise<T> {
   const measured = await measureProviderOperation(
     providerRoots,
-    [`${profile}/sources`],
+    [`${profile}/libraries`, `${profile}/packages`],
     operation
   );
   expect(measured.providerAfter).toEqual(measured.providerBefore);
@@ -71,15 +89,15 @@ async function discoverPreservingProvider<T>(
   return measured.outcome.value;
 }
 
-describe('source-unit resolver', () => {
+describe('Skill collection resolver', () => {
   it('preserves unchanged absent-namespace behavior', async () => {
     const { profile } = await fixture();
     await expect(discoverPreservingProvider(
       profile,
       [],
-      () => resolveProfileSourceUnits(profile, [])
+      () => resolveProfileSkillCollections(profile, [])
     )).resolves.toEqual({
-      directSourceUnits: [],
+      directCollections: [],
       derivedSkills: [],
       diagnostics: []
     });
@@ -132,10 +150,10 @@ describe('source-unit resolver', () => {
     const result = await discoverPreservingProvider(
       profile,
       [standalone, grouping],
-      () => resolveProfileSourceUnits(profile, [])
+      () => resolveProfileSkillCollections(profile, [])
     );
 
-    expect(result.directSourceUnits.map((item) => item.sourceId)).toEqual([
+    expect(result.directCollections.map((item) => item.collectionId)).toEqual([
       'grouping',
       'standalone'
     ]);
@@ -147,7 +165,7 @@ describe('source-unit resolver', () => {
     expect(result.diagnostics).toEqual([]);
   });
 
-  it('uses Pi YAML parsing and directory fallback for source skill names', async () => {
+  it('uses Pi YAML parsing and directory fallback for library Skill names', async () => {
     const { directory, profile } = await fixture();
     const root = await directory.mkdir('pi-name-parity');
     await directory.write(
@@ -163,7 +181,7 @@ describe('source-unit resolver', () => {
     const result = await discoverPreservingProvider(
       profile,
       [root],
-      () => resolveProfileSourceUnits(profile, [])
+      () => resolveProfileSkillCollections(profile, [])
     );
 
     expect(result.diagnostics).toEqual([]);
@@ -171,39 +189,41 @@ describe('source-unit resolver', () => {
       ['directory-fallback', 'directory-fallback/SKILL.md'],
       ['folded-name', 'folded-directory/SKILL.md']
     ]);
-    expect(result.derivedSkills.every((item) => item.baseDir.includes('/source-snapshots/sha256/'))).toBe(true);
+    expect(result.derivedSkills.every((item) => item.baseDir.includes('/skill-snapshots/sha256/'))).toBe(true);
   });
 
-  it('reports exact placeholders for malformed source-units roots', async () => {
+  it('reports exact placeholders for malformed library reference roots', async () => {
     const first = await fixture();
-    await first.directory.write('profiles/profile/sources', 'not a directory\n');
+    await first.directory.write('profiles/profile/libraries', 'not a directory\n');
     await expect(discoverPreservingProvider(
       first.profile,
       [],
-      () => resolveProfileSourceUnits(first.profile, [])
+      () => resolveProfileSkillCollections(first.profile, [])
     )).resolves.toEqual({
-      directSourceUnits: [],
+      directCollections: [],
       derivedSkills: [],
       diagnostics: [{
         category: 'invalid-reference',
-        sourceId: UNKNOWN_SOURCE_ID,
+        collectionKind: 'library',
+        collectionId: UNKNOWN_COLLECTION_ID,
         path: '.'
       }]
     });
 
     const second = await fixture();
     await second.directory.mkdir('elsewhere');
-    await symlink(second.directory.path('elsewhere'), second.directory.path('profiles/profile/sources'));
+    await symlink(second.directory.path('elsewhere'), second.directory.path('profiles/profile/libraries'));
     await expect(discoverPreservingProvider(
       second.profile,
       [],
-      () => resolveProfileSourceUnits(second.profile, [])
+      () => resolveProfileSkillCollections(second.profile, [])
     )).resolves.toEqual({
-      directSourceUnits: [],
+      directCollections: [],
       derivedSkills: [],
       diagnostics: [{
         category: 'invalid-reference',
-        sourceId: UNKNOWN_SOURCE_ID,
+        collectionKind: 'library',
+        collectionId: UNKNOWN_COLLECTION_ID,
         path: '.'
       }]
     });
@@ -211,18 +231,18 @@ describe('source-unit resolver', () => {
 
   it('reports every reachable flat namespace-shape problem and does not inspect siblings', async () => {
     const { directory, profile } = await fixture();
-    await directory.mkdir('profiles/profile/sources/legacy-provider');
-    await directory.write('profiles/profile/sources/bad.txt', '{}');
-    await directory.mkdir('profiles/profile/sources/child.json');
+    await directory.mkdir('profiles/profile/libraries/legacy-provider');
+    await directory.write('profiles/profile/libraries/bad.txt', '{}');
+    await directory.mkdir('profiles/profile/libraries/child.json');
 
-    const result = await discoverPreservingProvider(profile, [], () => resolveProfileSourceUnits(profile, []));
+    const result = await discoverPreservingProvider(profile, [], () => resolveProfileSkillCollections(profile, []));
 
-    expect(result.directSourceUnits).toEqual([]);
+    expect(result.directCollections).toEqual([]);
     expect(result.derivedSkills).toEqual([]);
     expect(result.diagnostics).toEqual([
-      { category: 'invalid-reference', sourceId: UNKNOWN_SOURCE_ID, path: 'bad.txt' },
-      { category: 'invalid-reference', sourceId: UNKNOWN_SOURCE_ID, path: 'legacy-provider' },
-      { category: 'invalid-reference', sourceId: 'child', path: 'child.json' }
+      { category: 'invalid-reference', collectionKind: 'library', collectionId: UNKNOWN_COLLECTION_ID, path: 'bad.txt' },
+      { category: 'invalid-reference', collectionKind: 'library', collectionId: UNKNOWN_COLLECTION_ID, path: 'legacy-provider' },
+      { category: 'invalid-reference', collectionKind: 'library', collectionId: 'child', path: 'child.json' }
     ]);
   });
 
@@ -236,18 +256,19 @@ describe('source-unit resolver', () => {
     const result = await discoverPreservingProvider(
       profile,
       [root],
-      () => resolveProfileSourceUnits(profile, [])
+      () => resolveProfileSkillCollections(profile, [])
     );
 
     expect(result.derivedSkills).toEqual([]);
     expect(result.diagnostics).toEqual([{
       category: 'mixed-root',
-      sourceId: 'mixed-precedence',
+      collectionKind: 'library',
+        collectionId: 'mixed-precedence',
       path: '.child/SKILL.md'
     }]);
   });
 
-  it('keeps ordinary source failures atomic while preserving other sources', async () => {
+  it('keeps ordinary object failures atomic while preserving other libraries/packages', async () => {
     const { directory, profile } = await fixture();
     const good = await directory.mkdir('good');
     const mixed = await directory.mkdir('mixed');
@@ -260,13 +281,14 @@ describe('source-unit resolver', () => {
     const result = await discoverPreservingProvider(
       profile,
       [good, mixed],
-      () => resolveProfileSourceUnits(profile, [])
+      () => resolveProfileSkillCollections(profile, [])
     );
 
     expect(result.derivedSkills.map((item) => item.name)).toEqual(['good-child']);
     expect(result.diagnostics).toEqual([{
       category: 'mixed-root',
-      sourceId: 'mixed',
+      collectionKind: 'library',
+        collectionId: 'mixed',
       path: 'child/SKILL.md'
     }]);
   });
@@ -297,7 +319,7 @@ describe('source-unit resolver', () => {
     const result = await discoverPreservingProvider(
       profile,
       roots,
-      () => resolveProfileSourceUnits(profile, [])
+      () => resolveProfileSkillCollections(profile, [])
     );
 
     expect(result.derivedSkills.map((item) => [item.name, item.relativePath])).toEqual([
@@ -306,7 +328,8 @@ describe('source-unit resolver', () => {
     expect(result.diagnostics).toEqual([
       {
         category: 'limit-exceeded',
-        sourceId: 'deep',
+        collectionKind: 'library',
+        collectionId: 'deep',
         path: 'd1/d2/d3/d4/d5/d6/d7/d8/d9',
         limit: 'depth'
       }
@@ -326,7 +349,7 @@ describe('source-unit resolver', () => {
     const result = await discoverPreservingProvider(
       profile,
       [root],
-      () => resolveProfileSourceUnits(profile, [])
+      () => resolveProfileSkillCollections(profile, [])
     );
 
     expect(result.derivedSkills.map((item) => item.name)).toEqual(['valid']);
@@ -359,20 +382,22 @@ describe('source-unit resolver', () => {
     const result = await discoverPreservingProvider(
       profile,
       roots,
-      () => resolveProfileSourceUnits(profile, [])
+      () => resolveProfileSkillCollections(profile, [])
     );
 
-    expect(result.derivedSkills.filter((item) => item.sourceId === 'skills-at')).toHaveLength(64);
+    expect(result.derivedSkills.filter((item) => item.collectionId === 'skills-at')).toHaveLength(64);
     expect(result.diagnostics).toEqual([
       {
         category: 'limit-exceeded',
-        sourceId: 'entries-over',
+        collectionKind: 'library',
+        collectionId: 'entries-over',
         path: 'f256',
         limit: 'entries'
       },
       {
         category: 'limit-exceeded',
-        sourceId: 'skills-over',
+        collectionKind: 'library',
+        collectionId: 'skills-over',
         path: 's064/SKILL.md',
         limit: 'skills'
       }
@@ -388,7 +413,7 @@ describe('source-unit resolver', () => {
     const result = await discoverPreservingProvider(
       profile,
       [root],
-      () => resolveProfileSourceUnits(profile, [], () => {
+      () => resolveProfileSkillCollections(profile, [], () => {
         throw new Error('injected definition parse failure');
       })
     );
@@ -396,7 +421,8 @@ describe('source-unit resolver', () => {
     expect(result.derivedSkills).toEqual([]);
     expect(result.diagnostics).toEqual([{
       category: 'invalid-definition',
-      sourceId: 'invalid-definition',
+      collectionKind: 'library',
+        collectionId: 'invalid-definition',
       path: 'SKILL.md'
     }]);
   });
@@ -410,13 +436,14 @@ describe('source-unit resolver', () => {
     const result = await discoverPreservingProvider(
       profile,
       [root],
-      () => resolveProfileSourceUnits(profile, [])
+      () => resolveProfileSkillCollections(profile, [])
     );
 
     expect(result.derivedSkills).toEqual([]);
     expect(result.diagnostics).toEqual([{
       category: 'pi-loader',
-      sourceId: 'missing-description',
+      collectionKind: 'library',
+        collectionId: 'missing-description',
       path: 'SKILL.md',
       diagnosticIndex: 0,
       message: 'description is required'
@@ -445,28 +472,31 @@ describe('source-unit resolver', () => {
     const result = await discoverPreservingProvider(
       profile,
       [first, second],
-      () => resolveProfileSourceUnits(profile, [], loader)
+      () => resolveProfileSkillCollections(profile, [], loader)
     );
 
     expect(result.derivedSkills).toEqual([]);
     expect(result.diagnostics).toEqual([
       {
         category: 'pi-loader',
-        sourceId: 'first',
+        collectionKind: 'library',
+        collectionId: 'first',
         path: 'SKILL.md',
         diagnosticIndex: 0,
         message: 'first error'
       },
       {
         category: 'pi-loader',
-        sourceId: 'first',
+        collectionKind: 'library',
+        collectionId: 'first',
         path: 'SKILL.md',
         diagnosticIndex: 1,
         message: 'additional detail'
       },
       {
         category: 'pi-loader',
-        sourceId: 'second',
+        collectionKind: 'library',
+        collectionId: 'second',
         path: 'SKILL.md',
         diagnosticIndex: 0,
         message: 'Pi loader rejected definition without a diagnostic'
@@ -474,7 +504,7 @@ describe('source-unit resolver', () => {
     ]);
   });
 
-  it('marks every duplicate path and withholds all involved source units while flat wins', async () => {
+  it('marks every duplicate path and withholds all involved libraries/packages while a profile Skill wins', async () => {
     const { directory, profile } = await fixture();
     const one = await directory.mkdir('one');
     const two = await directory.mkdir('two');
@@ -491,7 +521,7 @@ describe('source-unit resolver', () => {
     const result = await discoverPreservingProvider(
       profile,
       [one, two, three],
-      () => resolveProfileSourceUnits(profile, [{
+      () => resolveProfileSkillCollections(profile, [{
         name: 'flat-name',
         definitionPath: '/flat/SKILL.md'
       }])
@@ -499,24 +529,61 @@ describe('source-unit resolver', () => {
 
     expect(result.derivedSkills).toEqual([]);
     expect(result.diagnostics).toEqual([
-      { category: 'duplicate-name', sourceId: 'one', path: 'a/SKILL.md', name: 'shared' },
-      { category: 'duplicate-name', sourceId: 'one', path: 'b/SKILL.md', name: 'within' },
-      { category: 'duplicate-name', sourceId: 'one', path: 'c/SKILL.md', name: 'within' },
-      { category: 'duplicate-name', sourceId: 'three', path: 'SKILL.md', name: 'flat-name' },
-      { category: 'duplicate-name', sourceId: 'two', path: 'SKILL.md', name: 'shared' }
+      { category: 'duplicate-name', collectionKind: 'library', collectionId: 'one', path: 'a/SKILL.md', name: 'shared' },
+      { category: 'duplicate-name', collectionKind: 'library', collectionId: 'one', path: 'b/SKILL.md', name: 'within' },
+      { category: 'duplicate-name', collectionKind: 'library', collectionId: 'one', path: 'c/SKILL.md', name: 'within' },
+      { category: 'duplicate-name', collectionKind: 'library', collectionId: 'three', path: 'SKILL.md', name: 'flat-name' },
+      { category: 'duplicate-name', collectionKind: 'library', collectionId: 'two', path: 'SKILL.md', name: 'shared' }
+    ]);
+  });
+
+  it('withholds package-internal, direct-Skill/package, and cross-kind duplicate conflicts atomically', async () => {
+    const { directory, profile } = await fixture();
+    const library = await directory.mkdir('library-cross');
+    const crossPackage = await directory.mkdir('package-cross');
+    const internalPackage = await directory.mkdir('package-internal');
+    const flatPackage = await directory.mkdir('package-flat');
+    await directory.write('library-cross/collision/SKILL.md', skill('cross-kind'));
+    await directory.write('library-cross/noncolliding/SKILL.md', skill('library-only'));
+    await directory.write('package-cross/collision/SKILL.md', skill('cross-kind'));
+    await directory.write('package-cross/noncolliding/SKILL.md', skill('package-only'));
+    await directory.write('package-internal/a/SKILL.md', skill('inside-package'));
+    await directory.write('package-internal/b/SKILL.md', skill('inside-package'));
+    await directory.write('package-flat/SKILL.md', skill('flat-name'));
+    await collectionDescriptor(directory, 'library', library);
+    await collectionDescriptor(directory, 'package', crossPackage);
+    await collectionDescriptor(directory, 'package', internalPackage);
+    await collectionDescriptor(directory, 'package', flatPackage);
+
+    const result = await discoverPreservingProvider(
+      profile,
+      [library, crossPackage, internalPackage, flatPackage],
+      () => resolveProfileSkillCollections(profile, [{
+        name: 'flat-name',
+        definitionPath: '/flat/SKILL.md'
+      }])
+    );
+
+    expect(result.derivedSkills).toEqual([]);
+    expect(result.diagnostics).toEqual([
+      { category: 'duplicate-name', collectionKind: 'library', collectionId: 'library-cross', path: 'collision/SKILL.md', name: 'cross-kind' },
+      { category: 'duplicate-name', collectionKind: 'package', collectionId: 'package-cross', path: 'collision/SKILL.md', name: 'cross-kind' },
+      { category: 'duplicate-name', collectionKind: 'package', collectionId: 'package-flat', path: 'SKILL.md', name: 'flat-name' },
+      { category: 'duplicate-name', collectionKind: 'package', collectionId: 'package-internal', path: 'a/SKILL.md', name: 'inside-package' },
+      { category: 'duplicate-name', collectionKind: 'package', collectionId: 'package-internal', path: 'b/SKILL.md', name: 'inside-package' }
     ]);
   });
 
   it('fails closed when an activated snapshot is corrupt', async () => {
     const { directory, profile } = await fixture(); const root = await directory.mkdir('corrupt'); await directory.write('corrupt/SKILL.md', skill('corrupt'));
     await descriptor(directory, 'provider', 'corrupt', root);
-    const stored = JSON.parse(await readFile(directory.path('sources/corrupt.json'), 'utf8')) as { digest: string };
-    const artifact = directory.path('source-snapshots/sha256', stored.digest, 'artifact', 'SKILL.md');
+    const stored = JSON.parse(await readFile(directory.path('libraries/corrupt.json'), 'utf8')) as { digest: string };
+    const artifact = directory.path('skill-snapshots/sha256', stored.digest, 'artifact', 'SKILL.md');
     await chmod(artifact, 0o600); await writeFile(artifact, 'changed');
-    const result = await resolveProfileSourceUnits(profile, []);
+    const result = await resolveProfileSkillCollections(profile, []);
     expect(result.derivedSkills).toEqual([]);
-    expect(result.diagnostics).toEqual([{ category: 'broken-snapshot', sourceId: 'corrupt', path: '.' }]);
-    expect(result.directSourceUnits[0]).toMatchObject({ preparationState: 'failed' });
+    expect(result.diagnostics).toEqual([{ category: 'broken-snapshot', collectionKind: 'library', collectionId: 'corrupt', path: '.' }]);
+    expect(result.directCollections[0]).toMatchObject({ preparationState: 'failed' });
   });
 
   it('keeps an activated snapshot usable after the provider root is retargeted', async () => {
@@ -532,11 +599,11 @@ describe('source-unit resolver', () => {
     const result = await discoverPreservingProvider(
       profile,
       [root],
-      () => resolveProfileSourceUnits(profile, [])
+      () => resolveProfileSkillCollections(profile, [])
     );
 
     expect(result.derivedSkills.map((skill) => skill.name)).toEqual(['retargeted']);
-    expect(result.directSourceUnits[0]).toMatchObject({ preparationState: 'ready', rebuildAvailability: 'unavailable' });
+    expect(result.directCollections[0]).toMatchObject({ preparationState: 'ready', rebuildAvailability: 'unavailable' });
     expect(result.diagnostics).toEqual([]);
   });
 
@@ -545,16 +612,17 @@ describe('source-unit resolver', () => {
     const root = await directory.mkdir('valid-backed');
     await directory.write('valid-backed/SKILL.md', skill('valid-backed'));
     await descriptor(directory, 'provider', 'source', root);
-    await directory.write('profiles/profile/sources/broken.json', '{');
+    await directory.write('profiles/profile/libraries/broken.json', '{');
 
-    const result = await resolveProfileSourceUnits(profile, []);
+    const result = await resolveProfileSkillCollections(profile, []);
 
     expect(result).toEqual({
-      directSourceUnits: [],
+      directCollections: [],
       derivedSkills: [],
       diagnostics: [{
         category: 'invalid-reference',
-        sourceId: 'broken',
+        collectionKind: 'library',
+        collectionId: 'broken',
         path: 'broken.json'
       }]
     });
@@ -562,48 +630,82 @@ describe('source-unit resolver', () => {
 
   it('does not resolve global targets after finding a malformed sibling reference', async () => {
     const { directory, profile } = await fixture();
-    await directory.write('profiles/profile/sources/broken.json', '{');
+    await directory.write('profiles/profile/libraries/broken.json', '{');
     await directory.write(
-      'profiles/profile/sources/malformed.json',
-      encodeProfileSourceReference({ schemaVersion: 1, source: 'malformed' })
+      'profiles/profile/libraries/malformed.json',
+      JSON.stringify({ schemaVersion: 1, source: 'malformed' })
     );
-    await directory.write('sources/malformed.json', '{}\n');
+    await directory.write('libraries/malformed.json', '{}\n');
     await directory.write(
-      'profiles/profile/sources/missing.json',
-      encodeProfileSourceReference({ schemaVersion: 1, source: 'missing' })
+      'profiles/profile/libraries/missing.json',
+      JSON.stringify({ schemaVersion: 1, source: 'missing' })
     );
 
-    const result = await resolveProfileSourceUnits(profile, []);
+    const result = await resolveProfileSkillCollections(profile, []);
 
     expect(result).toEqual({
-      directSourceUnits: [],
+      directCollections: [],
       derivedSkills: [],
       diagnostics: [
-        { category: 'invalid-reference', sourceId: 'broken', path: 'broken.json' }
+        { category: 'invalid-reference', collectionKind: 'library', collectionId: 'broken', path: 'broken.json' },
+        { category: 'invalid-reference', collectionKind: 'library', collectionId: 'malformed', path: 'malformed.json' },
+        { category: 'invalid-reference', collectionKind: 'library', collectionId: 'missing', path: 'missing.json' }
       ]
     });
   });
 
-  it('allows a zero-child snapshot and reports zero-child snapshots', async () => {
+  it('resolves package snapshots containing zero, one, and many Skills', async () => {
+    const { directory, profile } = await fixture();
+    const empty = await directory.mkdir('package-empty');
+    const one = await directory.mkdir('package-one');
+    const many = await directory.mkdir('package-many');
+    await directory.write('package-one/only/SKILL.md', skill('only'));
+    await directory.write('package-many/alpha/SKILL.md', skill('alpha'));
+    await directory.write('package-many/beta/nested/SKILL.md', skill('beta'));
+    await collectionDescriptor(directory, 'package', empty);
+    await collectionDescriptor(directory, 'package', one);
+    await collectionDescriptor(directory, 'package', many);
+
+    const result = await discoverPreservingProvider(
+      profile,
+      [empty, one, many],
+      () => resolveProfileSkillCollections(profile, [])
+    );
+
+    expect(result.directCollections.map((item) => [item.collectionKind, item.collectionId])).toEqual([
+      ['package', 'package-empty'],
+      ['package', 'package-many'],
+      ['package', 'package-one']
+    ]);
+    expect(result.derivedSkills.map((item) => [item.collectionId, item.name, item.relativePath])).toEqual([
+      ['package-many', 'alpha', 'alpha/SKILL.md'],
+      ['package-many', 'beta', 'beta/nested/SKILL.md'],
+      ['package-one', 'only', 'only/SKILL.md']
+    ]);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it('allows a zero-child library snapshot and reports missing library snapshots', async () => {
     const { directory, profile } = await fixture();
     const empty = await directory.mkdir('empty');
     await descriptor(directory, 'provider', 'empty', empty);
     const missing = directory.path('missing');
     await directory.write(
-      'profiles/profile/sources/missing.json',
-      encodeProfileSourceReference({ schemaVersion: 1, source: 'missing' })
+      'profiles/profile/libraries/missing.json',
+      encodeProfileCollectionReference({ schemaVersion: 1, library: 'missing' })
     );
 
     const result = await discoverPreservingProvider(
       profile,
       [empty, missing],
-      () => resolveProfileSourceUnits(profile, [])
+      () => resolveProfileSkillCollections(profile, [])
     );
-    expect(result.directSourceUnits).toHaveLength(2);
+    expect(result.directCollections).toHaveLength(2);
     expect(result.derivedSkills).toEqual([]);
     expect(result.diagnostics).toEqual([{
-      category: 'invalid-source',
-      sourceId: 'missing',
+      category: 'invalid-collection',
+      collectionKind: 'library',
+      collectionId: 'missing',
       path: 'missing.json'
     }]);
   });

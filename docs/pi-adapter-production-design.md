@@ -163,7 +163,7 @@ $PI_CODING_AGENT_DIR/extensions/
 
 Ownership categories:
 
-- **User-owned:** profile content and instructions, configured skill roots, and source skills; `profile remove --force` explicitly authorizes deletion of the named non-active physical profile content.
+- **User-owned:** profile content and instructions, live added-Skill provider roots, prepared library roots, and package projects; `profile remove --force` explicitly authorizes deletion of the named non-active physical profile content.
 - **Bazframe-managed:** profile lifecycle operations, direct membership links, selection state, exceptional project overrides, adapter manifest, installed artifact, locks, and alias cache.
 - **Repository-owned:** the Git worktree and its project instructions.
 - **Pi-owned:** runtime settings, trust, tools, models, packages, extensions, prompts, themes, system prompts, and native skills.
@@ -239,7 +239,7 @@ Install flow:
 
 An exact desired artifact found without a manifest can be adopted because its bytes are reconstructably Bazframe's packaged artifact. Other occupied files stay under their current owner.
 
-Upgrade preserves profiles, global policy, project overrides and legacy records, and alias cache. A package migration runs only after validating the source schema and writing a recoverable destination.
+Adapter upgrade preserves profiles, global policy, project overrides, and alias cache. It does not migrate pre-alpha Skill collection state: old `sources/`, profile `sources/`, `source-snapshots/`, `source-units/`, and `bazframe-source.json` content remains inert and unchanged.
 
 Uninstall verifies the installed hash against the manifest, removes the artifact, removes the manifest, and clears the Pi alias cache. Drift remains visible for `--force` repair or manual recovery.
 
@@ -286,7 +286,7 @@ Skill requirements:
 - aliases direct Pi to the original skill file and base directory;
 - a generated alias collision is a profile error.
 
-Profile instructions and skills are trusted user content. Their source lifecycle stays independent from the adapter implementation so future skill-library providers can interoperate with the same profile contract.
+Profile instructions and Skills are trusted user content. Added-Skill, library, and package lifecycles stay independent from the adapter implementation so providers can interoperate with the same profile contract.
 
 ## 11. Diagnostics and failure behavior
 
@@ -300,7 +300,7 @@ Status reads existing state and reports:
 - canonical current Git root when one exists, otherwise explicit non-Git state;
 - current project state and effective default/disabled behavior;
 - active-profile ID and validation;
-- instruction source and skill count;
+- profile instruction path, directly added Skill count, typed library/package references, derived effective Skills, failures, and kind-qualified corrective commands;
 - aliases present in cache;
 - launch guidance;
 - one corrective command for each problem.
@@ -309,12 +309,16 @@ Status returns success for a healthy setup, a distinct attention status for inco
 
 ### 11.2 `/bazframe info`
 
-The runtime command reports only:
+The runtime command reports:
 
 - `Profile: <effective-id>` or `Profile: (none)`;
 - effective context entries in Pi order, each labeled `(pi)` or `(bazframe)`, or `Context: (none)`;
+- flat directly added Skills with paths;
+- kind-qualified library/package references with provider root, health, refresh availability, digest, and Skills root;
+- derived effective Skills with kind-qualified provenance;
+- kind-qualified library/package failures and exact `libraries update` / `packages build` corrective commands;
 - `Skills:` followed by deduplicated, lexically sorted names from Pi's effective `skill:` commands, or `(none)`;
-- a deterministic comma-separated `Collisions: original -> alias` line only when aliases exist.
+- a deterministic comma-separated `Aliases: original -> alias` line only when aliases exist.
 
 An active error-free profile contributes its instructions after Pi context. If Pi context is empty, the restored global context is listed first when present. Error, disabled, and unresolved states do not claim an effective profile or Bazframe context. The notification may use error severity without adding an error-detail line.
 

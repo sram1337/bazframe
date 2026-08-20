@@ -26,16 +26,15 @@
 - [x] Decide against Bazframe inter-skill dependency schema or automation for the current product: the Agent Skills specification has no dependency field, shared resources/runtime packages remain provider-owned, and any future namespaced validate-only sidecar requires separate evidence and approval.
 - [x] Collaboratively spec and add the `swarm`, `long`, and `nsn` skills to the active Bazframe profile through their provider; `nsn` bundles its explanatory reference locally.
 
-## Global managed sources and profile references
+## Skill libraries, Skill packages, and profile references
 
-- [x] Replace profile-local source descriptors with exact global source objects and exact profile references; old `source-units/` remains inert pre-alpha content.
-- [x] Implement global add/build/remove plus profile reference add/remove with no legacy aliases or migration.
-- [x] Validate shared-source activation against every referencing profile and refuse referenced deletion atomically.
-- [x] Resolve only active-profile references at runtime while retaining snapshot security, bounds, Pi validation, and collisions.
-- [x] Bring status, standalone Pi, pack, real-Pi, CLI/TUI agreement, and documentation to global-source parity.
-- [x] Add read-only managed-source details to Skills, profile reference display, and the multi-root Skills forest with exact `[+]`/`[-]` markers and indented children.
-- [x] Complete follow-up independent re-review; fail closed on malformed profile reference namespaces in production/Pi, keep unavailable TUI references visible, use one bulk reference-index snapshot per CLI/TUI overview, correct stale source/TUI terminology, and pass focused/full/real-Pi/local-terminal/Linux-terminal gates.
-- [x] Collapse managed-source identity to the exact canonical root basename with flat source-only records/references, one-argument add syntax, occupied-name rejection, no migration/fallback, and core/Pi/TUI parity.
+- [x] Replace the superseded umbrella with independent exact library/package records and exact typed profile references; old pre-alpha state remains inert.
+- [x] Implement library add/update/remove and package add/build/remove, plus whole-object profile reference add/remove, with no legacy aliases or migration.
+- [x] Keep library operations build-free; require exact `bazframe-package.json` and direct unsandboxed argv execution for explicit package add/build.
+- [x] Validate every referencing profile before atomic library update/package build and refuse referenced deletion.
+- [x] Resolve only active-profile typed references while retaining shared immutable snapshot security, bounded Pi validation, zero-Skill validity, and kind-qualified collision handling.
+- [x] Bring CLI/status, standalone Pi, pack, real-Pi, TUI projections, generated Skill, and current documentation to library/package parity.
+- [x] Remove obsolete shipped readers, commands, aliases, and compiled modules; keep old state invisible and unchanged.
 
 ## Terminal UI
 
@@ -49,7 +48,7 @@
 - [x] Implement separate top-tab focus with deterministic Tab/Shift+Tab traversal and immediate focused-tab activation.
 - [x] Distinguish focus with consistent active borders and add portable Vim `h`/`j`/`k`/`l` plus profile-pane `J`/`K` navigation.
 - [x] Implement reducer-owned persistent viewport offsets for the profile list, both membership panes, and the Skills browser, including reconciliation and resize clamping.
-- [x] Implement the read-only Skills source browser with provider-owned move/rename disabled and explained.
+- [x] Implement the read-only Skills browser as one uninterrupted list of collapsible `Added Skills`, `Library <id>`, and `Package <id>` peers, with provider-owned move/rename disabled and explained.
 - [x] Implement the Profiles list/lifecycle flows and two-pane selected-profile membership editor.
 - [x] Render structured read-only setup status and corrective actions in Settings; keep writes disabled.
 - [x] Add deterministic compact/resize/exit/accessibility reducer/component coverage and a real macOS pseudo-terminal enter/restore smoke test.
@@ -60,6 +59,8 @@
 - [x] Apply the August TUI usability reviews: responsive Skills/Profiles master-detail views, plain-text skill preview, combined source presentation, Adapters/Settings regrouping, back/breadcrumb and `o`/`c` navigation, honest loading, path-only manifest-free source add, height-aware compact panes, aligned profile counts, grouped Available skills, centralized hints, transient-message clearing, immediate tab activation, and same-width growth repaint coverage.
 - [x] Apply the follow-up TUI feedback: uppercase `H`/`L` route navigation, first-tab startup, preferred master panes that fill their allocated columns, bare profile skill counts, independently collapsible Available groups for every healthy browsable source, CLI guidance for whole-source attachment, snapshot-warning dismissal with persistent errors, proportional visual scrollbars for offset-driven content, and healthy/failed managed-source visibility coverage.
 - [x] Apply natural Left/Right and lowercase `h`/`l` master/detail traversal globally to Skills and Profiles, retain uppercase `H`/`L` compatibility, unwind nested Available rows before returning, and show active/dim-parent/inactive hierarchy that disappears while top tabs own focus.
+- [x] Preserve canonical kind-qualified validation diagnostics through library add/update and package add/build instead of leaking the resolver's private generic failure text.
+- [x] Document only Skill, added Skill, Skill library, and Skill package vocabulary; every discovered child remains a Skill.
 - [x] Implement `bazframe profile edit <profile>` / `bazframe skill edit <skill>` and route-specific TUI `e` with explicit inactive-profile/live-`(default)` targeting, managed-snapshot refusal, executable-only `VISUAL`/`EDITOR`, physical contained-target revalidation, shell-free inherited child execution, Ink terminal suspension/restoration, outcome refresh/reconciliation, CLI parity, and focused terminal evidence.
 - [ ] Complete the TUI production-readiness gate: macOS direct-PTY/local-tmux and Linux arm64 digest-pinned-base container direct-PTY/tmux/loopback-SSH resize, external-editor handoff/recovery, handled/fatal-render error, Ctrl+C, restoration, cleanup, and bounded CJK/combining/emoji-ZWJ/ANSI/long-path cell-width behavior are automated with run-recorded package/tool versions; Windows Terminal, representative remote SSH, terminal/font/locale ambiguous-width differences, and manual assistive-technology evidence remain open.
 
@@ -67,7 +68,7 @@
 
 - Skill packs, profile export, child subsets, and snapshot garbage collection require separate product decisions.
 - TUI skill artifact move/rename requires provider ownership, writable-root, cross-root, identity, locking, rollback, and recovery semantics.
-- Writable Settings and deeper source browsing remain candidate slices pending their documented lifecycle and interoperability gates.
+- Writable Settings and deeper provider-tree browsing remain candidate slices pending their documented lifecycle and interoperability gates.
 
 ## Research
 

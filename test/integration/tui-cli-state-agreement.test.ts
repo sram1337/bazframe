@@ -99,14 +99,14 @@ describe('CLI and TUI service state agreement', () => {
       .find((profile) => profile.id === 'focused')
       ?.memberships.find((membership) => membership.skillId === 'demo-skill');
     expect(cliMembership).toMatchObject({
-      sourceId: 'default',
+      originId: 'default',
       kind: 'managed',
       manageable: true
     });
 
     await service.removeMembership('focused', {
       membershipId: cliMembership!.membershipId,
-      sourceId: cliMembership!.sourceId!,
+      originId: cliMembership!.originId!,
       skillId: cliMembership!.skillId
     });
     expect(await cli([
@@ -114,7 +114,7 @@ describe('CLI and TUI service state agreement', () => {
     ])).toMatchObject({ status: 0, stdout: expect.stringContaining('absent'), stderr: '' });
 
     await service.addMembership('focused', {
-      sourceId: 'default',
+      originId: 'default',
       skillId: 'demo-skill'
     });
     expect(await cli([
@@ -136,7 +136,7 @@ describe('CLI and TUI service state agreement', () => {
     expect(await snapshotFilesystem(provider)).toEqual(providerBefore);
   });
 
-  it('shares manifest-free global source addition without implicit profile composition or provider mutation', async () => {
+  it('shares prepared-library addition without implicit profile composition or provider mutation', async () => {
     const directory = await createTempDirectory('bazframe source state agreement ');
     temporaryDirectories.push(directory);
     const home = directory.path('home');
@@ -163,18 +163,18 @@ describe('CLI and TUI service state agreement', () => {
     await service.useProfile('spare');
     const providerBefore = await snapshotFilesystem(provider);
 
-    const added = await service.addSource({ root: provider });
-    expect(added).toMatchObject({ action: 'added', source: 'downloaded' });
+    const added = await service.addLibrary({ root: provider });
+    expect(added).toMatchObject({ action: 'added', library: 'downloaded' });
 
-    const overview = await cli(['sources']);
+    const overview = await cli(['libraries']);
     expect(overview).toMatchObject({ status: 0, stderr: '' });
     expect(overview.stdout).toContain('downloaded');
     const dashboard = await service.loadDashboard();
     expect(dashboard.activeProfileId).toBe('spare');
-    expect(dashboard.managedSources).toContainEqual(expect.objectContaining({
-      source: 'downloaded', root: added.root, referenceCount: 0
+    expect(dashboard.collections).toContainEqual(expect.objectContaining({
+      kind: 'library', id: 'downloaded', root: added.root, referenceCount: 0
     }));
-    expect(dashboard.profiles.every((profile) => profile.sourceReferences?.length === 0)).toBe(true);
+    expect(dashboard.profiles.every((profile) => profile.libraryReferences?.length === 0)).toBe(true);
     expect(await snapshotFilesystem(provider)).toEqual(providerBefore);
   });
 });

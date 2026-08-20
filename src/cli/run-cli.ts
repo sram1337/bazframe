@@ -32,12 +32,12 @@ import {
   type ProfileRenameResult
 } from '../profiles/profile-management.js';
 import {
-  addActiveProfileSourceReference,
-  addProfileSourceReference,
-  removeActiveProfileSourceReference,
-  removeProfileSourceReference,
-  type ProfileSourceReferenceResult
-} from '../profiles/profile-source-reference-lifecycle.js';
+  addActiveProfileLibraryReference, addActiveProfilePackageReference,
+  addProfileLibraryReference, addProfilePackageReference,
+  removeActiveProfileLibraryReference, removeActiveProfilePackageReference,
+  removeProfileLibraryReference, removeProfilePackageReference,
+  type ProfileCollectionReferenceResult
+} from '../profiles/profile-skill-collection-reference-lifecycle.js';
 import {
   addActiveProfileSkill,
   addProfileSkill,
@@ -70,19 +70,17 @@ import {
 } from '../skills/default-skill-catalog.js';
 import { editSkillDefinition } from '../skills/skill-definition-editor.js';
 import {
-  formatSourceDiagnostic,
-  inspectGlobalSources,
+  formatSkillCollectionDiagnostic,
+  inspectGlobalSkillCollections,
   loadFlatSkillIdentities,
-  resolveProfileSourceUnits,
-  type GlobalSourceInspection,
-  type ProfileSourceComposition,
-  type SourceDiagnostic
-} from '../source-units/source-unit-resolver.js';
-import {
-  captureProfileSourceReferenceBulkIndex,
-  profileSourceReferenceKey
-} from '../profiles/profile-source-reference.js';
-import { addSource, buildSource, removeSource, type SourceLifecycleResult } from '../sources/source-lifecycle.js';
+  resolveProfileSkillCollections,
+  type GlobalSkillCollectionInspection,
+  type ProfileSkillCollectionComposition,
+  type SkillCollectionDiagnostic
+} from '../skill-collections/skill-collection-resolver.js';
+import { captureProfileCollectionReferenceBulkIndex } from '../profiles/profile-skill-collection-reference.js';
+import { addLibrary, addPackage, buildPackage, removeLibrary, removePackage, updateLibrary, type SkillCollectionLifecycleResult } from '../skill-collections/skill-collection-lifecycle.js';
+import { collectionKey, idForRecord, kindForRecord, skillsRootForRecord, type SkillCollectionKind } from '../skill-collections/skill-collection-store.js';
 import { buildStatus } from '../status/status.js';
 import {
   colorizeHelp,
@@ -107,13 +105,10 @@ import {
   PROFILE_SKILLS_ADD_HELP,
   PROFILE_SKILLS_HELP,
   PROFILE_SKILLS_REMOVE_HELP,
-  PROFILE_SOURCES_ADD_HELP,
-  PROFILE_SOURCES_HELP,
-  PROFILE_SOURCES_REMOVE_HELP,
-  SOURCES_ADD_HELP,
-  SOURCES_BUILD_HELP,
-  SOURCES_HELP,
-  SOURCES_REMOVE_HELP,
+  PROFILE_LIBRARIES_ADD_HELP, PROFILE_LIBRARIES_HELP, PROFILE_LIBRARIES_REMOVE_HELP,
+  PROFILE_PACKAGES_ADD_HELP, PROFILE_PACKAGES_HELP, PROFILE_PACKAGES_REMOVE_HELP,
+  LIBRARIES_ADD_HELP, LIBRARIES_HELP, LIBRARIES_REMOVE_HELP, LIBRARIES_UPDATE_HELP,
+  PACKAGES_ADD_HELP, PACKAGES_BUILD_HELP, PACKAGES_HELP, PACKAGES_REMOVE_HELP,
   PROFILE_USE_HELP,
   PROJECT_HELP,
   REMOVE_HELP,
@@ -322,33 +317,24 @@ async function runCommand(
     ));
     return EXIT_STATUS.success;
   }
-  if (command.name === 'sources-overview') {
-    const inspection = await inspectGlobalSources(bazframeHome);
-    const referenceIndex = await captureProfileSourceReferenceBulkIndex(bazframeHome);
+  if (command.name === 'libraries-overview' || command.name === 'packages-overview') {
+    const kind: SkillCollectionKind = command.name === 'libraries-overview' ? 'library' : 'package';
+    const inspection = await inspectGlobalSkillCollections(bazframeHome);
+    const referenceIndex = await captureProfileCollectionReferenceBulkIndex(bazframeHome);
     const referenceCounts = new Map<string, number | 'unknown'>();
-    for (const source of inspection.sources) {
-      const key = profileSourceReferenceKey(source.record.source);
-      referenceCounts.set(
-        key,
-        referenceIndex.diagnostics.length > 0
-          ? 'unknown'
-          : (referenceIndex.profileIdsBySource.get(key)?.length ?? 0)
-      );
+    for (const item of inspection.collections) {
+      const key = collectionKey(kindForRecord(item.record), idForRecord(item.record));
+      referenceCounts.set(key, referenceIndex.diagnostics.length > 0 ? 'unknown' : (referenceIndex.profileIdsByCollection.get(key)?.length ?? 0));
     }
-    writeStdout(formatSourcesOverview(
-      inspection,
-      referenceCounts,
-      referenceIndex.diagnostics,
-      stdoutColors
-    ));
+    writeStdout(formatCollectionsOverview(kind, inspection, referenceCounts, referenceIndex.diagnostics, stdoutColors));
     return EXIT_STATUS.success;
   }
-  if (command.name === 'profile-sources-overview') {
+  if (command.name === 'profile-libraries-overview' || command.name === 'profile-packages-overview') {
+    const kind: SkillCollectionKind = command.name === 'profile-libraries-overview' ? 'library' : 'package';
     const profileId = await readActiveProfile(bazframeHome);
     const profile = await loadProfile(bazframeHome, profileId);
-    const flatSkills = loadFlatSkillIdentities(profile.skillDirectories);
-    const composition = await resolveProfileSourceUnits(profile.directory, flatSkills);
-    writeStdout(formatProfileSourcesOverview(profileId, composition, stdoutColors));
+    const composition = await resolveProfileSkillCollections(profile.directory, loadFlatSkillIdentities(profile.skillDirectories));
+    writeStdout(formatProfileCollectionsOverview(profileId, kind, composition, stdoutColors));
     return EXIT_STATUS.success;
   }
   if (command.name === 'use' || command.name === 'profile-use') {
@@ -420,26 +406,29 @@ async function runCommand(
     writeStdout(`${await currentProfile(bazframeHome)}\n`);
     return EXIT_STATUS.success;
   }
-  if (command.name === 'sources-add' || command.name === 'sources-build' || command.name === 'sources-remove') {
+  if (command.name === 'libraries-add' || command.name === 'libraries-update' || command.name === 'libraries-remove' || command.name === 'packages-add' || command.name === 'packages-build' || command.name === 'packages-remove') {
     const options = { bazframeHome, environment };
-    const result = command.name === 'sources-add'
-      ? await addSource(options, command.sourceRoot)
-      : command.name === 'sources-build'
-        ? await buildSource(options, command.sourceId)
-        : await removeSource(options, command.sourceId);
-    writeStdout(formatSourceLifecycleResult(result));
+    let result: SkillCollectionLifecycleResult;
+    switch (command.name) {
+      case 'libraries-add': result = await addLibrary(options, command.root); break;
+      case 'libraries-update': result = await updateLibrary(options, command.id); break;
+      case 'libraries-remove': result = await removeLibrary(options, command.id); break;
+      case 'packages-add': result = await addPackage(options, command.root); break;
+      case 'packages-build': result = await buildPackage(options, command.id); break;
+      case 'packages-remove': result = await removePackage(options, command.id); break;
+    }
+    writeStdout(formatCollectionLifecycleResult(result));
     return EXIT_STATUS.success;
   }
-  if (command.name === 'profile-sources-add' || command.name === 'profile-sources-remove') {
+  if (command.name === 'profile-libraries-add' || command.name === 'profile-libraries-remove' || command.name === 'profile-packages-add' || command.name === 'profile-packages-remove') {
     const options = { bazframeHome };
-    const result = command.name === 'profile-sources-add'
-      ? command.profileId === undefined
-        ? await addActiveProfileSourceReference(options, command.sourceId)
-        : await addProfileSourceReference(options, command.profileId, command.sourceId)
-      : command.profileId === undefined
-        ? await removeActiveProfileSourceReference(options, command.sourceId)
-        : await removeProfileSourceReference(options, command.profileId, command.sourceId);
-    writeStdout(formatSourceReferenceResult(result, command.profileId !== undefined));
+    const explicit = command.profileId !== undefined;
+    let result: ProfileCollectionReferenceResult;
+    if (command.name === 'profile-libraries-add') result = explicit ? await addProfileLibraryReference(options, command.profileId!, command.id) : await addActiveProfileLibraryReference(options, command.id);
+    else if (command.name === 'profile-libraries-remove') result = explicit ? await removeProfileLibraryReference(options, command.profileId!, command.id) : await removeActiveProfileLibraryReference(options, command.id);
+    else if (command.name === 'profile-packages-add') result = explicit ? await addProfilePackageReference(options, command.profileId!, command.id) : await addActiveProfilePackageReference(options, command.id);
+    else result = explicit ? await removeProfilePackageReference(options, command.profileId!, command.id) : await removeActiveProfilePackageReference(options, command.id);
+    writeStdout(formatCollectionReferenceResult(result, explicit));
     return EXIT_STATUS.success;
   }
   if (command.name === 'default-skill-add' || command.name === 'default-skill-remove') {
@@ -708,7 +697,8 @@ function formatProfilesOverview(
     colors.command('  bazframe profile rename <old> <new>'),
     colors.command('  bazframe profile remove <profile> [--force]'),
     colors.command('  bazframe profile skills'),
-    colors.command('  bazframe profile sources'),
+    colors.command('  bazframe profile libraries'),
+    colors.command('  bazframe profile packages'),
     colors.command('  bazframe profile list'),
     colors.command('  bazframe profile current'),
     ''
@@ -722,7 +712,7 @@ function formatSkillsOverview(
 ): string {
   return [
     colors.heading('Skills'),
-    `Source: ${DEFAULT_SKILL_SOURCE_LABEL}`,
+    `Added Skills: ${DEFAULT_SKILL_SOURCE_LABEL}`,
     `Catalog: ${skillsRoot}`,
     ...(registrations.length === 0
       ? [colors.muted('  (none)')]
@@ -758,72 +748,33 @@ function formatProfileSkillsOverview(
   ].join('\n');
 }
 
-function formatSourcesOverview(
-  inspection: { sources: GlobalSourceInspection[]; diagnostics: SourceDiagnostic[] },
+function formatCollectionsOverview(
+  kind: SkillCollectionKind,
+  inspection: { collections: GlobalSkillCollectionInspection[]; diagnostics: SkillCollectionDiagnostic[] },
   referenceCounts: ReadonlyMap<string, number | 'unknown'>,
-  referenceDiagnostics: ReadonlyArray<{ profileId: string; diagnostic: { source: string; path: string } }>,
+  referenceDiagnostics: ReadonlyArray<{ profileId: string; diagnostic: { key: { kind: SkillCollectionKind; id: string }; path: string } }>,
   colors: CliColors
 ): string {
-  const sourceDiagnostics = [
-    ...inspection.diagnostics,
-    ...inspection.sources.flatMap((source) => source.diagnostics)
-  ];
+  const items = inspection.collections.filter((item) => kindForRecord(item.record) === kind);
+  const diagnostics = [...inspection.diagnostics.filter((item) => item.collectionKind === kind), ...items.flatMap((item) => item.diagnostics)];
+  const plural = kind === 'library' ? 'libraries' : 'packages';
   return [
-    colors.heading('Global sources'),
-    ...(inspection.sources.length === 0 ? [colors.muted('  (none)')] : inspection.sources.flatMap((source) => {
-      const record = source.record;
-      const referenceCount = referenceCounts.get(record.source) ?? 'unknown';
-      const health = source.diagnostics.length === 0 && referenceCount !== 'unknown' ? 'ready' : 'failed';
-      const skills = source.skills;
-      return [
-        `  - ${record.source} [${health}] -> ${record.root} (sha256:${record.digest}; root:${record.sourceUnitRoot}; rebuild:${source.rebuildAvailability}; references:${referenceCount}; skills:${source.skills.length})`,
-        ...skills.map((skill) => `      - ${skill.name} (${skill.relativePath})`)
-      ];
+    colors.heading(`Global ${plural}`),
+    ...(items.length === 0 ? [colors.muted('  (none)')] : items.flatMap((item) => {
+      const record = item.record; const id = idForRecord(record); const key = collectionKey(kind, id);
+      const referenceCount = referenceCounts.get(key) ?? 'unknown'; const health = item.diagnostics.length === 0 && referenceCount !== 'unknown' ? 'ready' : 'failed';
+      const roots = kind === 'package' && 'package' in record ? `; artifact root:${record.artifactRoot}; Skills root:${record.skillsRoot}` : '';
+      return [`  - ${id} [${health}] -> ${record.root} (sha256:${record.digest}${roots}; ${kind === 'library' ? 'update' : 'build'}:${item.rebuildAvailability}; references:${referenceCount}; Skills:${item.skills.length})`, ...item.skills.map((skill) => `      - ${skill.name} (${skill.relativePath})`)];
     })),
-    ...(sourceDiagnostics.length === 0 ? [] : [colors.heading('Source failures:'), ...sourceDiagnostics.map((diagnostic) => colors.warning(`  - ${formatSourceDiagnostic(diagnostic)}`))]),
-    ...(referenceDiagnostics.length === 0 ? [] : [
-      colors.heading('Reference index failures:'),
-      ...referenceDiagnostics.map((item) => colors.warning(`  - ${item.profileId}:${item.diagnostic.path} invalid-reference (${item.diagnostic.source})`))
-    ]),
-    '',
-    colors.heading('Commands:'),
-    colors.command('  bazframe sources add <absolute-root>'),
-    colors.command('  bazframe sources build <source>'),
-    colors.command('  bazframe sources remove <source>'),
-    ''
+    ...(diagnostics.length === 0 ? [] : [colors.heading(`${kind === 'library' ? 'Library' : 'Package'} failures:`), ...diagnostics.map((diagnostic) => colors.warning(`  - ${formatSkillCollectionDiagnostic(diagnostic)}`))]),
+    ...(referenceDiagnostics.length === 0 ? [] : [colors.heading('Reference index failures:'), ...referenceDiagnostics.filter((item) => item.diagnostic.key.kind === kind).map((item) => colors.warning(`  - ${item.profileId}:${item.diagnostic.key.kind}:${item.diagnostic.path} invalid-reference (${item.diagnostic.key.id})`))]),
+    '', colors.heading('Commands:'), colors.command(`  bazframe ${plural} add <absolute-root>`), colors.command(`  bazframe ${plural} ${kind === 'library' ? 'update' : 'build'} <${kind}>`), colors.command(`  bazframe ${plural} remove <${kind}>`), ''
   ].join('\n');
 }
 
-function formatProfileSourcesOverview(
-  profileId: string,
-  composition: ProfileSourceComposition,
-  colors: CliColors
-): string {
-  return [
-    colors.heading('Profile source references'),
-    colors.success(`Active profile: ${profileId}`),
-    colors.heading('Referenced sources:'),
-    ...(composition.directSourceUnits.length === 0
-      ? [colors.muted('  (none)')]
-      : composition.directSourceUnits.map((source) => source.snapshotDigest === undefined
-        ? `  - ${source.sourceId} (target unavailable)`
-        : `  - ${source.sourceId} (sha256:${source.snapshotDigest}; root:${source.sourceUnitRoot})`)),
-    colors.heading('Derived effective skills:'),
-    ...(composition.derivedSkills.length === 0
-      ? [colors.muted('  (none)')]
-      : composition.derivedSkills.map((skill) =>
-          `  - ${skill.name} (${skill.sourceId}:${skill.relativePath})`)),
-    colors.heading('Source failures:'),
-    ...(composition.diagnostics.length === 0
-      ? [colors.muted('  (none)')]
-      : composition.diagnostics.map((diagnostic) =>
-          colors.warning(`  - ${formatSourceDiagnostic(diagnostic)}`))),
-    '',
-    colors.heading('Commands:'),
-    colors.command('  bazframe profile sources add <source> [--profile <profile>]'),
-    colors.command('  bazframe profile sources remove <source> [--profile <profile>]'),
-    ''
-  ].join('\n');
+function formatProfileCollectionsOverview(profileId:string,kind:SkillCollectionKind,composition:ProfileSkillCollectionComposition,colors:CliColors):string{
+  const direct=composition.directCollections.filter((item)=>item.collectionKind===kind);const skills=composition.derivedSkills.filter((item)=>item.collectionKind===kind);const diagnostics=composition.diagnostics.filter((item)=>item.collectionKind===kind);const plural=kind==='library'?'libraries':'packages';
+  return [colors.heading(`Profile ${plural}`),colors.success(`Active profile: ${profileId}`),colors.heading(`Referenced ${plural}:`),...(direct.length===0?[colors.muted('  (none)')]:direct.map((item)=>item.snapshotDigest===undefined?`  - ${item.collectionId} (target unavailable)`:`  - ${item.collectionId} (sha256:${item.snapshotDigest}; Skills root:${item.skillsRoot})`)),colors.heading('Effective Skills:'),...(skills.length===0?[colors.muted('  (none)')]:skills.map((skill)=>`  - ${skill.name} (${skill.collectionId}:${skill.relativePath})`)),colors.heading(`${kind==='library'?'Library':'Package'} failures:`),...(diagnostics.length===0?[colors.muted('  (none)')]:diagnostics.map((item)=>colors.warning(`  - ${formatSkillCollectionDiagnostic(item)}`))),'',colors.heading('Commands:'),colors.command(`  bazframe profile ${plural} add <${kind}> [--profile <profile>]`),colors.command(`  bazframe profile ${plural} remove <${kind}> [--profile <profile>]`),''].join('\n');
 }
 
 function formatProjectsOverview(
@@ -935,33 +886,14 @@ function formatMembershipResult(
     `Profile skill membership: ${result.action}`,
     `${explicitlyTargeted ? 'Profile' : 'Active profile'}: ${result.profileId}`,
     `Skill: ${result.skillId}`,
-    `Source: ${result.sourceDirectory}`,
+    `Provider root: ${result.sourceDirectory}`,
     `Membership: ${result.membershipPath}`,
     ''
   ].join('\n');
 }
 
-function formatSourceLifecycleResult(result: SourceLifecycleResult): string {
-  return [
-    `Global source: ${result.action}`,
-    `Source: ${result.source}`,
-    `Source root: ${result.root}`,
-    `Snapshot: ${result.digest}`,
-    `Source-unit root: ${result.sourceUnitRoot}`,
-    `Record: ${result.path}`,
-    ''
-  ].join('\n');
-}
-
-function formatSourceReferenceResult(result: ProfileSourceReferenceResult, explicitlyTargeted: boolean): string {
-  return [
-    `Profile source reference: ${result.action}`,
-    `${explicitlyTargeted ? 'Profile' : 'Active profile'}: ${result.profileId}`,
-    `Source: ${result.source}`,
-    `Reference: ${result.path}`,
-    ''
-  ].join('\n');
-}
+function formatCollectionLifecycleResult(result:SkillCollectionLifecycleResult):string{const kind=kindForRecord(result);const id=idForRecord(result);return[`Global ${kind}: ${result.action}`,`${kind==='library'?'Library':'Package'}: ${id}`,`${kind==='library'?'Library':'Package'} root: ${result.root}`,`Snapshot: ${result.digest}`,`Skills root: ${skillsRootForRecord(result)}`,`Record: ${result.path}`,''].join('\n');}
+function formatCollectionReferenceResult(result:ProfileCollectionReferenceResult,explicit:boolean):string{if('library'in result)return[`Profile library reference: ${result.action}`,`${explicit?'Profile':'Active profile'}: ${result.profileId}`,`Library: ${result.library}`,`Reference: ${result.path}`,''].join('\n');return[`Profile package reference: ${result.action}`,`${explicit?'Profile':'Active profile'}: ${result.profileId}`,`Package: ${result.package}`,`Reference: ${result.path}`,''].join('\n');}
 
 function formatHarnessSummary(
   dryRun: boolean,
@@ -1009,13 +941,20 @@ function helpFor(topic: HelpTopic): string {
     case 'profile-skills': return PROFILE_SKILLS_HELP;
     case 'profile-skills-add': return PROFILE_SKILLS_ADD_HELP;
     case 'profile-skills-remove': return PROFILE_SKILLS_REMOVE_HELP;
-    case 'profile-sources': return PROFILE_SOURCES_HELP;
-    case 'profile-sources-add': return PROFILE_SOURCES_ADD_HELP;
-    case 'profile-sources-remove': return PROFILE_SOURCES_REMOVE_HELP;
-    case 'sources': return SOURCES_HELP;
-    case 'sources-add': return SOURCES_ADD_HELP;
-    case 'sources-build': return SOURCES_BUILD_HELP;
-    case 'sources-remove': return SOURCES_REMOVE_HELP;
+    case 'profile-libraries': return PROFILE_LIBRARIES_HELP;
+    case 'profile-libraries-add': return PROFILE_LIBRARIES_ADD_HELP;
+    case 'profile-libraries-remove': return PROFILE_LIBRARIES_REMOVE_HELP;
+    case 'profile-packages': return PROFILE_PACKAGES_HELP;
+    case 'profile-packages-add': return PROFILE_PACKAGES_ADD_HELP;
+    case 'profile-packages-remove': return PROFILE_PACKAGES_REMOVE_HELP;
+    case 'libraries': return LIBRARIES_HELP;
+    case 'libraries-add': return LIBRARIES_ADD_HELP;
+    case 'libraries-update': return LIBRARIES_UPDATE_HELP;
+    case 'libraries-remove': return LIBRARIES_REMOVE_HELP;
+    case 'packages': return PACKAGES_HELP;
+    case 'packages-add': return PACKAGES_ADD_HELP;
+    case 'packages-build': return PACKAGES_BUILD_HELP;
+    case 'packages-remove': return PACKAGES_REMOVE_HELP;
     case 'skills': return SKILLS_HELP;
     case 'skill-edit': return SKILL_EDIT_HELP;
     case 'project': return PROJECT_HELP;

@@ -130,7 +130,7 @@ Globally disabled Git worktrees remain native unless an enabled project override
 
 ## Skill collisions
 
-Profile duplicates are handled before this runtime boundary and never receive aliases. Duplicate flat/flat Pi-loaded names invalidate the complete profile. Prospective source add/build duplicates reject activation. For already-active memberships, flat/derived duplication preserves the flat skill and withholds the complete derived source unit; source/source duplication withholds every involved source unit; unrelated valid resources remain effective.
+Profile duplicates are handled before this runtime boundary and never receive aliases. Duplicate directly added Skill names invalidate the complete profile. Prospective library add/update, package add/build, and whole-object profile reference changes reject duplicate activation. If malformed external state later creates a direct-Skill/object collision, the direct Skill remains effective and the complete conflicting library or package is withheld. Library/package collisions withhold every involved object; unrelated valid Skills and objects remain effective.
 
 At runtime, any pre-existing Pi command with `source === "skill"` occupies its `skill:<name>` command; the adapter does not infer more specific ownership. A profile skill keeps its original name when free. When occupied, the pre-existing Pi skill command keeps the name and Bazframe attempts exactly one deterministic alias. The ordinary spelling is:
 

@@ -86,7 +86,7 @@ pi
 
 Enter `/bazframe info` inside Pi. `Profile: focused` confirms that Bazframe added the profile. The profile’s instruction now accompanies Pi’s own project context in that session.
 
-Use `/bazframe reload` after changing a profile or managed source while Pi is open.
+Use `/bazframe reload` after changing a profile, library activation, or package activation while Pi is open.
 
 ## Core workflows
 
@@ -117,9 +117,9 @@ bazframe profile remove --help
 
 The second command explains the safeguards around profile deletion.
 
-### Add an individual skill
+### Add an individual Skill
 
-An [Agent Skill](https://agentskills.io) is a directory containing a `SKILL.md` file with instructions for a coding agent. Direct skills are optional. Bazframe's `(default)` catalog stores absolute links to canonical external skill directories; providers retain their content.
+A **Skill** is a directory conforming to the [Agent Skills specification](https://agentskills.io) and containing a `SKILL.md` file with instructions for a coding agent. A profile's Skills are optional. Bazframe's `(default)` catalog stores absolute links to canonical external Skill directories; providers retain their content. See [Using Skills with Bazframe](docs/skills.md) for the standard format, Bazframe lifecycle choices, validation timing, and troubleshooting.
 
 Create a minimal local skill for this example:
 
@@ -149,54 +149,57 @@ bazframe profile skills
 
 After `/bazframe reload`, `/bazframe info` should report `Flat direct skills: 1` and list `explain-code`.
 
-Open a registered live provider definition explicitly with the same external-editor contract used for profiles:
+Open an added Skill's live provider definition explicitly with the same external-editor contract used for profiles:
 
 ```bash
 bazframe skill edit explain-code
 ```
 
-The command derives the provider `SKILL.md` from the `(default)` registration rather than trusting a displayed path. A successful editor exit does not claim that content was saved. Managed-source skills are immutable snapshots and cannot be edited this way; edit their provider input through its provider workflow, then run `bazframe sources build <source>`.
+The command derives the provider `SKILL.md` from the `(default)` entry rather than trusting a displayed path. A successful editor exit does not claim that content was saved. Skills from libraries and packages come from immutable snapshots and cannot be edited this way; edit provider input, then run `bazframe libraries update <library>` or `bazframe packages build <package>`.
 
-The catalog registration and profile membership are parallel links to the same provider directory. Provider changes are visible after a new Pi session or `/bazframe reload`. Remove the profile membership before `bazframe remove skill explain-code`; catalog removal is refused while any profile references it.
+The added Skill and its profile membership are parallel links to the same provider directory. Provider changes are visible after a new Pi session or `/bazframe reload`. Remove the profile membership before `bazframe remove skill explain-code`; catalog removal is refused while any profile references it.
 
-Bazframe's npm package also ships `dist/skills/bazframe/`. Register that directory with `bazframe add skill <installed-package>/dist/skills/bazframe` when the self-management skill is desired.
+Bazframe's npm package also ships `dist/skills/bazframe/`. Add that directory with `bazframe add skill <installed-package>/dist/skills/bazframe` when the `bazframe` Skill is desired.
 
-### Add a related collection of skills
+### Add a Skill library or Skill package
 
-A managed source is a named collection of Agent Skills that share files, scripts, or dependencies. Bazframe copies a prepared collection into an immutable snapshot. Its name is exactly the canonical input directory's basename; profiles refer to that one name and the global source record selects the active snapshot.
-
-This example creates an already-prepared source containing one skill:
+Use a **library** for an already-prepared directory of zero or more Skills:
 
 ```bash
 TOOLKIT="$HOME/example-toolkit"
 mkdir -p "$TOOLKIT/review-code"
-cat > "$TOOLKIT/review-code/SKILL.md" <<'EOF'
+cat > "$TOOLKIT/review-code/SKILL.md" <<'SKILL'
 ---
 name: review-code
 description: Review a change for correctness and maintainability.
 ---
-
 # Review code
-
-Inspect the change, verify its behavior, and report actionable findings.
-EOF
-
-bazframe sources add "$TOOLKIT"
-bazframe profile sources add example-toolkit
-bazframe profile sources
+SKILL
+bazframe libraries add "$TOOLKIT"
+bazframe profile libraries add example-toolkit
 ```
 
-Here `example-toolkit` is derived from the selected directory name. Bazframe rejects invalid or already-registered basenames rather than normalizing or disambiguating them.
+Provider changes become active only after `bazframe libraries update example-toolkit`.
 
-After `/bazframe reload`, `/bazframe info` should report one profile source reference and list `review-code` under derived effective skills.
+Use a **package** for a buildable project. Its required `bazframe-package.json` declares literal build argv, an artifact root, and a Skills root:
 
-Run an explicit build after changing the input collection:
+```json
+{
+  "schemaVersion": 1,
+  "build": ["npm", "run", "build"],
+  "artifactRoot": "dist",
+  "skillsRoot": "skills"
+}
+```
 
 ```bash
-bazframe sources build example-toolkit
+bazframe packages add /absolute/path/to/my-package
+bazframe profile packages add my-package
+bazframe packages build my-package
 ```
 
-Already-prepared directories work directly. A source that requires preparation can include `bazframe-source.json` with a build command and artifact paths. `sources add` and `sources build` run that declared command as your user. See [Managed source composition](docs/design.md#global-managed-sources-and-profile-composition) for the manifest and snapshot contract.
+Package builds are explicit and unsandboxed. The complete artifact root is snapshotted, including shared resources, while Skill discovery begins only at the Skills root. See [Using Skills with Bazframe](docs/skills.md).
+
 
 ## Control where the profile applies
 
@@ -212,13 +215,13 @@ bazframe projects         # inspect repository settings
 
 ## Terminal interface
 
-`bazframe tui` opens a keyboard-driven `Skills`, `Profiles`, `Adapters`, `Settings` interface. Preferred layouts show profile and skill/source master-detail panes; compact layouts drill into profile details and plain-text `SKILL.md` previews with Esc/Backspace return. Press `e` on a live `(default)` skill preview to open its provider `SKILL.md`; managed snapshots instead show provider-edit and rebuild guidance. Profile details retain `e` for the selected profile's `AGENTS.md`. The interface preserves explicit inactive-profile membership editing and keeps adapter/settings status read-only.
+`bazframe tui` opens a keyboard-driven `Skills`, `Profiles`, `Adapters`, `Settings` interface. Preferred layouts show profile and Skills master-detail panes; compact layouts drill into profile details and plain-text `SKILL.md` previews with Esc/Backspace return. Press `e` on an added Skill's live `(default)` preview to open its provider `SKILL.md`; library/package Skills instead show provider-input and refresh guidance. Profile details retain `e` for the selected profile's `AGENTS.md`. The interface preserves explicit inactive-profile membership editing and keeps adapter/settings status read-only.
 
 ```bash
 bazframe tui
 ```
 
-Press `?` for its key guide. In Skills, `o`/`c` expand or collapse a source and `a` can add an already-prepared physical root only when no build manifest is present; the source name is derived from that root. The final literal `y` creates no profile reference. Declared builds, rebuild/remove, and profile-source reference changes remain available through `bazframe sources` and `bazframe profile sources`.
+Press `?` for its key guide. In Skills, `o`/`c` expand or collapse groups and `a` can add an already-prepared library. The library ID is its canonical root basename, and final literal `y` creates no profile reference. Package writes and all profile library/package reference changes remain CLI-only.
 
 ## Command map
 
@@ -226,11 +229,11 @@ Press `?` for its key guide. In Skills, `o`/`c` expand or collapse a source and 
 |---|---|
 | Inspect profiles | `bazframe profiles` |
 | Select the active profile | `bazframe profile use <profile>` |
-| Register or remove individual skills | `bazframe add skill` / `bazframe remove skill` |
-| Browse registered individual skills | `bazframe skills` |
-| Manage profile skill membership | `bazframe profile skills` |
-| Manage shared skill collections | `bazframe sources` |
-| Manage profile source references | `bazframe profile sources` |
+| Add or remove a Skill | `bazframe add skill` / `bazframe remove skill` |
+| Browse added Skills | `bazframe skills` |
+| Manage a profile's Skills | `bazframe profile skills` |
+| Manage Skill libraries | `bazframe libraries` / `bazframe profile libraries` |
+| Manage Skill packages | `bazframe packages` / `bazframe profile packages` |
 | Control the global setting | `bazframe global` |
 | Control the current Git repository | `bazframe project` |
 | Inspect adapter state | `bazframe adapters` |
@@ -249,24 +252,25 @@ Bazframe stores user state in `~/.bazframe` by default:
 ├── active-profile
 ├── skills/
 ├── profiles/
-├── sources/
-├── source-snapshots/
+├── libraries/
+├── packages/
+├── skill-snapshots/
 ├── projects/
 └── adapters/
 ```
 
 | Environment variable | Purpose | Default |
 |---|---|---|
-| `BAZFRAME_HOME` | Bazframe profiles, settings, sources, snapshots, and adapter records | `~/.bazframe` |
+| `BAZFRAME_HOME` | Bazframe profiles, settings, libraries, packages, snapshots, and adapter records | `~/.bazframe` |
 | `PI_CODING_AGENT_DIR` | Pi’s global configuration and extension directory | `~/.pi/agent` |
 
 Each override must be an absolute path.
 
 ## Safety
 
-Profiles and skills become trusted input to a coding agent with filesystem and shell tools. Review their instructions and scripts before adding them. Review a managed source’s build declaration before running `sources add` or `sources build`. `bazframe profile remove --force` permanently deletes the named non-active profile directory.
+Profiles and skills become trusted input to a coding agent with filesystem and shell tools. Review their instructions and scripts before adding them. Review a package's build declaration before running `packages add` or `packages build`. `bazframe profile remove --force` permanently deletes the named non-active profile directory.
 
-`bazframe status` reports adapter ownership, active-profile validity, effective project behavior, source health, and corrective actions.
+`bazframe status` reports adapter ownership, active-profile validity, effective project behavior, library/package health, and corrective actions.
 
 ## Documentation
 

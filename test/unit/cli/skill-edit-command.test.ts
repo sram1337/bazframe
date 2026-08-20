@@ -17,8 +17,9 @@ describe('skill edit command', () => {
       expect(await runCli(argv, { writeStdout: (text) => { stdout += text; } })).toBe(0);
       expect(stdout).toContain('bazframe skill edit <skill>');
       expect(stdout).toContain('VISUAL');
-      expect(stdout).toContain('edit provider input through its provider workflow');
-      expect(stdout).toContain('bazframe sources build <source>');
+      expect(stdout).toContain('edit provider input');
+      expect(stdout).toContain('bazframe libraries update <library>');
+      expect(stdout).toContain('bazframe packages build <package>');
     }
     let stderr = '';
     expect(await runCli(['skills', 'edit', 'demo-skill'], {

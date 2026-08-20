@@ -37,22 +37,23 @@ import {
 } from '../skills/default-skill-catalog.js';
 import { inspectStatus, type StatusInspection } from '../status/status.js';
 import {
-  formatSourceDiagnostic,
-  inspectGlobalSources,
-  type GlobalSourceInspection,
-  type SourceDiagnostic
-} from '../source-units/source-unit-resolver.js';
-import { resolvePhysicalRelativeDirectory, verifySourceSnapshot } from '../source-units/source-snapshot.js';
-import { readOptionalSourceBuildManifest, type SourceBuildManifest } from '../source-units/source-build-manifest.js';
-import { canonicalPhysicalSourceRoot } from '../sources/source-store.js';
-import { addSource as addGlobalSource, type SourceLifecycleResult } from '../sources/source-lifecycle.js';
+  formatSkillCollectionDiagnostic,
+  inspectGlobalSkillCollections,
+  type GlobalSkillCollectionInspection,
+  type SkillCollectionDiagnostic
+} from '../skill-collections/skill-collection-resolver.js';
+import { resolvePhysicalRelativeDirectory, verifySkillSnapshot } from '../skill-collections/skill-snapshot.js';
+import { PACKAGE_MANIFEST } from '../packages/package-manifest.js';
+import { canonicalPhysicalCollectionRoot, collectionKey, idForRecord, kindForRecord, skillsRootForRecord, type SkillCollectionKind } from '../skill-collections/skill-collection-store.js';
+import { addLibrary as addGlobalLibrary, type SkillCollectionLifecycleResult } from '../skill-collections/skill-collection-lifecycle.js';
 import {
-  captureProfileSourceReferenceBulkIndex,
-  profileSourceReferenceKey,
-  readProfileSourceReference,
-  scanProfileSourceReferences,
-  type ProfileSourceReference
-} from '../profiles/profile-source-reference.js';
+  captureProfileCollectionReferenceBulkIndex,
+  idForReference,
+  kindForReference,
+  readProfileCollectionReference,
+  scanProfileCollectionReferences,
+  type ProfileSkillCollectionReference
+} from '../profiles/profile-skill-collection-reference.js';
 
 export type DiagnosticSeverity = 'warning' | 'error';
 
@@ -67,7 +68,7 @@ export type MembershipKind = 'managed' | 'unmanaged';
 export interface DirectMembership {
   id: string;
   membershipId: string;
-  sourceId?: string;
+  originId?: string;
   skillId: string;
   path: string;
   target?: string;
@@ -76,7 +77,8 @@ export interface DirectMembership {
   diagnostic?: string;
 }
 
-export interface ProfileSourceReferenceSummary extends ProfileSourceReference {
+export interface ProfileCollectionReferenceSummary {
+  kind: SkillCollectionKind;
   id: string;
   path: string;
   availability: 'available' | 'unavailable';
@@ -92,16 +94,17 @@ export interface ProfileSummary {
   membershipWritable: boolean;
   membershipDiagnostic?: string;
   memberships: DirectMembership[];
-  sourceReferences?: ProfileSourceReferenceSummary[];
+  libraryReferences?: ProfileCollectionReferenceSummary[];
+  packageReferences?: ProfileCollectionReferenceSummary[];
 }
 
 export interface SkillSummary {
   id: string;
-  sourceId: string;
+  originId: string;
   directory: string;
 }
 
-export interface SkillSourceSummary {
+export interface SkillGroupSummary {
   id: string;
   label: string;
   root: string;
@@ -110,13 +113,16 @@ export interface SkillSourceSummary {
   skills: SkillSummary[];
 }
 
-export interface ManagedSourceSummary {
+export interface SkillCollectionSummary {
+  key: string;
+  kind: SkillCollectionKind;
   id: string;
-  source: string;
   root: string;
   digest: string;
-  sourceUnitRoot: string;
-  rebuildAvailability: 'available' | 'unavailable';
+  artifactRoot?: string;
+  skillsRoot: string;
+  refreshAvailability: 'available' | 'unavailable';
+  skillCount: number;
   referenceCount: number | 'unknown';
   health: 'ready' | 'failed';
   diagnostics: string[];
@@ -130,11 +136,9 @@ export interface DashboardSnapshot {
   revision: number;
   activeProfileId?: string;
   profiles: ProfileSummary[];
-  managedSources?: ManagedSourceSummary[];
-  skillRoots?: SkillSourceSummary[];
-  availableSkillSources?: SkillSourceSummary[];
-  /** Test-fixture compatibility only; production dashboards use the separated collections above. */
-  sources?: SkillSourceSummary[];
+  collections?: SkillCollectionSummary[];
+  skillGroups?: SkillGroupSummary[];
+  availableSkillGroups?: SkillGroupSummary[];
   status: DashboardSetupStatus;
   diagnostics: DashboardDiagnostic[];
 }
@@ -148,7 +152,7 @@ export type ProfileRemovalAuthorization =
     };
 
 export interface SkillReference {
-  sourceId: string;
+  originId: string;
   skillId: string;
 }
 
@@ -169,17 +173,14 @@ export interface DirectoryBrowserSnapshot {
   entries: DirectoryBrowserEntry[];
 }
 
-export interface SourceCandidateSummary {
-  sourceId: string;
+export interface LibraryCandidateSummary {
+  libraryId: string;
   enteredRoot: string;
   canonicalRoot: string;
-  manifest:
-    | { state: 'absent' }
-    | { state: 'present'; value: SourceBuildManifest }
-    | { state: 'invalid'; diagnostic: string };
+  packageManifest: { state: 'absent' } | { state: 'present' };
 }
 
-export interface SourceAddRequest {
+export interface LibraryAddRequest {
   root: string;
 }
 
@@ -200,8 +201,8 @@ export interface BazframeTuiService {
   removeMembership(profileId: string, membership: MembershipReference): Promise<void>;
   loadSkillPreview(skill: SkillReference): Promise<SkillPreview>;
   browseDirectories(input: string): Promise<DirectoryBrowserSnapshot>;
-  inspectSourceCandidate(request: SourceAddRequest): Promise<SourceCandidateSummary>;
-  addSource(request: SourceAddRequest): Promise<SourceLifecycleResult>;
+  inspectLibraryCandidate(request: LibraryAddRequest): Promise<LibraryCandidateSummary>;
+  addLibrary(request: LibraryAddRequest): Promise<SkillCollectionLifecycleResult>;
 }
 
 export interface BazframeTuiServiceOptions extends ProfileSkillMembershipOptions {
@@ -262,10 +263,10 @@ export function createBazframeTuiService(
     },
     async editSkillDefinition(skill) {
       assertSafeSkillId(skill.skillId);
-      if (skill.sourceId !== DEFAULT_SKILL_SOURCE_ID) {
+      if (skill.originId !== DEFAULT_SKILL_SOURCE_ID) {
         throw new BazframeError(
           'SKILL_EDITOR_SOURCE_READ_ONLY',
-          `Only live (default) skills can be opened in an editor: ${skill.sourceId}/${skill.skillId}`
+          `Only live (default) skills can be opened in an editor: ${skill.originId}/${skill.skillId}`
         );
       }
       return launchSkillDefinitionEditor({
@@ -278,11 +279,11 @@ export function createBazframeTuiService(
       });
     },
     async addMembership(profileId, skill) {
-      assertKnownSource(skill.sourceId);
+      assertKnownOrigin(skill.originId);
       await addProfileSkill(options, profileId, skill.skillId);
     },
     async removeMembership(profileId, membership) {
-      assertKnownSource(membership.sourceId);
+      assertKnownOrigin(membership.originId);
       const expectedMembershipId = membershipProjectionId(profileId, membership.skillId);
       if (membership.membershipId !== expectedMembershipId) {
         throw new BazframeError(
@@ -298,33 +299,19 @@ export function createBazframeTuiService(
     async browseDirectories(input) {
       return browseDirectories(options, input);
     },
-    async inspectSourceCandidate(request) {
+    async inspectLibraryCandidate(request) {
       const enteredRoot = expandBrowserPath(options, request.root);
-      const canonicalRoot = await canonicalPhysicalSourceRoot(enteredRoot);
-      const sourceId = basename(canonicalRoot);
-      assertSafeSkillId(sourceId);
-      try {
-        const manifest = await readOptionalSourceBuildManifest(canonicalRoot);
-        return {
-          sourceId,
-          enteredRoot,
-          canonicalRoot,
-          manifest: manifest === undefined
-            ? { state: 'absent' }
-            : { state: 'present', value: manifest }
-        };
-      } catch (error) {
-        return {
-          sourceId,
-          enteredRoot,
-          canonicalRoot,
-          manifest: { state: 'invalid', diagnostic: messageFor(error) }
-        };
-      }
+      const canonicalRoot = await canonicalPhysicalCollectionRoot(enteredRoot, 'library');
+      const libraryId = basename(canonicalRoot);
+      assertSafeSkillId(libraryId);
+      let packageManifest: LibraryCandidateSummary['packageManifest'] = { state: 'absent' };
+      try { await lstat(join(canonicalRoot, PACKAGE_MANIFEST)); packageManifest = { state: 'present' }; }
+      catch (error) { if (errorCode(error) !== 'ENOENT') throw error; }
+      return { libraryId, enteredRoot, canonicalRoot, packageManifest };
     },
-    async addSource(request) {
+    async addLibrary(request) {
       const root = expandBrowserPath(options, request.root);
-      return addGlobalSource(options, root, { declaredBuild: 'reject' });
+      return addGlobalLibrary(options, root);
     }
   };
 }
@@ -335,34 +322,27 @@ async function loadSkillPreview(
 ): Promise<SkillPreview> {
   assertSafeSkillId(reference.skillId);
   let definitionPath: string | undefined;
-  if (reference.sourceId === DEFAULT_SKILL_SOURCE_ID) {
+  if (reference.originId === DEFAULT_SKILL_SOURCE_ID) {
     try {
       const registration = await readDefaultSkillRegistration(options.bazframeHome, reference.skillId);
       definitionPath = join(registration.target, 'SKILL.md');
     } catch (error) {
       throw new BazframeError('SKILL_PREVIEW_STALE', `Skill is no longer available from (default): ${reference.skillId}`, { cause: error });
     }
-  } else if (reference.sourceId.startsWith('managed:')) {
-    const sourceId = reference.sourceId.slice('managed:'.length);
-    if (!isSafeSkillId(sourceId)) {
-      throw new BazframeError('SKILL_SOURCE_UNKNOWN', `Unknown skill source: ${reference.sourceId}`);
-    }
-    const global = await inspectGlobalSources(options.bazframeHome);
-    const source = global.sources.find((item) => item.record.source === sourceId);
-    if (source === undefined || source.diagnostics.length > 0) {
-      throw new BazframeError(
-        'SKILL_PREVIEW_STALE',
-        `Managed source is unavailable: ${sourceId}`
-      );
-    }
-    definitionPath = source.skills.find((skill) => skill.name === reference.skillId)?.definitionPath;
+  } else if (reference.originId.startsWith('library:') || reference.originId.startsWith('package:')) {
+    const [kind, id] = reference.originId.split(':') as [SkillCollectionKind, string];
+    if (!isSafeSkillId(id)) throw new BazframeError('SKILL_ORIGIN_UNKNOWN', `Unknown Skill origin: ${reference.originId}`);
+    const global = await inspectGlobalSkillCollections(options.bazframeHome);
+    const collection = global.collections.find((item) => kindForRecord(item.record) === kind && idForRecord(item.record) === id);
+    if (collection === undefined || collection.diagnostics.length > 0) throw new BazframeError('SKILL_PREVIEW_STALE', `${kind === 'library' ? 'Library' : 'Package'} is unavailable: ${id}`);
+    definitionPath = collection.skills.find((skill) => skill.name === reference.skillId)?.definitionPath;
   } else {
-    throw new BazframeError('SKILL_SOURCE_UNKNOWN', `Unknown skill source: ${reference.sourceId}`);
+    throw new BazframeError('SKILL_ORIGIN_UNKNOWN', `Unknown Skill origin: ${reference.originId}`);
   }
   if (definitionPath === undefined) {
     throw new BazframeError(
       'SKILL_PREVIEW_STALE',
-      `Skill is no longer available: ${reference.sourceId}/${reference.skillId}`
+      `Skill is no longer available: ${reference.originId}/${reference.skillId}`
     );
   }
   return {
@@ -392,17 +372,17 @@ async function browseDirectories(
     const metadata = await lstat(resolvedPath);
     if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
       throw new BazframeError(
-        'SOURCE_BROWSER_PATH_INVALID',
+        'LIBRARY_BROWSER_PATH_INVALID',
         `Path must be a physical directory: ${resolvedPath}`
       );
     }
-    listRoot = await canonicalPhysicalSourceRoot(resolvedPath);
+    listRoot = await canonicalPhysicalCollectionRoot(resolvedPath, 'library');
     selectablePath = resolvedPath;
   } catch (error) {
     if (errorCode(error) !== 'ENOENT') throw error;
     const parent = dirname(resolvedPath);
     prefix = basename(resolvedPath);
-    listRoot = await canonicalPhysicalSourceRoot(parent);
+    listRoot = await canonicalPhysicalCollectionRoot(parent, 'library');
   }
   const entries: DirectoryBrowserEntry[] = [];
   for (const entry of (await readdir(listRoot, { withFileTypes: true }))
@@ -437,7 +417,7 @@ async function assertNoExplicitAncestorSymlink(
     try {
       if ((await lstat(ancestor)).isSymbolicLink()) {
         throw new BazframeError(
-          'SOURCE_BROWSER_PATH_INVALID',
+          'LIBRARY_BROWSER_PATH_INVALID',
           `Path traverses a symbolic link instead of physical directories: ${ancestor}`
         );
       }
@@ -453,21 +433,17 @@ function expandBrowserPath(options: BazframeTuiServiceOptions, input: string): s
   if (value === '~' || value.startsWith('~/')) {
     const userHome = options.userHome ?? options.environment.HOME;
     if (userHome === undefined || !isAbsolute(userHome)) {
-      throw new BazframeError('SOURCE_BROWSER_PATH_INVALID', 'Cannot expand ~ without an absolute user home.');
+      throw new BazframeError('LIBRARY_BROWSER_PATH_INVALID', 'Cannot expand ~ without an absolute user home.');
     }
     return value === '~' ? resolve(userHome) : resolve(userHome, value.slice(2));
   }
   if (value.startsWith('~') || !isAbsolute(value)) {
     throw new BazframeError(
-      'SOURCE_BROWSER_PATH_INVALID',
-      'Source paths must be absolute or use only the exact ~ or ~/ prefix.'
+      'LIBRARY_BROWSER_PATH_INVALID',
+      'Library paths must be absolute or use only the exact ~ or ~/ prefix.'
     );
   }
   return resolve(value);
-}
-
-function messageFor(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 async function inspectDashboard(
@@ -476,53 +452,22 @@ async function inspectDashboard(
 ): Promise<DashboardSnapshot> {
   const diagnostics: DashboardDiagnostic[] = [];
   const activeProfileId = await inspectActiveProfile(options.bazframeHome, diagnostics);
-  const defaultCatalog = await inspectDefaultSkillSource(options, diagnostics);
-  const global = await inspectGlobalSources(options.bazframeHome);
-  for (const item of global.diagnostics) diagnostics.push({ id: `managed-source-${item.sourceId}`, severity: 'error', message: `${item.sourceId}:${item.path} ${item.category}` });
-  const managedSources: ManagedSourceSummary[] = [];
-  const managedRoots: SkillSourceSummary[] = [];
-  const referenceIndex = await captureProfileSourceReferenceBulkIndex(options.bazframeHome);
-  for (const item of referenceIndex.diagnostics) diagnostics.push({
-    id: `managed-source-reference-index-${item.profileId}-${item.diagnostic.path}`,
-    severity: 'error',
-    message: `Reference index unavailable at ${item.profileId}:${item.diagnostic.path}.`
-  });
+  const defaultCatalog = await inspectDefaultSkillGroup(options, diagnostics);
+  const global = await inspectGlobalSkillCollections(options.bazframeHome);
+  for (const item of global.diagnostics) diagnostics.push({ id: `${item.collectionKind}-${item.collectionId}`, severity: 'error', message: formatSkillCollectionDiagnostic(item) });
+  const collections: SkillCollectionSummary[] = [];
+  const collectionGroups: SkillGroupSummary[] = [];
+  const referenceIndex = await captureProfileCollectionReferenceBulkIndex(options.bazframeHome);
+  for (const item of referenceIndex.diagnostics) diagnostics.push({ id: `collection-reference-index-${item.profileId}-${item.diagnostic.key.kind}-${item.diagnostic.path}`, severity: 'error', message: `Reference index unavailable at ${item.profileId}:${item.diagnostic.key.kind}:${item.diagnostic.path}.` });
   const referenceIndexReady = referenceIndex.diagnostics.length === 0;
-  for (const item of global.sources) {
-    const record = item.record;
-    const referenceKey = profileSourceReferenceKey(record.source);
-    const id = `managed:${record.source}`;
-    const sourceDiagnostics = [
-      ...item.diagnostics.map((entry) => `${entry.path} ${entry.category}`),
-      ...(referenceIndexReady ? [] : ['reference index unavailable'])
-    ];
-    const sourceHealthy = item.diagnostics.length === 0 && referenceIndexReady;
-    managedSources.push({
-      id,
-      source: record.source,
-      root: record.root,
-      digest: record.digest,
-      sourceUnitRoot: record.sourceUnitRoot,
-      rebuildAvailability: item.rebuildAvailability,
-      referenceCount: referenceIndexReady
-        ? (referenceIndex.profileIdsBySource.get(referenceKey)?.length ?? 0)
-        : 'unknown',
-      health: sourceHealthy ? 'ready' : 'failed',
-      diagnostics: sourceDiagnostics
-    });
+  for (const item of global.collections) {
+    const record = item.record; const kind = kindForRecord(record); const id = idForRecord(record); const key = collectionKey(kind, id);
+    const itemDiagnostics = [...item.diagnostics.map(formatSkillCollectionDiagnostic), ...(referenceIndexReady ? [] : ['reference index unavailable'])];
+    collections.push({ key, kind, id, root: record.root, digest: record.digest, ...('package' in record ? { artifactRoot: record.artifactRoot } : {}), skillsRoot: skillsRootForRecord(record), refreshAvailability: item.rebuildAvailability, skillCount: item.skills.length, referenceCount: referenceIndexReady ? (referenceIndex.profileIdsByCollection.get(key)?.length ?? 0) : 'unknown', health: item.diagnostics.length === 0 && referenceIndexReady ? 'ready' : 'failed', diagnostics: itemDiagnostics });
     if (item.diagnostics.length === 0) {
-      const snapshot = await verifySourceSnapshot(options.bazframeHome, record.digest);
-      const immutableRoot = await resolvePhysicalRelativeDirectory(
-        snapshot.artifactRoot,
-        record.sourceUnitRoot
-      );
-      managedRoots.push({
-        id,
-        label: record.source,
-        root: immutableRoot,
-        artifactWritesSupported: false,
-        skills: item.skills.map((skill) => ({ id: skill.name, sourceId: id, directory: skill.baseDir }))
-      });
+      const snapshot = await verifySkillSnapshot(options.bazframeHome, record.digest);
+      const immutableRoot = await resolvePhysicalRelativeDirectory(snapshot.artifactPath, skillsRootForRecord(record));
+      collectionGroups.push({ id: key, label: `${kind === 'library' ? 'Library' : 'Package'}: ${id}`, root: immutableRoot, artifactWritesSupported: false, skills: item.skills.map((skill) => ({ id: skill.name, originId: key, directory: skill.baseDir })) });
     }
   }
   const profiles = await inspectProfiles(
@@ -533,14 +478,14 @@ async function inspectDashboard(
     diagnostics
   );
   const status = await inspectSetupStatus(options, diagnostics);
-  const availableSkillSources = defaultCatalog === undefined ? [] : [defaultCatalog.source];
+  const availableSkillGroups = defaultCatalog === undefined ? [] : [defaultCatalog.group];
   return {
     revision,
     ...(activeProfileId === undefined ? {} : { activeProfileId }),
     profiles,
-    managedSources,
-    skillRoots: [...availableSkillSources, ...managedRoots],
-    availableSkillSources,
+    collections,
+    skillGroups: [...availableSkillGroups, ...collectionGroups],
+    availableSkillGroups,
     status,
     diagnostics
   };
@@ -584,10 +529,10 @@ async function inspectActiveProfile(
   }
 }
 
-async function inspectDefaultSkillSource(
+async function inspectDefaultSkillGroup(
   options: BazframeTuiServiceOptions,
   diagnostics: DashboardDiagnostic[]
-): Promise<{ source: SkillSourceSummary; registrations: DefaultSkillRegistration[] } | undefined> {
+): Promise<{ group: SkillGroupSummary; registrations: DefaultSkillRegistration[] } | undefined> {
   try {
     const listed = await inspectDefaultSkillCatalog(options.bazframeHome);
     for (const [index, message] of listed.diagnostics.entries()) {
@@ -598,7 +543,7 @@ async function inspectDefaultSkillSource(
     catch (error) { if (errorCode(error) !== 'ENOENT') throw error; }
     return {
       registrations: listed.registrations,
-      source: {
+      group: {
         id: DEFAULT_SKILL_SOURCE_ID,
         label: DEFAULT_SKILL_SOURCE_LABEL,
         root: listed.root,
@@ -606,13 +551,13 @@ async function inspectDefaultSkillSource(
         artifactWritesSupported: false,
         skills: listed.registrations.map((registration) => ({
           id: registration.id,
-          sourceId: DEFAULT_SKILL_SOURCE_ID,
+          originId: DEFAULT_SKILL_SOURCE_ID,
           directory: registration.target
         }))
       }
     };
   } catch (error) {
-    diagnostics.push(diagnostic('default-skill-source', error));
+    diagnostics.push(diagnostic('default-skill-group', error));
     return undefined;
   }
 }
@@ -621,7 +566,7 @@ async function inspectProfiles(
   bazframeHome: string,
   defaultRegistrations: readonly DefaultSkillRegistration[],
   activeProfileId: string | undefined,
-  globalSources: { sources: GlobalSourceInspection[]; diagnostics: SourceDiagnostic[] },
+  globalCollections: { collections: GlobalSkillCollectionInspection[]; diagnostics: SkillCollectionDiagnostic[] },
   diagnostics: DashboardDiagnostic[]
 ): Promise<ProfileSummary[]> {
   const root = join(bazframeHome, 'profiles');
@@ -708,35 +653,20 @@ async function inspectProfiles(
           message: membershipDiagnostic
         });
       }
-      const sourceReferences: ProfileSourceReferenceSummary[] = [];
-      const referenceNamespace = await scanProfileSourceReferences(bazframeHome, entry.name);
-      const invalidReferencePaths = referenceNamespace.diagnostics.map((item) => item.path);
-      for (const item of referenceNamespace.diagnostics) diagnostics.push({ id: `profile-${entry.name}-source-${item.path}`, severity: 'error', message: `Invalid source reference ${item.path}.` });
-      const readableReferences: Array<{ reference: ProfileSourceReference; path: string }> = [];
+      const libraryReferences: ProfileCollectionReferenceSummary[] = [];
+      const packageReferences: ProfileCollectionReferenceSummary[] = [];
+      const referenceNamespace = await scanProfileCollectionReferences(bazframeHome, entry.name);
+      const invalidReferencePaths = referenceNamespace.diagnostics.map((item) => `${item.key.kind}:${item.path}`);
+      for (const item of referenceNamespace.diagnostics) diagnostics.push({ id: `profile-${entry.name}-${item.key.kind}-${item.path}`, severity: 'error', message: `Invalid ${item.key.kind} reference ${item.path}.` });
+      const readableReferences: Array<{ reference: ProfileSkillCollectionReference; path: string }> = [];
       for (const item of referenceNamespace.references) {
-        try {
-          readableReferences.push({
-            reference: await readProfileSourceReference(bazframeHome, entry.name, item.source),
-            path: item.path
-          });
-        } catch (error) {
-          invalidReferencePaths.push(item.relativePath);
-          diagnostics.push(diagnostic(`profile-${entry.name}-source-${item.relativePath}`, error));
-        }
+        try { readableReferences.push({ reference: await readProfileCollectionReference(bazframeHome, entry.name, item.key), path: item.path }); }
+        catch (error) { invalidReferencePaths.push(`${item.key.kind}:${item.relativePath}`); diagnostics.push(diagnostic(`profile-${entry.name}-${item.key.kind}-${item.relativePath}`, error)); }
       }
-      const namespaceDiagnostic = invalidReferencePaths.length === 0
-        ? undefined
-        : `Profile source reference namespace is invalid: ${[...invalidReferencePaths].sort(lexicalCompare).join(', ')}`;
+      const namespaceDiagnostic = invalidReferencePaths.length === 0 ? undefined : `Profile library/package reference namespace is invalid: ${[...invalidReferencePaths].sort(lexicalCompare).join(', ')}`;
       for (const item of readableReferences) {
-        const availability = namespaceDiagnostic === undefined
-          ? inspectReferenceAvailability(item.reference, globalSources)
-          : { availability: 'unavailable' as const, diagnostic: namespaceDiagnostic };
-        sourceReferences.push({
-          ...item.reference,
-          id: item.reference.source,
-          path: item.path,
-          ...availability
-        });
+        const kind = kindForReference(item.reference); const summary: ProfileCollectionReferenceSummary = { kind, id: idForReference(item.reference), path: item.path, ...(namespaceDiagnostic === undefined ? inspectReferenceAvailability(item.reference, globalCollections) : { availability: 'unavailable' as const, diagnostic: namespaceDiagnostic }) };
+        (kind === 'library' ? libraryReferences : packageReferences).push(summary);
       }
       profiles.push({
         id: entry.name,
@@ -747,7 +677,8 @@ async function inspectProfiles(
         membershipWritable,
         ...(membershipDiagnostic === undefined ? {} : { membershipDiagnostic }),
         memberships,
-        sourceReferences
+        libraryReferences,
+        packageReferences
       });
     } catch (error) {
       diagnostics.push(diagnostic(`profile-${entry.name}`, error));
@@ -756,24 +687,7 @@ async function inspectProfiles(
   return profiles;
 }
 
-function inspectReferenceAvailability(
-  reference: ProfileSourceReference,
-  globalSources: { sources: GlobalSourceInspection[]; diagnostics: SourceDiagnostic[] }
-): Pick<ProfileSourceReferenceSummary, 'availability' | 'diagnostic'> {
-  const source = globalSources.sources.find((item) => item.record.source === reference.source);
-  if (source !== undefined && source.diagnostics.length === 0) {
-    return { availability: 'available' };
-  }
-  const failures = source?.diagnostics ?? globalSources.diagnostics.filter((item) =>
-    item.sourceId === reference.source
-  );
-  return {
-    availability: 'unavailable',
-    diagnostic: failures.length === 0
-      ? 'Global source target is unavailable.'
-      : failures.map(formatSourceDiagnostic).join('; ')
-  };
-}
+function inspectReferenceAvailability(reference:ProfileSkillCollectionReference,globalCollections:{collections:GlobalSkillCollectionInspection[];diagnostics:SkillCollectionDiagnostic[]}):Pick<ProfileCollectionReferenceSummary,'availability'|'diagnostic'>{const kind=kindForReference(reference);const id=idForReference(reference);const item=globalCollections.collections.find((entry)=>kindForRecord(entry.record)===kind&&idForRecord(entry.record)===id);if(item!==undefined&&item.diagnostics.length===0)return{availability:'available'};const failures=item?.diagnostics??globalCollections.diagnostics.filter((entry)=>entry.collectionKind===kind&&entry.collectionId===id);return{availability:'unavailable',diagnostic:failures.length===0?`Global ${kind} target is unavailable.`:failures.map(formatSkillCollectionDiagnostic).join('; ') };}
 
 async function inspectMemberships(
   skillsDirectory: string,
@@ -826,7 +740,7 @@ async function inspectMemberships(
       memberships.push({
         id: entry.name,
         membershipId,
-        ...(managed ? { sourceId: DEFAULT_SKILL_SOURCE_ID } : {}),
+        ...(managed ? { originId: DEFAULT_SKILL_SOURCE_ID } : {}),
         skillId: entry.name,
         path,
         target,
@@ -865,11 +779,11 @@ function membershipProjectionId(profileId: string, skillId: string): string {
   return `${profileId}:default:${skillId}`;
 }
 
-function assertKnownSource(sourceId: string): void {
-  if (sourceId !== DEFAULT_SKILL_SOURCE_ID) {
+function assertKnownOrigin(originId: string): void {
+  if (originId !== DEFAULT_SKILL_SOURCE_ID) {
     throw new BazframeError(
-      'SKILL_SOURCE_UNKNOWN',
-      `Unknown skill source: ${JSON.stringify(sourceId)}`
+      'SKILL_ORIGIN_UNKNOWN',
+      `Unknown Skill origin: ${JSON.stringify(originId)}`
     );
   }
 }

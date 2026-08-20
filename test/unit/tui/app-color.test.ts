@@ -54,7 +54,7 @@ describe('TuiApp focus border color', () => {
     app.stdin.write('l');
     await vi.waitFor(() => expect(app.lastFrame()).toContain('Left/h back'));
 
-    const parentLine = plainLine(app.lastFrame(), 'Skill sources');
+    const parentLine = plainLine(app.lastFrame(), '┃ Skills');
     expect(parentLine).toMatch(/^┃/u);
     expect(parentLine.split('┃').length - 1).toBeGreaterThanOrEqual(3);
     if (noColor) expect(app.lastFrame()).not.toContain('\u001B[36m');
@@ -62,9 +62,9 @@ describe('TuiApp focus border color', () => {
     expect(app.lastFrame()).toContain('\u001B[2m');
 
     app.stdin.write('\t');
-    await vi.waitFor(() => expect(plainLine(app.lastFrame(), 'Skill sources')).toMatch(/^\|/u));
+    await vi.waitFor(() => expect(plainLine(app.lastFrame(), '| Skills')).toMatch(/^\|/u));
     app.stdin.write('\u001B[Z');
-    await vi.waitFor(() => expect(plainLine(app.lastFrame(), 'Skill sources')).toMatch(/^┃/u));
+    await vi.waitFor(() => expect(plainLine(app.lastFrame(), '┃ Skills')).toMatch(/^┃/u));
     expect(app.lastFrame()).toContain('Left/h back');
     app.cleanup();
   });
@@ -167,16 +167,16 @@ async function renderIsolatedApp(dimensions = { columns: 60, rows: 16 }) {
     editSkillDefinition: vi.fn(async () => ({ exitCode: 0, signal: null })),
     addMembership: vi.fn(),
     removeMembership: vi.fn(),
-    loadSkillPreview: vi.fn(async ({ sourceId, skillId }) => ({
-      sourceId, skillId, path: `/skills/${skillId}/SKILL.md`, contents: `# ${skillId}\n`
+    loadSkillPreview: vi.fn(async ({ originId, skillId }) => ({
+      originId, skillId, path: `/skills/${skillId}/SKILL.md`, contents: `# ${skillId}\n`
     })),
     browseDirectories: vi.fn(async (input) => ({ input, resolvedPath: '/tmp', selectablePath: '/tmp', entries: [] })),
-    inspectSourceCandidate: vi.fn(async ({ root }) => ({
-      sourceId: root.split('/').filter(Boolean).at(-1) ?? 'source', enteredRoot: root, canonicalRoot: root, manifest: { state: 'absent' as const }
+    inspectLibraryCandidate: vi.fn(async ({ root }) => ({
+      libraryId: root.split('/').filter(Boolean).at(-1) ?? 'library', enteredRoot: root, canonicalRoot: root, packageManifest: { state: 'absent' as const }
     })),
-    addSource: vi.fn(async ({ root }) => ({
-      schemaVersion: 1 as const, source: root.split('/').filter(Boolean).at(-1) ?? 'source', root,
-      digest: 'a'.repeat(64), sourceUnitRoot: '.', action: 'added' as const, path: '/sources/source.json'
+    addLibrary: vi.fn(async ({ root }) => ({
+      schemaVersion: 1 as const, library: root.split('/').filter(Boolean).at(-1) ?? 'library', root,
+      digest: 'a'.repeat(64), action: 'added' as const, path: '/libraries/library.json'
     }))
   } satisfies BazframeTuiService;
   const view = testing.render(createElement(TuiApp, {
@@ -203,14 +203,14 @@ function dashboard(): DashboardSnapshot {
       membershipWritable: true,
       memberships: []
     }],
-    sources: [{
+    skillGroups: [{
       id: 'default',
       label: '(default)',
       root: '/skills',
       artifactWritesSupported: false,
       skills: [{
         id: 'demo-skill',
-        sourceId: 'default',
+        originId: 'default',
         directory: '/skills/demo-skill'
       }]
     }],

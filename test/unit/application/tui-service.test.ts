@@ -11,8 +11,8 @@ import {
   renameProfile
 } from '../../../src/profiles/profile-management.js';
 import { readActiveProfile, writeActiveProfile } from '../../../src/profiles/profile-store.js';
-import { encodeProfileSourceReference } from '../../../src/profiles/profile-source-reference.js';
-import { addSource } from '../../../src/sources/source-lifecycle.js';
+import { encodeProfileCollectionReference } from '../../../src/profiles/profile-skill-collection-reference.js';
+import { addLibrary } from '../../../src/skill-collections/skill-collection-lifecycle.js';
 import { createTempDirectory, type TempDirectory } from '../../helpers/temp-directory.js';
 
 const temporaryDirectories: TempDirectory[] = [];
@@ -22,7 +22,7 @@ afterEach(async () => {
 });
 
 describe('Bazframe TUI service', () => {
-  it('projects profiles, source skills, managed memberships, and diagnostics without CLI text', async () => {
+  it('projects profiles, available Skills, managed memberships, and diagnostics without CLI text', async () => {
     if (process.platform === 'win32') return;
     const fixture = await createFixture();
     await symlink(fixture.source, fixture.directory.path(
@@ -39,10 +39,10 @@ describe('Bazframe TUI service', () => {
     expect(() => JSON.stringify(first.profiles.map((profile) => profile.removalIdentity)))
       .not.toThrow();
     expect(first.profiles.map((profile) => profile.id)).toEqual(['focused', 'reviewer']);
-    expect(first.availableSkillSources).toMatchObject([{
+    expect(first.availableSkillGroups).toMatchObject([{
       id: 'default',
       artifactWritesSupported: false,
-      skills: [{ id: 'demo-skill', sourceId: 'default' }]
+      skills: [{ id: 'demo-skill', originId: 'default' }]
     }]);
     expect(first.status).toMatchObject({
       state: 'available',
@@ -66,7 +66,7 @@ describe('Bazframe TUI service', () => {
     const fixture = await createFixture();
 
     await fixture.service.addMembership('reviewer', {
-      sourceId: 'default',
+      originId: 'default',
       skillId: 'demo-skill'
     });
     expect(await readActiveProfile(fixture.home)).toBe('focused');
@@ -83,7 +83,7 @@ describe('Bazframe TUI service', () => {
     expect(membership).toBeDefined();
     await fixture.service.removeMembership('reviewer', {
       membershipId: membership!.membershipId,
-      sourceId: membership!.sourceId!,
+      originId: membership!.originId!,
       skillId: membership!.skillId
     });
     await expect(lstat(fixture.directory.path(
@@ -109,7 +109,7 @@ describe('Bazframe TUI service', () => {
       .toContain('no skills directory');
   });
 
-  it('requires exact recursive-removal authorization and a recognized source', async () => {
+  it('requires exact recursive-removal authorization and a recognized Skill origin', async () => {
     const fixture = await createFixture();
     const reviewer = (await fixture.service.loadDashboard()).profiles
       .find((profile) => profile.id === 'reviewer');
@@ -120,12 +120,12 @@ describe('Bazframe TUI service', () => {
       removalIdentity: reviewer!.removalIdentity
     })).rejects.toThrow(/exactly match/u);
     await expect(fixture.service.addMembership('reviewer', {
-      sourceId: 'other',
+      originId: 'other',
       skillId: 'demo-skill'
-    })).rejects.toThrow(/Unknown skill source/u);
+    })).rejects.toThrow(/Unknown Skill origin/u);
     await expect(fixture.service.removeMembership('reviewer', {
       membershipId: 'focused:default:demo-skill',
-      sourceId: 'default',
+      originId: 'default',
       skillId: 'demo-skill'
     })).rejects.toThrow(/Stale profile skill membership reference/u);
     expect((await lstat(fixture.directory.path('home/profiles/reviewer'))).isDirectory())
@@ -136,7 +136,7 @@ describe('Bazframe TUI service', () => {
     if (process.platform === 'win32') return;
     const fixture = await createFixture();
     await fixture.service.addMembership('reviewer', {
-      sourceId: 'default',
+      originId: 'default',
       skillId: 'demo-skill'
     });
     const reviewed = (await fixture.service.loadDashboard()).profiles
@@ -175,7 +175,7 @@ describe('Bazframe TUI service', () => {
     expect(instructionsChanged.fingerprint).not.toBe(original.fingerprint);
 
     await fixture.service.addMembership('reviewer', {
-      sourceId: 'default',
+      originId: 'default',
       skillId: 'demo-skill'
     });
     const membershipChanged = (await fixture.service.loadDashboard()).profiles
@@ -190,7 +190,7 @@ describe('Bazframe TUI service', () => {
 
   it('projects the physical default catalog and canonical external targets', async () => {
     const fixture = await createFixture();
-    const source = (await fixture.service.loadDashboard()).availableSkillSources![0];
+    const source = (await fixture.service.loadDashboard()).availableSkillGroups![0];
     expect(source).toMatchObject({
       id: 'default',
       label: '(default)',
@@ -200,17 +200,17 @@ describe('Bazframe TUI service', () => {
     });
   });
 
-  it('uses the verified immutable snapshot root for a healthy zero-child managed source', async () => {
+  it('uses the verified immutable snapshot root for a healthy zero-Skill library', async () => {
     const fixture = await createFixture();
     const sourceRoot = await fixture.directory.mkdir('empty');
-    const added = await addSource({ bazframeHome: fixture.home }, sourceRoot);
+    const added = await addLibrary({ bazframeHome: fixture.home }, sourceRoot);
 
     const dashboard = await fixture.service.loadDashboard();
-    const root = dashboard.skillRoots?.find((source) => source.id === 'managed:empty');
+    const root = dashboard.skillGroups?.find((source) => source.id === 'library:empty');
 
     expect(root).toMatchObject({ skills: [] });
     expect(root?.root).toBe(await realpath(fixture.directory.path(
-      'home/source-snapshots/sha256',
+      'home/skill-snapshots/sha256',
       added.digest,
       'artifact'
     )));
@@ -221,14 +221,14 @@ describe('Bazframe TUI service', () => {
     const fixture = await createFixture();
     const sourceRoot = await fixture.directory.mkdir('unusable');
     await fixture.directory.write('unusable/demo/SKILL.md', skill('managed-demo'));
-    const added = await addSource({ bazframeHome: fixture.home }, sourceRoot);
-    const reference = (source: string) => encodeProfileSourceReference({ schemaVersion: 1, source });
-    await fixture.directory.write('home/profiles/reviewer/sources/missing.json', reference('missing'));
-    await fixture.directory.write('home/profiles/reviewer/sources/malformed.json', reference('malformed'));
-    await fixture.directory.write('home/profiles/reviewer/sources/unusable.json', reference('unusable'));
-    await fixture.directory.write('home/sources/malformed.json', '{}\n');
+    const added = await addLibrary({ bazframeHome: fixture.home }, sourceRoot);
+    const reference = (source: string) => encodeProfileCollectionReference({ schemaVersion: 1, library: source });
+    await fixture.directory.write('home/profiles/reviewer/libraries/missing.json', reference('missing'));
+    await fixture.directory.write('home/profiles/reviewer/libraries/malformed.json', reference('malformed'));
+    await fixture.directory.write('home/profiles/reviewer/libraries/unusable.json', reference('unusable'));
+    await fixture.directory.write('home/libraries/malformed.json', '{}\n');
     const snapshotSkill = fixture.directory.path(
-      'home/source-snapshots/sha256', added.digest, 'artifact', 'demo', 'SKILL.md'
+      'home/skill-snapshots/sha256', added.digest, 'artifact', 'demo', 'SKILL.md'
     );
     if (process.platform !== 'win32') await chmod(snapshotSkill, 0o600);
     await writeFile(snapshotSkill, 'corrupt\n');
@@ -238,16 +238,16 @@ describe('Bazframe TUI service', () => {
     const reviewer = dashboard.profiles.find((profile) => profile.id === 'reviewer');
 
     expect(reviewer?.active).toBe(false);
-    expect(reviewer?.sourceReferences).toEqual([
+    expect(reviewer?.libraryReferences).toEqual([
       expect.objectContaining({
         id: 'malformed',
         availability: 'unavailable',
-        diagnostic: expect.stringContaining('invalid-source')
+        diagnostic: expect.stringContaining('invalid-library')
       }),
       expect.objectContaining({
         id: 'missing',
         availability: 'unavailable',
-        diagnostic: 'Global source target is unavailable.'
+        diagnostic: 'Global library target is unavailable.'
       }),
       expect.objectContaining({
         id: 'unusable',
@@ -258,17 +258,17 @@ describe('Bazframe TUI service', () => {
     expect(await readFile(fixture.directory.path('unusable/demo/SKILL.md'))).toEqual(providerBefore);
   });
 
-  it('marks reference counts unknown and source health failed when the reference index is invalid', async () => {
+  it('marks reference counts unknown and object health failed when the reference index is invalid', async () => {
     const fixture = await createFixture();
     const sourceRoot = await fixture.directory.mkdir('source');
     await fixture.directory.write('source/demo/SKILL.md', skill('demo'));
-    await addSource({ bazframeHome: fixture.home }, sourceRoot);
+    await addLibrary({ bazframeHome: fixture.home }, sourceRoot);
     await fixture.directory.write('home/profiles/broken-profile', 'not a directory');
 
     const dashboard = await fixture.service.loadDashboard();
 
-    expect(dashboard.managedSources).toEqual([expect.objectContaining({
-      id: 'managed:source',
+    expect(dashboard.collections).toEqual([expect.objectContaining({
+      key: 'library:source',
       referenceCount: 'unknown',
       health: 'failed',
       diagnostics: expect.arrayContaining(['reference index unavailable'])
@@ -282,28 +282,28 @@ describe('Bazframe TUI service', () => {
   it('loads authoritative (default) and immutable managed SKILL.md previews', async () => {
     const fixture = await createFixture();
     const defaultSkill = await fixture.service.loadSkillPreview({
-      sourceId: 'default', skillId: 'demo-skill'
+      originId: 'default', skillId: 'demo-skill'
     });
     expect(defaultSkill.contents).toContain('# Skill');
 
     const sourceRoot = await fixture.directory.mkdir('preview');
     await fixture.directory.write('preview/demo/SKILL.md', skill('managed-demo'));
-    await addSource({ bazframeHome: fixture.home }, sourceRoot);
+    await addLibrary({ bazframeHome: fixture.home }, sourceRoot);
     const before = await fixture.service.loadSkillPreview({
-      sourceId: 'managed:preview', skillId: 'managed-demo'
+      originId: 'library:preview', skillId: 'managed-demo'
     });
     await fixture.directory.write('preview/demo/SKILL.md', skill('managed-demo').replace('# Skill', '# Changed'));
     const after = await fixture.service.loadSkillPreview({
-      sourceId: 'managed:preview', skillId: 'managed-demo'
+      originId: 'library:preview', skillId: 'managed-demo'
     });
 
     expect(after).toEqual(before);
     await expect(fixture.service.loadSkillPreview({
-      sourceId: 'managed:preview', skillId: 'missing'
+      originId: 'library:preview', skillId: 'missing'
     })).rejects.toThrow(/no longer available/u);
   });
 
-  it('browses physical directories and adds a manifest-free source without composing it', async () => {
+  it('browses physical directories and adds a prepared library without composing it', async () => {
     const fixture = await createFixture();
     await fixture.directory.mkdir('Downloads/skills');
     await fixture.directory.mkdir('Documents');
@@ -326,38 +326,51 @@ describe('Bazframe TUI service', () => {
         .rejects.toThrow(/symbolic link/u);
     }
 
-    const candidate = await fixture.service.inspectSourceCandidate({ root: '~/Downloads/skills' });
+    const candidate = await fixture.service.inspectLibraryCandidate({ root: '~/Downloads/skills' });
     expect(candidate).toMatchObject({
-      sourceId: 'skills',
-      enteredRoot: fixture.directory.path('Downloads/skills'),
+      libraryId: 'skills', enteredRoot: fixture.directory.path('Downloads/skills'),
       canonicalRoot: await realpath(fixture.directory.path('Downloads/skills')),
-      manifest: { state: 'absent' }
+      packageManifest: { state: 'absent' }
     });
-    await fixture.service.addSource({ root: '~/Downloads/skills' });
+    await fixture.service.addLibrary({ root: '~/Downloads/skills' });
     const dashboard = await fixture.service.loadDashboard();
-    expect(dashboard.managedSources).toContainEqual(expect.objectContaining({
-      id: 'managed:skills', health: 'ready', referenceCount: 0
+    expect(dashboard.collections).toContainEqual(expect.objectContaining({
+      key: 'library:skills', health: 'ready', referenceCount: 0
     }));
-    expect(dashboard.profiles.every((profile) => profile.sourceReferences?.length === 0)).toBe(true);
+    expect(dashboard.profiles.every((profile) => profile.libraryReferences?.length === 0)).toBe(true);
     expect(await readActiveProfile(fixture.home)).toBe('focused');
   });
 
-  it('reports declared source builds and refuses to execute them through the TUI service', async () => {
+  it('preserves actionable nested-Skill validation diagnostics through library add', async () => {
     const fixture = await createFixture();
-    await fixture.directory.write('declared/bazframe-source.json', `${JSON.stringify({
+    await fixture.directory.write('skilllib/myskill/SKILL.md', '# Missing frontmatter\n');
+
+    const failure = await fixture.service.addLibrary({ root: fixture.directory.path('skilllib') })
+      .catch((error: unknown) => error);
+
+    expect(failure).toMatchObject({
+      code: 'SKILL_COLLECTION_CANDIDATE_INVALID',
+      message: 'library skilllib:myskill/SKILL.md pi-loader[0]: description is required'
+    });
+    expect(failure).not.toHaveProperty('message', 'collection resolution failed');
+  });
+
+  it('reports package declarations and refuses to execute package builds through the TUI service', async () => {
+    const fixture = await createFixture();
+    await fixture.directory.write('declared/bazframe-package.json', `${JSON.stringify({
       schemaVersion: 1,
       build: [process.execPath, '-e', "require('node:fs').writeFileSync('ran', 'yes')"],
       artifactRoot: '.',
-      sourceUnitRoot: '.'
+      skillsRoot: '.'
     })}\n`);
     await fixture.directory.write('declared/demo/SKILL.md', skill('declared-demo'));
-    const candidate = await fixture.service.inspectSourceCandidate({ root: fixture.directory.path('declared') });
-    expect(candidate.manifest.state).toBe('present');
-    await expect(fixture.service.addSource({ root: fixture.directory.path('declared') }))
-      .rejects.toMatchObject({ code: 'SOURCE_BUILD_REQUIRES_CLI' });
+    const candidate = await fixture.service.inspectLibraryCandidate({ root: fixture.directory.path('declared') });
+    expect(candidate.packageManifest.state).toBe('present');
+    await expect(fixture.service.addLibrary({ root: fixture.directory.path('declared') }))
+      .rejects.toMatchObject({ code: 'LIBRARY_IS_PACKAGE' });
     await expect(lstat(fixture.directory.path('declared/ran'))).rejects.toMatchObject({ code: 'ENOENT' });
-    expect((await fixture.service.loadDashboard()).managedSources).not.toContainEqual(
-      expect.objectContaining({ id: 'managed:declared' })
+    expect((await fixture.service.loadDashboard()).collections).not.toContainEqual(
+      expect.objectContaining({ key: 'library:declared' })
     );
   });
 
@@ -399,12 +412,12 @@ describe('Bazframe TUI service', () => {
       editorChildRunner
     });
     const disclosed = await service.loadSkillPreview({
-      sourceId: 'default', skillId: 'demo-skill'
+      originId: 'default', skillId: 'demo-skill'
     });
     disclosed.path = '/untrusted/preview/SKILL.md';
 
     await expect(service.editSkillDefinition({
-      sourceId: 'default', skillId: 'demo-skill'
+      originId: 'default', skillId: 'demo-skill'
     })).resolves.toEqual({ exitCode: 0, signal: null });
     expect(editorChildRunner).toHaveBeenCalledWith(
       '/editor executable',
@@ -417,7 +430,7 @@ describe('Bazframe TUI service', () => {
     );
 
     await expect(service.editSkillDefinition({
-      sourceId: 'managed:bundle', skillId: 'demo-skill'
+      originId: 'library:bundle', skillId: 'demo-skill'
     })).rejects.toMatchObject({ code: 'SKILL_EDITOR_SOURCE_READ_ONLY' });
     expect(editorChildRunner).toHaveBeenCalledTimes(1);
   });
@@ -435,7 +448,7 @@ describe('Bazframe TUI service', () => {
 
     await expect(service.loadDashboard()).resolves.toMatchObject({
       profiles: [],
-      availableSkillSources: [{ id: 'default', skills: [] }],
+      availableSkillGroups: [{ id: 'default', skills: [] }],
       status: { state: 'available' }
     });
     await expect(lstat(home)).rejects.toMatchObject({ code: 'ENOENT' });
@@ -451,10 +464,10 @@ describe('Bazframe TUI service', () => {
     const dashboard = await fixture.service.loadDashboard();
 
     expect(dashboard.profiles.map((profile) => profile.id)).toEqual(['focused', 'reviewer']);
-    expect(dashboard.availableSkillSources).toEqual([]);
+    expect(dashboard.availableSkillGroups).toEqual([]);
     expect(dashboard.status).toMatchObject({ state: 'available' });
     expect(dashboard.diagnostics).toContainEqual(expect.objectContaining({
-      id: 'default-skill-source',
+      id: 'default-skill-group',
       message: expect.stringContaining('physical directory')
     }));
     expect(dashboard.profiles.find((profile) => profile.id === 'reviewer')?.memberships)
@@ -468,7 +481,7 @@ describe('Bazframe TUI service', () => {
     const dashboard = await fixture.service.loadDashboard();
 
     expect(dashboard.profiles.map((profile) => profile.id)).toEqual(['focused', 'reviewer']);
-    expect(dashboard.availableSkillSources![0]?.skills.map((entry) => entry.id)).toEqual(['demo-skill']);
+    expect(dashboard.availableSkillGroups![0]?.skills.map((entry) => entry.id)).toEqual(['demo-skill']);
     expect(dashboard.status).toMatchObject({
       state: 'unavailable',
       diagnostic: { id: 'setup-status', severity: 'error' }

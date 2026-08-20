@@ -13,13 +13,13 @@ import { loadProfile, readActiveProfile } from '../profiles/profile-store.js';
 import { findGitRoot } from '../project/git-root.js';
 import { readRepositoryProjectState } from '../project/registration-store.js';
 import {
-  formatSourceDiagnostic,
+  formatSkillCollectionDiagnostic,
   loadFlatSkillIdentities,
-  resolveProfileSourceUnits,
+  resolveProfileSkillCollections,
   type DerivedSkill,
-  type DirectSourceUnit,
-  type SourceDiagnostic
-} from '../source-units/source-unit-resolver.js';
+  type DirectSkillCollection,
+  type SkillCollectionDiagnostic
+} from '../skill-collections/skill-collection-resolver.js';
 import { resolvePiAgentDirectory } from '../state/paths.js';
 
 export interface StatusOptions {
@@ -70,15 +70,15 @@ export type StatusProfile =
       /** Compatibility alias for the flat direct skill count. */
       skillCount: number;
       flatSkillCount?: number;
-      directSourceUnitCount?: number;
-      directSourceUnits?: DirectSourceUnit[];
+      collectionReferenceCount?: number;
+      collections?: DirectSkillCollection[];
       derivedSkillCount?: number;
       derivedSkills?: DerivedSkill[];
-      sourceDiagnostics?: SourceDiagnostic[];
+      collectionDiagnostics?: SkillCollectionDiagnostic[];
     };
 
 export interface StatusCorrectiveAction {
-  id: 'adapter' | 'active-profile' | 'source-units';
+  id: 'adapter' | 'active-profile' | 'collections';
   message: string;
 }
 
@@ -171,28 +171,28 @@ export async function inspectStatus(options: StatusOptions): Promise<StatusInspe
       try {
         const loaded = await loadProfile(options.bazframeHome, profileId);
         const flatSkills = loadFlatSkillIdentities(loaded.skillDirectories);
-        const sources = await resolveProfileSourceUnits(loaded.directory, flatSkills);
+        const collections = await resolveProfileSkillCollections(loaded.directory, flatSkills);
         profile = {
           state: 'ready',
           id: profileId,
           instructionsPath: loaded.instructionsPath,
           skillCount: loaded.skillDirectories.length,
           flatSkillCount: loaded.skillDirectories.length,
-          directSourceUnitCount: sources.directSourceUnits.length,
-          directSourceUnits: sources.directSourceUnits,
-          derivedSkillCount: sources.derivedSkills.length,
-          derivedSkills: sources.derivedSkills,
-          sourceDiagnostics: sources.diagnostics
+          collectionReferenceCount: collections.directCollections.length,
+          collections: collections.directCollections,
+          derivedSkillCount: collections.derivedSkills.length,
+          derivedSkills: collections.derivedSkills,
+          collectionDiagnostics: collections.diagnostics
         };
-        if (sources.diagnostics.length > 0) {
-          const buildRequired = sources.directSourceUnits
-            .filter((source) => source.preparationState === 'failed' && source.rebuildAvailability === 'available')
-            .map((source) => `bazframe sources build ${source.sourceId}`);
-          corrections.set('source-units', {
-            id: 'source-units',
+        if (collections.diagnostics.length > 0) {
+          const buildRequired = collections.directCollections
+            .filter((item) => item.preparationState === 'failed' && item.rebuildAvailability === 'available')
+            .map((item) => item.collectionKind === 'library' ? `bazframe libraries update ${item.collectionId}` : `bazframe packages build ${item.collectionId}`);
+          corrections.set('collections', {
+            id: 'collections',
             message: buildRequired.length === 0
-              ? 'Inspect referenced-source failures with `bazframe profile sources`.'
-              : `Build the sources with: ${buildRequired.map((command) => `\`${command}\``).join(', ')}.`
+              ? 'Inspect library and package failures with `bazframe profile libraries` and `bazframe profile packages`.'
+              : `Refresh the affected libraries/packages with: ${buildRequired.map((command) => `\`${command}\``).join(', ')}.`
           });
         }
       } catch (error) {
@@ -278,18 +278,18 @@ export function formatStatus(status: StatusInspection): string {
   const flatSkillCount: number | string = status.profile.state === 'ready'
     ? status.profile.flatSkillCount ?? status.profile.skillCount
     : unavailableCount;
-  const directSourceUnitCount: number | string = status.profile.state === 'ready'
-    ? status.profile.directSourceUnitCount ?? 0
+  const collectionReferenceCount: number | string = status.profile.state === 'ready'
+    ? status.profile.collectionReferenceCount ?? 0
     : unavailableCount;
-  const directSourceUnits = status.profile.state === 'ready' ? status.profile.directSourceUnits ?? [] : [];
+  const directCollections = status.profile.state === 'ready' ? status.profile.collections ?? [] : [];
   const derivedSkillCount: number | string = status.profile.state === 'ready'
     ? status.profile.derivedSkillCount ?? 0
     : unavailableCount;
   const derivedSkills = status.profile.state === 'ready'
     ? status.profile.derivedSkills ?? []
     : [];
-  const sourceDiagnostics = status.profile.state === 'ready'
-    ? status.profile.sourceDiagnostics ?? []
+  const collectionDiagnostics = status.profile.state === 'ready'
+    ? status.profile.collectionDiagnostics ?? []
     : [];
   const runtimeReady = status.adapter.state === 'current' && status.profile.state === 'ready';
   const globalState = status.globalPolicy.policy === 'enabled'
@@ -310,19 +310,19 @@ export function formatStatus(status: StatusInspection): string {
     `Active profile: ${activeProfile}`,
     `Profile instructions: ${instructionSource}`,
     `Flat direct skills: ${flatSkillCount}`,
-    `Profile source references: ${directSourceUnitCount}`,
-    ...directSourceUnits.map((source) => source.snapshotDigest === undefined
-      ? `  - ${source.sourceId}: ${source.preparationState}; target unavailable`
-      : `  - ${source.sourceId}: ${source.preparationState}; rebuild ${source.rebuildAvailability}; sha256:${source.snapshotDigest}; root:${source.sourceUnitRoot}`),
+    `Profile library/package references: ${collectionReferenceCount}`,
+    ...directCollections.map((item) => item.snapshotDigest === undefined
+      ? `  - ${item.collectionKind} ${item.collectionId}: ${item.preparationState}; target unavailable`
+      : `  - ${item.collectionKind} ${item.collectionId}: ${item.preparationState}; refresh ${item.rebuildAvailability}; sha256:${item.snapshotDigest}; Skills root:${item.skillsRoot}`),
     `Derived effective skills: ${derivedSkillCount}`,
     ...(derivedSkills.length === 0
       ? ['  (none)']
       : derivedSkills.map((skill) =>
-          `  - ${skill.name} (${skill.sourceId}:${skill.relativePath})`)),
-    'Source failures:',
-    ...(sourceDiagnostics.length === 0
+          `  - ${skill.name} (${skill.collectionKind} ${skill.collectionId}:${skill.relativePath})`)),
+    'Library/package failures:',
+    ...(collectionDiagnostics.length === 0
       ? ['  (none)']
-      : sourceDiagnostics.map((diagnostic) => `  - ${formatSourceDiagnostic(diagnostic)}`)),
+      : collectionDiagnostics.map((diagnostic) => `  - ${formatSkillCollectionDiagnostic(diagnostic)}`)),
     `Cached collision aliases: ${status.cachedCollisionAliasCount}`,
     'Launch:',
     ...(!status.effectiveBehavior.enabled

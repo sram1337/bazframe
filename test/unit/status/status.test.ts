@@ -15,9 +15,9 @@ import {
   type StatusInspection,
   type StatusOptions
 } from '../../../src/status/status.js';
-import { publishSourceSnapshot } from '../../../src/source-units/source-snapshot.js';
-import { encodeGlobalSource } from '../../../src/sources/source-store.js';
-import { encodeProfileSourceReference } from '../../../src/profiles/profile-source-reference.js';
+import { encodeProfileCollectionReference } from '../../../src/profiles/profile-skill-collection-reference.js';
+import { encodeLibrary, encodePackage } from '../../../src/skill-collections/skill-collection-store.js';
+import { publishSkillSnapshot } from '../../../src/skill-collections/skill-snapshot.js';
 import { captureProviderManifest } from '../../helpers/provider-manifest.js';
 import { createTempDirectory, type TempDirectory } from '../../helpers/temp-directory.js';
 
@@ -69,10 +69,10 @@ describe('Bazframe status', () => {
         'Active profile: focused',
         `Profile instructions: ${directory.path('bazframe-home/profiles/focused/AGENTS.md')}`,
         'Flat direct skills: 1',
-        'Profile source references: 0',
+        'Profile library/package references: 0',
         'Derived effective skills: 0',
         '  (none)',
-        'Source failures:',
+        'Library/package failures:',
         '  (none)',
         'Cached collision aliases: 0',
         'Launch:',
@@ -112,10 +112,10 @@ describe('Bazframe status', () => {
         'Active profile: (not used: disabled: project-disabled-override)',
         'Profile instructions: (not used: disabled: project-disabled-override)',
         'Flat direct skills: (not used: disabled: project-disabled-override)',
-        'Profile source references: (not used: disabled: project-disabled-override)',
+        'Profile library/package references: (not used: disabled: project-disabled-override)',
         'Derived effective skills: (not used: disabled: project-disabled-override)',
         '  (none)',
-        'Source failures:',
+        'Library/package failures:',
         '  (none)',
         'Cached collision aliases: 0',
         'Launch:',
@@ -183,10 +183,10 @@ describe('Bazframe status', () => {
         'Active profile: focused',
         `Profile instructions: ${directory.path('bazframe-home/profiles/focused/AGENTS.md')}`,
         'Flat direct skills: 1',
-        'Profile source references: 0',
+        'Profile library/package references: 0',
         'Derived effective skills: 0',
         '  (none)',
-        'Source failures:',
+        'Library/package failures:',
         '  (none)',
         'Cached collision aliases: 0',
         'Launch:',
@@ -199,109 +199,90 @@ describe('Bazframe status', () => {
     });
   });
 
-  it('uses Pi directory fallback for flat duplicate analysis and withholds the derived source', async () => {
-    const directory = await temporary();
-    const options = await statusOptions(directory);
-    await readyProfile(directory, options);
-    await directory.write(
-      'bazframe-home/profiles/focused/skills/review/SKILL.md',
-      '---\ndescription: fallback flat name\n---\n'
-    );
-    const provider = await realpath(await directory.mkdir('source'));
-    await directory.write(
-      'source/derived/SKILL.md',
-      '---\nname: review\ndescription: derived\n---\n'
-    );
-    const snapshot = await publishSourceSnapshot(directory.path('bazframe-home'), provider);
-    const descriptorPath = await directory.write(
-      'bazframe-home/sources/source.json',
-      encodeGlobalSource({ schemaVersion: 1, source: 'source', root: provider, digest: snapshot.digest, sourceUnitRoot: '.' })
-    );
-    await directory.write('bazframe-home/profiles/focused/sources/source.json', encodeProfileSourceReference({ schemaVersion: 1, source: 'source' }));
-
-    const ownedBefore = await captureProviderManifest([descriptorPath]);
-    const providerBefore = await captureProviderManifest([provider]);
+  it('uses Pi directory fallback for direct duplicate analysis and withholds the complete library', async () => {
+    const directory = await temporary(); const options = await statusOptions(directory); await readyProfile(directory, options);
+    await directory.write('bazframe-home/profiles/focused/skills/review/SKILL.md', '---\ndescription: fallback flat name\n---\n');
+    const provider = await realpath(await directory.mkdir('library'));
+    await directory.write('library/derived/SKILL.md', '---\nname: review\ndescription: derived\n---\n');
+    const snapshot = await publishSkillSnapshot(options.bazframeHome, provider);
+    const recordPath = await directory.write('bazframe-home/libraries/library.json', encodeLibrary({ schemaVersion: 1, library: 'library', root: provider, digest: snapshot.digest }));
+    await directory.write('bazframe-home/profiles/focused/libraries/library.json', encodeProfileCollectionReference({ schemaVersion: 1, library: 'library' }));
+    const providerBefore = await captureProviderManifest([provider]); const recordBefore = await captureProviderManifest([recordPath]);
     const inspection = await inspectStatus(options);
-    const providerAfter = await captureProviderManifest([provider]);
-    const ownedAfter = await captureProviderManifest([descriptorPath]);
-
-    expect(providerAfter).toEqual(providerBefore);
-    expect(ownedAfter).toEqual(ownedBefore);
-    expect(inspection.profile).toMatchObject({
-      state: 'ready',
-      flatSkillCount: 1,
-      directSourceUnitCount: 1,
-      derivedSkillCount: 0,
-      sourceDiagnostics: [{
-        category: 'duplicate-name',
-        sourceId: 'source',
-        path: 'derived/SKILL.md',
-        name: 'review'
-      }]
-    });
+    expect(await captureProviderManifest([provider])).toEqual(providerBefore); expect(await captureProviderManifest([recordPath])).toEqual(recordBefore);
+    expect(inspection.profile).toMatchObject({ state: 'ready', flatSkillCount: 1, collectionReferenceCount: 1, derivedSkillCount: 0, collectionDiagnostics: [{ category: 'duplicate-name', collectionKind: 'library', collectionId: 'library', path: 'derived/SKILL.md', name: 'review' }] });
   });
 
-  it('reports the canonical global build correction when a failed source can be rebuilt', async () => {
+  it('reports a healthy same-ID zero-Skill library and package independently', async () => {
     const directory = await temporary();
     const options = await statusOptions(directory);
     await readyProfile(directory, options);
     await installPiAdapter(options);
-    const provider = await realpath(await directory.mkdir('source'));
-    await directory.write('source/alpha/SKILL.md', '---\nname: alpha\ndescription: alpha\n---\n');
-    await directory.write(
-      'bazframe-home/sources/source.json',
-      encodeGlobalSource({ schemaVersion: 1, source: 'source', root: provider, digest: '0'.repeat(64), sourceUnitRoot: '.' })
-    );
-    await directory.write(
-      'bazframe-home/profiles/focused/sources/source.json',
-      encodeProfileSourceReference({ schemaVersion: 1, source: 'source' })
-    );
+    const libraryRoot = await realpath(await directory.mkdir('library-provider/toolkit'));
+    const packageRoot = await realpath(await directory.mkdir('package-provider/toolkit'));
+    const librarySnapshot = await publishSkillSnapshot(options.bazframeHome, libraryRoot);
+    const packageSnapshot = await publishSkillSnapshot(options.bazframeHome, packageRoot);
+    await directory.write('bazframe-home/libraries/toolkit.json', encodeLibrary({
+      schemaVersion: 1, library: 'toolkit', root: libraryRoot, digest: librarySnapshot.digest
+    }));
+    await directory.write('bazframe-home/packages/toolkit.json', encodePackage({
+      schemaVersion: 1, package: 'toolkit', root: packageRoot, digest: packageSnapshot.digest,
+      artifactRoot: '.', skillsRoot: '.'
+    }));
+    await directory.write('bazframe-home/profiles/focused/libraries/toolkit.json', encodeProfileCollectionReference({ schemaVersion: 1, library: 'toolkit' }));
+    await directory.write('bazframe-home/profiles/focused/packages/toolkit.json', encodeProfileCollectionReference({ schemaVersion: 1, package: 'toolkit' }));
 
+    const inspection = await inspectStatus(options);
+    expect(inspection.profile).toMatchObject({
+      state: 'ready',
+      collectionReferenceCount: 2,
+      derivedSkillCount: 0,
+      collectionDiagnostics: [],
+      collections: [
+        { collectionKind: 'library', collectionId: 'toolkit', preparationState: 'ready' },
+        { collectionKind: 'package', collectionId: 'toolkit', preparationState: 'ready' }
+      ]
+    });
+    expect(statusExitStatus(inspection)).toBe(0);
+    const text = formatStatus(inspection);
+    expect(text).toContain('Profile library/package references: 2');
+    expect(text).toContain('library toolkit: ready;');
+    expect(text).toContain('package toolkit: ready;');
+    expect(text).toContain('Derived effective skills: 0');
+    expect(text).toContain('Library/package failures:\n  (none)');
+  });
+
+  it('reports the canonical kind-qualified refresh correction for a failed library', async () => {
+    const directory = await temporary(); const options = await statusOptions(directory); await readyProfile(directory, options); await installPiAdapter(options);
+    const provider = await realpath(await directory.mkdir('library'));
+    await directory.write('bazframe-home/libraries/library.json', encodeLibrary({ schemaVersion: 1, library: 'library', root: provider, digest: '0'.repeat(64) }));
+    await directory.write('bazframe-home/profiles/focused/libraries/library.json', encodeProfileCollectionReference({ schemaVersion: 1, library: 'library' }));
     const status = await buildStatus(options);
-
-    expect(status.exitStatus).toBe(3);
-    expect(status.text).toContain('source: failed; rebuild available;');
-    expect(status.text).toContain('Build the sources with: `bazframe sources build source`.');
+    expect(status.exitStatus).toBe(3); expect(status.text).toContain('library library: failed; refresh available;');
+    expect(status.text).toContain('Refresh the affected libraries/packages with: `bazframe libraries update library`.');
   });
 
-  it('keeps flat status ready while reporting a scoped source-unit failure', async () => {
-    const directory = await temporary();
-    const options = await statusOptions(directory);
-    await readyProfile(directory, options);
-    await installPiAdapter(options);
-    const missingRoot = directory.path('source');
-    for (const source of ['another', 'source']) {
-      const root = await realpath(await directory.mkdir(source));
-      await directory.write(`bazframe-home/sources/${source}.json`, encodeGlobalSource({ schemaVersion: 1, source, root, digest: '0'.repeat(64), sourceUnitRoot: '.' }));
-      await directory.write(`bazframe-home/profiles/focused/sources/${source}.json`, encodeProfileSourceReference({ schemaVersion: 1, source }));
-    }
+  it('uses kind-specific wording for an invalid library record', async () => {
+    const directory = await temporary(); const options = await statusOptions(directory); await readyProfile(directory, options); await installPiAdapter(options);
+    await directory.write('bazframe-home/libraries/broken.json', '{}\n');
+    await directory.write('bazframe-home/profiles/focused/libraries/broken.json', encodeProfileCollectionReference({ schemaVersion: 1, library: 'broken' }));
+    const status = await buildStatus(options);
+    expect(status.text).toContain('library broken:broken.json invalid-library');
+    expect(status.text).not.toContain('invalid-collection');
+  });
 
-    const descriptorPath = directory.path(
-      'bazframe-home/sources/source.json'
-    );
-    const ownedBefore = await captureProviderManifest([descriptorPath]);
-    const before = await captureProviderManifest([missingRoot]);
-    const inspection = await inspectStatus(options);
-    const after = await captureProviderManifest([missingRoot]);
-    const ownedAfter = await captureProviderManifest([descriptorPath]);
-    expect(after).toEqual(before);
-    expect(ownedAfter).toEqual(ownedBefore);
-    expect(inspection.profile).toMatchObject({
-      state: 'ready',
-      flatSkillCount: 1,
-      directSourceUnitCount: 2,
-      derivedSkillCount: 0,
-      sourceDiagnostics: [{
-        category: 'broken-snapshot', sourceId: 'another', path: '.'
-      }, {
-        category: 'broken-snapshot', sourceId: 'source', path: '.'
-      }]
-    });
+  it('keeps flat status ready while reporting sorted library/package failures and corrections', async () => {
+    const directory = await temporary(); const options = await statusOptions(directory); await readyProfile(directory, options); await installPiAdapter(options);
+    const libraryRoot = await realpath(await directory.mkdir('library')); const packageRoot = await realpath(await directory.mkdir('package'));
+    await directory.write('bazframe-home/libraries/library.json', encodeLibrary({ schemaVersion: 1, library: 'library', root: libraryRoot, digest: '0'.repeat(64) }));
+    await directory.write('bazframe-home/packages/package.json', encodePackage({ schemaVersion: 1, package: 'package', root: packageRoot, digest: '1'.repeat(64), artifactRoot: 'dist', skillsRoot: 'skills' }));
+    await directory.write('bazframe-home/profiles/focused/libraries/library.json', encodeProfileCollectionReference({ schemaVersion: 1, library: 'library' }));
+    await directory.write('bazframe-home/profiles/focused/packages/package.json', encodeProfileCollectionReference({ schemaVersion: 1, package: 'package' }));
+    const inspection = await inspectStatus(options); expect(inspection.profile).toMatchObject({ state: 'ready', flatSkillCount: 1, collectionReferenceCount: 2, derivedSkillCount: 0 });
     expect(statusExitStatus(inspection)).toBe(3);
-    expect(formatStatus(inspection)).toContain('Source failures:\n  - another:. broken-snapshot\n  - source:. broken-snapshot');
-    expect(formatStatus(inspection)).toContain(
-      'Build the sources with: `bazframe sources build another`, `bazframe sources build source`.'
-    );
+    const text = formatStatus(inspection);
+    expect(text).toContain('Library/package failures:\n  - library library:. broken-snapshot\n  - package package:. broken-snapshot');
+    expect(text).toContain('`bazframe libraries update library`, `bazframe packages build package`');
   });
 
   it('reports incomplete globally enabled setup outside Git', async () => {
@@ -378,10 +359,10 @@ describe('Bazframe status', () => {
         'Active profile: focused',
         `Profile instructions: ${directory.path('bazframe-home/profiles/focused/AGENTS.md')}`,
         'Flat direct skills: 1',
-        'Profile source references: 0',
+        'Profile library/package references: 0',
         'Derived effective skills: 0',
         '  (none)',
-        'Source failures:',
+        'Library/package failures:',
         '  (none)',
         'Cached collision aliases: 0',
         'Launch:',
@@ -441,10 +422,10 @@ describe('Bazframe status', () => {
       'Active profile: (none)',
       'Profile instructions: (none)',
       'Flat direct skills: 0',
-      'Profile source references: 0',
+      'Profile library/package references: 0',
       'Derived effective skills: 0',
       '  (none)',
-      'Source failures:',
+      'Library/package failures:',
       '  (none)',
       'Cached collision aliases: 2',
       'Launch:',

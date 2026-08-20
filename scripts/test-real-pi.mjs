@@ -16,7 +16,7 @@ import {
   writeFileSync
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 const projectRoot = process.cwd();
 const npmExecPath = process.env.npm_execpath;
@@ -69,8 +69,8 @@ try {
     'skills',
     'profile-probe'
   );
-  const sourceProvider = join(temporaryRoot, 'source');
-  const sourceSkill = join(sourceProvider, 'source-probe');
+  const libraryProvider = join(temporaryRoot, 'demo-library');
+  const sourceSkill = join(libraryProvider, 'source-probe');
   const sourceDefinition = [
     '---',
     'name: source-probe',
@@ -82,6 +82,25 @@ try {
   ].join('\n');
   mkdirSync(sourceSkill, { recursive: true });
   writeFileSync(join(sourceSkill, 'SKILL.md'), sourceDefinition);
+  const packageProvider = join(temporaryRoot, 'demo-package');
+  mkdirSync(join(packageProvider, 'src', 'package-probe'), { recursive: true });
+  writeFileSync(join(packageProvider, 'src', 'package-probe', 'SKILL.md'), [
+    '---', 'name: package-probe', 'description: PACKED_PACKAGE_SKILL', '---', '', '# Package probe', ''
+  ].join('\n'));
+  writeFileSync(join(packageProvider, 'build.mjs'), [
+    "import { cp, mkdir, rm, writeFile } from 'node:fs/promises';",
+    "await rm('dist', { recursive: true, force: true });",
+    "await mkdir('dist/skills', { recursive: true });",
+    "await cp('src', 'dist/skills', { recursive: true });",
+    "await mkdir('dist/shared', { recursive: true });",
+    "await writeFile('dist/shared/resource.txt', 'PACKED_SHARED_RESOURCE\\n');"
+  ].join('\n'));
+  writeFileSync(join(packageProvider, 'bazframe-package.json'), JSON.stringify({
+    schemaVersion: 1,
+    build: [process.execPath, 'build.mjs'],
+    artifactRoot: 'dist',
+    skillsRoot: 'skills'
+  }));
   const skillDefinition = [
     '---',
     'name: profile-probe',
@@ -138,29 +157,55 @@ try {
   run(executable, ['profile', 'use', 'focused'], temporaryRoot, environment);
   const profileCurrent = run(executable, ['profile', 'current'], temporaryRoot, environment);
   assert(profileCurrent.stdout === 'focused\n', 'Packed CLI current profile was incorrect.');
-  const sourceDescriptorPath = join(bazframeHome, 'sources', 'source.json');
-  const sourceReferencePath = join(bazframeHome, 'profiles', 'focused', 'sources', 'source.json');
-  const ownedBeforeSourceAdd = providerManifest(sourceDescriptorPath);
-  const sourceBeforeAdd = providerManifest(sourceProvider);
-  const sourceAdded = run(executable, ['sources', 'add', realpathSync(sourceProvider)], temporaryRoot, environment);
-  assert(providerManifest(sourceProvider) === sourceBeforeAdd, 'Source add changed provider bytes.');
-  assert(providerManifest(sourceDescriptorPath) !== ownedBeforeSourceAdd, 'Source add did not change global source state.');
-  assert(sourceAdded.stdout.includes('Global source: added'), 'Packed CLI did not add global source.');
-  const referenceAdded = run(executable, ['profile', 'sources', 'add', 'source'], temporaryRoot, environment);
-  assert(referenceAdded.stdout.includes('Profile source reference: added'), 'Packed CLI did not add source reference.');
-  assert(existsSync(sourceReferencePath), 'Profile source reference was not created.');
-  const expectedSourceDescriptor = JSON.parse(readFileSync(sourceDescriptorPath, 'utf8'));
-  assert(expectedSourceDescriptor.schemaVersion === 1
-    && expectedSourceDescriptor.source === 'source'
-    && expectedSourceDescriptor.root === realpathSync(sourceProvider)
-    && /^[a-f0-9]{64}$/u.test(expectedSourceDescriptor.digest)
-    && expectedSourceDescriptor.sourceUnitRoot === '.', 'Source add wrote an unexpected global record.');
-  const ownedBeforeOccupiedAdd = providerManifest(sourceDescriptorPath);
-  const sourceBeforeOccupiedAdd = providerManifest(sourceProvider);
-  const sourceOccupied = runFailure(executable, ['sources', 'add', realpathSync(sourceProvider)], temporaryRoot, environment);
-  assert(providerManifest(sourceProvider) === sourceBeforeOccupiedAdd, 'Occupied source add changed source bytes.');
-  assert(providerManifest(sourceDescriptorPath) === ownedBeforeOccupiedAdd, 'Occupied source add changed global source state.');
-  assert(sourceOccupied.stderr.includes('source name is already registered'), 'Packed CLI source add did not reject an occupied source name.');
+  const obsoleteGlobalPath = join(bazframeHome, 'sources', 'legacy.json');
+  const obsoleteProfilePath = join(bazframeHome, 'profiles', 'focused', 'sources', 'legacy.json');
+  const obsoleteSnapshotPath = join(bazframeHome, 'source-snapshots', 'legacy');
+  mkdirSync(dirname(obsoleteGlobalPath), { recursive: true });
+  mkdirSync(dirname(obsoleteProfilePath), { recursive: true });
+  mkdirSync(obsoleteSnapshotPath, { recursive: true });
+  writeFileSync(obsoleteGlobalPath, '{');
+  writeFileSync(obsoleteProfilePath, '{');
+  writeFileSync(join(obsoleteSnapshotPath, 'bytes'), 'legacy state\n');
+  const obsoleteStateBefore = ownedManifest([obsoleteGlobalPath, obsoleteProfilePath, obsoleteSnapshotPath]);
+  const libraryRecordPath = join(bazframeHome, 'libraries', 'demo-library.json');
+  const libraryReferencePath = join(bazframeHome, 'profiles', 'focused', 'libraries', 'demo-library.json');
+  const ownedBeforeLibraryAdd = providerManifest(libraryRecordPath);
+  const libraryBeforeAdd = providerManifest(libraryProvider);
+  const libraryAdded = run(executable, ['libraries', 'add', realpathSync(libraryProvider)], temporaryRoot, environment);
+  assert(providerManifest(libraryProvider) === libraryBeforeAdd, 'Source add changed provider bytes.');
+  assert(providerManifest(libraryRecordPath) !== ownedBeforeLibraryAdd, 'Source add did not change global source state.');
+  assert(libraryAdded.stdout.includes('Global library: added'), 'Packed CLI did not add global source.');
+  const referenceAdded = run(executable, ['profile', 'libraries', 'add', 'demo-library'], temporaryRoot, environment);
+  assert(referenceAdded.stdout.includes('Profile library reference: added'), 'Packed CLI did not add source reference.');
+  assert(existsSync(libraryReferencePath), 'Profile source reference was not created.');
+  const expectedLibraryRecord = JSON.parse(readFileSync(libraryRecordPath, 'utf8'));
+  assert(expectedLibraryRecord.schemaVersion === 1
+    && expectedLibraryRecord.library === 'demo-library'
+    && expectedLibraryRecord.root === realpathSync(libraryProvider)
+    && /^[a-f0-9]{64}$/u.test(expectedLibraryRecord.digest)
+, 'Source add wrote an unexpected global record.');
+  const ownedBeforeOccupiedAdd = providerManifest(libraryRecordPath);
+  const libraryBeforeOccupiedAdd = providerManifest(libraryProvider);
+  const libraryOccupied = runFailure(executable, ['libraries', 'add', realpathSync(libraryProvider)], temporaryRoot, environment);
+  assert(providerManifest(libraryProvider) === libraryBeforeOccupiedAdd, 'Occupied source add changed source bytes.');
+  assert(providerManifest(libraryRecordPath) === ownedBeforeOccupiedAdd, 'Occupied source add changed global source state.');
+  assert(libraryOccupied.stderr.includes('library name is already registered'), 'Packed CLI library add did not reject an occupied library name.');
+  const packageRecordPath = join(bazframeHome, 'packages', 'demo-package.json');
+  const packageReferencePath = join(bazframeHome, 'profiles', 'focused', 'packages', 'demo-package.json');
+  const packageBeforeAdd = providerManifest(packageProvider);
+  const packageAdded = run(executable, ['packages', 'add', realpathSync(packageProvider)], temporaryRoot, environment);
+  assert(packageAdded.stdout.includes('Global package: added'), 'Packed CLI did not add the package.');
+  assert(providerManifest(packageProvider) !== packageBeforeAdd, 'Declared package build did not create its provider-owned artifact.');
+  const expectedPackageRecord = JSON.parse(readFileSync(packageRecordPath, 'utf8'));
+  assert(expectedPackageRecord.schemaVersion === 1
+    && expectedPackageRecord.package === 'demo-package'
+    && expectedPackageRecord.root === realpathSync(packageProvider)
+    && expectedPackageRecord.artifactRoot === 'dist'
+    && expectedPackageRecord.skillsRoot === 'skills'
+    && /^[a-f0-9]{64}$/u.test(expectedPackageRecord.digest), 'Package add wrote an unexpected record.');
+  const packageReferenceAdded = run(executable, ['profile', 'packages', 'add', 'demo-package'], temporaryRoot, environment);
+  assert(packageReferenceAdded.stdout.includes('Profile package reference: added'), 'Packed CLI did not add the package reference.');
+  assert(existsSync(packageReferencePath), 'Profile package reference was not created.');
   const registered = run(executable, ['add', 'skill', realpathSync(skillSource)], temporaryRoot, environment);
   assert(registered.stdout.includes('Default skill registration: added'), 'Packed CLI did not register direct skill.');
   const catalogRegistration = join(bazframeHome, 'skills', 'profile-probe');
@@ -175,12 +220,12 @@ try {
   assert(lstatSync(membership).isSymbolicLink(), 'Packed CLI membership is not a symlink.');
   assert(readlinkSync(membership) === realpathSync(skillSource), 'Packed CLI membership target is not the direct provider source.');
   run(executable, ['adapter', 'install', 'pi'], temporaryRoot, environment);
-  const ownedBeforeStatus = providerManifest(sourceDescriptorPath);
-  const sourceBeforeStatus = providerManifest(sourceProvider);
+  const ownedBeforeStatus = providerManifest(libraryRecordPath);
+  const libraryBeforeStatus = providerManifest(libraryProvider);
   const status = run(executable, ['status'], repository, environment);
-  const sourceAfterStatus = providerManifest(sourceProvider);
-  const ownedAfterStatus = providerManifest(sourceDescriptorPath);
-  assert(sourceAfterStatus === sourceBeforeStatus, 'Git status discovery changed provider bytes.');
+  const libraryAfterStatus = providerManifest(libraryProvider);
+  const ownedAfterStatus = providerManifest(libraryRecordPath);
+  assert(libraryAfterStatus === libraryBeforeStatus, 'Git status discovery changed provider bytes.');
   assert(ownedAfterStatus === ownedBeforeStatus, 'Git status discovery changed descriptor state.');
   assert(status.stdout.includes('Pi adapter: current'), 'Packed CLI status omitted current adapter.');
   assert(status.stdout.includes('Global policy: enabled'), 'Packed CLI status omitted global policy.');
@@ -190,13 +235,13 @@ try {
   );
   assert(!existsSync(projectStatePath), 'Default project behavior wrote current project state.');
   assert(!existsSync(globalStatePath), 'Default global behavior wrote global state.');
-  const ownedBeforeNonGitStatus = providerManifest(sourceDescriptorPath);
-  const sourceBeforeNonGitStatus = providerManifest(sourceProvider);
+  const ownedBeforeNonGitStatus = providerManifest(libraryRecordPath);
+  const libraryBeforeNonGitStatus = providerManifest(libraryProvider);
   const nonGitStatus = run(executable, ['status'], nonGitDirectory, environment);
-  const sourceAfterNonGitStatus = providerManifest(sourceProvider);
-  const ownedAfterNonGitStatus = providerManifest(sourceDescriptorPath);
+  const libraryAfterNonGitStatus = providerManifest(libraryProvider);
+  const ownedAfterNonGitStatus = providerManifest(libraryRecordPath);
   assert(
-    sourceAfterNonGitStatus === sourceBeforeNonGitStatus,
+    libraryAfterNonGitStatus === libraryBeforeNonGitStatus,
     'Non-Git status discovery changed provider bytes.'
   );
   assert(
@@ -221,16 +266,17 @@ try {
     encoding: 'utf8'
   });
   const replacement = runPiPreservingProvider(
-    sourceProvider, repository, environment, ['-nc'], 'replacement probe'
+    libraryProvider, repository, environment, ['-nc'], 'replacement probe'
   );
   const additive = runPiPreservingProvider(
-    sourceProvider, repository, environment, [], 'additive probe'
+    libraryProvider, repository, environment, [], 'additive probe'
   );
   const nonGitEnabledRun = runPiPreservingProvider(
-    sourceProvider, nonGitDirectory, environment, [], 'non-Git enabled probe'
+    libraryProvider, nonGitDirectory, environment, [], 'non-Git enabled probe'
   );
   const rpcOwnedRoots = [
-    sourceDescriptorPath,
+    libraryRecordPath,
+    packageRecordPath,
     join(bazframeHome, 'adapter-cache', 'pi', 'skill-aliases', 'focused')
   ];
   rpcClient = startPiRpc(repository, environment);
@@ -238,13 +284,15 @@ try {
   assert(initialCommandsResponse.success === true, 'Initial RPC command query failed.');
   const initialRpcCommands = rpcCommandNames(initialCommandsResponse);
   assert(initialRpcCommands.includes('bazframe'), 'RPC process did not load /bazframe.');
-  assert(initialRpcCommands.includes('skill:source-probe'), 'RPC process omitted the initial source skill.');
-  assert(!initialRpcCommands.includes('skill:live-source'), 'RPC process saw a future provider change.');
+  assert(initialRpcCommands.includes('skill:source-probe'), 'RPC process omitted the initial library Skill.');
+  assert(initialRpcCommands.includes('skill:package-probe'), 'RPC process omitted the initial package Skill.');
+  assert(!initialRpcCommands.includes('skill:live-source'), 'RPC process saw a future library change.');
+  assert(!initialRpcCommands.includes('skill:package-live'), 'RPC process saw a future package change.');
   const liveSkillDefinition = skillDefinition.replace('PACKED_PROFILE_SKILL', 'PACKED_PROFILE_SKILL_LIVE');
   writeFileSync(join(skillSource, 'SKILL.md'), liveSkillDefinition);
   assert(!JSON.stringify(await rpcClient.request({ type: 'get_commands' })).includes('PACKED_PROFILE_SKILL_LIVE'), 'RPC process saw live direct-skill provider mutation before reload.');
 
-  const liveSource = join(sourceProvider, 'live-source');
+  const liveSource = join(libraryProvider, 'live-source');
   mkdirSync(liveSource);
   writeFileSync(join(liveSource, 'SKILL.md'), [
     '---',
@@ -257,28 +305,37 @@ try {
   ].join('\n'));
   const beforeBuildCommands = rpcCommandNames(await rpcClient.request({ type: 'get_commands' }));
   assert(!beforeBuildCommands.includes('skill:live-source'), 'The same Pi process saw provider mutation before explicit build.');
-  const nonRpcBeforeBuild = runPiPreservingProvider(sourceProvider, repository, environment, [], 'pre-build invisibility probe');
+  const nonRpcBeforeBuild = runPiPreservingProvider(libraryProvider, repository, environment, [], 'pre-build invisibility probe');
   assert(!nonRpcBeforeBuild.stdout.includes('PACKED_LIVE_SOURCE'), 'A fresh non-RPC Pi run saw provider mutation before explicit build.');
 
-  const sourceBeforeExplicitBuild = providerManifest(sourceProvider);
-  const rebuiltForLiveSource = run(executable, ['sources', 'build', 'source'], temporaryRoot, environment);
-  assert(rebuiltForLiveSource.stdout.includes('Global source: built'), 'Explicit source build did not activate the provider change.');
-  assert(providerManifest(sourceProvider) === sourceBeforeExplicitBuild, 'Explicit snapshot-only build changed provider bytes.');
+  const libraryBeforeExplicitUpdate = providerManifest(libraryProvider);
+  const updatedForLiveSkill = run(executable, ['libraries', 'update', 'demo-library'], temporaryRoot, environment);
+  assert(updatedForLiveSkill.stdout.includes('Global library: updated'), 'Explicit source build did not activate the provider change.');
+  assert(providerManifest(libraryProvider) === libraryBeforeExplicitUpdate, 'Explicit snapshot-only build changed provider bytes.');
   const afterBuildBeforeReload = rpcCommandNames(await rpcClient.request({ type: 'get_commands' }));
-  assert(!afterBuildBeforeReload.includes('skill:live-source'), 'The same Pi process saw the rebuilt snapshot before /bazframe reload.');
+  assert(!afterBuildBeforeReload.includes('skill:live-source'), 'The same Pi process saw the updated library snapshot before /bazframe reload.');
+  mkdirSync(join(packageProvider, 'src', 'package-live'));
+  writeFileSync(join(packageProvider, 'src', 'package-live', 'SKILL.md'), [
+    '---', 'name: package-live', 'description: PACKED_PACKAGE_LIVE', '---', '', '# Package live', ''
+  ].join('\n'));
+  assert(!rpcCommandNames(await rpcClient.request({ type: 'get_commands' })).includes('skill:package-live'), 'RPC process saw package provider mutation before build.');
+  const packageBuilt = run(executable, ['packages', 'build', 'demo-package'], temporaryRoot, environment);
+  assert(packageBuilt.stdout.includes('Global package: built'), 'Explicit package build did not activate provider output.');
+  assert(!rpcCommandNames(await rpcClient.request({ type: 'get_commands' })).includes('skill:package-live'), 'RPC process saw the built package before reload.');
 
   const ownedBeforeRpcReload = ownedManifest(rpcOwnedRoots);
-  const providerBeforeRpcReload = providerManifest(sourceProvider);
+  const providerBeforeRpcReload = providerManifest(libraryProvider);
   const reloadResponse = await rpcClient.request({ type: 'prompt', message: '/bazframe reload' });
   assert(reloadResponse.success === true, 'RPC /bazframe reload did not return correlated success.');
-  assert(providerManifest(sourceProvider) === providerBeforeRpcReload, 'RPC /bazframe reload changed provider bytes.');
+  assert(providerManifest(libraryProvider) === providerBeforeRpcReload, 'RPC /bazframe reload changed provider bytes.');
   assert(ownedManifest(rpcOwnedRoots) === ownedBeforeRpcReload, 'RPC /bazframe reload changed Bazframe-owned state.');
   const afterReloadResponse = await rpcClient.request({ type: 'get_commands' });
   const afterReloadCommands = rpcCommandNames(afterReloadResponse);
-  assert(afterReloadCommands.includes('skill:live-source'), 'The same Pi process did not expose the rebuilt source after /bazframe reload.');
+  assert(afterReloadCommands.includes('skill:live-source'), 'The same Pi process did not expose the updated library after /bazframe reload.');
+  assert(afterReloadCommands.includes('skill:package-live'), 'The same Pi process did not expose the built package after /bazframe reload.');
   assert(JSON.stringify(afterReloadResponse).includes('PACKED_PROFILE_SKILL_LIVE'), 'The same Pi process did not expose live direct-skill provider changes after /bazframe reload.');
 
-  const rpcReloadSource = join(sourceProvider, 'rpc-reloaded-source');
+  const rpcReloadSource = join(libraryProvider, 'rpc-reloaded-source');
   mkdirSync(rpcReloadSource);
   writeFileSync(join(rpcReloadSource, 'SKILL.md'), [
     '---',
@@ -290,10 +347,10 @@ try {
     ''
   ].join('\n'));
   assert(!rpcCommandNames(await rpcClient.request({ type: 'get_commands' })).includes('skill:rpc-reloaded-source'), 'RPC process saw a second provider mutation before build.');
-  const providerBeforeRpcBuild = providerManifest(sourceProvider);
-  const rpcBuilt = run(executable, ['sources', 'build', 'source'], temporaryRoot, environment);
-  assert(rpcBuilt.stdout.includes('Global source: built'), 'Explicit RPC-era source build did not activate.');
-  assert(providerManifest(sourceProvider) === providerBeforeRpcBuild, 'RPC-era source build changed provider bytes.');
+  const providerBeforeRpcUpdate = providerManifest(libraryProvider);
+  const rpcUpdated = run(executable, ['libraries', 'update', 'demo-library'], temporaryRoot, environment);
+  assert(rpcUpdated.stdout.includes('Global library: updated'), 'Explicit RPC-era source build did not activate.');
+  assert(providerManifest(libraryProvider) === providerBeforeRpcUpdate, 'RPC-era source build changed provider bytes.');
   assert(!rpcCommandNames(await rpcClient.request({ type: 'get_commands' })).includes('skill:rpc-reloaded-source'), 'RPC process saw second rebuilt source before reload.');
   assert((await rpcClient.request({ type: 'prompt', message: '/bazframe reload' })).success === true, 'Second RPC reload failed.');
   assert(rpcCommandNames(await rpcClient.request({ type: 'get_commands' })).includes('skill:rpc-reloaded-source'), 'Second rebuilt source remained absent after reload.');
@@ -313,7 +370,7 @@ try {
     profile: 'active'
   }, null, 2)}\n`);
   const legacyDefaultRun = runPiPreservingProvider(
-    sourceProvider, repository, environment, [], 'legacy default probe'
+    libraryProvider, repository, environment, [], 'legacy default probe'
   );
   assert(legacyDefaultRun.stdout.includes('probe-ok'), 'Legacy-default probe response was missing.');
   const legacyCleaned = run(executable, ['project', 'enable'], repository, environment);
@@ -324,10 +381,10 @@ try {
   assert(globalDisabled.stdout.includes('Global policy: disabled'), 'Packed CLI did not disable globally.');
   assert(existsSync(globalStatePath), 'Global disable did not write state.');
   const globalDisabledRun = runPiPreservingProvider(
-    sourceProvider, repository, environment, [], 'global disabled probe'
+    libraryProvider, repository, environment, [], 'global disabled probe'
   );
   const nonGitDisabledRun = runPiPreservingProvider(
-    sourceProvider, nonGitDirectory, environment, [], 'non-Git disabled probe'
+    libraryProvider, nonGitDirectory, environment, [], 'non-Git disabled probe'
   );
   assert(globalDisabledRun.stdout.includes('probe-ok'), 'Global-disabled probe response was missing.');
   assert(nonGitDisabledRun.stdout.includes('probe-ok'), 'Non-Git disabled probe response was missing.');
@@ -335,7 +392,7 @@ try {
   const projectEnabled = run(executable, ['project', 'enable'], repository, environment);
   assert(projectEnabled.stdout.includes('enabled project override'), 'Project enable did not override global disable.');
   const projectEnabledRun = runPiPreservingProvider(
-    sourceProvider, repository, environment, ['-nc'], 'project enabled probe'
+    libraryProvider, repository, environment, ['-nc'], 'project enabled probe'
   );
   assert(projectEnabledRun.stdout.includes('probe-ok'), 'Project-enabled probe response was missing.');
 
@@ -344,7 +401,7 @@ try {
   const projectDisabled = run(executable, ['project', 'disable'], repository, environment);
   assert(projectDisabled.stdout.includes('disabled project override'), 'Project disable did not override global enable.');
   const projectDisabledRun = runPiPreservingProvider(
-    sourceProvider, repository, environment, [], 'project disabled probe'
+    libraryProvider, repository, environment, [], 'project disabled probe'
   );
   assert(projectDisabledRun.stdout.includes('probe-ok'), 'Project-disabled probe response was missing.');
 
@@ -352,7 +409,7 @@ try {
   assert(restored.stdout.includes('Project policy: enabled'), 'Packed CLI did not restore inheritance.');
   assert(!existsSync(projectStatePath), 'Restoring inheritance left current project state.');
   const restoredRun = runPiPreservingProvider(
-    sourceProvider, repository, environment, [], 'restored default probe'
+    libraryProvider, repository, environment, [], 'restored default probe'
   );
   assert(restoredRun.stdout.includes('probe-ok'), 'Restored-default probe response was missing.');
 
@@ -472,18 +529,26 @@ try {
     'Packed CLI changed the provider support file.'
   );
 
-  const ownedBeforeSourceRemove = providerManifest(sourceDescriptorPath);
-  const sourceBeforeRemove = providerManifest(sourceProvider);
-  const sourceRemoved = run(executable, ['profile', 'sources', 'remove', 'source'], temporaryRoot, environment);
-  assert(providerManifest(sourceProvider) === sourceBeforeRemove, 'Source detach changed provider bytes.');
-  assert(providerManifest(sourceDescriptorPath) === ownedBeforeSourceRemove, 'Source detach changed global source state.');
-  assert(sourceRemoved.stdout.includes('Profile source reference: removed'), 'Packed CLI did not remove source reference.');
-  assert(!existsSync(sourceReferencePath), 'Source detach left the profile reference.');
-  const sourceAbsent = run(executable, ['profile', 'sources', 'remove', 'source'], temporaryRoot, environment);
-  assert(sourceAbsent.stdout.includes('Profile source reference: absent'), 'Source detach retry was not absent.');
-  const globalRemoved = run(executable, ['sources', 'remove', 'source'], temporaryRoot, environment);
-  assert(globalRemoved.stdout.includes('Global source: removed'), 'Packed CLI did not remove unreferenced global source.');
-  assert(!existsSync(sourceDescriptorPath), 'Global source removal left its record.');
+  const ownedBeforeLibraryRemove = providerManifest(libraryRecordPath);
+  const libraryBeforeRemove = providerManifest(libraryProvider);
+  const libraryRemoved = run(executable, ['profile', 'libraries', 'remove', 'demo-library'], temporaryRoot, environment);
+  assert(providerManifest(libraryProvider) === libraryBeforeRemove, 'Source detach changed provider bytes.');
+  assert(providerManifest(libraryRecordPath) === ownedBeforeLibraryRemove, 'Source detach changed global source state.');
+  assert(libraryRemoved.stdout.includes('Profile library reference: removed'), 'Packed CLI did not remove source reference.');
+  assert(!existsSync(libraryReferencePath), 'Source detach left the profile reference.');
+  const libraryAbsent = run(executable, ['profile', 'libraries', 'remove', 'demo-library'], temporaryRoot, environment);
+  assert(libraryAbsent.stdout.includes('Profile library reference: absent'), 'Source detach retry was not absent.');
+  const globalLibraryRemoved = run(executable, ['libraries', 'remove', 'demo-library'], temporaryRoot, environment);
+  assert(globalLibraryRemoved.stdout.includes('Global library: removed'), 'Packed CLI did not remove unreferenced global source.');
+  assert(!existsSync(libraryRecordPath), 'Global library removal left its record.');
+  const packageBeforeRemove = providerManifest(packageProvider);
+  const packageReferenceRemoved = run(executable, ['profile', 'packages', 'remove', 'demo-package'], temporaryRoot, environment);
+  assert(packageReferenceRemoved.stdout.includes('Profile package reference: removed'), 'Packed CLI did not remove package reference.');
+  const globalPackageRemoved = run(executable, ['packages', 'remove', 'demo-package'], temporaryRoot, environment);
+  assert(globalPackageRemoved.stdout.includes('Global package: removed'), 'Packed CLI did not remove unreferenced package.');
+  assert(!existsSync(packageRecordPath) && !existsSync(packageReferencePath), 'Package removal left Bazframe state.');
+  assert(providerManifest(packageProvider) === packageBeforeRemove, 'Package removal changed provider-owned bytes.');
+  assert(ownedManifest([obsoleteGlobalPath, obsoleteProfilePath, obsoleteSnapshotPath]) === obsoleteStateBefore, 'Obsolete pre-alpha state was read destructively or changed.');
 
   run(executable, ['adapter', 'uninstall', 'pi'], temporaryRoot, environment);
   assert(!existsSync(join(agentDirectory, 'extensions', 'bazframe.ts')), 'Adapter uninstall left its artifact.');
@@ -506,10 +571,13 @@ try {
     defaultCatalogMembershipLifecycle: true,
     directSkillProviderPreserved: true,
     liveDirectSkillReload: true,
-    providerNeutralSourceProjection: true,
-    explicitSnapshotRebuild: true,
+    providerNeutralCollectionProjection: true,
+    libraryUpdateLifecycle: true,
+    packageBuildLifecycle: true,
+    sharedPackageArtifact: true,
+    obsoleteStateInertAndPreserved: true,
     sameProcessRpcReload: true,
-    sourceProviderPreserved: true,
+    libraryProviderPreserved: true,
     repositoryStable: true
   }, null, 2)}\n`);
 } finally {
@@ -709,7 +777,8 @@ function run(executable, args, cwd, environment) {
 }
 
 function runPiPreservingProvider(providerRoot, cwd, environment, extraArgs, prompt) {
-  const descriptorPath = join(environment.BAZFRAME_HOME, 'sources', 'source.json');
+  const libraryRecord = join(environment.BAZFRAME_HOME, 'libraries', 'demo-library.json');
+  const packageRecord = join(environment.BAZFRAME_HOME, 'packages', 'demo-package.json');
   const aliasRoot = join(
     environment.BAZFRAME_HOME,
     'adapter-cache',
@@ -717,11 +786,11 @@ function runPiPreservingProvider(providerRoot, cwd, environment, extraArgs, prom
     'skill-aliases',
     'focused'
   );
-  const ownedBefore = ownedManifest([descriptorPath, aliasRoot]);
+  const ownedBefore = ownedManifest([libraryRecord, packageRecord, aliasRoot]);
   const before = providerManifest(providerRoot);
   const result = runPi(cwd, environment, extraArgs, prompt);
   const after = providerManifest(providerRoot);
-  const ownedAfter = ownedManifest([descriptorPath, aliasRoot]);
+  const ownedAfter = ownedManifest([libraryRecord, packageRecord, aliasRoot]);
   assert(after === before, `Real-Pi projection changed provider bytes during ${prompt}.`);
   assert(ownedAfter === ownedBefore, `Real-Pi projection changed Bazframe-owned state during ${prompt}.`);
   return result;

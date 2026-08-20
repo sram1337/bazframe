@@ -8,20 +8,29 @@ export type HelpTopic =
   | 'root' | 'use' | 'add-skill' | 'remove-skill' | 'pi' | 'adapter' | 'status' | 'global'
   | 'profile' | 'profile-add' | 'profile-duplicate' | 'profile-remove' | 'profile-rename'
   | 'profile-use' | 'profile-edit' | 'profile-list' | 'profile-current' | 'profile-skills'
-  | 'profile-skills-add' | 'profile-skills-remove' | 'profile-sources'
-  | 'profile-sources-add' | 'profile-sources-remove' | 'sources' | 'sources-add' | 'sources-build' | 'sources-remove'
+  | 'profile-skills-add' | 'profile-skills-remove' | 'profile-libraries' | 'profile-libraries-add' | 'profile-libraries-remove'
+  | 'profile-packages' | 'profile-packages-add' | 'profile-packages-remove'
+  | 'libraries' | 'libraries-add' | 'libraries-update' | 'libraries-remove'
+  | 'packages' | 'packages-add' | 'packages-build' | 'packages-remove'
   | 'skills' | 'skill-edit' | 'project' | 'tui';
 export type Command =
   | { name: 'profiles-overview' }
   | { name: 'skills-overview' }
   | { name: 'profile-skills-overview' }
-  | { name: 'sources-overview' }
-  | { name: 'sources-add'; sourceRoot: string }
-  | { name: 'sources-build'; sourceId: string }
-  | { name: 'sources-remove'; sourceId: string }
-  | { name: 'profile-sources-overview' }
-  | { name: 'profile-sources-add'; sourceId: string; profileId?: string }
-  | { name: 'profile-sources-remove'; sourceId: string; profileId?: string }
+  | { name: 'libraries-overview' }
+  | { name: 'libraries-add'; root: string }
+  | { name: 'libraries-update'; id: string }
+  | { name: 'libraries-remove'; id: string }
+  | { name: 'packages-overview' }
+  | { name: 'packages-add'; root: string }
+  | { name: 'packages-build'; id: string }
+  | { name: 'packages-remove'; id: string }
+  | { name: 'profile-libraries-overview' }
+  | { name: 'profile-libraries-add'; id: string; profileId?: string }
+  | { name: 'profile-libraries-remove'; id: string; profileId?: string }
+  | { name: 'profile-packages-overview' }
+  | { name: 'profile-packages-add'; id: string; profileId?: string }
+  | { name: 'profile-packages-remove'; id: string; profileId?: string }
   | { name: 'projects-overview' }
   | { name: 'global-overview' }
   | { name: 'adapters-overview' }
@@ -76,7 +85,8 @@ export function parseArgv(argv: readonly string[]): ParseResult {
   if (first === 'profiles') return parsePluralOverview(rest, 'profiles-overview', 'profile');
   if (first === 'skill') return parseSkill(rest);
   if (first === 'skills') return parsePluralOverview(rest, 'skills-overview', 'skills', 'skill');
-  if (first === 'sources') return parseSources(rest);
+  if (first === 'libraries') return parseCollections('library', rest);
+  if (first === 'packages') return parseCollections('package', rest);
   if (first === 'project') return parseProject(rest);
   if (first === 'projects') return parsePluralOverview(rest, 'projects-overview', 'project');
   if (first === 'global') return parseGlobal(rest);
@@ -100,10 +110,10 @@ function parseHelp(args: readonly string[]): ParseResult {
     ['profile', 'profile'], ['profiles', 'profile'],
     ['profile edit', 'profile-edit'],
     ['profile skills', 'profile-skills'],
-    ['profile sources', 'profile-sources'],
-    ['profile sources add', 'profile-sources-add'],
-    ['profile sources remove', 'profile-sources-remove'],
-    ['sources', 'sources'], ['sources add', 'sources-add'], ['sources build', 'sources-build'], ['sources remove', 'sources-remove'],
+    ['profile libraries', 'profile-libraries'], ['profile libraries add', 'profile-libraries-add'], ['profile libraries remove', 'profile-libraries-remove'],
+    ['profile packages', 'profile-packages'], ['profile packages add', 'profile-packages-add'], ['profile packages remove', 'profile-packages-remove'],
+    ['libraries', 'libraries'], ['libraries add', 'libraries-add'], ['libraries update', 'libraries-update'], ['libraries remove', 'libraries-remove'],
+    ['packages', 'packages'], ['packages add', 'packages-add'], ['packages build', 'packages-build'], ['packages remove', 'packages-remove'],
     ['skill', 'skills'], ['skills', 'skills'], ['skill edit', 'skill-edit'],
     ['project', 'project'], ['projects', 'project'],
     ['global', 'global'],
@@ -166,10 +176,11 @@ function parseProfile(args: readonly string[]): ParseResult {
   }
   const [subcommand, ...rest] = args;
   if (subcommand === 'skills') return parseProfileSkills(rest);
-  if (subcommand === 'sources') return parseProfileSources(rest);
+  if (subcommand === 'libraries') return parseProfileCollections('library', rest);
+  if (subcommand === 'packages') return parseProfileCollections('package', rest);
   if (!new Set(['add', 'duplicate', 'remove', 'rename', 'use', 'edit', 'list', 'current']).has(subcommand)) {
     return usageError(
-      'profile requires `skills`, `sources`, `add`, `duplicate`, `remove`, `rename`, `use`, `edit`, `list`, or `current`.',
+      'profile requires `skills`, `libraries`, `packages`, `add`, `duplicate`, `remove`, `rename`, `use`, `edit`, `list`, or `current`.',
       'profile'
     );
   }
@@ -243,43 +254,47 @@ function parseProfileSkills(args: readonly string[]): ParseResult {
   return parseMembership(subcommand, rest, `profile-skills-${subcommand}`);
 }
 
-function parseProfileSources(args: readonly string[]): ParseResult {
-  if (args.length === 0) return { kind: 'command', command: { name: 'profile-sources-overview' } };
-  if (args.length === 1 && HELP_FLAGS.has(args[0])) return { kind: 'help', topic: 'profile-sources' };
+function parseProfileCollections(kind: 'library' | 'package', args: readonly string[]): ParseResult {
+  const plural = kind === 'library' ? 'libraries' : 'packages';
+  const overview = `profile-${plural}-overview` as Command['name'];
+  const help = `profile-${plural}` as HelpTopic;
+  if (args.length === 0) return { kind: 'command', command: { name: overview } as Command };
+  if (args.length === 1 && HELP_FLAGS.has(args[0])) return { kind: 'help', topic: help };
   const [subcommand, ...rest] = args;
-  if (subcommand !== 'add' && subcommand !== 'remove') return usageError('profile sources requires `add` or `remove`.', 'profile-sources');
-  const topic: HelpTopic = `profile-sources-${subcommand}`;
+  if (subcommand !== 'add' && subcommand !== 'remove') return usageError(`profile ${plural} requires \`add\` or \`remove\`.`, help);
+  const topic = `profile-${plural}-${subcommand}` as HelpTopic;
   if (rest.length === 1 && HELP_FLAGS.has(rest[0])) return { kind: 'help', topic };
   const hasExplicitProfile = rest.length === 3 && rest[1] === '--profile';
-  if (!(rest.length === 1 || hasExplicitProfile)) return usageError(`profile sources ${subcommand} requires <source> followed only by optional --profile <profile>.`, topic);
-  const sourceId = rest[0];
-  if (!isSafeSkillId(sourceId)) return invalidSourceId(topic);
+  if (!(rest.length === 1 || hasExplicitProfile)) return usageError(`profile ${plural} ${subcommand} requires <${kind}> followed only by optional --profile <profile>.`, topic);
+  if (!isSafeSkillId(rest[0])) return invalidCollectionId(kind, topic);
   const profileId = hasExplicitProfile ? rest[2] : undefined;
   if (profileId !== undefined && !isSafeProfileId(profileId)) return invalidProfileId(topic);
-  return { kind: 'command', command: { name: `profile-sources-${subcommand}`, sourceId, ...(profileId === undefined ? {} : { profileId }) } as Command };
+  return { kind: 'command', command: { name: `profile-${plural}-${subcommand}`, id: rest[0], ...(profileId === undefined ? {} : { profileId }) } as Command };
 }
 
-function parseSources(args: readonly string[]): ParseResult {
-  if (args.length === 0) return { kind: 'command', command: { name: 'sources-overview' } };
-  if (args.length === 1 && HELP_FLAGS.has(args[0])) return { kind: 'help', topic: 'sources' };
+function parseCollections(kind: 'library' | 'package', args: readonly string[]): ParseResult {
+  const plural = kind === 'library' ? 'libraries' : 'packages';
+  if (args.length === 0) return { kind: 'command', command: { name: `${plural}-overview` } as Command };
+  if (args.length === 1 && HELP_FLAGS.has(args[0])) return { kind: 'help', topic: plural };
   const [subcommand, ...rest] = args;
-  if (!new Set(['add', 'build', 'remove']).has(subcommand)) return usageError('sources requires `add`, `build`, or `remove`.', 'sources');
-  const topic = `sources-${subcommand}` as HelpTopic;
+  const allowed = kind === 'library' ? new Set(['add', 'update', 'remove']) : new Set(['add', 'build', 'remove']);
+  if (!allowed.has(subcommand)) return usageError(`${plural} requires ${kind === 'library' ? '`add`, `update`, or `remove`' : '`add`, `build`, or `remove`'}.`, plural);
+  const topic = `${plural}-${subcommand}` as HelpTopic;
   if (rest.length === 1 && HELP_FLAGS.has(rest[0])) return { kind: 'help', topic };
-  if (rest.length !== 1) return usageError(`sources ${subcommand} requires ${subcommand === 'add' ? '<absolute-root>' : '<source>'}.`, topic);
+  if (rest.length !== 1) return usageError(`${plural} ${subcommand} requires ${subcommand === 'add' ? '<absolute-root>' : `<${kind}>`}.`, topic);
   if (subcommand === 'add') {
-    const sourceRoot = rest[0];
-    if (!isAbsolute(sourceRoot) || sourceRoot.includes('\0')) return usageError('Source root must be a non-empty absolute path without NUL bytes.', topic);
-    return { kind: 'command', command: { name: 'sources-add', sourceRoot } };
+    const root = rest[0];
+    if (!isAbsolute(root) || root.includes('\0')) return usageError(`${kind === 'library' ? 'Library' : 'Package'} root must be a non-empty absolute path without NUL bytes.`, topic);
+    return { kind: 'command', command: { name: `${plural}-add`, root } as Command };
   }
-  const sourceId = rest[0];
-  if (!isSafeSkillId(sourceId)) return invalidSourceId(topic);
-  return { kind: 'command', command: { name: `sources-${subcommand}`, sourceId } as Command };
+  if (!isSafeSkillId(rest[0])) return invalidCollectionId(kind, topic);
+  return { kind: 'command', command: { name: `${plural}-${subcommand}`, id: rest[0] } as Command };
 }
 
-function invalidSourceId(topic: HelpTopic): ParseResult {
-  return usageError('Source IDs must be 1-64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen.', topic);
+function invalidCollectionId(kind: 'library' | 'package', topic: HelpTopic): ParseResult {
+  return usageError(`${kind === 'library' ? 'Library' : 'Package'} IDs must be 1-64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen.`, topic);
 }
+
 
 function invalidProfileId(topic: HelpTopic): ParseResult {
   return usageError(

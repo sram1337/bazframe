@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { DashboardSnapshot } from '../../../src/application/tui-service.js';
 import {
   availableRowsFor,
-  availableSourcesForProfile,
+  availableGroupsForProfile,
   clampAvailableViewportOffset,
   initialTuiState,
   moveAvailableSelectionByRows,
@@ -22,13 +22,13 @@ const VIEWPORT_ROWS: ViewportRows = {
 };
 
 describe('TUI state', () => {
-  it('keeps grouped Available selection source-aware across visual-row paging', () => {
-    const rows = ['@source:alpha', 'alpha:a1', 'alpha:a2', '@source:beta', 'beta:b1', 'beta:b2'];
+  it('keeps grouped Available selection origin-aware across visual-row paging', () => {
+    const rows = ['@group:alpha', 'alpha:a1', 'alpha:a2', '@group:beta', 'beta:b1', 'beta:b2'];
     expect(moveAvailableSelectionByRows(rows, 'alpha:a1', 3)).toBe('beta:b1');
     expect(moveAvailableSelectionByRows(rows, 'beta:b1', -3)).toBe('alpha:a1');
-    expect(moveAvailableSelectionByRows(rows, 'alpha:a2', 1)).toBe('@source:beta');
+    expect(moveAvailableSelectionByRows(rows, 'alpha:a2', 1)).toBe('@group:beta');
     expect(clampAvailableViewportOffset(rows, 'beta:b1', 0, 3)).toBe(2);
-    expect(rows.slice(2, 5)).toEqual(['alpha:a2', '@source:beta', 'beta:b1']);
+    expect(rows.slice(2, 5)).toEqual(['alpha:a2', '@group:beta', 'beta:b1']);
     expect(clampAvailableViewportOffset(rows, 'alpha:a1', 4, 3)).toBe(0);
     expect(clampAvailableViewportOffset(rows, 'alpha:a1', 0, 1)).toBe(1);
   });
@@ -138,29 +138,42 @@ describe('TUI state', () => {
     });
   });
 
-  it('falls back to a managed source parent when a selected child disappears', () => {
+  it('falls back to a library/package parent when a selected child disappears', () => {
     const dashboard = snapshot(['focused'], []);
-    dashboard.skillRoots = [
+    dashboard.collections = [
       {
-        id: 'managed:one', label: 'one', root: '/snapshots/one', artifactWritesSupported: false,
-        skills: [{ id: 'a', sourceId: 'managed:one', directory: '/snapshots/one/a' }]
+        key: 'library:one', kind: 'library', id: 'one', root: '/providers/one',
+        digest: 'a'.repeat(64), skillsRoot: '.', refreshAvailability: 'available',
+        skillCount: 1, referenceCount: 0, health: 'ready', diagnostics: []
       },
       {
-        id: 'managed:two', label: 'two', root: '/snapshots/two', artifactWritesSupported: false,
-        skills: [{ id: 'z', sourceId: 'managed:two', directory: '/snapshots/two/z' }]
+        key: 'package:two', kind: 'package', id: 'two', root: '/providers/two',
+        digest: 'b'.repeat(64), artifactRoot: 'dist', skillsRoot: 'skills',
+        refreshAvailability: 'available', skillCount: 1, referenceCount: 0,
+        health: 'ready', diagnostics: []
+      }
+    ];
+    dashboard.skillGroups = [
+      {
+        id: 'library:one', label: 'one', root: '/snapshots/one', artifactWritesSupported: false,
+        skills: [{ id: 'a', originId: 'library:one', directory: '/snapshots/one/a' }]
+      },
+      {
+        id: 'package:two', label: 'two', root: '/snapshots/two', artifactWritesSupported: false,
+        skills: [{ id: 'z', originId: 'package:two', directory: '/snapshots/two/z' }]
       }
     ];
     let state: TuiState = {
       ...initialTuiState,
-      expandedSourceIds: ['managed:one', 'managed:two'],
-      browserSkillId: 'managed:two:z'
+      expandedSkillGroupIds: ['library:one', 'package:two'],
+      browserSkillId: 'package:two:z'
     };
 
     state = tuiReducer(state, { type: 'reconcile', snapshot: dashboard, viewportRows: VIEWPORT_ROWS });
-    dashboard.skillRoots[1]!.skills = [];
+    dashboard.skillGroups[1]!.skills = [];
     state = tuiReducer(state, { type: 'reconcile', snapshot: dashboard, viewportRows: VIEWPORT_ROWS });
 
-    expect(state.browserSkillId).toBe('source:managed:two');
+    expect(state.browserSkillId).toBe('collection:package:two');
   });
 
   it('selects the create row when no profiles exist', () => {
@@ -172,82 +185,82 @@ describe('TUI state', () => {
     expect(state.selectedProfileId).toBe(PROFILE_CREATE_ROW_ID);
   });
 
-  it('tracks Skills and Available source expansion independently', () => {
+  it('tracks Skills and Available group expansion independently', () => {
     const collapsed = tuiReducer(initialTuiState, {
-      type: 'toggle-source',
+      type: 'toggle-skill-group',
       id: 'default',
       expanded: false
     });
-    expect(collapsed.expandedSourceIds).toEqual([]);
-    expect(collapsed.expandedAvailableSourceIds).toEqual(['default']);
+    expect(collapsed.expandedSkillGroupIds).toEqual([]);
+    expect(collapsed.expandedAvailableGroupIds).toEqual(['default']);
     const expanded = tuiReducer(collapsed, {
-      type: 'toggle-source',
+      type: 'toggle-skill-group',
       id: 'default',
       expanded: true
     });
-    expect(expanded.expandedSourceIds).toEqual(['default']);
+    expect(expanded.expandedSkillGroupIds).toEqual(['default']);
 
     const availableCollapsed = tuiReducer({
       ...expanded,
       availableSkillId: 'default:one'
     }, {
-      type: 'toggle-available-source',
+      type: 'toggle-available-group',
       id: 'default',
       expanded: false,
-      rowIds: ['@source:default', '@source:other'],
+      rowIds: ['@group:default', '@group:other'],
       viewportRows: 3
     });
-    expect(availableCollapsed.expandedAvailableSourceIds).toEqual([]);
-    expect(availableCollapsed.expandedSourceIds).toEqual(['default']);
-    expect(availableCollapsed.availableSkillId).toBe('@source:default');
+    expect(availableCollapsed.expandedAvailableGroupIds).toEqual([]);
+    expect(availableCollapsed.expandedSkillGroupIds).toEqual(['default']);
+    expect(availableCollapsed.availableSkillId).toBe('@group:default');
   });
 
   it('selects unreferenced browsable roots for Available without granting direct membership', () => {
     const dashboard = snapshot(['focused'], []);
-    const defaultSource = dashboard.sources![0]!;
+    const defaultSource = dashboard.skillGroups![0]!;
     const managed = {
-      id: 'managed:mtg-deckbuilding', label: 'mtg-deckbuilding', root: '/snapshots/mtg',
+      id: 'library:mtg-deckbuilding', label: 'mtg-deckbuilding', root: '/snapshots/mtg',
       artifactWritesSupported: false as const,
       skills: [{
-        id: 'deck-building', sourceId: 'managed:mtg-deckbuilding',
+        id: 'deck-building', originId: 'library:mtg-deckbuilding',
         directory: '/snapshots/mtg/deck-building'
       }]
     };
-    dashboard.availableSkillSources = [defaultSource];
-    dashboard.skillRoots = [defaultSource, managed];
+    dashboard.availableSkillGroups = [defaultSource];
+    dashboard.skillGroups = [defaultSource, managed];
 
-    expect(availableSourcesForProfile(dashboard, dashboard.profiles[0])
-      .map((source) => source.id)).toEqual(['default', 'managed:mtg-deckbuilding']);
+    expect(availableGroupsForProfile(dashboard, dashboard.profiles[0])
+      .map((source) => source.id)).toEqual(['default', 'library:mtg-deckbuilding']);
 
-    dashboard.profiles[0]!.sourceReferences = [{
-      schemaVersion: 1, source: 'mtg-deckbuilding', id: 'mtg-deckbuilding',
-      path: '/profiles/focused/sources/mtg-deckbuilding.json', availability: 'available'
+    dashboard.profiles[0]!.libraryReferences = [{
+      kind: 'library', id: 'mtg-deckbuilding',
+      path: '/profiles/focused/libraries/mtg-deckbuilding.json', availability: 'available'
     }];
-    expect(availableSourcesForProfile(dashboard, dashboard.profiles[0])
+    expect(availableGroupsForProfile(dashboard, dashboard.profiles[0])
       .map((source) => source.id)).toEqual(['default']);
-    expect(dashboard.availableSkillSources.map((source) => source.id)).toEqual(['default']);
+    expect(dashboard.availableSkillGroups.map((source) => source.id)).toEqual(['default']);
   });
 
-  it('constructs Available visual rows from browsable sources and expansion state', () => {
+  it('constructs Available visual rows from browsable groups and expansion state', () => {
     const sources = [
       {
         id: 'default', label: '(default)', root: '/skills', artifactWritesSupported: false as const,
         skills: [
-          { id: 'included', sourceId: 'default', directory: '/skills/included' },
-          { id: 'free', sourceId: 'default', directory: '/skills/free' }
+          { id: 'included', originId: 'default', directory: '/skills/included' },
+          { id: 'free', originId: 'default', directory: '/skills/free' }
         ]
       },
       {
         id: 'other', label: 'Other', root: '/other', artifactWritesSupported: false as const,
-        skills: [{ id: 'second', sourceId: 'other', directory: '/other/second' }]
+        skills: [{ id: 'second', originId: 'other', directory: '/other/second' }]
       }
     ];
     const rows = availableRowsFor(sources, new Set(['included']), ['default']);
     expect(rows.map((row) => row.id)).toEqual([
-      '@source:default', 'default:free', '@source:other'
+      '@group:default', 'default:free', '@group:other'
     ]);
-    expect(rows[0]).toMatchObject({ kind: 'source', expanded: true, label: '(default)' });
-    expect(rows[2]).toMatchObject({ kind: 'source', expanded: false, label: 'Other' });
+    expect(rows[0]).toMatchObject({ kind: 'group', expanded: true, label: '(default)' });
+    expect(rows[2]).toMatchObject({ kind: 'group', expanded: false, label: 'Other' });
   });
 
   it('owns four independent offsets across tab and profile-route changes', () => {
@@ -280,7 +293,7 @@ describe('TUI state', () => {
       ids: availableCompositeIds,
       viewportRows: VIEWPORT_ROWS.available
     });
-    const browserIds = ['source:default', ...availableCompositeIds];
+    const browserIds = ['collection:default', ...availableCompositeIds];
     state = tuiReducer(state, {
       type: 'select-browser-skill',
       id: availableCompositeIds[15],
@@ -351,7 +364,7 @@ describe('TUI state', () => {
       id: 'reviewer',
       profileIds: ['focused', 'reviewer'],
       includedIds: reviewerIncluded,
-      availableRowIds: ['@source:default', ...reviewerAvailable],
+      availableRowIds: ['@group:default', ...reviewerAvailable],
       viewportRows,
       openEditor: true
     });
@@ -360,7 +373,7 @@ describe('TUI state', () => {
       selectedProfileId: 'reviewer',
       profileRoute: 'editor',
       includedSkillId: 'reviewer-member-00',
-      availableSkillId: '@source:default',
+      availableSkillId: '@group:default',
       profileListOffset: 1,
       includedOffset: 0,
       availableOffset: 0,
@@ -402,7 +415,7 @@ describe('TUI state', () => {
     state = tuiReducer(state, {
       type: 'select-browser-skill',
       id: availableCompositeIds[18],
-      ids: ['source:default', ...availableCompositeIds],
+      ids: ['collection:default', ...availableCompositeIds],
       viewportRows: VIEWPORT_ROWS.skillsBrowser
     });
 
@@ -418,7 +431,7 @@ describe('TUI state', () => {
     expect(state).toMatchObject({
       selectedProfileId: 'profile-07',
       includedSkillId: 'included-05',
-      availableSkillId: '@source:default',
+      availableSkillId: '@group:default',
       browserSkillId: 'default:available-04',
       profileListOffset: 4,
       includedOffset: 2,
@@ -459,7 +472,7 @@ describe('TUI state', () => {
     state = tuiReducer(state, {
       type: 'select-browser-skill',
       id: availableCompositeIds[25],
-      ids: ['source:default', ...availableCompositeIds],
+      ids: ['collection:default', ...availableCompositeIds],
       viewportRows: 6
     });
     expect(state).toMatchObject({
@@ -533,21 +546,21 @@ function snapshot(
       memberships: membershipIds.map((skillId) => ({
         id: skillId,
         membershipId: `${id}:default:${skillId}`,
-        sourceId: 'default',
+        originId: 'default',
         skillId,
         path: `/profiles/${id}/skills/${skillId}`,
         kind: 'managed' as const,
         manageable: true
       }))
     })),
-    sources: [{
+    skillGroups: [{
       id: 'default',
       label: '(default)',
       root: '/skills',
       artifactWritesSupported: false,
       skills: availableIds.map((id) => ({
         id,
-        sourceId: 'default',
+        originId: 'default',
         directory: `/skills/${id}`
       }))
     }],

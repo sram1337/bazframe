@@ -3,20 +3,25 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { loadSkillsFromDir, type Skill } from '@earendil-works/pi-coding-agent';
 import { BazframeError, errorCode } from '../core/errors.js';
 import {
-  readProfileSourceReference,
-  scanProfileSourceReferences
-} from '../profiles/profile-source-reference.js';
+  readProfileCollectionReference,
+  scanProfileCollectionReferences
+} from '../profiles/profile-skill-collection-reference.js';
 import { isSafeSkillId } from '../skills/skill-id.js';
 import { SKILL_DEFINITION } from '../skills/skill-metadata.js';
 import {
-  readGlobalSource,
-  scanGlobalSourceNamespace,
-  type GlobalSourceRecord
-} from '../sources/source-store.js';
-import { resolvePhysicalRelativeDirectory, verifySourceSnapshot } from './source-snapshot.js';
+  collectionKey,
+  idForRecord,
+  kindForRecord,
+  readCollection,
+  scanGlobalSkillCollections,
+  skillsRootForRecord,
+  type SkillCollectionKind,
+  type SkillCollectionRecord
+} from './skill-collection-store.js';
+import { resolvePhysicalRelativeDirectory, verifySkillSnapshot } from './skill-snapshot.js';
 
-export const SOURCE_UNIT_LIMITS = Object.freeze({ depth: 8, entries: 256, skills: 64 });
-export const UNKNOWN_SOURCE_ID = '<unknown-source>';
+export const SKILL_COLLECTION_LIMITS = Object.freeze({ depth: 8, entries: 256, skills: 64 });
+export const UNKNOWN_COLLECTION_ID = '<unknown>';
 
 export interface FlatSkillIdentity { name: string; definitionPath: string; }
 export function loadFlatSkillIdentities(skillDirectories: readonly string[]): FlatSkillIdentity[] {
@@ -34,12 +39,13 @@ export function loadFlatSkillIdentities(skillDirectories: readonly string[]): Fl
   });
 }
 
-export interface DirectSourceUnit {
+export interface DirectSkillCollection {
   schemaVersion: 1;
-  sourceId: string;
-  sourceRoot?: string;
+  collectionKind: SkillCollectionKind;
+  collectionId: string;
+  collectionRoot?: string;
   snapshotDigest?: string;
-  sourceUnitRoot?: string;
+  skillsRoot?: string;
   descriptorPath: string;
   relativeDescriptorPath: string;
   preparationState: 'ready' | 'failed';
@@ -47,36 +53,36 @@ export interface DirectSourceUnit {
 }
 export interface DerivedSkill<T = unknown> {
   name: string; baseDir: string; definitionPath: string;
-  sourceId: string; sourceRoot: string; relativePath: string; loaded?: T;
+  collectionKind: SkillCollectionKind; collectionId: string; collectionRoot: string; relativePath: string; loaded?: T;
 }
 export interface DefinitionLoaderSkill<T = unknown> { name: string; baseDir: string; definitionPath: string; loaded?: T; }
 export interface DefinitionLoaderDiagnostic { type?: 'error' | 'warning' | 'collision'; message: string; }
 export interface DefinitionLoaderResult<T = unknown> { skills: DefinitionLoaderSkill<T>[]; diagnostics: DefinitionLoaderDiagnostic[]; }
-export type DefinitionLoader<T = unknown> = (baseDir: string, definitionPath: string) => Promise<DefinitionLoaderResult<T>> | DefinitionLoaderResult<T>;
+export type DefinitionLoader<T = unknown> = (baseDir: string, definitionPath: string, kind?: SkillCollectionKind) => Promise<DefinitionLoaderResult<T>> | DefinitionLoaderResult<T>;
 
-export type SourceDiagnostic =
-  | { category: 'invalid-reference' | 'invalid-source'; sourceId: string; path: string }
-  | { category: 'broken-root' | 'broken-snapshot' | 'internal-symlink' | 'unsupported-entry' | 'mixed-root' | 'invalid-definition' | 'io-error'; sourceId: string; path: string }
-  | { category: 'limit-exceeded'; sourceId: string; path: string; limit: 'depth' | 'entries' | 'skills' }
-  | { category: 'duplicate-name'; sourceId: string; path: string; name: string }
-  | { category: 'pi-loader'; sourceId: string; path: string; diagnosticIndex: number; message: string };
+export type SkillCollectionDiagnostic =
+  | { category: 'invalid-reference' | 'invalid-collection'; collectionKind: SkillCollectionKind; collectionId: string; path: string }
+  | { category: 'broken-root' | 'broken-snapshot' | 'internal-symlink' | 'unsupported-entry' | 'mixed-root' | 'invalid-definition' | 'io-error'; collectionKind: SkillCollectionKind; collectionId: string; path: string }
+  | { category: 'limit-exceeded'; collectionKind: SkillCollectionKind; collectionId: string; path: string; limit: 'depth' | 'entries' | 'skills' }
+  | { category: 'duplicate-name'; collectionKind: SkillCollectionKind; collectionId: string; path: string; name: string }
+  | { category: 'pi-loader'; collectionKind: SkillCollectionKind; collectionId: string; path: string; diagnosticIndex: number; message: string };
 
-export interface ProfileSourceComposition<T = unknown> {
-  directSourceUnits: DirectSourceUnit[];
+export interface ProfileSkillCollectionComposition<T = unknown> {
+  directCollections: DirectSkillCollection[];
   derivedSkills: DerivedSkill<T>[];
-  diagnostics: SourceDiagnostic[];
+  diagnostics: SkillCollectionDiagnostic[];
 }
-export interface GlobalSourceInspection<T = unknown> {
-  record: GlobalSourceRecord;
+export interface GlobalSkillCollectionInspection<T = unknown> {
+  record: SkillCollectionRecord;
   path: string;
   rebuildAvailability: 'available' | 'unavailable';
   skills: DerivedSkill<T>[];
-  diagnostics: SourceDiagnostic[];
+  diagnostics: SkillCollectionDiagnostic[];
 }
-interface CandidateSource<T> { direct: DirectSourceUnit; skills: DerivedSkill<T>[]; }
-class SourceFailure extends Error {
-  readonly diagnostic: SourceDiagnostic | SourceDiagnostic[];
-  constructor(diagnostic: SourceDiagnostic | SourceDiagnostic[]) { super('source-unit resolution failed'); this.diagnostic = diagnostic; }
+interface CandidateCollection<T> { direct: DirectSkillCollection; skills: DerivedSkill<T>[]; }
+class SkillCollectionFailure extends Error {
+  readonly diagnostic: SkillCollectionDiagnostic | SkillCollectionDiagnostic[];
+  constructor(diagnostic: SkillCollectionDiagnostic | SkillCollectionDiagnostic[]) { super('skill collection resolution failed'); this.diagnostic = diagnostic; }
 }
 
 function homeForProfile(profileDirectory: string): string {
@@ -84,26 +90,29 @@ function homeForProfile(profileDirectory: string): string {
   return profileParent.endsWith(`${sep}profiles`) ? dirname(profileParent) : profileParent;
 }
 function directFromReference(
-  sourceId: string,
+  collectionKind: SkillCollectionKind,
+  collectionId: string,
   referencePath: string,
   relativePath: string
-): DirectSourceUnit {
+): DirectSkillCollection {
   return {
     schemaVersion: 1,
-    sourceId,
+    collectionKind,
+    collectionId,
     descriptorPath: referencePath,
     relativeDescriptorPath: relativePath,
     preparationState: 'failed',
     rebuildAvailability: 'unavailable'
   };
 }
-function directFromRecord(record: GlobalSourceRecord, referencePath: string, relativePath: string, rebuild: 'available' | 'unavailable' = 'unavailable'): DirectSourceUnit {
+function directFromRecord(record: SkillCollectionRecord, referencePath: string, relativePath: string, rebuild: 'available' | 'unavailable' = 'unavailable'): DirectSkillCollection {
   return {
     schemaVersion: 1,
-    sourceId: record.source,
-    sourceRoot: record.root,
+    collectionKind: kindForRecord(record),
+    collectionId: idForRecord(record),
+    collectionRoot: record.root,
     snapshotDigest: record.digest,
-    sourceUnitRoot: record.sourceUnitRoot,
+    skillsRoot: skillsRootForRecord(record),
     descriptorPath: referencePath,
     relativeDescriptorPath: relativePath,
     preparationState: 'ready',
@@ -111,97 +120,108 @@ function directFromRecord(record: GlobalSourceRecord, referencePath: string, rel
   };
 }
 
-export async function inspectGlobalSources<T = unknown>(
+export async function inspectGlobalSkillCollections<T = unknown>(
   bazframeHome: string,
   definitionLoader: DefinitionLoader<T> = defaultDefinitionLoader as unknown as DefinitionLoader<T>
-): Promise<{ sources: GlobalSourceInspection<T>[]; diagnostics: SourceDiagnostic[] }> {
-  const namespace = await scanGlobalSourceNamespace(bazframeHome);
-  const diagnostics: SourceDiagnostic[] = namespace.diagnostics.map((item) => ({
-    category: 'invalid-source', sourceId: item.source, path: item.path
+): Promise<{ collections: GlobalSkillCollectionInspection<T>[]; diagnostics: SkillCollectionDiagnostic[] }> {
+  const namespace = await scanGlobalSkillCollections(bazframeHome);
+  const diagnostics: SkillCollectionDiagnostic[] = namespace.diagnostics.map((item) => ({
+    category: 'invalid-collection', collectionKind: item.key.kind, collectionId: item.key.id, path: item.path
   }));
-  const sources: GlobalSourceInspection<T>[] = [];
-  for (const item of namespace.sources) {
+  const collections: GlobalSkillCollectionInspection<T>[] = [];
+  for (const item of namespace.records) {
     try {
-      const record = await readGlobalSource(bazframeHome, item.source);
+      const record = await readCollection(bazframeHome, item.key);
       const rebuild = await rebuildAvailability(record.root);
       const direct = directFromRecord(record, item.path, item.relativePath, rebuild);
       let skills: DerivedSkill<T>[] = [];
-      const sourceDiagnostics: SourceDiagnostic[] = [];
-      try { skills = await resolveOneSource(direct, definitionLoader, bazframeHome); }
+      const collectionDiagnostics: SkillCollectionDiagnostic[] = [];
+      try { skills = await resolveOneCollection(direct, definitionLoader, bazframeHome); }
       catch (error) {
-        if (error instanceof SourceFailure) sourceDiagnostics.push(...(Array.isArray(error.diagnostic) ? error.diagnostic : [error.diagnostic]));
-        else sourceDiagnostics.push(baseDiagnostic('io-error', direct, '.'));
+        if (error instanceof SkillCollectionFailure) collectionDiagnostics.push(...(Array.isArray(error.diagnostic) ? error.diagnostic : [error.diagnostic]));
+        else collectionDiagnostics.push(baseDiagnostic('io-error', direct, '.'));
       }
-      sources.push({ record, path: item.path, rebuildAvailability: rebuild, skills, diagnostics: sortDiagnostics(sourceDiagnostics) });
-    } catch { diagnostics.push({ category: 'invalid-source', sourceId: item.source, path: item.relativePath }); }
+      collections.push({ record, path: item.path, rebuildAvailability: rebuild, skills, diagnostics: sortDiagnostics(collectionDiagnostics) });
+    } catch { diagnostics.push({ category: 'invalid-collection', collectionKind: item.key.kind, collectionId: item.key.id, path: item.relativePath }); }
   }
-  return { sources, diagnostics: sortDiagnostics(diagnostics) };
+  return { collections, diagnostics: sortDiagnostics(diagnostics) };
 }
 
-export async function resolveGlobalSource<T = unknown>(
+export async function resolveGlobalSkillCollection<T = unknown>(
   bazframeHome: string,
-  record: GlobalSourceRecord,
+  record: SkillCollectionRecord,
   definitionLoader: DefinitionLoader<T> = defaultDefinitionLoader as unknown as DefinitionLoader<T>
 ): Promise<DerivedSkill<T>[]> {
-  return resolveOneSource(directFromRecord(record, '', `${record.source}.json`), definitionLoader, bazframeHome);
+  try {
+    return await resolveOneCollection(
+      directFromRecord(record, '', `${idForRecord(record)}.json`),
+      definitionLoader,
+      bazframeHome
+    );
+  } catch (error) {
+    if (error instanceof SkillCollectionFailure) throw invalidCollectionCandidate(error);
+    throw error;
+  }
 }
 
-export async function resolveProfileSourceUnits<T = unknown>(
+export async function resolveProfileSkillCollections<T = unknown>(
   profileDirectory: string,
   flatSkills: readonly FlatSkillIdentity[],
   definitionLoader: DefinitionLoader<T> = defaultDefinitionLoader as unknown as DefinitionLoader<T>
-): Promise<ProfileSourceComposition<T>> {
+): Promise<ProfileSkillCollectionComposition<T>> {
   const bazframeHome = homeForProfile(profileDirectory);
   const profileId = profileDirectory.split(sep).at(-1)!;
-  const namespace = await scanProfileSourceReferences(bazframeHome, profileId);
-  const directSourceUnits: DirectSourceUnit[] = [];
-  const candidates: CandidateSource<T>[] = [];
-  const diagnostics: SourceDiagnostic[] = namespace.diagnostics.map((item) => ({
+  const namespace = await scanProfileCollectionReferences(bazframeHome, profileId);
+  const directCollections: DirectSkillCollection[] = [];
+  const candidates: CandidateCollection<T>[] = [];
+  const diagnostics: SkillCollectionDiagnostic[] = namespace.diagnostics.map((item) => ({
     category: 'invalid-reference' as const,
-    sourceId: item.source,
+    collectionKind: item.key.kind,
+    collectionId: item.key.id,
     path: item.path
   }));
   if (diagnostics.length > 0) {
-    return { directSourceUnits: [], derivedSkills: [], diagnostics: sortDiagnostics(diagnostics) };
+    return { directCollections: [], derivedSkills: [], diagnostics: sortDiagnostics(diagnostics) };
   }
   for (const item of namespace.references) {
-    try { await readProfileSourceReference(bazframeHome, profileId, item.source); }
+    try { await readProfileCollectionReference(bazframeHome, profileId, item.key); }
     catch {
-      diagnostics.push({ category: 'invalid-reference', sourceId: item.source, path: item.relativePath });
+      diagnostics.push({ category: 'invalid-reference', collectionKind: item.key.kind, collectionId: item.key.id, path: item.relativePath });
     }
   }
   if (diagnostics.length > 0) {
-    return { directSourceUnits: [], derivedSkills: [], diagnostics: sortDiagnostics(diagnostics) };
+    return { directCollections: [], derivedSkills: [], diagnostics: sortDiagnostics(diagnostics) };
   }
   for (const item of namespace.references) {
     const referenceDirect = directFromReference(
-      item.source,
+      item.key.kind,
+      item.key.id,
       item.path,
       item.relativePath
     );
-    directSourceUnits.push(referenceDirect);
-    let record: GlobalSourceRecord;
-    try { record = await readGlobalSource(bazframeHome, item.source); }
+    directCollections.push(referenceDirect);
+    let record: SkillCollectionRecord;
+    try { record = await readCollection(bazframeHome, item.key); }
     catch {
-      diagnostics.push({ category: 'invalid-source', sourceId: item.source, path: item.relativePath });
+      diagnostics.push({ category: 'invalid-collection', collectionKind: item.key.kind, collectionId: item.key.id, path: item.relativePath });
       continue;
     }
     const direct = directFromRecord(record, item.path, item.relativePath, await rebuildAvailability(record.root));
-    directSourceUnits[directSourceUnits.length - 1] = direct;
-    try { candidates.push({ direct, skills: await resolveOneSource(direct, definitionLoader, bazframeHome) }); }
+    directCollections[directCollections.length - 1] = direct;
+    try { candidates.push({ direct, skills: await resolveOneCollection(direct, definitionLoader, bazframeHome) }); }
     catch (error) {
       direct.preparationState = 'failed';
-      if (error instanceof SourceFailure) {
+      if (error instanceof SkillCollectionFailure) {
         const failures = Array.isArray(error.diagnostic) ? error.diagnostic : [error.diagnostic];
         diagnostics.push(...failures);
       } else diagnostics.push(baseDiagnostic('io-error', direct, '.'));
     }
   }
-  return composeCandidates(directSourceUnits, candidates, flatSkills, diagnostics);
+  return composeCandidates(directCollections, candidates, flatSkills, diagnostics);
 }
 
-function composeCandidates<T>(directSourceUnits: DirectSourceUnit[], candidates: CandidateSource<T>[], flatSkills: readonly FlatSkillIdentity[], diagnostics: SourceDiagnostic[]): ProfileSourceComposition<T> {
-  const duplicateUnits = new Set<string>();
+function composeCandidates<T>(directCollections: DirectSkillCollection[], candidates: CandidateCollection<T>[], flatSkills: readonly FlatSkillIdentity[], diagnostics: SkillCollectionDiagnostic[]): ProfileSkillCollectionComposition<T> {
+  const duplicateCollections = new Set<string>();
   const flatNames = new Set(flatSkills.map((skill) => skill.name));
   const byName = new Map<string, DerivedSkill<T>[]>();
   for (const candidate of candidates) for (const skill of candidate.skills) {
@@ -210,75 +230,76 @@ function composeCandidates<T>(directSourceUnits: DirectSourceUnit[], candidates:
   for (const [name, skills] of [...byName.entries()].sort(([left], [right]) => compare(left, right))) {
     if (!flatNames.has(name) && skills.length < 2) continue;
     for (const skill of skills) {
-      duplicateUnits.add(skill.sourceId);
-      diagnostics.push({ category: 'duplicate-name', sourceId: skill.sourceId, path: skill.relativePath, name });
+      duplicateCollections.add(collectionKey(skill.collectionKind, skill.collectionId));
+      diagnostics.push({ category: 'duplicate-name', collectionKind: skill.collectionKind, collectionId: skill.collectionId, path: skill.relativePath, name });
     }
   }
   return {
-    directSourceUnits,
-    derivedSkills: candidates.filter((candidate) => !duplicateUnits.has(candidate.direct.sourceId)).flatMap((candidate) => candidate.skills),
+    directCollections,
+    derivedSkills: candidates.filter((candidate) => !duplicateCollections.has(collectionKey(candidate.direct.collectionKind, candidate.direct.collectionId))).flatMap((candidate) => candidate.skills),
     diagnostics: sortDiagnostics(diagnostics)
   };
 }
 
-async function rebuildAvailability(sourceRoot: string): Promise<'available' | 'unavailable'> {
-  try { const metadata = await lstat(sourceRoot); return !metadata.isSymbolicLink() && metadata.isDirectory() && await realpath(sourceRoot) === sourceRoot ? 'available' : 'unavailable'; }
+async function rebuildAvailability(collectionRoot: string): Promise<'available' | 'unavailable'> {
+  try { const metadata = await lstat(collectionRoot); return !metadata.isSymbolicLink() && metadata.isDirectory() && await realpath(collectionRoot) === collectionRoot ? 'available' : 'unavailable'; }
   catch { return 'unavailable'; }
 }
 
-export async function validateProspectiveSourceUnit<T = unknown>(
+export async function validateProspectiveSkillCollection<T = unknown>(
   profileDirectory: string,
   flatSkills: readonly FlatSkillIdentity[],
-  candidate: DirectSourceUnit,
+  candidate: DirectSkillCollection,
   definitionLoader: DefinitionLoader<T> = defaultDefinitionLoader as unknown as DefinitionLoader<T>
 ): Promise<DerivedSkill<T>[]> {
   const bazframeHome = homeForProfile(profileDirectory);
   let skills: DerivedSkill<T>[];
-  try { skills = await resolveOneSource(candidate, definitionLoader, bazframeHome); }
+  try { skills = await resolveOneCollection(candidate, definitionLoader, bazframeHome); }
   catch (error) {
-    if (error instanceof SourceFailure) throw new BazframeError('SOURCE_CANDIDATE_INVALID', formatSourceDiagnostic(Array.isArray(error.diagnostic) ? error.diagnostic[0]! : error.diagnostic));
+    if (error instanceof SkillCollectionFailure) throw invalidCollectionCandidate(error);
     throw error;
   }
   const ownNames = new Map<string, number>();
   for (const skill of skills) ownNames.set(skill.name, (ownNames.get(skill.name) ?? 0) + 1);
   const occupied = new Set(flatSkills.map((skill) => skill.name));
-  for (const skill of await structurallyValidExistingSkills(profileDirectory, candidate.sourceId, definitionLoader, bazframeHome)) occupied.add(skill.name);
+  for (const skill of await structurallyValidExistingSkills(profileDirectory, collectionKey(candidate.collectionKind, candidate.collectionId), definitionLoader, bazframeHome)) occupied.add(skill.name);
   const conflict = skills.find((skill) => (ownNames.get(skill.name) ?? 0) > 1 || occupied.has(skill.name));
-  if (conflict !== undefined) throw new BazframeError('SOURCE_CANDIDATE_DUPLICATE', `Candidate source skill name conflicts with the prospective profile: ${conflict.name}`);
+  if (conflict !== undefined) throw new BazframeError('SKILL_COLLECTION_CANDIDATE_DUPLICATE', `Candidate ${candidate.collectionKind} Skill name conflicts with the prospective profile: ${conflict.name}`);
   return skills;
 }
 
-async function structurallyValidExistingSkills<T>(profileDirectory: string, excludedSourceId: string, loader: DefinitionLoader<T>, bazframeHome: string): Promise<DerivedSkill<T>[]> {
+async function structurallyValidExistingSkills<T>(profileDirectory: string, excludedCollectionKey: string, loader: DefinitionLoader<T>, bazframeHome: string): Promise<DerivedSkill<T>[]> {
   const profileId = profileDirectory.split(sep).at(-1)!;
-  const namespace = await scanProfileSourceReferences(bazframeHome, profileId);
+  const namespace = await scanProfileCollectionReferences(bazframeHome, profileId);
   const skills: DerivedSkill<T>[] = [];
   for (const item of namespace.references) {
-    if (item.source === excludedSourceId) continue;
+    if (collectionKey(item.key.kind, item.key.id) === excludedCollectionKey) continue;
     try {
-      await readProfileSourceReference(bazframeHome, profileId, item.source);
-      const record = await readGlobalSource(bazframeHome, item.source);
-      skills.push(...await resolveOneSource(directFromRecord(record, item.path, item.relativePath), loader, bazframeHome));
+      await readProfileCollectionReference(bazframeHome, profileId, item.key);
+      const record = await readCollection(bazframeHome, item.key);
+      skills.push(...await resolveOneCollection(directFromRecord(record, item.path, item.relativePath), loader, bazframeHome));
     } catch { /* unrelated failures do not block activation */ }
   }
   return skills;
 }
 
-async function resolveOneSource<T>(
-  direct: DirectSourceUnit,
+async function resolveOneCollection<T>(
+  direct: DirectSkillCollection,
   loader: DefinitionLoader<T>,
   bazframeHome: string
 ): Promise<DerivedSkill<T>[]> {
   let root: string;
-  if (direct.snapshotDigest === undefined || direct.sourceUnitRoot === undefined) {
+  if (direct.snapshotDigest === undefined || direct.skillsRoot === undefined) {
     fail({
-      category: 'invalid-source',
-      sourceId: direct.sourceId,
+      category: 'invalid-collection',
+      collectionKind: direct.collectionKind,
+      collectionId: direct.collectionId,
       path: direct.relativeDescriptorPath
     });
   }
   try {
-    const snapshot = await verifySourceSnapshot(bazframeHome, direct.snapshotDigest);
-    root = await resolvePhysicalRelativeDirectory(snapshot.artifactRoot, direct.sourceUnitRoot);
+    const snapshot = await verifySkillSnapshot(bazframeHome, direct.snapshotDigest);
+    root = await resolvePhysicalRelativeDirectory(snapshot.artifactPath, direct.skillsRoot);
   } catch {
     fail(baseDiagnostic('broken-snapshot', direct, '.'));
   }
@@ -291,7 +312,7 @@ async function resolveOneSource<T>(
     const canonical = await realpath(root);
     if (canonical !== root) fail(baseDiagnostic('broken-root', direct, '.'));
   } catch (error) {
-    if (error instanceof SourceFailure) throw error;
+    if (error instanceof SkillCollectionFailure) throw error;
     fail(baseDiagnostic('broken-root', direct, '.'));
   }
 
@@ -320,10 +341,10 @@ async function resolveOneSource<T>(
         && (metadata.isDirectory() || metadata.isSymbolicLink())) continue;
 
       entries += 1;
-      if (entries > SOURCE_UNIT_LIMITS.entries) {
+      if (entries > SKILL_COLLECTION_LIMITS.entries) {
         fail(limitDiagnostic(direct, path, 'entries'));
       }
-      if (metadata.isDirectory() && depth + 1 > SOURCE_UNIT_LIMITS.depth) {
+      if (metadata.isDirectory() && depth + 1 > SKILL_COLLECTION_LIMITS.depth) {
         fail(limitDiagnostic(direct, path, 'depth'));
       }
       if (metadata.isSymbolicLink()) {
@@ -338,7 +359,7 @@ async function resolveOneSource<T>(
           fail(baseDiagnostic('io-error', direct, path));
         }
       } catch (error) {
-        if (error instanceof SourceFailure) throw error;
+        if (error instanceof SkillCollectionFailure) throw error;
         fail(baseDiagnostic('io-error', direct, path));
       }
       if (metadata.isDirectory()) {
@@ -348,7 +369,7 @@ async function resolveOneSource<T>(
       if (name !== SKILL_DEFINITION) continue;
 
       skills += 1;
-      if (skills > SOURCE_UNIT_LIMITS.skills) {
+      if (skills > SKILL_COLLECTION_LIMITS.skills) {
         fail(limitDiagnostic(direct, path, 'skills'));
       }
       if (relativeDirectory !== '.' && rootHasDefinition) {
@@ -358,7 +379,7 @@ async function resolveOneSource<T>(
       const baseDir = directory;
       let loaded: DefinitionLoaderResult<T>;
       try {
-        loaded = await loader(baseDir, absolute);
+        loaded = await loader(baseDir, absolute, direct.collectionKind);
       } catch {
         fail(baseDiagnostic('invalid-definition', direct, path));
       }
@@ -373,7 +394,8 @@ async function resolveOneSource<T>(
           : loaded.diagnostics;
         fail(diagnostics.map((diagnostic, diagnosticIndex) => ({
           category: 'pi-loader' as const,
-          sourceId: direct.sourceId,
+          collectionKind: direct.collectionKind,
+          collectionId: direct.collectionId,
           path,
           diagnosticIndex,
           message: diagnostic.message
@@ -384,8 +406,9 @@ async function resolveOneSource<T>(
         name: skill.name,
         baseDir: skill.baseDir,
         definitionPath: skill.definitionPath,
-        sourceId: direct.sourceId,
-        sourceRoot: root,
+        collectionKind: direct.collectionKind,
+        collectionId: direct.collectionId,
+        collectionRoot: root,
         relativePath: path,
         ...(skill.loaded === undefined ? {} : { loaded: skill.loaded })
       });
@@ -402,7 +425,7 @@ async function resolveOneSource<T>(
 
 async function hasPhysicalRootDefinition(
   root: string,
-  direct: DirectSourceUnit
+  direct: DirectSkillCollection
 ): Promise<boolean> {
   try {
     const metadata = await lstat(join(root, SKILL_DEFINITION));
@@ -415,9 +438,10 @@ async function hasPhysicalRootDefinition(
 
 async function defaultDefinitionLoader(
   baseDir: string,
-  definitionPath: string
+  definitionPath: string,
+  kind: SkillCollectionKind = 'library'
 ): Promise<DefinitionLoaderResult<Skill>> {
-  const loaded = loadSkillsFromDir({ dir: baseDir, source: 'bazframe-source-unit' });
+  const loaded = loadSkillsFromDir({ dir: baseDir, source: kind === 'library' ? 'bazframe-library' : 'bazframe-package' });
   return {
     skills: loaded.skills
       .filter((skill) => skill.baseDir === baseDir && skill.filePath === definitionPath)
@@ -447,35 +471,46 @@ function invalidFlatSkill(
 }
 
 function baseDiagnostic(
-  category: Extract<SourceDiagnostic['category'],
+  category: Extract<SkillCollectionDiagnostic['category'],
     'broken-root' | 'broken-snapshot' | 'internal-symlink' | 'unsupported-entry' | 'mixed-root'
     | 'invalid-definition' | 'io-error'>,
-  direct: DirectSourceUnit,
+  direct: DirectSkillCollection,
   path: string
-): SourceDiagnostic {
-  return { category, sourceId: direct.sourceId, path };
+): SkillCollectionDiagnostic {
+  return { category, collectionKind: direct.collectionKind, collectionId: direct.collectionId, path };
 }
 
 function limitDiagnostic(
-  direct: DirectSourceUnit,
+  direct: DirectSkillCollection,
   path: string,
   limit: 'depth' | 'entries' | 'skills'
-): SourceDiagnostic {
+): SkillCollectionDiagnostic {
   return {
     category: 'limit-exceeded',
-    sourceId: direct.sourceId,
+    collectionKind: direct.collectionKind,
+    collectionId: direct.collectionId,
     path,
     limit
   };
 }
 
-function fail(diagnostic: SourceDiagnostic | SourceDiagnostic[]): never {
-  throw new SourceFailure(diagnostic);
+function fail(diagnostic: SkillCollectionDiagnostic | SkillCollectionDiagnostic[]): never {
+  throw new SkillCollectionFailure(diagnostic);
 }
 
-function sortDiagnostics(diagnostics: readonly SourceDiagnostic[]): SourceDiagnostic[] {
+function invalidCollectionCandidate(error: SkillCollectionFailure): BazframeError {
+  const diagnostic = Array.isArray(error.diagnostic) ? error.diagnostic[0]! : error.diagnostic;
+  return new BazframeError(
+    'SKILL_COLLECTION_CANDIDATE_INVALID',
+    formatSkillCollectionDiagnostic(diagnostic),
+    { cause: error }
+  );
+}
+
+function sortDiagnostics(diagnostics: readonly SkillCollectionDiagnostic[]): SkillCollectionDiagnostic[] {
   return [...diagnostics].sort((left, right) => {
-    const base = compare(left.sourceId, right.sourceId)
+    const base = compare(left.collectionKind, right.collectionKind)
+      || compare(left.collectionId, right.collectionId)
       || compare(left.path, right.path)
       || compare(left.category, right.category);
     if (base !== 0) return base;
@@ -486,18 +521,21 @@ function sortDiagnostics(diagnostics: readonly SourceDiagnostic[]): SourceDiagno
   });
 }
 
-export function formatSourceDiagnostic(diagnostic: SourceDiagnostic): string {
-  const identity = `${diagnostic.sourceId}:${diagnostic.path}`;
+export function formatSkillCollectionDiagnostic(diagnostic: SkillCollectionDiagnostic): string {
+  const identity = `${diagnostic.collectionKind} ${diagnostic.collectionId}:${diagnostic.path}`;
+  const category = diagnostic.category === 'invalid-collection'
+    ? `invalid-${diagnostic.collectionKind}`
+    : diagnostic.category;
   if (diagnostic.category === 'limit-exceeded') {
-    return `${identity} ${diagnostic.category} (${diagnostic.limit})`;
+    return `${identity} ${category} (${diagnostic.limit})`;
   }
   if (diagnostic.category === 'duplicate-name') {
-    return `${identity} ${diagnostic.category} (${diagnostic.name})`;
+    return `${identity} ${category} (${diagnostic.name})`;
   }
   if (diagnostic.category === 'pi-loader') {
-    return `${identity} ${diagnostic.category}[${diagnostic.diagnosticIndex}]: ${diagnostic.message}`;
+    return `${identity} ${category}[${diagnostic.diagnosticIndex}]: ${diagnostic.message}`;
   }
-  return `${identity} ${diagnostic.category}`;
+  return `${identity} ${category}`;
 }
 
 function compare(left: string, right: string): number {

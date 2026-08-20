@@ -4,16 +4,16 @@ import { chmod, lstat, mkdir, open, readdir, realpath, rename, rm, type FileHand
 import { isAbsolute, join, relative, sep } from 'node:path';
 import { BazframeError, errorCode } from '../core/errors.js';
 import { ensureManagedDirectory } from '../state/atomic-file.js';
-import { isPortableSourceRelativePath } from './source-build-manifest.js';
+import { isPortableRelativePath } from './portable-relative-path.js';
 
 export interface SnapshotDirectoryEntry { path: string; type: 'directory' }
 export interface SnapshotFileEntry { path: string; type: 'file'; executable: boolean; sha256: string }
 export type SnapshotEntry = SnapshotDirectoryEntry | SnapshotFileEntry;
 export interface SnapshotManifest { schemaVersion: 1; entries: SnapshotEntry[] }
-export interface PublishedSnapshot { digest: string; snapshotRoot: string; artifactRoot: string; manifest: SnapshotManifest; manifestBytes: Buffer }
-export interface SourceSnapshotDependencies {
+export interface PublishedSnapshot { digest: string; snapshotRoot: string; artifactPath: string; manifest: SnapshotManifest; manifestBytes: Buffer }
+export interface SkillSnapshotDependencies {
   beforePublish?: (stagingRoot: string) => Promise<void>;
-  duringArtifactVerification?: (artifactRoot: string) => Promise<void>;
+  duringArtifactVerification?: (artifactPath: string) => Promise<void>;
 }
 
 const MODES_SUPPORTED = process.platform !== 'win32';
@@ -21,7 +21,7 @@ const DIRECTORY_MODE = 0o500;
 const FILE_MODE = 0o400;
 const EXECUTABLE_FILE_MODE = 0o500;
 
-export function snapshotStoreRoot(bazframeHome: string): string { return join(bazframeHome, 'source-snapshots', 'sha256'); }
+export function snapshotStoreRoot(bazframeHome: string): string { return join(bazframeHome, 'skill-snapshots', 'sha256'); }
 export function snapshotPath(bazframeHome: string, digest: string): string { return join(snapshotStoreRoot(bazframeHome), digest); }
 export function encodeSnapshotManifest(manifest: SnapshotManifest): Buffer { return Buffer.from(`${JSON.stringify(manifest)}\n`, 'utf8'); }
 
@@ -55,31 +55,31 @@ export function decodeSnapshotManifest(value: unknown): SnapshotManifest {
 }
 
 export async function resolvePhysicalRelativeDirectory(root: string, relativePath: string): Promise<string> {
-  if (!isPortableSourceRelativePath(relativePath)) throw new BazframeError('SOURCE_PATH_INVALID', `Invalid source-relative directory: ${relativePath}`);
+  if (!isPortableRelativePath(relativePath)) throw new BazframeError('SKILL_COLLECTION_PATH_INVALID', `Invalid snapshot-relative directory: ${relativePath}`);
   const canonicalRoot = await physicalDirectory(root, 'Root');
   let current = canonicalRoot;
   if (relativePath !== '.') for (const segment of relativePath.split('/')) {
     const next = join(current, segment);
     const metadata = await lstat(next).catch((error: unknown) => { throw pathError(next, error); });
-    if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new BazframeError('SOURCE_PATH_INVALID', `Source path component must be a physical directory: ${next}`);
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new BazframeError('SKILL_COLLECTION_PATH_INVALID', `Snapshot path component must be a physical directory: ${next}`);
     const canonical = await realpath(next);
-    if (!within(canonicalRoot, canonical)) throw new BazframeError('SOURCE_PATH_INVALID', `Source path escapes its root: ${relativePath}`);
+    if (!within(canonicalRoot, canonical)) throw new BazframeError('SKILL_COLLECTION_PATH_INVALID', `Snapshot path escapes its root: ${relativePath}`);
     current = canonical;
   }
   return current;
 }
 
-export async function publishSourceSnapshot(
+export async function publishSkillSnapshot(
   bazframeHome: string,
   inputArtifactRoot: string,
-  dependencies: SourceSnapshotDependencies = {}
+  dependencies: SkillSnapshotDependencies = {}
 ): Promise<PublishedSnapshot> {
   const canonicalInput = await physicalDirectory(inputArtifactRoot, 'Artifact root');
   const store = snapshotStoreRoot(bazframeHome);
   await ensureManagedDirectory(bazframeHome, store);
   const canonicalStore = await realpath(store);
   if (within(canonicalInput, canonicalStore) || within(canonicalStore, canonicalInput)) {
-    throw new BazframeError('SOURCE_SNAPSHOT_PATH_OVERLAP', 'Artifact root and Bazframe snapshot storage must not overlap.');
+    throw new BazframeError('SKILL_SNAPSHOT_PATH_OVERLAP', 'Artifact root and Bazframe snapshot storage must not overlap.');
   }
   const staging = join(canonicalStore, `.staging-${process.pid}-${randomUUID()}`);
   const stagedArtifact = join(staging, 'artifact');
@@ -104,7 +104,7 @@ export async function publishSourceSnapshot(
       await makeTreeWritable(staging);
       await rm(staging, { recursive: true, force: true });
     } catch (error) {
-      if (!(error instanceof BazframeError) || error.code !== 'SOURCE_SNAPSHOT_CORRUPT' || await pathExists(final)) throw error;
+      if (!(error instanceof BazframeError) || error.code !== 'SKILL_SNAPSHOT_CORRUPT' || await pathExists(final)) throw error;
       try {
         await rename(staging, final);
         renamedToFinal = final;
@@ -134,14 +134,14 @@ export async function publishSourceSnapshot(
       await rm(unpublished, { recursive: true, force: true }).catch(() => undefined);
     }
     if (error instanceof BazframeError) throw error;
-    throw new BazframeError('SOURCE_SNAPSHOT_PUBLISH_FAILED', `Could not publish source snapshot${formatCode(error)}`, { cause: error });
+    throw new BazframeError('SKILL_SNAPSHOT_PUBLISH_FAILED', `Could not publish Skill snapshot${formatCode(error)}`, { cause: error });
   }
 }
 
-export async function verifySourceSnapshot(
+export async function verifySkillSnapshot(
   bazframeHome: string,
   digest: string,
-  dependencies: SourceSnapshotDependencies = {}
+  dependencies: SkillSnapshotDependencies = {}
 ): Promise<PublishedSnapshot> {
   if (!/^[a-f0-9]{64}$/u.test(digest)) throw corrupt('snapshot digest is invalid');
   return verifySnapshotAt(snapshotPath(bazframeHome, digest), digest, dependencies);
@@ -150,7 +150,7 @@ export async function verifySourceSnapshot(
 async function verifySnapshotAt(
   root: string,
   expectedDigest: string,
-  dependencies: SourceSnapshotDependencies = {}
+  dependencies: SkillSnapshotDependencies = {}
 ): Promise<PublishedSnapshot> {
   let openedRoot: OpenPhysicalDirectory | undefined;
   let openedArtifact: OpenPhysicalDirectory | undefined;
@@ -187,9 +187,9 @@ async function verifySnapshotAt(
     await assertOpenDirectoryStable(openedArtifact);
     await assertOpenDirectoryStable(openedRoot);
     if (await realpath(root) !== snapshotRoot || await realpath(openedArtifact.path) !== artifactRoot) throw corrupt('snapshot directory canonical identity changed');
-    return { digest, snapshotRoot: root, artifactRoot, manifest, manifestBytes };
+    return { digest, snapshotRoot: root, artifactPath: artifactRoot, manifest, manifestBytes };
   } catch (error) {
-    if (error instanceof BazframeError && error.code === 'SOURCE_SNAPSHOT_CORRUPT') throw error;
+    if (error instanceof BazframeError && error.code === 'SKILL_SNAPSHOT_CORRUPT') throw error;
     throw corrupt(`snapshot cannot be verified${formatCode(error)}`, error);
   } finally {
     await openedArtifact?.handle.close().catch(() => undefined);
@@ -203,16 +203,16 @@ async function copyTree(source: string, destination: string, relativePath: strin
     const from = join(source, name); const to = join(destination, name);
     const path = relativePath === '.' ? name : `${relativePath}/${name}`;
     const metadata = await lstat(from);
-    if (metadata.isSymbolicLink()) throw new BazframeError('SOURCE_SNAPSHOT_INVALID_ENTRY', `Snapshot input contains a symbolic link: ${path}`);
+    if (metadata.isSymbolicLink()) throw new BazframeError('SKILL_SNAPSHOT_INVALID_ENTRY', `Snapshot input contains a symbolic link: ${path}`);
     const canonical = await realpath(from);
-    if (!within(root, canonical)) throw new BazframeError('SOURCE_SNAPSHOT_INVALID_ENTRY', `Snapshot input escapes its root: ${path}`);
+    if (!within(root, canonical)) throw new BazframeError('SKILL_SNAPSHOT_INVALID_ENTRY', `Snapshot input escapes its root: ${path}`);
     if (metadata.isDirectory()) {
       await mkdir(to, { mode: 0o700 }); entries.push({ path, type: 'directory' }); await copyTree(from, to, path, entries, root);
     } else if (metadata.isFile()) {
       const physical = await readStablePhysicalFile(from, `snapshot input file ${path}`, invalidEntry);
       await writePhysicalFile(to, physical.bytes);
       entries.push({ path, type: 'file', executable: executable(physical.mode), sha256: sha256(physical.bytes) });
-    } else throw new BazframeError('SOURCE_SNAPSHOT_INVALID_ENTRY', `Snapshot input contains an unsupported entry: ${path}`);
+    } else throw new BazframeError('SKILL_SNAPSHOT_INVALID_ENTRY', `Snapshot input contains an unsupported entry: ${path}`);
   }
   await assertDirectoryIdentity(source, identity, 'snapshot input directory', invalidEntry);
 }
@@ -325,12 +325,12 @@ async function makeTreeWritable(root: string): Promise<void> {
 function assertMode(mode: number, expected: number, label: string): void { if (MODES_SUPPORTED && (mode & 0o777) !== expected) throw corrupt(`${label} mode is writable or otherwise invalid`); }
 function executable(mode: number): boolean { return MODES_SUPPORTED && (mode & 0o111) !== 0; }
 function sha256(bytes: Uint8Array): string { return createHash('sha256').update(bytes).digest('hex'); }
-async function physicalDirectory(path: string, label: string): Promise<string> { const metadata = await lstat(path); if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new BazframeError('SOURCE_PATH_INVALID', `${label} must be a physical directory: ${path}`); const canonical = await realpath(path); if (!isAbsolute(canonical)) throw new BazframeError('SOURCE_PATH_INVALID', `${label} is invalid: ${path}`); return canonical; }
+async function physicalDirectory(path: string, label: string): Promise<string> { const metadata = await lstat(path); if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new BazframeError('SKILL_COLLECTION_PATH_INVALID', `${label} must be a physical directory: ${path}`); const canonical = await realpath(path); if (!isAbsolute(canonical)) throw new BazframeError('SKILL_COLLECTION_PATH_INVALID', `${label} is invalid: ${path}`); return canonical; }
 function within(root: string, candidate: string): boolean { const rel = relative(root, candidate); return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)); }
 function compare(a: string, b: string): number { const left = [...a]; const right = [...b]; for (let index = 0; index < Math.min(left.length, right.length); index += 1) { const difference = left[index]!.codePointAt(0)! - right[index]!.codePointAt(0)!; if (difference !== 0) return difference; } return left.length - right.length; }
-function corrupt(detail: string, cause?: unknown): BazframeError { return new BazframeError('SOURCE_SNAPSHOT_CORRUPT', `Source snapshot is corrupt: ${detail}.`, cause === undefined ? undefined : { cause }); }
-function invalidEntry(detail: string, cause?: unknown): BazframeError { return new BazframeError('SOURCE_SNAPSHOT_INVALID_ENTRY', `Invalid snapshot input: ${detail}.`, cause === undefined ? undefined : { cause }); }
-function pathError(path: string, error: unknown): BazframeError { return new BazframeError('SOURCE_PATH_INVALID', `Could not resolve source path ${path}${formatCode(error)}`, { cause: error }); }
+function corrupt(detail: string, cause?: unknown): BazframeError { return new BazframeError('SKILL_SNAPSHOT_CORRUPT', `Skill snapshot is corrupt: ${detail}.`, cause === undefined ? undefined : { cause }); }
+function invalidEntry(detail: string, cause?: unknown): BazframeError { return new BazframeError('SKILL_SNAPSHOT_INVALID_ENTRY', `Invalid snapshot input: ${detail}.`, cause === undefined ? undefined : { cause }); }
+function pathError(path: string, error: unknown): BazframeError { return new BazframeError('SKILL_COLLECTION_PATH_INVALID', `Could not resolve snapshot path ${path}${formatCode(error)}`, { cause: error }); }
 async function pathExists(path: string): Promise<boolean> {
   try { await lstat(path); return true; } catch (error) { if (errorCode(error) === 'ENOENT') return false; throw error; }
 }

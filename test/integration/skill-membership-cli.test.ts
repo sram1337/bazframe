@@ -18,7 +18,7 @@ describe('default catalog and profile skill CLI', () => {
     expect(await run(['add', 'skill', fixture.source], fixture)).toMatchObject({ status: 0, stderr: '' });
     expect(await readlink(fixture.registration)).toBe(fixture.source);
     const listed = await run(['skills'], fixture);
-    expect(listed.stdout).toContain('Source: (default)');
+    expect(listed.stdout).toContain('Added Skills: (default)');
     expect(listed.stdout).toContain(`demo-skill -> ${fixture.source}`);
     expect((await run(['skill'], fixture)).stdout).toBe(listed.stdout);
 

@@ -33,8 +33,8 @@ const MAX_REGISTRATION_BYTES = 64 * 1024;
 const PROFILE_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const SKILL_ALIAS_SUFFIX = "-x-bazframe";
-const SOURCE_LIMITS = { depth: 8, entries: 256, skills: 64 } as const;
-const UNKNOWN_SOURCE_ID = "<unknown-source>";
+const COLLECTION_LIMITS = { depth: 8, entries: 256, skills: 64 } as const;
+const UNKNOWN_COLLECTION_ID = "<unknown>";
 const CONTEXT_FILE_NAMES = ["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"];
 const GIT_ENVIRONMENT_VARIABLES = [
 	"GIT_DIR",
@@ -92,19 +92,22 @@ interface InstructionFile {
 	content: string;
 }
 
-interface SourceDescriptor {
+type SkillCollectionKind = "library" | "package";
+interface CollectionDescriptor {
 	schemaVersion: 1;
-	sourceId: string;
-	sourceRoot: string;
+	collectionKind: SkillCollectionKind;
+	collectionId: string;
+	collectionRoot: string;
 	snapshotDigest: string;
-	sourceUnitRoot: string;
+	skillsRoot: string;
 }
-interface DirectSourceUnit {
+interface DirectSkillCollection {
 	schemaVersion: 1;
-	sourceId: string;
-	sourceRoot?: string;
+	collectionKind: SkillCollectionKind;
+	collectionId: string;
+	collectionRoot?: string;
 	snapshotDigest?: string;
-	sourceUnitRoot?: string;
+	skillsRoot?: string;
 	descriptorPath: string;
 	preparationState: "ready" | "failed";
 	rebuildAvailability: "available" | "unavailable";
@@ -114,17 +117,19 @@ interface DerivedSkill {
 	name: string;
 	baseDir: string;
 	definitionPath: string;
-	sourceId: string;
-	sourceRoot: string;
+	collectionKind: SkillCollectionKind;
+	collectionId: string;
+	collectionRoot: string;
 	relativePath: string;
 	skill: Skill;
 }
 
-interface SourceDiagnostic {
-	category: "invalid-reference" | "invalid-source" | "broken-root" | "broken-snapshot" | "limit-exceeded" | "internal-symlink"
+interface SkillCollectionDiagnostic {
+	category: "invalid-reference" | "invalid-collection" | "broken-root" | "broken-snapshot" | "limit-exceeded" | "internal-symlink"
 		| "unsupported-entry" | "mixed-root" | "invalid-definition" | "duplicate-name"
 		| "pi-loader" | "io-error";
-	sourceId: string;
+	collectionKind: SkillCollectionKind;
+	collectionId: string;
 	path: string;
 	limit?: "depth" | "entries" | "skills";
 	name?: string;
@@ -138,9 +143,9 @@ interface ProfileState {
 	instructionsPath: string;
 	instructions: string;
 	flatSkills: Skill[];
-	directSourceUnits: DirectSourceUnit[];
+	directCollections: DirectSkillCollection[];
 	derivedSkills: DerivedSkill[];
-	sourceDiagnostics: SourceDiagnostic[];
+	collectionDiagnostics: SkillCollectionDiagnostic[];
 	skills: Skill[];
 	skillDirectories: string[];
 	warnings: string[];
@@ -477,217 +482,127 @@ async function loadProfileSkills(skillsRoot: string): Promise<{ skills: Skill[];
 	return { skills, warnings };
 }
 
-class SourceResolutionFailure extends Error {
-	constructor(readonly diagnostics: SourceDiagnostic[]) {
-		super("source resolution failed");
+class CollectionResolutionFailure extends Error {
+	constructor(readonly diagnostics: SkillCollectionDiagnostic[]) {
+		super("library/package resolution failed");
 	}
 }
 
-function safeSourceId(value: string): boolean {
+function safeCollectionId(value: string): boolean {
 	return value.length >= 1 && value.length <= 64 && SKILL_NAME.test(value);
 }
 
-function sourceDiagnostic(
-	category: SourceDiagnostic["category"],
-	sourceId: string,
+function collectionDiagnostic(
+	category: SkillCollectionDiagnostic["category"],
+	collectionKind: SkillCollectionKind,
+	collectionId: string,
 	path: string,
-	extra: Partial<SourceDiagnostic> = {},
-): SourceDiagnostic {
-	return { category, sourceId, path, ...extra };
+	extra: Partial<SkillCollectionDiagnostic> = {},
+): SkillCollectionDiagnostic {
+	return { category, collectionKind, collectionId, path, ...extra };
 }
 
-function failSource(diagnostic: SourceDiagnostic | SourceDiagnostic[]): never {
-	throw new SourceResolutionFailure(Array.isArray(diagnostic) ? diagnostic : [diagnostic]);
+function failCollection(diagnostic: SkillCollectionDiagnostic | SkillCollectionDiagnostic[]): never {
+	throw new CollectionResolutionFailure(Array.isArray(diagnostic) ? diagnostic : [diagnostic]);
 }
 
-function sourceDescriptorId(name: string): string | undefined {
+function collectionRecordId(name: string): string | undefined {
 	if (!name.endsWith(".json")) return undefined;
 	const id = name.slice(0, -5);
-	return safeSourceId(id) ? id : undefined;
+	return safeCollectionId(id) ? id : undefined;
 }
 
-function portableSourceRelativePath(value: unknown): value is string {
+function portableCollectionRelativePath(value: unknown): value is string {
 	if (typeof value !== "string" || value.length === 0 || value.includes("\\") || value.includes("\0")) return false;
 	if (value === ".") return true;
 	if (value.startsWith("/") || /^[A-Za-z]:/u.test(value)) return false;
 	return value.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
 }
 
-class InvalidSourceReference extends Error {}
-class InvalidGlobalSource extends Error {}
+class InvalidCollectionReference extends Error {}
+class InvalidGlobalCollection extends Error {}
 
-async function validateSourceReference(
+async function validateCollectionReference(
 	bazframeHome: string,
 	profileId: string,
-	sourceId: string,
-	expectedReferenceIdentity: SourcePhysicalIdentity,
+	collectionKind: SkillCollectionKind,
+	collectionId: string,
+	expectedReferenceIdentity: CollectionPhysicalIdentity,
 ): Promise<void> {
-	if (!PROFILE_ID.test(profileId) || profileId.length > 64 || !safeSourceId(sourceId)) {
-		throw new InvalidSourceReference("Invalid profile source reference identity.");
-	}
+	if (!PROFILE_ID.test(profileId) || profileId.length > 64 || !safeCollectionId(collectionId)) throw new InvalidCollectionReference(`Invalid profile ${collectionKind} reference identity.`);
 	const profilesPath = join(bazframeHome, "profiles");
 	const profilePath = join(profilesPath, profileId);
-	const sourcesPath = join(profilePath, "sources");
-	const path = join(sourcesPath, `${sourceId}.json`);
+	const referencesPath = join(profilePath, collectionKind === "library" ? "libraries" : "packages");
+	const path = join(referencesPath, `${collectionId}.json`);
 	try {
-		const value = await readStableSourceJson(
-			[bazframeHome, profilesPath, profilePath, sourcesPath],
-			path,
-			"Profile source reference",
-			expectedReferenceIdentity,
-		);
-		if (!hasExactKeys(value, ["schemaVersion", "source"])
-			|| value.schemaVersion !== 1 || value.source !== sourceId) throw new Error("invalid reference fields");
-	} catch (error) { throw new InvalidSourceReference(`Invalid profile source reference: ${path}`, { cause: error }); }
+		const value = await readStableCollectionJson([bazframeHome, profilesPath, profilePath, referencesPath], path, `Profile ${collectionKind} reference`, expectedReferenceIdentity);
+		if (!hasExactKeys(value, ["schemaVersion", collectionKind]) || value.schemaVersion !== 1 || value[collectionKind] !== collectionId) throw new Error("invalid reference fields");
+	} catch (error) { throw new InvalidCollectionReference(`Invalid profile ${collectionKind} reference: ${path}`, { cause: error }); }
 }
 
-async function readSourceDescriptor(
-	sourceId: string,
-	bazframeHome: string,
-): Promise<SourceDescriptor> {
-	if (!safeSourceId(sourceId)) throw new InvalidGlobalSource("Invalid global source identity.");
-	const globalPath = join(bazframeHome, "sources", `${sourceId}.json`);
+async function readCollectionDescriptor(collectionKind: SkillCollectionKind, collectionId: string, bazframeHome: string): Promise<CollectionDescriptor> {
+	if (!safeCollectionId(collectionId)) throw new InvalidGlobalCollection(`Invalid global ${collectionKind} identity.`);
+	const directory = join(bazframeHome, collectionKind === "library" ? "libraries" : "packages");
+	const globalPath = join(directory, `${collectionId}.json`);
 	let candidate: Record<string, unknown>;
 	try {
-		candidate = await readStableSourceJson(
-			[bazframeHome, join(bazframeHome, "sources")],
-			globalPath,
-			"Global source",
-		);
-		if (!hasExactKeys(candidate, ["schemaVersion", "source", "root", "digest", "sourceUnitRoot"])
-			|| candidate.schemaVersion !== 1 || candidate.source !== sourceId
+		candidate = await readStableCollectionJson([bazframeHome, directory], globalPath, `Global ${collectionKind}`);
+		const exact = collectionKind === "library"
+			? hasExactKeys(candidate, ["schemaVersion", "library", "root", "digest"])
+			: hasExactKeys(candidate, ["schemaVersion", "package", "root", "digest", "artifactRoot", "skillsRoot"]);
+		if (!exact || candidate.schemaVersion !== 1 || candidate[collectionKind] !== collectionId
 			|| typeof candidate.root !== "string" || !isAbsolute(candidate.root) || candidate.root.includes("\0") || resolve(candidate.root) !== candidate.root
-			|| basename(candidate.root) !== sourceId
-			|| typeof candidate.digest !== "string" || !/^[a-f0-9]{64}$/u.test(candidate.digest)
-			|| !portableSourceRelativePath(candidate.sourceUnitRoot)) throw new Error("invalid global source fields");
-	} catch (error) { throw new InvalidGlobalSource(`Invalid global source: ${globalPath}`, { cause: error }); }
-	return { schemaVersion: 1, sourceId, sourceRoot: candidate.root as string, snapshotDigest: candidate.digest as string, sourceUnitRoot: candidate.sourceUnitRoot as string };
+			|| basename(candidate.root) !== collectionId || typeof candidate.digest !== "string" || !/^[a-f0-9]{64}$/u.test(candidate.digest)
+			|| (collectionKind === "package" && (!portableCollectionRelativePath(candidate.artifactRoot) || !portableCollectionRelativePath(candidate.skillsRoot)))) throw new Error(`invalid global ${collectionKind} fields`);
+	} catch (error) { throw new InvalidGlobalCollection(`Invalid global ${collectionKind}: ${globalPath}`, { cause: error }); }
+	return { schemaVersion: 1, collectionKind, collectionId, collectionRoot: candidate.root as string, snapshotDigest: candidate.digest as string, skillsRoot: collectionKind === "library" ? "." : candidate.skillsRoot as string };
 }
 
-async function readStableSourceJson(
-	directoryPaths: string[],
-	path: string,
-	label: string,
-	expectedIdentity?: SourcePhysicalIdentity,
-): Promise<Record<string, unknown>> {
-	const directories: SourceOpenDirectory[] = [];
-	let handle: FileHandle | undefined;
+async function readStableCollectionJson(directoryPaths: string[], path: string, label: string, expectedIdentity?: CollectionPhysicalIdentity): Promise<Record<string, unknown>> {
+	const directories: CollectionOpenDirectory[] = []; let handle: FileHandle | undefined;
 	try {
-		for (const directoryPath of directoryPaths) directories.push(await openExistingSourceDirectory(directoryPath));
+		for (const directoryPath of directoryPaths) directories.push(await openExistingCollectionDirectory(directoryPath));
 		const before = await lstat(path, { bigint: true });
-		if (before.isSymbolicLink() || !before.isFile()
-			|| (expectedIdentity !== undefined && !sameSourceIdentity(sourceIdentity(before), expectedIdentity))) throw new Error("not the expected physical file");
-		handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-		const opened = await handle.stat({ bigint: true });
-		const bytes = await handle.readFile();
-		const [after, current] = await Promise.all([handle.stat({ bigint: true }), lstat(path, { bigint: true })]);
-		const identityBefore = sourceIdentity(before);
-		if (!opened.isFile() || !after.isFile() || current.isSymbolicLink() || !current.isFile()
-			|| !sameSourceIdentity(sourceIdentity(opened), identityBefore)
-			|| !sameSourceIdentity(sourceIdentity(after), identityBefore)
-			|| !sameSourceIdentity(sourceIdentity(current), identityBefore)) throw new Error("file identity changed");
-		for (const directory of [...directories].reverse()) await assertSourceDirectoryStable(directory);
-		return JSON.parse(decodeUtf8(bytes, label)) as Record<string, unknown>;
-	} finally {
-		await handle?.close().catch(() => undefined);
-		for (const directory of [...directories].reverse()) await directory.handle.close().catch(() => undefined);
-	}
+		if (before.isSymbolicLink() || !before.isFile() || (expectedIdentity !== undefined && !sameCollectionIdentity(collectionIdentity(before), expectedIdentity))) throw new Error("not the expected physical file");
+		handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); const opened = await handle.stat({ bigint: true }); const bytes = await handle.readFile(); const [after, current] = await Promise.all([handle.stat({ bigint: true }), lstat(path, { bigint: true })]); const identityBefore = collectionIdentity(before);
+		if (!opened.isFile() || !after.isFile() || current.isSymbolicLink() || !current.isFile() || !sameCollectionIdentity(collectionIdentity(opened), identityBefore) || !sameCollectionIdentity(collectionIdentity(after), identityBefore) || !sameCollectionIdentity(collectionIdentity(current), identityBefore)) throw new Error("file identity changed");
+		for (const directory of [...directories].reverse()) await assertCollectionDirectoryStable(directory); return JSON.parse(decodeUtf8(bytes, label)) as Record<string, unknown>;
+	} finally { await handle?.close().catch(() => undefined); for (const directory of [...directories].reverse()) await directory.handle.close().catch(() => undefined); }
 }
 
-async function openExistingSourceDirectory(path: string): Promise<SourceOpenDirectory> {
-	const metadata = await lstat(path, { bigint: true });
-	if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new Error(`Source namespace path is not a physical directory: ${path}`);
-	return openSourceDirectory(path, sourceIdentity(metadata));
+async function openExistingCollectionDirectory(path: string): Promise<CollectionOpenDirectory> { const metadata = await lstat(path, { bigint: true }); if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new Error(`Library/package namespace path is not a physical directory: ${path}`); return openCollectionDirectory(path, collectionIdentity(metadata)); }
+interface CollectionPhysicalIdentity { device: bigint; inode: bigint }
+interface CollectionOpenDirectory { path: string; handle: FileHandle; identity: CollectionPhysicalIdentity }
+interface CollectionNamespaceEntry { collectionKind: SkillCollectionKind; collectionId: string; path: string; identity: CollectionPhysicalIdentity }
+
+async function collectionNamespace(profileDirectory: string): Promise<{ descriptors: CollectionNamespaceEntry[]; diagnostics: SkillCollectionDiagnostic[] }> {
+	const results = await Promise.all((["library", "package"] as const).map(async (collectionKind) => {
+		const rootPath = join(profileDirectory, collectionKind === "library" ? "libraries" : "packages"); let rootMetadata;
+		try { rootMetadata = await lstat(rootPath, { bigint: true }); } catch (error) { if (error instanceof Error && "code" in error && error.code === "ENOENT") return { descriptors: [] as CollectionNamespaceEntry[], diagnostics: [] as SkillCollectionDiagnostic[] }; return invalidCollectionNamespaceRoot(collectionKind); }
+		if (rootMetadata.isSymbolicLink() || !rootMetadata.isDirectory()) return invalidCollectionNamespaceRoot(collectionKind);
+		let root: CollectionOpenDirectory | undefined;
+		try {
+			root = await openCollectionDirectory(rootPath, collectionIdentity(rootMetadata)); const diagnostics: SkillCollectionDiagnostic[] = []; const descriptors: CollectionNamespaceEntry[] = [];
+			for (const name of await enumerateCollectionDirectory(root)) { const collectionId = collectionRecordId(name); const childPath = join(rootPath, name); let child; try { child = await lstat(childPath, { bigint: true }); } catch { diagnostics.push(collectionDiagnostic("invalid-reference", collectionKind, collectionId ?? UNKNOWN_COLLECTION_ID, name)); continue; } if (collectionId === undefined || child.isSymbolicLink() || !child.isFile()) { diagnostics.push(collectionDiagnostic("invalid-reference", collectionKind, collectionId ?? UNKNOWN_COLLECTION_ID, name)); continue; } descriptors.push({ collectionKind, collectionId, path: childPath, identity: collectionIdentity(child) }); }
+			await assertCollectionDirectoryStable(root); return { descriptors, diagnostics };
+		} catch { return invalidCollectionNamespaceRoot(collectionKind); } finally { await root?.handle.close().catch(() => undefined); }
+	}));
+	return { descriptors: results.flatMap((item) => item.descriptors), diagnostics: results.flatMap((item) => item.diagnostics) };
 }
+function invalidCollectionNamespaceRoot(collectionKind: SkillCollectionKind): { descriptors: CollectionNamespaceEntry[]; diagnostics: SkillCollectionDiagnostic[] } { return { descriptors: [], diagnostics: [collectionDiagnostic("invalid-reference", collectionKind, UNKNOWN_COLLECTION_ID, ".")] }; }
 
-interface SourcePhysicalIdentity {
-	device: bigint;
-	inode: bigint;
-}
-
-interface SourceOpenDirectory {
-	path: string;
-	handle: FileHandle;
-	identity: SourcePhysicalIdentity;
-}
-
-async function sourceNamespace(profileDirectory: string): Promise<{
-	descriptors: { sourceId: string; path: string; identity: SourcePhysicalIdentity }[];
-	diagnostics: SourceDiagnostic[];
-}> {
-	const rootPath = join(profileDirectory, "sources");
-	let rootMetadata;
-	try {
-		rootMetadata = await lstat(rootPath, { bigint: true });
-	} catch (error) {
-		if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-			return { descriptors: [], diagnostics: [] };
-		}
-		return invalidSourceNamespaceRoot();
-	}
-	if (rootMetadata.isSymbolicLink() || !rootMetadata.isDirectory()) return invalidSourceNamespaceRoot();
-
-	let root: SourceOpenDirectory | undefined;
-	try {
-		root = await openSourceDirectory(rootPath, sourceIdentity(rootMetadata));
-		const diagnostics: SourceDiagnostic[] = [];
-		const descriptors: { sourceId: string; path: string; identity: SourcePhysicalIdentity }[] = [];
-		for (const name of await enumerateSourceDirectory(root)) {
-			const sourceId = sourceDescriptorId(name);
-			const childPath = join(rootPath, name);
-			let child;
-			try { child = await lstat(childPath, { bigint: true }); } catch {
-				diagnostics.push(sourceDiagnostic("invalid-reference", sourceId ?? UNKNOWN_SOURCE_ID, name));
-				continue;
-			}
-			if (sourceId === undefined || child.isSymbolicLink() || !child.isFile()) {
-				diagnostics.push(sourceDiagnostic("invalid-reference", sourceId ?? UNKNOWN_SOURCE_ID, name));
-				continue;
-			}
-			descriptors.push({ sourceId, path: childPath, identity: sourceIdentity(child) });
-		}
-		for (const descriptor of descriptors) {
-			try {
-				const metadata = await lstat(descriptor.path, { bigint: true });
-				if (metadata.isSymbolicLink() || !metadata.isFile()
-					|| !sameSourceIdentity(sourceIdentity(metadata), descriptor.identity)) {
-					throw new Error("descriptor namespace entry changed");
-				}
-			} catch {
-				diagnostics.push(sourceDiagnostic("invalid-reference", descriptor.sourceId, `${descriptor.sourceId}.json`));
-			}
-		}
-		await assertSourceDirectoryStable(root);
-		return { descriptors, diagnostics };
-	} catch {
-		return invalidSourceNamespaceRoot();
-	} finally {
-		await root?.handle.close().catch(() => undefined);
-	}
-}
-
-function invalidSourceNamespaceRoot(): {
-	descriptors: { sourceId: string; path: string; identity: SourcePhysicalIdentity }[];
-	diagnostics: SourceDiagnostic[];
-} {
-	return {
-		descriptors: [],
-		diagnostics: [sourceDiagnostic("invalid-reference", UNKNOWN_SOURCE_ID, ".")],
-	};
-}
-
-async function openSourceDirectory(
+async function openCollectionDirectory(
 	path: string,
-	expectedIdentity: SourcePhysicalIdentity,
-): Promise<SourceOpenDirectory> {
+	expectedIdentity: CollectionPhysicalIdentity,
+): Promise<CollectionOpenDirectory> {
 	const handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
 	try {
 		const metadata = await handle.stat({ bigint: true });
-		if (!metadata.isDirectory() || !sameSourceIdentity(sourceIdentity(metadata), expectedIdentity)) {
+		if (!metadata.isDirectory() || !sameCollectionIdentity(collectionIdentity(metadata), expectedIdentity)) {
 			throw new Error("directory identity changed");
 		}
 		const directory = { path, handle, identity: expectedIdentity };
-		await assertSourceDirectoryStable(directory);
+		await assertCollectionDirectoryStable(directory);
 		return directory;
 	} catch (error) {
 		await handle.close().catch(() => undefined);
@@ -695,38 +610,38 @@ async function openSourceDirectory(
 	}
 }
 
-async function enumerateSourceDirectory(directory: SourceOpenDirectory): Promise<string[]> {
-	await assertSourceDirectoryStable(directory);
+async function enumerateCollectionDirectory(directory: CollectionOpenDirectory): Promise<string[]> {
+	await assertCollectionDirectoryStable(directory);
 	const names = (await readdir(directory.path)).sort(codeUnitCompare);
-	await assertSourceDirectoryStable(directory);
+	await assertCollectionDirectoryStable(directory);
 	return names;
 }
 
-async function assertSourceDirectoryStable(directory: SourceOpenDirectory): Promise<void> {
+async function assertCollectionDirectoryStable(directory: CollectionOpenDirectory): Promise<void> {
 	const [openedMetadata, pathMetadata] = await Promise.all([
 		directory.handle.stat({ bigint: true }),
 		lstat(directory.path, { bigint: true }),
 	]);
 	if (!openedMetadata.isDirectory() || pathMetadata.isSymbolicLink() || !pathMetadata.isDirectory()
-		|| !sameSourceIdentity(sourceIdentity(openedMetadata), directory.identity)
-		|| !sameSourceIdentity(sourceIdentity(pathMetadata), directory.identity)) {
+		|| !sameCollectionIdentity(collectionIdentity(openedMetadata), directory.identity)
+		|| !sameCollectionIdentity(collectionIdentity(pathMetadata), directory.identity)) {
 		throw new Error("directory identity changed");
 	}
 }
 
-function sourceIdentity(metadata: { dev: bigint; ino: bigint }): SourcePhysicalIdentity {
+function collectionIdentity(metadata: { dev: bigint; ino: bigint }): CollectionPhysicalIdentity {
 	return { device: metadata.dev, inode: metadata.ino };
 }
 
-function sameSourceIdentity(
-	left: SourcePhysicalIdentity | undefined,
-	right: SourcePhysicalIdentity | undefined,
+function sameCollectionIdentity(
+	left: CollectionPhysicalIdentity | undefined,
+	right: CollectionPhysicalIdentity | undefined,
 ): boolean {
 	return left !== undefined && right !== undefined
 		&& left.device === right.device && left.inode === right.inode;
 }
 
-function sourcePathWithin(path: string, root: string): boolean {
+function collectionPathWithin(path: string, root: string): boolean {
 	const fromRoot = relative(root, path);
 	return fromRoot === ""
 		|| (fromRoot !== ".." && !fromRoot.startsWith(`..${sep}`) && !isAbsolute(fromRoot));
@@ -796,14 +711,14 @@ function assertSnapshotMode(mode: number, expected: number): void {
 	if (SNAPSHOT_MODES_SUPPORTED && (mode & 0o777) !== expected) throw new Error("snapshot mode drift");
 }
 
-async function verifiedSnapshotSourceRoot(bazframeHome: string, digest: string, sourceUnitRoot: string): Promise<string> {
-	const snapshot = join(bazframeHome, "source-snapshots", "sha256", digest);
+async function verifiedSnapshotSkillsRoot(bazframeHome: string, digest: string, skillsRoot: string): Promise<string> {
+	const snapshot = join(bazframeHome, "skill-snapshots", "sha256", digest);
 	let openedSnapshot: SnapshotOpenDirectory | undefined;
 	let openedArtifact: SnapshotOpenDirectory | undefined;
 	try {
 		openedSnapshot = await openSnapshotDirectory(snapshot); assertSnapshotMode(openedSnapshot.identity.mode, 0o500);
 		const physicalSnapshot = await realpath(snapshot); await assertOpenSnapshotDirectory(openedSnapshot);
-		const names = (await readdir(snapshot)).sort(sourceManifestCompare); await assertOpenSnapshotDirectory(openedSnapshot);
+		const names = (await readdir(snapshot)).sort(collectionManifestCompare); await assertOpenSnapshotDirectory(openedSnapshot);
 		if (names.join(",") !== "artifact,manifest.json") throw new Error("invalid snapshot root");
 		const manifest = await readSnapshotFile(join(snapshot, "manifest.json")); assertSnapshotMode(manifest.mode, 0o400);
 		const manifestBytes = manifest.bytes;
@@ -815,7 +730,7 @@ async function verifiedSnapshotSourceRoot(bazframeHome: string, digest: string, 
 		for (const raw of parsed.entries) {
 			if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid snapshot entry");
 			const item = raw as Record<string, unknown>;
-			if (!validSnapshotEntryPath(item.path) || (previous !== undefined && sourceManifestCompare(previous, item.path) >= 0)) throw new Error("invalid snapshot entry path");
+			if (!validSnapshotEntryPath(item.path) || (previous !== undefined && collectionManifestCompare(previous, item.path) >= 0)) throw new Error("invalid snapshot entry path");
 			previous = item.path;
 			const keys = Object.keys(item).join(",");
 			if (item.type === "directory" ? keys !== "path,type" : item.type === "file"
@@ -824,19 +739,19 @@ async function verifiedSnapshotSourceRoot(bazframeHome: string, digest: string, 
 		}
 		const artifactPath = join(snapshot, "artifact"); openedArtifact = await openSnapshotDirectory(artifactPath); assertSnapshotMode(openedArtifact.identity.mode, 0o500);
 		const artifact = await realpath(artifactPath);
-		if (artifact === physicalSnapshot || !sourcePathWithin(artifact, physicalSnapshot)) throw new Error("snapshot artifact escape");
+		if (artifact === physicalSnapshot || !collectionPathWithin(artifact, physicalSnapshot)) throw new Error("snapshot artifact escape");
 		await assertOpenSnapshotDirectory(openedSnapshot); await assertOpenSnapshotDirectory(openedArtifact);
 		const actual: ArtifactEntry[] = [{ path: ".", type: "directory" }];
 		await collectArtifactEntries(artifact, ".", actual, openedArtifact);
-		actual.sort((a, b) => sourceManifestCompare(a.path, b.path));
+		actual.sort((a, b) => collectionManifestCompare(a.path, b.path));
 		if (JSON.stringify(actual) !== JSON.stringify(parsed.entries)) throw new Error("snapshot artifact mismatch");
 		await assertOpenSnapshotDirectory(openedArtifact); await assertOpenSnapshotDirectory(openedSnapshot);
 		if (await realpath(snapshot) !== physicalSnapshot || await realpath(artifactPath) !== artifact) throw new Error("snapshot canonical identity changed");
 		let root = artifact;
-		if (sourceUnitRoot !== ".") for (const segment of sourceUnitRoot.split("/")) {
+		if (skillsRoot !== ".") for (const segment of skillsRoot.split("/")) {
 			const next = join(root, segment); const metadata = await lstat(next);
-			if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new Error("invalid source-unit root");
-			root = await realpath(next); if (!sourcePathWithin(root, artifact)) throw new Error("source-unit root escape");
+			if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new Error("invalid Skills root");
+			root = await realpath(next); if (!collectionPathWithin(root, artifact)) throw new Error("Skills root escape");
 		}
 		await assertOpenSnapshotDirectory(openedArtifact); await assertOpenSnapshotDirectory(openedSnapshot);
 		return root;
@@ -850,7 +765,7 @@ async function collectArtifactEntries(root: string, relativePath: string, entrie
 	await assertOpenSnapshotDirectory(heldRoot);
 	const directory = relativePath === "." ? root : join(root, ...relativePath.split("/"));
 	const identity = await snapshotDirectoryIdentity(directory); assertSnapshotMode(identity.mode, 0o500);
-	for (const name of (await readdir(directory)).sort(sourceManifestCompare)) {
+	for (const name of (await readdir(directory)).sort(collectionManifestCompare)) {
 		const path = relativePath === "." ? name : `${relativePath}/${name}`; const absolute = join(directory, name); const metadata = await lstat(absolute);
 		if (metadata.isSymbolicLink()) throw new Error("snapshot link");
 		if (metadata.isDirectory()) { entries.push({ path, type: "directory" }); await collectArtifactEntries(root, path, entries, heldRoot); }
@@ -861,7 +776,7 @@ async function collectArtifactEntries(root: string, relativePath: string, entrie
 	await assertOpenSnapshotDirectory(heldRoot);
 }
 
-function sourceManifestCompare(left: string, right: string): number {
+function collectionManifestCompare(left: string, right: string): number {
 	const a = [...left]; const b = [...right];
 	for (let index = 0; index < Math.min(a.length, b.length); index += 1) {
 		const difference = a[index].codePointAt(0) - b[index].codePointAt(0);
@@ -870,62 +785,62 @@ function sourceManifestCompare(left: string, right: string): number {
 	return a.length - b.length;
 }
 
-async function resolveDirectSource(direct: DirectSourceUnit, bazframeHome: string): Promise<DerivedSkill[]> {
+async function resolveDirectCollection(direct: DirectSkillCollection, bazframeHome: string): Promise<DerivedSkill[]> {
 	let root: string;
-	if (direct.snapshotDigest === undefined || direct.sourceUnitRoot === undefined) {
-		failSource(sourceDiagnostic("invalid-source", direct.sourceId, `${direct.sourceId}.json`));
+	if (direct.snapshotDigest === undefined || direct.skillsRoot === undefined) {
+		failCollection(collectionDiagnostic("invalid-collection", direct.collectionKind, direct.collectionId, `${direct.collectionId}.json`));
 	}
-	try { root = await verifiedSnapshotSourceRoot(bazframeHome, direct.snapshotDigest, direct.sourceUnitRoot); }
-	catch { failSource(sourceDiagnostic("broken-snapshot", direct.sourceId, ".")); }
+	try { root = await verifiedSnapshotSkillsRoot(bazframeHome, direct.snapshotDigest, direct.skillsRoot); }
+	catch { failCollection(collectionDiagnostic("broken-snapshot", direct.collectionKind, direct.collectionId, ".")); }
 	try {
 		const metadata = await lstat(root);
 		if (metadata.isSymbolicLink() || !metadata.isDirectory() || await realpath(root) !== root) {
-			failSource(sourceDiagnostic("broken-root", direct.sourceId, "."));
+			failCollection(collectionDiagnostic("broken-root", direct.collectionKind, direct.collectionId, "."));
 		}
 	} catch (error) {
-		if (error instanceof SourceResolutionFailure) throw error;
-		failSource(sourceDiagnostic("broken-root", direct.sourceId, "."));
+		if (error instanceof CollectionResolutionFailure) throw error;
+		failCollection(collectionDiagnostic("broken-root", direct.collectionKind, direct.collectionId, "."));
 	}
 	let entryCount = 0;
 	let skillCount = 0;
-	const rootDefinition = await physicalSourceRootDefinition(direct, root);
+	const rootDefinition = await physicalCollectionRootDefinition(direct, root);
 	const derived: DerivedSkill[] = [];
-	const diagnostic = (category: SourceDiagnostic["category"], path: string, extra = {}) =>
-		sourceDiagnostic(category, direct.sourceId, path, extra);
+	const diagnostic = (category: SkillCollectionDiagnostic["category"], path: string, extra = {}) =>
+		collectionDiagnostic(category, direct.collectionKind, direct.collectionId, path, extra);
 
 	async function visit(directory: string, relativeDirectory: string, depth: number): Promise<void> {
 		let names: string[];
 		try { names = (await readdir(directory)).sort(); } catch {
-			failSource(diagnostic("io-error", relativeDirectory));
+			failCollection(diagnostic("io-error", relativeDirectory));
 		}
 		for (const name of names) {
 			const path = relativeDirectory === "." ? name : `${relativeDirectory}/${name}`;
 			const absolute = join(directory, name);
 			let metadata;
 			try { metadata = await lstat(absolute); } catch {
-				failSource(diagnostic("io-error", path));
+				failCollection(diagnostic("io-error", path));
 			}
 			if ((name === ".git" || name === "node_modules")
 				&& (metadata.isDirectory() || metadata.isSymbolicLink())) continue;
 			entryCount += 1;
-			if (entryCount > SOURCE_LIMITS.entries) {
-				failSource(diagnostic("limit-exceeded", path, { limit: "entries" }));
+			if (entryCount > COLLECTION_LIMITS.entries) {
+				failCollection(diagnostic("limit-exceeded", path, { limit: "entries" }));
 			}
-			if (metadata.isDirectory() && depth + 1 > SOURCE_LIMITS.depth) {
-				failSource(diagnostic("limit-exceeded", path, { limit: "depth" }));
+			if (metadata.isDirectory() && depth + 1 > COLLECTION_LIMITS.depth) {
+				failCollection(diagnostic("limit-exceeded", path, { limit: "depth" }));
 			}
-			if (metadata.isSymbolicLink()) failSource(diagnostic("internal-symlink", path));
+			if (metadata.isSymbolicLink()) failCollection(diagnostic("internal-symlink", path));
 			if (!metadata.isDirectory() && !metadata.isFile()) {
-				failSource(diagnostic("unsupported-entry", path));
+				failCollection(diagnostic("unsupported-entry", path));
 			}
 			try {
 				const canonical = await realpath(absolute);
-				if (canonical !== resolve(absolute) || !sourcePathWithin(canonical, root)) {
-					failSource(diagnostic("io-error", path));
+				if (canonical !== resolve(absolute) || !collectionPathWithin(canonical, root)) {
+					failCollection(diagnostic("io-error", path));
 				}
 			} catch (error) {
-				if (error instanceof SourceResolutionFailure) throw error;
-				failSource(diagnostic("io-error", path));
+				if (error instanceof CollectionResolutionFailure) throw error;
+				failCollection(diagnostic("io-error", path));
 			}
 			if (metadata.isDirectory()) {
 				await visit(absolute, path, depth + 1);
@@ -933,22 +848,22 @@ async function resolveDirectSource(direct: DirectSourceUnit, bazframeHome: strin
 			}
 			if (name !== "SKILL.md") continue;
 			skillCount += 1;
-			if (skillCount > SOURCE_LIMITS.skills) {
-				failSource(diagnostic("limit-exceeded", path, { limit: "skills" }));
+			if (skillCount > COLLECTION_LIMITS.skills) {
+				failCollection(diagnostic("limit-exceeded", path, { limit: "skills" }));
 			}
 			if (relativeDirectory !== "." && rootDefinition) {
-				failSource(diagnostic("mixed-root", path));
+				failCollection(diagnostic("mixed-root", path));
 			}
-			const loaded = loadSkillsFromDir({ dir: directory, source: "bazframe-source-unit" });
+			const loaded = loadSkillsFromDir({ dir: directory, source: direct.collectionKind === "library" ? "bazframe-library" : "bazframe-package" });
 			const errors = loaded.diagnostics.filter((item) => item.type === "error");
 			const matching = loaded.skills.filter((skill) =>
 				skill.baseDir === directory && skill.filePath === absolute);
-			const exact = matching.length === 1 && safeSourceId(matching[0]?.name ?? "");
+			const exact = matching.length === 1 && safeCollectionId(matching[0]?.name ?? "");
 			if (errors.length > 0 || !exact) {
 				const returned = loaded.diagnostics.length === 0
 					? [{ message: "Pi loader rejected definition without a diagnostic" }]
 					: loaded.diagnostics;
-				failSource(returned.map((item, diagnosticIndex) => diagnostic("pi-loader", path, {
+				failCollection(returned.map((item, diagnosticIndex) => diagnostic("pi-loader", path, {
 					diagnosticIndex,
 					message: item.message,
 				})));
@@ -958,8 +873,9 @@ async function resolveDirectSource(direct: DirectSourceUnit, bazframeHome: strin
 				name: skill.name,
 				baseDir: skill.baseDir,
 				definitionPath: skill.filePath,
-				sourceId: direct.sourceId,
-				sourceRoot: root,
+				collectionKind: direct.collectionKind,
+				collectionId: direct.collectionId,
+				collectionRoot: root,
 				relativePath: path,
 				skill,
 			});
@@ -968,7 +884,7 @@ async function resolveDirectSource(direct: DirectSourceUnit, bazframeHome: strin
 	await visit(root, ".", 0);
 	const descendant = derived.find((skill) => skill.relativePath !== "SKILL.md");
 	if (rootDefinition && descendant !== undefined) {
-		failSource(diagnostic("mixed-root", descendant.relativePath));
+		failCollection(diagnostic("mixed-root", descendant.relativePath));
 	}
 	return derived;
 }
@@ -977,75 +893,76 @@ function codeUnitCompare(left: string, right: string): number {
 	return left < right ? -1 : left > right ? 1 : 0;
 }
 
-async function physicalSourceRootDefinition(direct: DirectSourceUnit, root: string): Promise<boolean> {
+async function physicalCollectionRootDefinition(direct: DirectSkillCollection, root: string): Promise<boolean> {
 	try {
 		const metadata = await lstat(join(root, "SKILL.md"));
 		return !metadata.isSymbolicLink() && metadata.isFile();
 	} catch (error) {
 		if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
-		failSource(sourceDiagnostic("io-error", direct.sourceId, "SKILL.md"));
+		failCollection(collectionDiagnostic("io-error", direct.collectionKind, direct.collectionId, "SKILL.md"));
 	}
 }
 
-function sortSourceDiagnostics(diagnostics: SourceDiagnostic[]): SourceDiagnostic[] {
-	return diagnostics.sort((left, right) => codeUnitCompare(left.sourceId, right.sourceId)
+function sortSkillCollectionDiagnostics(diagnostics: SkillCollectionDiagnostic[]): SkillCollectionDiagnostic[] {
+	return diagnostics.sort((left, right) => codeUnitCompare(left.collectionId, right.collectionId)
 		|| codeUnitCompare(left.path, right.path)
 		|| codeUnitCompare(left.category, right.category)
 		|| (left.diagnosticIndex ?? 0) - (right.diagnosticIndex ?? 0)
 		|| codeUnitCompare(left.message ?? "", right.message ?? ""));
 }
 
-async function loadProfileSources(
+async function loadProfileCollections(
 	profileDirectory: string,
 	flatSkills: Skill[],
 ): Promise<{
-	directSourceUnits: DirectSourceUnit[];
+	directCollections: DirectSkillCollection[];
 	derivedSkills: DerivedSkill[];
-	diagnostics: SourceDiagnostic[];
+	diagnostics: SkillCollectionDiagnostic[];
 }> {
-	const namespace = await sourceNamespace(profileDirectory);
+	const namespace = await collectionNamespace(profileDirectory);
 	const profileParent = resolve(profileDirectory, "..");
 	const bazframeHome = profileParent.endsWith(`${sep}profiles`) ? resolve(profileParent, "..") : profileParent;
-	const directSourceUnits: DirectSourceUnit[] = [];
-	const candidates: { direct: DirectSourceUnit; skills: DerivedSkill[] }[] = [];
-	const diagnostics: SourceDiagnostic[] = [...namespace.diagnostics];
+	const directCollections: DirectSkillCollection[] = [];
+	const candidates: { direct: DirectSkillCollection; skills: DerivedSkill[] }[] = [];
+	const diagnostics: SkillCollectionDiagnostic[] = [...namespace.diagnostics];
 	if (diagnostics.length > 0) {
-		return { directSourceUnits: [], derivedSkills: [], diagnostics: sortSourceDiagnostics(diagnostics) };
+		return { directCollections: [], derivedSkills: [], diagnostics: sortSkillCollectionDiagnostics(diagnostics) };
 	}
 	const profileId = profileDirectory.split(sep).at(-1)!;
 	for (const item of namespace.descriptors) {
-		try { await validateSourceReference(bazframeHome, profileId, item.sourceId, item.identity); } catch {
-			diagnostics.push(sourceDiagnostic("invalid-reference", item.sourceId, `${item.sourceId}.json`));
+		try { await validateCollectionReference(bazframeHome, profileId, item.collectionKind, item.collectionId, item.identity); } catch {
+			diagnostics.push(collectionDiagnostic("invalid-reference", item.collectionKind, item.collectionId, `${item.collectionId}.json`));
 		}
 	}
 	if (diagnostics.length > 0) {
-		return { directSourceUnits: [], derivedSkills: [], diagnostics: sortSourceDiagnostics(diagnostics) };
+		return { directCollections: [], derivedSkills: [], diagnostics: sortSkillCollectionDiagnostics(diagnostics) };
 	}
 	for (const item of namespace.descriptors) {
-		const referenceDirect: DirectSourceUnit = {
+		const referenceDirect: DirectSkillCollection = {
 			schemaVersion: 1,
-			sourceId: item.sourceId,
+			collectionKind: item.collectionKind,
+			collectionId: item.collectionId,
 			descriptorPath: item.path,
 			preparationState: "failed",
 			rebuildAvailability: "unavailable",
 		};
-		directSourceUnits.push(referenceDirect);
-		let descriptor: SourceDescriptor;
-		try { descriptor = await readSourceDescriptor(item.sourceId, bazframeHome); } catch {
-			diagnostics.push(sourceDiagnostic("invalid-source", item.sourceId, `${item.sourceId}.json`));
+		directCollections.push(referenceDirect);
+		let descriptor: CollectionDescriptor;
+		try { descriptor = await readCollectionDescriptor(item.collectionKind, item.collectionId, bazframeHome); } catch {
+			diagnostics.push(collectionDiagnostic("invalid-collection", item.collectionKind, item.collectionId, `${item.collectionId}.json`));
 			continue;
 		}
-		const direct: DirectSourceUnit = {
+		const direct: DirectSkillCollection = {
 			...descriptor,
 			descriptorPath: item.path,
 			preparationState: "ready",
-			rebuildAvailability: await sourceRebuildAvailability(descriptor.sourceRoot),
+			rebuildAvailability: await collectionRefreshAvailability(descriptor.collectionRoot),
 		};
-		directSourceUnits[directSourceUnits.length - 1] = direct;
-		try { candidates.push({ direct, skills: await resolveDirectSource(direct, bazframeHome) }); } catch (error) {
+		directCollections[directCollections.length - 1] = direct;
+		try { candidates.push({ direct, skills: await resolveDirectCollection(direct, bazframeHome) }); } catch (error) {
 			direct.preparationState = "failed";
-			if (error instanceof SourceResolutionFailure) diagnostics.push(...error.diagnostics);
-			else diagnostics.push(sourceDiagnostic("io-error", item.sourceId, "."));
+			if (error instanceof CollectionResolutionFailure) diagnostics.push(...error.diagnostics);
+			else diagnostics.push(collectionDiagnostic("io-error", item.collectionKind, item.collectionId, "."));
 		}
 	}
 	const names = new Map<string, DerivedSkill[]>();
@@ -1055,27 +972,27 @@ async function loadProfileSources(
 		names.set(skill.name, group);
 	}
 	const flatNames = new Set(flatSkills.map((skill) => skill.name));
-	const duplicateUnits = new Set<string>();
+	const duplicateCollections = new Set<string>();
 	for (const [name, skills] of [...names.entries()].sort(([left], [right]) => codeUnitCompare(left, right))) {
 		if (!flatNames.has(name) && skills.length < 2) continue;
 		for (const skill of skills) {
-			duplicateUnits.add(skill.sourceId);
-			diagnostics.push(sourceDiagnostic("duplicate-name", skill.sourceId, skill.relativePath, { name }));
+			duplicateCollections.add(`${skill.collectionKind}:${skill.collectionId}`);
+			diagnostics.push(collectionDiagnostic("duplicate-name", skill.collectionKind, skill.collectionId, skill.relativePath, { name }));
 		}
 	}
 	return {
-		directSourceUnits,
+		directCollections,
 		derivedSkills: candidates
-			.filter(({ direct }) => !duplicateUnits.has(direct.sourceId))
+			.filter(({ direct }) => !duplicateCollections.has(`${direct.collectionKind}:${direct.collectionId}`))
 			.flatMap((candidate) => candidate.skills),
-		diagnostics: sortSourceDiagnostics(diagnostics),
+		diagnostics: sortSkillCollectionDiagnostics(diagnostics),
 	};
 }
 
-async function sourceRebuildAvailability(sourceRoot: string): Promise<"available" | "unavailable"> {
+async function collectionRefreshAvailability(collectionRoot: string): Promise<"available" | "unavailable"> {
 	try {
-		const metadata = await lstat(sourceRoot);
-		return !metadata.isSymbolicLink() && metadata.isDirectory() && await realpath(sourceRoot) === sourceRoot ? "available" : "unavailable";
+		const metadata = await lstat(collectionRoot);
+		return !metadata.isSymbolicLink() && metadata.isDirectory() && await realpath(collectionRoot) === collectionRoot ? "available" : "unavailable";
 	} catch { return "unavailable"; }
 }
 
@@ -1083,10 +1000,10 @@ async function loadProfile(bazframeHome: string): Promise<ProfileState> {
 	const id = await readActiveProfileId(bazframeHome);
 	const profilesPath = join(bazframeHome, "profiles");
 	const directory = join(profilesPath, id);
-	const directories: SourceOpenDirectory[] = [];
+	const directories: CollectionOpenDirectory[] = [];
 	try {
 		for (const directoryPath of [bazframeHome, profilesPath, directory]) {
-			directories.push(await openExistingSourceDirectory(directoryPath));
+			directories.push(await openExistingCollectionDirectory(directoryPath));
 		}
 		const instructionsPath = join(directory, "AGENTS.md");
 		const instructions = decodeUtf8(
@@ -1099,18 +1016,18 @@ async function loadProfile(bazframeHome: string): Promise<ProfileState> {
 			if (names.has(skill.name)) throw new Error(`Duplicate profile skill name: ${skill.name}`);
 			names.add(skill.name);
 		}
-		const sources = await loadProfileSources(directory, loaded.skills);
-		for (const openedDirectory of [...directories].reverse()) await assertSourceDirectoryStable(openedDirectory);
-		const combined = [...loaded.skills, ...sources.derivedSkills.map((derived) => derived.skill)];
+		const collections = await loadProfileCollections(directory, loaded.skills);
+		for (const openedDirectory of [...directories].reverse()) await assertCollectionDirectoryStable(openedDirectory);
+		const combined = [...loaded.skills, ...collections.derivedSkills.map((derived) => derived.skill)];
 		return {
 			id,
 			directory,
 			instructionsPath,
 			instructions,
 			flatSkills: loaded.skills,
-			directSourceUnits: sources.directSourceUnits,
-			derivedSkills: sources.derivedSkills,
-			sourceDiagnostics: sources.diagnostics,
+			directCollections: collections.directCollections,
+			derivedSkills: collections.derivedSkills,
+			collectionDiagnostics: collections.diagnostics,
 			skills: combined,
 			skillDirectories: [...new Set(combined.map((skill) => skill.baseDir))].sort(),
 			warnings: loaded.warnings,
@@ -1385,27 +1302,30 @@ function contextPaths(options: BuildSystemPromptOptions): string[] {
 	return options.contextFiles.map((file) => file.path);
 }
 
-function formatSourceFailure(diagnostic: SourceDiagnostic): string {
-	const identity = `${diagnostic.sourceId}:${diagnostic.path}`;
+function formatCollectionFailure(diagnostic: SkillCollectionDiagnostic): string {
+	const identity = `${diagnostic.collectionKind} ${diagnostic.collectionId}:${diagnostic.path}`;
+	const category = diagnostic.category === "invalid-collection"
+		? `invalid-${diagnostic.collectionKind}`
+		: diagnostic.category;
 	if (diagnostic.category === "limit-exceeded") {
-		return `${identity} ${diagnostic.category} (${diagnostic.limit})`;
+		return `${identity} ${category} (${diagnostic.limit})`;
 	}
 	if (diagnostic.category === "duplicate-name") {
-		return `${identity} ${diagnostic.category} (${diagnostic.name})`;
+		return `${identity} ${category} (${diagnostic.name})`;
 	}
 	if (diagnostic.category === "pi-loader") {
-		return `${identity} ${diagnostic.category}[${diagnostic.diagnosticIndex}]: ${diagnostic.message}`;
+		return `${identity} ${category}[${diagnostic.diagnosticIndex}]: ${diagnostic.message}`;
 	}
-	return `${identity} ${diagnostic.category}`;
+	return `${identity} ${category}`;
 }
 
-function sourceCorrectiveActions(profile: ProfileState | undefined): string[] {
+function collectionCorrectiveActions(profile: ProfileState | undefined): string[] {
 	if (profile === undefined) return ["  (none)"];
-	const builds = profile.directSourceUnits
-		.filter((source) => source.preparationState === "failed" && source.rebuildAvailability === "available")
-		.map((source) => `  - bazframe sources build ${source.sourceId}`);
-	if (builds.length > 0) return builds;
-	return profile.sourceDiagnostics.length > 0 ? ["  - Inspect referenced-source failures with `bazframe profile sources`."] : ["  (none)"];
+	const actions = profile.directCollections
+		.filter((collection) => collection.preparationState === "failed" && collection.rebuildAvailability === "available")
+		.map((collection) => `  - bazframe ${collection.collectionKind === "library" ? "libraries update" : "packages build"} ${collection.collectionId}`);
+	if (actions.length > 0) return actions;
+	return profile.collectionDiagnostics.length > 0 ? ["  - Inspect failures with `bazframe profile libraries` and `bazframe profile packages`."] : ["  (none)"];
 }
 
 function info(state: AdapterState, pi: ExtensionAPI, ctx: ExtensionCommandContext): string {
@@ -1447,23 +1367,23 @@ function info(state: AdapterState, pi: ExtensionAPI, ctx: ExtensionCommandContex
 		...(profile === undefined || profile.flatSkills.length === 0
 			? ["  (none)"]
 			: profile.flatSkills.map((skill) => `  - ${skill.name} (${skill.filePath})`)),
-		`Profile source references: ${profile?.directSourceUnits.length ?? 0}`,
-		...(profile === undefined || profile.directSourceUnits.length === 0
+		`Profile library/package references: ${profile?.directCollections.length ?? 0}`,
+		...(profile === undefined || profile.directCollections.length === 0
 			? ["  (none)"]
-			: profile.directSourceUnits.map((source) => source.snapshotDigest === undefined
-				? `  - ${source.sourceId} (failed; target unavailable)`
-				: `  - ${source.sourceId} -> ${source.sourceRoot} (${source.preparationState}; rebuild:${source.rebuildAvailability}; sha256:${source.snapshotDigest}; root:${source.sourceUnitRoot})`)),
+			: profile.directCollections.map((collection) => collection.snapshotDigest === undefined
+				? `  - ${collection.collectionKind} ${collection.collectionId} (failed; target unavailable)`
+				: `  - ${collection.collectionKind} ${collection.collectionId} -> ${collection.collectionRoot} (${collection.preparationState}; refresh:${collection.rebuildAvailability}; sha256:${collection.snapshotDigest}; Skills root:${collection.skillsRoot})`)),
 		`Derived effective skills: ${profile?.derivedSkills.length ?? 0}`,
 		...(profile === undefined || profile.derivedSkills.length === 0
 			? ["  (none)"]
 			: profile.derivedSkills.map((skill) =>
-				`  - ${skill.name} (${skill.sourceId}:${skill.relativePath})`)),
-		`Source failures: ${profile?.sourceDiagnostics.length ?? 0}`,
-		...(profile === undefined || profile.sourceDiagnostics.length === 0
+				`  - ${skill.name} (${skill.collectionKind} ${skill.collectionId}:${skill.relativePath})`)),
+		`Library/package failures: ${profile?.collectionDiagnostics.length ?? 0}`,
+		...(profile === undefined || profile.collectionDiagnostics.length === 0
 			? ["  (none)"]
-			: profile.sourceDiagnostics.map((diagnostic) => `  - ${formatSourceFailure(diagnostic)}`)),
+			: profile.collectionDiagnostics.map((diagnostic) => `  - ${formatCollectionFailure(diagnostic)}`)),
 		"Corrective actions:",
-		...sourceCorrectiveActions(profile),
+		...collectionCorrectiveActions(profile),
 		`Skills: ${skills.length === 0 ? "(none)" : skills.join(", ")}`,
 		...(collisions.length === 0 ? [] : [`Aliases: ${collisions.join(", ")}`]),
 	].join("\n");
@@ -1536,9 +1456,9 @@ export default function bazframePiAdapter(pi: ExtensionAPI): void {
 			for (const warning of state.profile.warnings) {
 				if (ctx.hasUI) ctx.ui.notify(`Bazframe profile skill warning: ${warning}`, "warning");
 			}
-			for (const diagnostic of state.profile.sourceDiagnostics) {
+			for (const diagnostic of state.profile.collectionDiagnostics) {
 				if (ctx.hasUI) ctx.ui.notify(
-					`Bazframe source-unit failure: ${formatSourceFailure(diagnostic)}`,
+					`Bazframe library/package failure: ${formatCollectionFailure(diagnostic)}`,
 					"warning",
 				);
 			}

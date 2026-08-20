@@ -50,8 +50,8 @@ export function createBazframeTuiService() {
       writeMarker('mutation-resolved');
     },
     removeMembership: async () => undefined,
-    loadSkillPreview: async ({ sourceId, skillId }) => ({
-      sourceId,
+    loadSkillPreview: async ({ originId, skillId }) => ({
+      originId,
       skillId,
       path: '/fixture/library/skills/demo-skill/SKILL.md',
       contents: '---\nname: demo-skill\ndescription: fixture\n---\n\nTUI-PREVIEW-SENTINEL\n'
@@ -62,20 +62,19 @@ export function createBazframeTuiService() {
       selectablePath: '/fixture',
       entries: []
     }),
-    inspectSourceCandidate: async ({ root }) => ({
-      sourceId: root.split('/').filter(Boolean).at(-1) ?? 'source',
+    inspectLibraryCandidate: async ({ root }) => ({
+      libraryId: root.split('/').filter(Boolean).at(-1) ?? 'library',
       enteredRoot: root,
       canonicalRoot: root,
-      manifest: { state: 'absent' }
+      packageManifest: { state: 'absent' }
     }),
-    addSource: async ({ root }) => ({
+    addLibrary: async ({ root }) => ({
       schemaVersion: 1,
-      source: root.split('/').filter(Boolean).at(-1) ?? 'source',
+      library: root.split('/').filter(Boolean).at(-1) ?? 'library',
       root,
       digest: 'a'.repeat(64),
-      sourceUnitRoot: '.',
       action: 'added',
-      path: `/fixture/sources/${root.split('/').filter(Boolean).at(-1) ?? 'source'}.json`
+      path: `/fixture/libraries/${root.split('/').filter(Boolean).at(-1) ?? 'library'}.json`
     })
   };
 }
@@ -120,17 +119,24 @@ function dashboard() {
       membershipWritable: true,
       memberships: []
     }],
-    sources: [{
+    collections: [],
+    skillGroups: [{
       id: 'default',
-      provider: 'default',
       label: scenario === 'unicode-width' ? 'U' : '(default)',
       root: scenario === 'unicode-width' ? unicodeWidthRoot : '/fixture/library/skills',
       artifactWritesSupported: false,
       skills: [{
         id: 'demo-skill',
-        sourceId: 'default',
+        originId: 'default',
         directory: '/fixture/library/skills/demo-skill'
       }]
+    }],
+    availableSkillGroups: [{
+      id: 'default',
+      label: scenario === 'unicode-width' ? 'U' : '(default)',
+      root: scenario === 'unicode-width' ? unicodeWidthRoot : '/fixture/library/skills',
+      artifactWritesSupported: false,
+      skills: [{ id: 'demo-skill', originId: 'default', directory: '/fixture/library/skills/demo-skill' }]
     }],
     diagnostics: []
   };

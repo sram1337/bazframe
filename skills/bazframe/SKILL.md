@@ -1,6 +1,6 @@
 ---
 name: bazframe
-description: Manages Bazframe profiles, registered direct skills, managed skill sources, policy, the Pi adapter, status, and the terminal UI. Use when configuring or diagnosing Bazframe 2.
+description: Manages Bazframe profiles, added Skills, Skill libraries, Skill packages, policy, the Pi adapter, status, and the terminal UI. Use when configuring or diagnosing Bazframe 2.
 compatibility: Requires the Bazframe 2 CLI; current adapter commands target Pi 0.82.x.
 ---
 
@@ -10,56 +10,58 @@ Bazframe composes a personal profile with coding-agent runtime and repository co
 
 ## Safety and ownership
 
-- Use `bazframe` commands for state under `${BAZFRAME_HOME:-$HOME/.bazframe}`. Do not edit catalog links, profile memberships, source records, snapshots, policy, or adapter artifacts manually.
-- Provider directories registered in `(default)` remain provider-owned and live. Bazframe links to them; it never copies, updates, polls, or deletes their content.
-- Managed sources are different: explicit add/build commands may run a provider-declared build with ordinary user authority, then Bazframe activates an immutable snapshot.
-- Inspect build declarations before adding or rebuilding a managed source.
-- Use `profile remove --force` or adapter `--force` only with explicit authorization.
-- Treat live `bazframe --help` and resource help as authoritative when installed behavior differs from remembered instructions.
+- Use `bazframe` commands for state under `${BAZFRAME_HOME:-$HOME/.bazframe}`. Do not edit catalog links, profile memberships, records, references, snapshots, policy, or adapter artifacts manually.
+- Added Skills in `(default)` remain provider-owned and live. Bazframe links to them and never updates or deletes provider content.
+- A library is an already-prepared directory. Adding or updating one executes nothing.
+- A package is a buildable project with `bazframe-package.json`. Package add/build executes its literal argv unsandboxed with ordinary user authority.
+- Library/package snapshots are immutable. Edit provider input, then explicitly update the library or build the package.
+- Treat live `bazframe --help` and resource help as authoritative.
 
-## Direct skills
-
-Register one external Agent Skill in Bazframe's `(default)` catalog, then select it for a profile:
+## Added Skills
 
 ```bash
 bazframe add skill /absolute/path/to/skill
 bazframe skills
 bazframe profile skills add <skill> [--profile <profile>]
-bazframe profile skills
-```
-
-Catalog and profile links point directly to the same canonical provider directory. Provider changes become visible on the next Pi startup or `/bazframe reload`.
-
-Remove profile selection before removing its catalog registration:
-
-```bash
 bazframe profile skills remove <skill> [--profile <profile>]
 bazframe remove skill <skill>
 ```
 
-Catalog removal is refused while any profile references the skill and never deletes provider content.
+Catalog and profile links point to the same canonical provider directory. Provider changes become visible on the next Pi startup or `/bazframe reload`. `bazframe skill edit <skill>` opens only a live added Skill through executable-only `VISUAL`, then `EDITOR`.
 
-Open a registered live provider definition explicitly:
-
-```bash
-bazframe skill edit <skill>
-```
-
-This re-derives the provider-contained `SKILL.md` from `(default)` and can open malformed content for repair. It uses the same executable-only `VISUAL` then `EDITOR` contract described below. A successful child exit does not claim a save. Managed snapshots cannot be edited; use the provider workflow and then `bazframe sources build <source>`.
-
-## Managed sources
-
-Use managed sources for a skill or collection that should be built, snapshotted, and attached as a whole:
+## Skill libraries
 
 ```bash
-bazframe sources add /absolute/path/to/source
-bazframe sources build <source>
-bazframe profile sources add <source> [--profile <profile>]
-bazframe profile sources remove <source> [--profile <profile>]
-bazframe sources remove <source>
+bazframe libraries
+bazframe libraries add /absolute/path/to/library
+bazframe libraries update <library>
+bazframe profile libraries add <library> [--profile <profile>]
+bazframe profile libraries remove <library> [--profile <profile>]
+bazframe libraries remove <library>
 ```
 
-The source name is the canonical root basename. `sources add` and `sources build` explicitly run any declared build. Profile reference changes never build. Removal is refused while referenced.
+A library ID is its canonical root basename. Profile references attach the complete library and never prepare it. Removal is refused while referenced.
+
+## Skill packages
+
+A package root must contain a physical regular `bazframe-package.json` with exactly `schemaVersion`, `build`, `artifactRoot`, and `skillsRoot`:
+
+```json
+{"schemaVersion":1,"build":["npm","run","build"],"artifactRoot":"dist","skillsRoot":"skills"}
+```
+
+`build` is a nonempty literal argv array. Both roots are portable relative paths (`.` is allowed). Bazframe runs `build` directly with no shell, snapshots the complete artifact root (including shared resources), and discovers Skills only below the Skills root.
+
+```bash
+bazframe packages
+bazframe packages add /absolute/path/to/package
+bazframe packages build <package>
+bazframe profile packages add <package> [--profile <profile>]
+bazframe profile packages remove <package> [--profile <profile>]
+bazframe packages remove <package>
+```
+
+Profile reference changes never build. Removal is refused while referenced. A failed library update or package build leaves the previous activated snapshot in use. Libraries and packages have typed, separate namespaces, so both may have the same ID. A healthy library or package may contain `0 Skills`; profiles always reference the complete object, never selected children.
 
 ## Profiles and policy
 
@@ -73,9 +75,7 @@ bazframe global
 bazframe project
 ```
 
-`profile edit` opens the named active or inactive profile's actual `AGENTS.md` without changing selection. It uses the first nonblank `VISUAL`, then `EDITOR`, as one executable name or path with no shell, flag parsing, or fallback. Use an executable wrapper for fixed flags or GUI wait behavior, and run `/bazframe reload` in an existing Pi session afterward.
-
-Global policy is enabled by default. A Git-worktree project override takes precedence.
+`profile edit` opens the named profile's `AGENTS.md` without changing selection. Use an executable wrapper for editor flags or GUI wait behavior, and run `/bazframe reload` in an existing Pi session afterward.
 
 ## Pi adapter and diagnosis
 
@@ -86,4 +86,4 @@ bazframe status
 bazframe tui
 ```
 
-Invoke `pi` directly after installing the adapter. Use `/bazframe info` to inspect effective composition and `/bazframe reload` after profile, direct-skill, or managed-source changes.
+Invoke `pi` directly after installing the adapter. Use `/bazframe info` to inspect effective composition and `/bazframe reload` after profile, added Skill, library, or package changes.

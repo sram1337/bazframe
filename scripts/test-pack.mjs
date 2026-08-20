@@ -1,5 +1,5 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -40,15 +40,22 @@ try {
   }
   assertExists(join(packageRoot, 'dist', 'tui', 'run-tui.js'));
   assertExists(join(packageRoot, 'dist', 'application', 'tui-service.js'));
-  assertExists(join(packageRoot, 'dist', 'profiles', 'profile-source-reference.js'));
-  assertExists(join(packageRoot, 'dist', 'profiles', 'profile-source-reference-lifecycle.js'));
+  assertExists(join(packageRoot, 'dist', 'profiles', 'profile-skill-collection-reference.js'));
+  assertExists(join(packageRoot, 'dist', 'profiles', 'profile-skill-collection-reference-lifecycle.js'));
   assertExists(join(packageRoot, 'dist', 'profiles', 'profile-instruction-editor.js'));
   assertExists(join(packageRoot, 'dist', 'skills', 'skill-definition-editor.js'));
   assertExists(join(packageRoot, 'dist', 'core', 'child-process.js'));
   assertExists(join(packageRoot, 'dist', 'core', 'external-editor.js'));
-  assertExists(join(packageRoot, 'dist', 'sources', 'source-store.js'));
-  assertExists(join(packageRoot, 'dist', 'sources', 'source-lifecycle.js'));
-  assertExists(join(packageRoot, 'dist', 'source-units', 'source-unit-resolver.js'));
+  assertExists(join(packageRoot, 'dist', 'skill-collections', 'skill-collection-store.js'));
+  assertExists(join(packageRoot, 'dist', 'skill-collections', 'skill-collection-lifecycle.js'));
+  assertExists(join(packageRoot, 'dist', 'skill-collections', 'skill-collection-resolver.js'));
+  assertExists(join(packageRoot, 'dist', 'skill-collections', 'skill-collection-preparation.js'));
+  assertExists(join(packageRoot, 'dist', 'skill-collections', 'skill-snapshot.js'));
+  assertExists(join(packageRoot, 'dist', 'packages', 'package-manifest.js'));
+  assertMissing(join(packageRoot, 'dist', 'sources'));
+  assertMissing(join(packageRoot, 'dist', 'source-units'));
+  assertMissing(join(packageRoot, 'dist', 'profiles', 'profile-source-reference.js'));
+  assertMissing(join(packageRoot, 'dist', 'profiles', 'profile-source-reference-lifecycle.js'));
   const packagedSkill = join(packageRoot, 'dist', 'skills', 'bazframe', 'SKILL.md');
   assertExists(packagedSkill);
   if (readFileSync(packagedSkill, 'utf8') !== readFileSync(join(projectRoot, 'skills', 'bazframe', 'SKILL.md'), 'utf8')) {
@@ -105,6 +112,27 @@ try {
     );
   }
 
+  const collectionHome = join(temporaryRoot, 'packed-collection-home');
+  const collectionEnvironment = { ...process.env, BAZFRAME_HOME: collectionHome, NO_COLOR: '1' };
+  runInstalled(executable, ['profile', 'add', 'focused'], collectionEnvironment, 'Profile lifecycle: added');
+  runInstalled(executable, ['profile', 'use', 'focused'], collectionEnvironment, 'Active profile: focused');
+  const libraryRoot = join(temporaryRoot, 'packed-library');
+  mkdirSync(join(libraryRoot, 'library-skill'), { recursive: true });
+  writeFileSync(join(libraryRoot, 'library-skill', 'SKILL.md'), '---\nname: library-skill\ndescription: Packed library Skill.\n---\n# Library\n');
+  runInstalled(executable, ['libraries', 'add', libraryRoot], collectionEnvironment, 'Global library: added');
+  runInstalled(executable, ['profile', 'libraries', 'add', 'packed-library'], collectionEnvironment, 'Profile library reference: added');
+  writeFileSync(join(libraryRoot, 'provider-update.txt'), 'updated\n');
+  runInstalled(executable, ['libraries', 'update', 'packed-library'], collectionEnvironment, 'Global library: updated');
+  const fixturePackageRoot = join(temporaryRoot, 'packed-package');
+  mkdirSync(fixturePackageRoot, { recursive: true });
+  writeFileSync(join(fixturePackageRoot, 'build.mjs'), "import{mkdir,writeFile}from'node:fs/promises';await mkdir('dist/skills/package-skill',{recursive:true});await writeFile('dist/skills/package-skill/SKILL.md','---\\nname: package-skill\\ndescription: Packed package Skill.\\n---\\n# Package\\n');\n");
+  writeFileSync(join(fixturePackageRoot, 'bazframe-package.json'), JSON.stringify({ schemaVersion: 1, build: [process.execPath, 'build.mjs'], artifactRoot: 'dist', skillsRoot: 'skills' }));
+  runInstalled(executable, ['packages', 'add', fixturePackageRoot], collectionEnvironment, 'Global package: added');
+  runInstalled(executable, ['profile', 'packages', 'add', 'packed-package'], collectionEnvironment, 'Profile package reference: added');
+  runInstalled(executable, ['packages', 'build', 'packed-package'], collectionEnvironment, 'Global package: built');
+  const obsolete = spawnSync(executable, ['sources'], { encoding: 'utf8', shell: false, env: collectionEnvironment });
+  if (obsolete.status !== 2 || existsSync(join(collectionHome, 'sources'))) throw new Error(`Obsolete sources command was not inert.\nstdout: ${obsolete.stdout}\nstderr: ${obsolete.stderr}`);
+
   const editorHelp = spawnSync(executable, ['help', 'profile', 'edit'], {
     encoding: 'utf8', shell: false
   });
@@ -124,8 +152,9 @@ try {
   if (
     skillEditorHelp.status !== 0
     || !skillEditorHelp.stdout.includes('bazframe skill edit <skill>')
-    || !skillEditorHelp.stdout.includes('edit provider input through its provider workflow')
-    || !skillEditorHelp.stdout.includes('bazframe sources build <source>')
+    || !skillEditorHelp.stdout.includes('edit provider input')
+    || !skillEditorHelp.stdout.includes('bazframe libraries update <library>')
+    || !skillEditorHelp.stdout.includes('bazframe packages build <package>')
   ) {
     throw new Error(
       `Packed skill editor help failed (${skillEditorHelp.status}).\nstdout: ${skillEditorHelp.stdout}\nstderr: ${skillEditorHelp.stderr}`
@@ -194,7 +223,24 @@ try {
   assertMissing(join(temporaryRoot, 'pi-agent', 'extensions', 'bazframe.ts'));
 } finally {
   if (tarballPath !== undefined && existsSync(tarballPath)) unlinkSync(tarballPath);
-  rmSync(temporaryRoot, { recursive: true, force: true });
+  makeWritable(temporaryRoot);
+  rmSync(temporaryRoot, { recursive: true, force: true, maxRetries: 3 });
+}
+
+function makeWritable(path) {
+  if (!existsSync(path)) return;
+  const metadata = lstatSync(path);
+  if (metadata.isSymbolicLink()) return;
+  try { chmodSync(path, metadata.isDirectory() ? 0o700 : 0o600); } catch { /* best-effort cleanup */ }
+  if (metadata.isDirectory()) for (const name of readdirSync(path)) makeWritable(join(path, name));
+}
+
+function runInstalled(executable, args, environment, expectedOutput) {
+  const result = spawnSync(executable, args, { encoding: 'utf8', shell: false, env: environment });
+  if (result.status !== 0 || !result.stdout.includes(expectedOutput)) {
+    throw new Error(`Installed command failed: bazframe ${args.join(' ')} (${result.status}).\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  }
+  return result;
 }
 
 async function runPackedTui(executable, temporaryRoot) {

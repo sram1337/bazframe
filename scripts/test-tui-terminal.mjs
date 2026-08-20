@@ -84,7 +84,7 @@ try {
       'Terminal too small (59x15); minimum 60x16.',
       deadline
     );
-    actAndWaitForCurrentText(session, () => resize(session, 80, 24), 'Source references:', deadline);
+    actAndWaitForCurrentText(session, () => resize(session, 80, 24), 'Referenced Libraries:', deadline);
     sendLiteral(session, 'q');
     return {
       evidence: {

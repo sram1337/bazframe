@@ -1,7 +1,7 @@
 import type {
   DashboardSnapshot,
   ProfileSummary,
-  SkillSourceSummary,
+  SkillGroupSummary,
   SkillSummary
 } from '../application/tui-service.js';
 import type { ProfileRemovalIdentity } from '../profiles/profile-removal-identity.js';
@@ -11,7 +11,7 @@ export const PROFILE_CREATE_ROW_ID = '@create-profile';
 export type TuiTab = 'skills' | 'profiles' | 'adapters' | 'settings';
 export type TuiFocusRegion = 'tabs' | 'body';
 export type ProfileRoute = 'list' | 'editor';
-export type SkillRoute = 'browser' | 'preview';
+export type SkillRoute = 'browser' | 'preview' | 'object-details';
 export type ProfilePane = 'included' | 'available';
 export type ViewportRegion = 'profileList' | 'included' | 'available' | 'skillsBrowser' | 'skillPreview';
 export type ViewportRows = Readonly<Record<ViewportRegion, number>>;
@@ -21,8 +21,8 @@ export type ModalKind =
   | 'rename'
   | 'remove-confirm'
   | 'remove-recursive'
-  | 'source-root'
-  | 'source-confirm'
+  | 'library-root'
+  | 'library-confirm'
   | 'help';
 
 export interface TuiModal {
@@ -32,7 +32,7 @@ export interface TuiModal {
   directory?: string;
   removalIdentity?: ProfileRemovalIdentity;
   preservedTargets?: readonly string[];
-  sourceId?: string;
+  originId?: string;
   root?: string;
   enteredRoot?: string;
   canonicalRoot?: string;
@@ -54,8 +54,8 @@ export interface TuiState {
   availableOffset: number;
   skillsBrowserOffset: number;
   skillPreviewOffset: number;
-  expandedSourceIds: readonly string[];
-  expandedAvailableSourceIds: readonly string[];
+  expandedSkillGroupIds: readonly string[];
+  expandedAvailableGroupIds: readonly string[];
   modal?: TuiModal;
 }
 
@@ -80,9 +80,9 @@ export type TuiAction =
   | { type: 'select-included'; id?: string; ids?: readonly string[]; viewportRows?: number }
   | { type: 'select-available'; id?: string; ids?: readonly string[]; viewportRows?: number }
   | { type: 'select-browser-skill'; id?: string; ids?: readonly string[]; viewportRows?: number }
-  | { type: 'toggle-source'; id: string; expanded?: boolean }
+  | { type: 'toggle-skill-group'; id: string; expanded?: boolean }
   | {
-      type: 'toggle-available-source';
+      type: 'toggle-available-group';
       id: string;
       expanded?: boolean;
       rowIds?: readonly string[];
@@ -106,8 +106,8 @@ export const initialTuiState: TuiState = {
   availableOffset: 0,
   skillsBrowserOffset: 0,
   skillPreviewOffset: 0,
-  expandedSourceIds: ['default'],
-  expandedAvailableSourceIds: ['default']
+  expandedSkillGroupIds: ['default'],
+  expandedAvailableGroupIds: ['default']
 };
 
 export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
@@ -199,25 +199,25 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
           action.viewportRows
         )
       };
-    case 'toggle-source': {
-      const expanded = new Set(state.expandedSourceIds);
+    case 'toggle-skill-group': {
+      const expanded = new Set(state.expandedSkillGroupIds);
       const shouldExpand = action.expanded ?? !expanded.has(action.id);
       if (shouldExpand) expanded.add(action.id);
       else expanded.delete(action.id);
-      return { ...state, expandedSourceIds: [...expanded] };
+      return { ...state, expandedSkillGroupIds: [...expanded] };
     }
-    case 'toggle-available-source': {
-      const expanded = new Set(state.expandedAvailableSourceIds);
+    case 'toggle-available-group': {
+      const expanded = new Set(state.expandedAvailableGroupIds);
       const shouldExpand = action.expanded ?? !expanded.has(action.id);
       if (shouldExpand) expanded.add(action.id);
       else expanded.delete(action.id);
-      const sourceRowId = availableSourceRowId(action.id);
+      const groupRowId = availableGroupRowId(action.id);
       const selectedId = !shouldExpand && isAvailableChildOf(state.availableSkillId, action.id)
-        ? sourceRowId
+        ? groupRowId
         : state.availableSkillId;
       return {
         ...state,
-        expandedAvailableSourceIds: [...expanded],
+        expandedAvailableGroupIds: [...expanded],
         availableSkillId: selectedId,
         availableOffset: action.rowIds === undefined || action.viewportRows === undefined
           ? state.availableOffset
@@ -287,11 +287,11 @@ function reconcileState(
   const selectedProfile = snapshot.profiles.find((profile) => profile.id === selectedProfileId);
   const includedIds = selectedProfile?.memberships.map((membership) => membership.id) ?? [];
   const availableRowIds = availableRowsFor(
-    availableSourcesForProfile(snapshot, selectedProfile),
+    availableGroupsForProfile(snapshot, selectedProfile),
     new Set<string>(),
-    state.expandedAvailableSourceIds
+    state.expandedAvailableGroupIds
   ).map((row) => row.id);
-  const browserIds = browserIdsFor(snapshot, state.expandedSourceIds);
+  const browserIds = browserRowIdsFor(snapshot, state.expandedSkillGroupIds);
   const browserSkillId = keepOrBrowserNeighbor(browserIds, state.browserSkillId);
   const next = {
     ...state,
@@ -299,8 +299,10 @@ function reconcileState(
     includedSkillId: keepOrFirst(includedIds, state.includedSkillId),
     availableSkillId: keepOrAvailableNeighbor(availableRowIds, state.availableSkillId),
     browserSkillId,
-    skillRoute: state.skillRoute === 'preview'
-      && (browserSkillId === undefined || browserSkillId.startsWith('source:'))
+    skillRoute: (state.skillRoute === 'preview'
+      && (browserSkillId === undefined || browserSkillId.startsWith('collection:')))
+      || (state.skillRoute === 'object-details'
+        && (browserSkillId === undefined || !browserSkillId.startsWith('collection:')))
       ? 'browser' as const
       : state.skillRoute
   };
@@ -308,7 +310,7 @@ function reconcileState(
     profileList: [...profileIds, PROFILE_CREATE_ROW_ID],
     included: includedIds,
     available: availableRowIds,
-    skillsBrowser: browserIds,
+    skillsBrowser: browserRowIdsFor(snapshot, state.expandedSkillGroupIds),
     skillPreview: []
   }, viewportRows);
 }
@@ -323,9 +325,9 @@ function clampViewportOffsets(
   );
   const includedIds = selectedProfile?.memberships.map((membership) => membership.id) ?? [];
   const availableRowIds = availableRowsFor(
-    availableSourcesForProfile(snapshot, selectedProfile),
+    availableGroupsForProfile(snapshot, selectedProfile),
     new Set<string>(),
-    state.expandedAvailableSourceIds
+    state.expandedAvailableGroupIds
   ).map((row) => row.id);
   return clampOffsetsForIds({
     ...state,
@@ -334,7 +336,7 @@ function clampViewportOffsets(
     profileList: [...snapshot.profiles.map((profile) => profile.id), PROFILE_CREATE_ROW_ID],
     included: includedIds,
     available: availableRowIds,
-    skillsBrowser: browserIdsFor(snapshot, state.expandedSourceIds),
+    skillsBrowser: browserRowIdsFor(snapshot, state.expandedSkillGroupIds),
     skillPreview: []
   }, viewportRows);
 }
@@ -397,7 +399,7 @@ export function clampAvailableViewportOffset(
 ): number {
   const rows = Math.max(1, Math.floor(viewportRows));
   const selectedIndex = selectedId === undefined ? -1 : rowIds.indexOf(selectedId);
-  const selectedGroupHeading = selectedIndex > 0 && rowIds[selectedIndex - 1]?.startsWith('@source:')
+  const selectedGroupHeading = selectedIndex > 0 && rowIds[selectedIndex - 1]?.startsWith('@group:')
     ? selectedIndex - 1
     : -1;
   if (rows <= 1 || selectedGroupHeading < 0) {
@@ -442,75 +444,76 @@ function availableSelectionOffset(
 export type AvailableRow =
   | {
       id: string;
-      kind: 'source';
-      sourceId: string;
+      kind: 'group';
+      originId: string;
       label: string;
       root: string;
       expanded: boolean;
     }
-  | { id: string; kind: 'skill'; sourceId: string; skill: SkillSummary };
+  | { id: string; kind: 'skill'; originId: string; skill: SkillSummary };
 
-export function availableSourcesForProfile(
+export function availableGroupsForProfile(
   snapshot: DashboardSnapshot | undefined,
   profile: ProfileSummary | undefined
-): SkillSourceSummary[] {
+): SkillGroupSummary[] {
   if (snapshot === undefined) return [];
-  const directSourceIds = new Set(
-    directMembershipSources(snapshot).map((source) => source.id)
+  const directGroupIds = new Set(
+    directMembershipGroups(snapshot).map((group) => group.id)
   );
   const includedSkillIds = new Set(
     profile?.memberships.map((membership) => membership.skillId) ?? []
   );
-  const referencedManagedSourceIds = new Set(
-    profile?.sourceReferences?.map((reference) => `managed:${reference.source}`) ?? []
-  );
-  const browsableSources = snapshot.skillRoots ?? snapshot.availableSkillSources ?? snapshot.sources ?? [];
+  const referencedCollectionGroupIds = new Set([
+    ...(profile?.libraryReferences?.map((reference) => `library:${reference.id}`) ?? []),
+    ...(profile?.packageReferences?.map((reference) => `package:${reference.id}`) ?? [])
+  ]);
+  const browsableGroups = snapshot.skillGroups ?? snapshot.availableSkillGroups ?? [];
 
-  return browsableSources.flatMap((source) => {
-    if (referencedManagedSourceIds.has(source.id)) return [];
-    if (!directSourceIds.has(source.id)) return [source];
-    const skills = source.skills.filter((skill) => !includedSkillIds.has(skill.id));
-    return skills.length === 0 ? [] : [{ ...source, skills }];
+  return browsableGroups.flatMap((group) => {
+    if (referencedCollectionGroupIds.has(group.id)) return [];
+    if (!directGroupIds.has(group.id)) return [group];
+    const skills = group.skills.filter((skill) => !includedSkillIds.has(skill.id));
+    return skills.length === 0 ? [] : [{ ...group, skills }];
   });
 }
 
-export function isDirectMembershipSource(
+export function isDirectMembershipGroup(
   snapshot: DashboardSnapshot,
-  sourceId: string
+  originId: string
 ): boolean {
-  return directMembershipSources(snapshot).some((source) => source.id === sourceId);
+  return directMembershipGroups(snapshot).some((group) => group.id === originId);
 }
 
-function directMembershipSources(snapshot: DashboardSnapshot): readonly SkillSourceSummary[] {
-  if (snapshot.availableSkillSources !== undefined) return snapshot.availableSkillSources;
-  return snapshot.skillRoots === undefined ? snapshot.sources ?? [] : [];
+function directMembershipGroups(snapshot: DashboardSnapshot): readonly SkillGroupSummary[] {
+  if (snapshot.availableSkillGroups !== undefined) return snapshot.availableSkillGroups;
+  return snapshot.skillGroups?.filter((group) => group.id === 'default') ?? [];
 }
 
 export function availableRowsFor(
-  sources: readonly SkillSourceSummary[],
+  groups: readonly SkillGroupSummary[],
   includedSkillIds: ReadonlySet<string>,
-  expandedSourceIds: readonly string[]
+  expandedSkillGroupIds: readonly string[]
 ): AvailableRow[] {
-  const expanded = new Set(expandedSourceIds);
+  const expanded = new Set(expandedSkillGroupIds);
   const rows: AvailableRow[] = [];
-  for (const source of sources) {
-    const skills = source.skills.filter((skill) => !includedSkillIds.has(skill.id));
+  for (const group of groups) {
+    const skills = group.skills.filter((skill) => !includedSkillIds.has(skill.id));
     if (skills.length === 0) continue;
-    const isExpanded = expanded.has(source.id);
+    const isExpanded = expanded.has(group.id);
     rows.push({
-      id: availableSourceRowId(source.id),
-      kind: 'source',
-      sourceId: source.id,
-      label: source.label,
-      root: source.root,
+      id: availableGroupRowId(group.id),
+      kind: 'group',
+      originId: group.id,
+      label: group.label,
+      root: group.root,
       expanded: isExpanded
     });
     if (isExpanded) {
       for (const skill of skills) {
         rows.push({
-          id: `${skill.sourceId}:${skill.id}`,
+          id: `${skill.originId}:${skill.id}`,
           kind: 'skill',
-          sourceId: source.id,
+          originId: group.id,
           skill
         });
       }
@@ -519,40 +522,47 @@ export function availableRowsFor(
   return rows;
 }
 
-export function availableSourceRowId(sourceId: string): string {
-  return `@source:${sourceId}`;
+export function availableGroupRowId(originId: string): string {
+  return `@group:${originId}`;
 }
 
-export function availableSourceIdForRow(
+export function availableGroupIdForRow(
   rowIds: readonly string[],
   rowId: string | undefined
 ): string | undefined {
   if (rowId === undefined) return undefined;
-  if (rowId.startsWith('@source:')) return rowId.slice('@source:'.length);
-  const sourceRows = rowIds
-    .filter((id) => id.startsWith('@source:'))
+  if (rowId.startsWith('@group:')) return rowId.slice('@group:'.length);
+  const groupRows = rowIds
+    .filter((id) => id.startsWith('@group:'))
     .sort((left, right) => right.length - left.length);
-  return sourceRows
-    .map((id) => id.slice('@source:'.length))
-    .find((sourceId) => rowId.startsWith(`${sourceId}:`));
+  return groupRows
+    .map((id) => id.slice('@group:'.length))
+    .find((originId) => rowId.startsWith(`${originId}:`));
 }
 
-function browserIdsFor(
+function browserRowIdsFor(
   snapshot: DashboardSnapshot,
-  expandedSourceIds: readonly string[]
+  expandedSkillGroupIds: readonly string[]
 ): string[] {
-  const roots = snapshot.skillRoots ?? snapshot.sources ?? [];
-  const defaultSource = roots.filter((source) => source.id === 'default');
-  const managed = (snapshot.managedSources ?? []).map((source) =>
-    roots.find((root) => root.id === source.id) ?? { id: source.id, skills: [] });
-  const managedIds = new Set(managed.map((source) => source.id));
-  const remaining = roots.filter((source) => source.id !== 'default' && !managedIds.has(source.id));
-  return [...defaultSource, ...managed, ...remaining].flatMap((source) => [
-    `source:${source.id}`,
-    ...(expandedSourceIds.includes(source.id)
-      ? source.skills.map((skill) => `${skill.sourceId}:${skill.id}`)
+  const roots = snapshot.skillGroups ?? [];
+  const collections = snapshot.collections ?? [];
+  const added = roots.filter((group) => group.id === 'default');
+  const groupRows = (group: Pick<SkillGroupSummary, 'id' | 'skills'>): string[] => [
+    `collection:${group.id}`,
+    ...(expandedSkillGroupIds.includes(group.id)
+      ? group.skills.map((skill) => `${skill.originId}:${skill.id}`)
       : [])
-  ]);
+  ];
+  const managedRows = (kind: 'library' | 'package'): string[] => collections
+    .filter((collection) => collection.kind === kind)
+    .flatMap((collection) => groupRows(
+      roots.find((root) => root.id === collection.key) ?? { id: collection.key, skills: [] }
+    ));
+  return [
+    ...added.flatMap(groupRows),
+    ...managedRows('library'),
+    ...managedRows('package')
+  ];
 }
 
 function keepOrAvailableNeighbor(
@@ -560,38 +570,38 @@ function keepOrAvailableNeighbor(
   currentId: string | undefined
 ): string | undefined {
   if (currentId === undefined) {
-    return ids.find((id) => !id.startsWith('@source:')) ?? ids[0];
+    return ids.find((id) => !id.startsWith('@group:')) ?? ids[0];
   }
-  if (currentId.startsWith('@source:')) return keepOrFirst(ids, currentId);
+  if (currentId.startsWith('@group:')) return keepOrFirst(ids, currentId);
   if (ids.includes(currentId)) return currentId;
-  const sourceId = availableSourceIdForRow(ids, currentId);
-  const sourceRowId = sourceId === undefined ? undefined : availableSourceRowId(sourceId);
-  return sourceRowId !== undefined && ids.includes(sourceRowId)
-    ? sourceRowId
+  const originId = availableGroupIdForRow(ids, currentId);
+  const groupRowId = originId === undefined ? undefined : availableGroupRowId(originId);
+  return groupRowId !== undefined && ids.includes(groupRowId)
+    ? groupRowId
     : keepOrFirst(ids, currentId);
 }
 
-function isAvailableChildOf(rowId: string | undefined, sourceId: string): boolean {
+function isAvailableChildOf(rowId: string | undefined, originId: string): boolean {
   return rowId !== undefined
-    && !rowId.startsWith('@source:')
-    && rowId.startsWith(`${sourceId}:`);
+    && !rowId.startsWith('@group:')
+    && rowId.startsWith(`${originId}:`);
 }
 
 function keepOrBrowserNeighbor(
   ids: readonly string[],
   currentId: string | undefined
 ): string | undefined {
-  if (currentId === undefined || currentId.startsWith('source:')) {
+  if (currentId === undefined || currentId.startsWith('collection:')) {
     return keepOrFirst(ids, currentId);
   }
-  const sourceRow = ids
-    .filter((id) => id.startsWith('source:'))
+  const groupRow = ids
+    .filter((id) => id.startsWith('collection:'))
     .sort((left, right) => right.length - left.length)
-    .find((id) => currentId.startsWith(`${id.slice('source:'.length)}:`));
-  if (sourceRow === undefined) return keepOrFirst(ids, currentId);
-  const sourceId = sourceRow.slice('source:'.length);
-  const siblingIds = ids.filter((id) => id.startsWith(`${sourceId}:`));
-  return keepOrFirst(siblingIds, currentId) ?? sourceRow;
+    .find((id) => currentId.startsWith(`${id.slice('collection:'.length)}:`));
+  if (groupRow === undefined) return keepOrFirst(ids, currentId);
+  const originId = groupRow.slice('collection:'.length);
+  const siblingIds = ids.filter((id) => id.startsWith(`${originId}:`));
+  return keepOrFirst(siblingIds, currentId) ?? groupRow;
 }
 
 function keepOrFirst(ids: readonly string[], currentId: string | undefined): string | undefined {

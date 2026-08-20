@@ -24,7 +24,8 @@ describe('packed-style TUI terminal lifecycle', () => {
 
     expect(result.status, JSON.stringify(result)).toBe(0);
     expect(result.output).toContain('\u001B[?1049h');
-    expect(result.output).toContain('Skill sources');
+    expect(result.output).toContain('[-] Added Skills');
+    expect(result.output).not.toContain('Added Skills / Libraries');
     expect(result.output).toContain('\u001B[?1049l');
     expect(result.output).toContain('\u001B[?25h');
     expect(result.stderr).toBe('');

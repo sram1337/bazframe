@@ -20,23 +20,23 @@ import type {
   DashboardDiagnostic,
   DashboardSnapshot,
   DirectMembership,
-  ManagedSourceSummary,
+  SkillCollectionSummary,
   ProfileSummary,
-  SkillSourceSummary,
+  SkillGroupSummary,
   SkillSummary,
   DirectoryBrowserSnapshot,
   SkillPreview,
-  SourceCandidateSummary
+  LibraryCandidateSummary
 } from '../application/tui-service.js';
 import type { ChildResult } from '../core/child-process.js';
 import { BazframeError } from '../core/errors.js';
 import {
   availableRowsFor,
-  availableSourcesForProfile,
-  availableSourceIdForRow,
-  availableSourceRowId,
+  availableGroupsForProfile,
+  availableGroupIdForRow,
+  availableGroupRowId,
   initialTuiState,
-  isDirectMembershipSource,
+  isDirectMembershipGroup,
   moveAvailableSelectionByRows,
   moveSelection,
   PROFILE_CREATE_ROW_ID,
@@ -98,18 +98,18 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
   const [message, setMessage] = useState<UiMessage>();
   const [warningsDismissed, setWarningsDismissed] = useState(false);
   const [preview, setPreview] = useState<
-    | { state: 'loading'; sourceId: string; skillId: string }
+    | { state: 'loading'; originId: string; skillId: string }
     | { state: 'available'; value: SkillPreview }
-    | { state: 'error'; sourceId: string; skillId: string; message: string }
+    | { state: 'error'; originId: string; skillId: string; message: string }
   >();
   const [directoryBrowser, setDirectoryBrowser] = useState<DirectoryBrowserSnapshot>();
   const [browserChoice, setBrowserChoice] = useState(-1);
   const [browserOffset, setBrowserOffset] = useState(0);
-  const [sourceCandidate, setSourceCandidate] = useState<SourceCandidateSummary>();
+  const [libraryCandidate, setLibraryCandidate] = useState<LibraryCandidateSummary>();
   const snapshotRef = useRef<DashboardSnapshot | undefined>(undefined);
   const previewGeneration = useRef(0);
   const browserGeneration = useRef(0);
-  const sourceInspectionGeneration = useRef(0);
+  const libraryInspectionGeneration = useRef(0);
   const loadGeneration = useRef(0);
   const mutationActive = useRef(false);
   const exitRequested = useRef(false);
@@ -156,8 +156,8 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
       setPreview(undefined);
       return;
     }
-    setPreview({ state: 'loading', sourceId: selected.sourceId, skillId: selected.id });
-    void service.loadSkillPreview({ sourceId: selected.sourceId, skillId: selected.id })
+    setPreview({ state: 'loading', originId: selected.originId, skillId: selected.id });
+    void service.loadSkillPreview({ originId: selected.originId, skillId: selected.id })
       .then((value) => {
         if (generation === previewGeneration.current) setPreview({ state: 'available', value });
       })
@@ -165,7 +165,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
         if (generation === previewGeneration.current) {
           setPreview({
             state: 'error',
-            sourceId: selected.sourceId,
+            originId: selected.originId,
             skillId: selected.id,
             message: messageFor(error)
           });
@@ -176,24 +176,24 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
   useEffect(() => {
     const modal = state.modal;
     const generation = ++browserGeneration.current;
-    ++sourceInspectionGeneration.current;
-    if (modal?.kind !== 'source-root') {
+    ++libraryInspectionGeneration.current;
+    if (modal?.kind !== 'library-root') {
       setDirectoryBrowser(undefined);
       setBrowserChoice(-1);
       setBrowserOffset(0);
-      if (modal?.kind !== 'source-confirm') setSourceCandidate(undefined);
+      if (modal?.kind !== 'library-confirm') setLibraryCandidate(undefined);
       return;
     }
     setDirectoryBrowser(undefined);
     setBrowserChoice(-1);
     setBrowserOffset(0);
-    setSourceCandidate(undefined);
+    setLibraryCandidate(undefined);
     void service.browseDirectories(modal.value)
       .then((value) => {
         if (generation === browserGeneration.current) {
           const currentModal = stateRef.current.modal;
           if (
-            currentModal?.kind !== 'source-root'
+            currentModal?.kind !== 'library-root'
             || currentModal.value !== value.input
           ) return;
           setDirectoryBrowser(value);
@@ -204,7 +204,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
       .catch((error: unknown) => {
         if (generation !== browserGeneration.current) return;
         const currentModal = stateRef.current.modal;
-        if (currentModal?.kind !== 'source-root' || currentModal.value !== modal.value) return;
+        if (currentModal?.kind !== 'library-root' || currentModal.value !== modal.value) return;
         setDirectoryBrowser(undefined);
         setMessage({ tone: 'error', text: messageFor(error) });
       });
@@ -329,8 +329,8 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
   const selectedProfile = snapshot?.profiles.find(
     (profile) => profile.id === state.selectedProfileId
   );
-  const availableSources = useMemo(
-    () => availableSourcesForProfile(snapshot, selectedProfile),
+  const availableGroups = useMemo(
+    () => availableGroupsForProfile(snapshot, selectedProfile),
     [snapshot, selectedProfile]
   );
   const submitModal = useCallback(() => {
@@ -342,13 +342,13 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
       dispatch({ type: 'close-modal' });
       return;
     }
-    if (modal.kind === 'source-root') {
+    if (modal.kind === 'library-root') {
       const selectedEntry = browserChoice < 0
         ? undefined
         : directoryBrowser?.entries[browserChoice];
       if (selectedEntry !== undefined) {
-        ++sourceInspectionGeneration.current;
-        setSourceCandidate(undefined);
+        ++libraryInspectionGeneration.current;
+        setLibraryCandidate(undefined);
         setDirectoryBrowser(undefined);
         setBrowserChoice(-1);
         setBrowserOffset(0);
@@ -363,35 +363,35 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
         setMessage({ tone: 'error', text: 'Select an existing physical directory.' });
         return;
       }
-      const generation = ++sourceInspectionGeneration.current;
-      setSourceCandidate(undefined);
-      void service.inspectSourceCandidate({ root }).then((candidate) => {
+      const generation = ++libraryInspectionGeneration.current;
+      setLibraryCandidate(undefined);
+      void service.inspectLibraryCandidate({ root }).then((candidate) => {
         const currentModal = stateRef.current.modal;
         if (
-          generation !== sourceInspectionGeneration.current
-          || currentModal?.kind !== 'source-root'
+          generation !== libraryInspectionGeneration.current
+          || currentModal?.kind !== 'library-root'
           || currentModal.value !== modal.value
         ) return;
-        setSourceCandidate(candidate);
+        setLibraryCandidate(candidate);
         dispatch({
           type: 'open-modal',
           modal: {
-            kind: 'source-confirm',
+            kind: 'library-confirm',
             value: '',
-            sourceId: candidate.sourceId,
+            originId: candidate.libraryId,
             root: candidate.enteredRoot,
             enteredRoot: candidate.enteredRoot,
             canonicalRoot: candidate.canonicalRoot
           }
         });
       }).catch((error: unknown) => {
-        if (generation === sourceInspectionGeneration.current) {
+        if (generation === libraryInspectionGeneration.current) {
           setMessage({ tone: 'error', text: messageFor(error) });
         }
       });
       return;
     }
-    if (modal.kind === 'source-confirm') return;
+    if (modal.kind === 'library-confirm') return;
     if (modal.kind === 'remove-confirm' && modal.targetId !== undefined) {
       void mutate(
         'Remove profile',
@@ -527,15 +527,15 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
   }, [loading, message, mutation]);
 
   const handleModalInput = useCallback((input: string, key: Key, modal: TuiModal) => {
-    if (modal.kind === 'source-confirm') {
+    if (modal.kind === 'library-confirm') {
       if (key.escape || key.backspace || input === 'n') {
         clearTransientMessage();
-        ++sourceInspectionGeneration.current;
-        setSourceCandidate(undefined);
+        ++libraryInspectionGeneration.current;
+        setLibraryCandidate(undefined);
         dispatch({
           type: 'open-modal',
           modal: {
-            kind: 'source-root',
+            kind: 'library-root',
             value: modal.enteredRoot ?? modal.root ?? ''
           }
         });
@@ -544,35 +544,35 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
       if (input === 'y') {
         clearTransientMessage();
         if (tooSmall) {
-          setMessage({ tone: 'error', text: 'Resize to review the full source authorization.' });
+          setMessage({ tone: 'error', text: 'Resize to review the full library authorization.' });
           return;
         }
         if (
-          sourceCandidate?.manifest.state !== 'absent'
-          || modal.sourceId !== sourceCandidate.sourceId
-          || modal.enteredRoot !== sourceCandidate.enteredRoot
-          || modal.canonicalRoot !== sourceCandidate.canonicalRoot
+          libraryCandidate?.packageManifest.state !== 'absent'
+          || modal.originId !== libraryCandidate.libraryId
+          || modal.enteredRoot !== libraryCandidate.enteredRoot
+          || modal.canonicalRoot !== libraryCandidate.canonicalRoot
         ) {
           setMessage({
             tone: 'error',
-            text: 'Declared or invalid builds must be added with `bazframe sources add`.'
+            text: 'Directories with a package manifest must be added with `bazframe packages add`.'
           });
           return;
         }
         void mutate(
-          'Add source',
+          'Add library',
           async () => {
-            await service.addSource({ root: sourceCandidate.canonicalRoot });
+            await service.addLibrary({ root: libraryCandidate.canonicalRoot });
           },
           () => {
-            setSourceCandidate(undefined);
+            setLibraryCandidate(undefined);
             dispatch({ type: 'close-modal' });
           }
         );
       }
       return;
     }
-    if (modal.kind === 'source-root' && (key.upArrow || key.downArrow)) {
+    if (modal.kind === 'library-root' && (key.upArrow || key.downArrow)) {
       const count = directoryBrowser?.entries.length ?? 0;
       if (count > 0) {
         clearTransientMessage();
@@ -588,9 +588,9 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
     }
     if (key.escape) {
       clearTransientMessage();
-      if (modal.kind === 'source-root') {
-        ++sourceInspectionGeneration.current;
-        setSourceCandidate(undefined);
+      if (modal.kind === 'library-root') {
+        ++libraryInspectionGeneration.current;
+        setLibraryCandidate(undefined);
         setDirectoryBrowser(undefined);
         setBrowserChoice(-1);
         setBrowserOffset(0);
@@ -616,9 +616,9 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
     if (modal.kind === 'help') return;
     if (key.backspace || key.delete) {
       clearTransientMessage();
-      if (modal.kind === 'source-root') {
-        ++sourceInspectionGeneration.current;
-        setSourceCandidate(undefined);
+      if (modal.kind === 'library-root') {
+        ++libraryInspectionGeneration.current;
+        setLibraryCandidate(undefined);
         setDirectoryBrowser(undefined);
         setBrowserChoice(-1);
         setBrowserOffset(0);
@@ -630,9 +630,9 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
       const printable = input.replaceAll(/[\r\n\0]/gu, '');
       if (printable.length > 0) {
         clearTransientMessage();
-        if (modal.kind === 'source-root') {
-          ++sourceInspectionGeneration.current;
-          setSourceCandidate(undefined);
+        if (modal.kind === 'library-root') {
+          ++libraryInspectionGeneration.current;
+          setLibraryCandidate(undefined);
           setDirectoryBrowser(undefined);
           setBrowserChoice(-1);
           setBrowserOffset(0);
@@ -640,7 +640,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
         dispatch({ type: 'set-modal-value', value: modal.value + printable });
       }
     }
-  }, [clearTransientMessage, directoryBrowser, mutate, service, sourceCandidate, submitModal, tooSmall]);
+  }, [clearTransientMessage, directoryBrowser, mutate, service, libraryCandidate, submitModal, tooSmall]);
 
   useInput((input, key) => {
     const currentState = stateRef.current;
@@ -703,11 +703,11 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
     const vimRight = !key.ctrl && !key.meta && input === 'l';
     const vimUp = !key.ctrl && !key.meta && input === 'k';
     const vimDown = !key.ctrl && !key.meta && input === 'j';
-    const skillPreviewBack = currentState.focusedRegion === 'body'
+    const skillDetailBack = currentState.focusedRegion === 'body'
       && currentState.activeTab === 'skills'
-      && currentState.skillRoute === 'preview'
+      && currentState.skillRoute !== 'browser'
       && (key.leftArrow || vimLeft);
-    const routeBack = key.escape || key.backspace || input === 'H' || skillPreviewBack;
+    const routeBack = key.escape || key.backspace || input === 'H' || skillDetailBack;
     const routeForward = key.return || input === 'L';
     if (routeBack) {
       if (currentState.activeTab === 'profiles' && currentState.profileRoute === 'editor') {
@@ -715,7 +715,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
         dispatch({ type: 'profile-route', route: 'list' });
         return;
       }
-      if (currentState.activeTab === 'skills' && currentState.skillRoute === 'preview') {
+      if (currentState.activeTab === 'skills' && currentState.skillRoute !== 'browser') {
         clearTransientMessage();
         dispatch({ type: 'skill-route', route: 'browser' });
         return;
@@ -741,25 +741,25 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
     const currentSelectedProfile = currentSnapshot.profiles.find(
       (profile) => profile.id === stateRef.current.selectedProfileId
     );
-    const currentAvailableSources = availableSourcesForProfile(currentSnapshot, currentSelectedProfile);
+    const currentAvailableGroups = availableGroupsForProfile(currentSnapshot, currentSelectedProfile);
     const currentAvailableRows = availableRowsFor(
-      currentAvailableSources,
+      currentAvailableGroups,
       new Set<string>(),
-      currentState.expandedAvailableSourceIds
+      currentState.expandedAvailableGroupIds
     );
     const currentAvailableRowIds = currentAvailableRows.map((row) => row.id);
-    const setAvailableSourceExpansion = (sourceId: string, expanded: boolean): string[] => {
-      const nextExpanded = new Set(currentState.expandedAvailableSourceIds);
-      if (expanded) nextExpanded.add(sourceId);
-      else nextExpanded.delete(sourceId);
+    const setAvailableGroupExpansion = (originId: string, expanded: boolean): string[] => {
+      const nextExpanded = new Set(currentState.expandedAvailableGroupIds);
+      if (expanded) nextExpanded.add(originId);
+      else nextExpanded.delete(originId);
       const rowIds = availableRowsFor(
-        currentAvailableSources,
+        currentAvailableGroups,
         new Set<string>(),
         [...nextExpanded]
       ).map((row) => row.id);
       dispatch({
-        type: 'toggle-available-source',
-        id: sourceId,
+        type: 'toggle-available-group',
+        id: originId,
         expanded,
         rowIds,
         viewportRows: viewportRowsRef.current.available
@@ -802,7 +802,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
             : profileSnapshotSelection(
                 currentSnapshot,
                 profile,
-                currentState.expandedAvailableSourceIds,
+                currentState.expandedAvailableGroupIds,
                 viewportRowsRef.current
               ));
           return;
@@ -818,7 +818,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
           dispatch(profileSnapshotSelection(
             currentSnapshot,
             currentSelectedProfile,
-            currentState.expandedAvailableSourceIds,
+            currentState.expandedAvailableGroupIds,
             viewportRowsRef.current,
             true
           ));
@@ -923,22 +923,22 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
         const selectedAvailableRow = currentAvailableRows.find(
           (row) => row.id === currentState.availableSkillId
         );
-        const selectedSourceId = availableSourceIdForRow(
+        const selectedGroupId = availableGroupIdForRow(
           currentAvailableRowIds,
           currentState.availableSkillId
         );
-        if (selectedAvailableRow?.kind === 'source' && routeForward) {
+        if (selectedAvailableRow?.kind === 'group' && routeForward) {
           clearTransientMessage();
-          setAvailableSourceExpansion(selectedAvailableRow.sourceId, !selectedAvailableRow.expanded);
+          setAvailableGroupExpansion(selectedAvailableRow.originId, !selectedAvailableRow.expanded);
           return;
         }
-        if (selectedAvailableRow?.kind === 'source' && (key.rightArrow || vimRight)) {
+        if (selectedAvailableRow?.kind === 'group' && (key.rightArrow || vimRight)) {
           clearTransientMessage();
           if (!selectedAvailableRow.expanded) {
-            setAvailableSourceExpansion(selectedAvailableRow.sourceId, true);
+            setAvailableGroupExpansion(selectedAvailableRow.originId, true);
           } else {
             const firstChild = currentAvailableRows.find(
-              (row) => row.kind === 'skill' && row.sourceId === selectedAvailableRow.sourceId
+              (row) => row.kind === 'skill' && row.originId === selectedAvailableRow.originId
             );
             if (firstChild !== undefined) {
               dispatch({
@@ -951,30 +951,30 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
           }
           return;
         }
-        if ((key.leftArrow || vimLeft) && selectedSourceId !== undefined) {
+        if ((key.leftArrow || vimLeft) && selectedGroupId !== undefined) {
           clearTransientMessage();
           if (selectedAvailableRow?.kind === 'skill') {
             dispatch({
               type: 'select-available',
-              id: availableSourceRowId(selectedSourceId),
+              id: availableGroupRowId(selectedGroupId),
               ids: currentAvailableRowIds,
               viewportRows: viewportRowsRef.current.available
             });
             return;
           }
-          if (selectedAvailableRow?.kind === 'source' && selectedAvailableRow.expanded) {
-            setAvailableSourceExpansion(selectedSourceId, false);
+          if (selectedAvailableRow?.kind === 'group' && selectedAvailableRow.expanded) {
+            setAvailableGroupExpansion(selectedGroupId, false);
             return;
           }
         }
-        if (input === 'o' && selectedSourceId !== undefined) {
+        if (input === 'o' && selectedGroupId !== undefined) {
           clearTransientMessage();
-          setAvailableSourceExpansion(selectedSourceId, true);
+          setAvailableGroupExpansion(selectedGroupId, true);
           return;
         }
-        if (input === 'c' && selectedSourceId !== undefined) {
+        if (input === 'c' && selectedGroupId !== undefined) {
           clearTransientMessage();
-          setAvailableSourceExpansion(selectedSourceId, false);
+          setAvailableGroupExpansion(selectedGroupId, false);
           return;
         }
       }
@@ -1000,20 +1000,15 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
         const selectedRow = currentAvailableRows.find(
           (row) => row.id === currentState.availableSkillId
         );
-        const selectedSourceId = selectedRow?.sourceId;
+        const selectedGroupId = selectedRow?.originId;
         if (
-          selectedSourceId !== undefined
-          && !isDirectMembershipSource(currentSnapshot, selectedSourceId)
+          selectedGroupId !== undefined
+          && !isDirectMembershipGroup(currentSnapshot, selectedGroupId)
         ) {
-          const managed = currentSnapshot.managedSources?.find(
-            (source) => source.id === selectedSourceId
-          );
-          setMessage(managed === undefined
-            ? { tone: 'info', text: 'This source is browse-only in the TUI.' }
-            : {
-                tone: 'info',
-                text: `Attach the whole source with \`bazframe profile sources add ${managed.source} --profile ${currentSelectedProfile.id}\`.`
-              });
+          const collection = currentSnapshot.collections?.find((item) => item.key === selectedGroupId);
+          setMessage(collection === undefined
+            ? { tone: 'info', text: 'This group is browse-only in the TUI.' }
+            : { tone: 'info', text: `Attach the whole ${collection.kind} with \`bazframe profile ${collection.kind === 'library' ? 'libraries' : 'packages'} add ${collection.id} --profile ${currentSelectedProfile.id}\`.` });
           return;
         }
         if (!currentSelectedProfile.membershipWritable) {
@@ -1027,7 +1022,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
           void mutate(
             'Add membership',
             () => service.addMembership(currentSelectedProfile.id, {
-              sourceId: selectedRow.skill.sourceId,
+              originId: selectedRow.skill.originId,
               skillId: selectedRow.skill.id
             })
           );
@@ -1043,12 +1038,12 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
         const membership = currentSelectedProfile.memberships.find(
           (candidate) => candidate.id === currentState.includedSkillId
         );
-        if (membership?.manageable === true && membership.sourceId !== undefined) {
+        if (membership?.manageable === true && membership.originId !== undefined) {
           void mutate(
             'Remove membership',
             () => service.removeMembership(currentSelectedProfile.id, {
               membershipId: membership.membershipId,
-              sourceId: membership.sourceId!,
+              originId: membership.originId!,
               skillId: membership.skillId
             })
           );
@@ -1072,20 +1067,17 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
         const selectedSkill = findBrowserSkill(currentSnapshot, currentState.browserSkillId);
         if (selectedSkill !== undefined) {
           clearTransientMessage();
-          if (selectedSkill.sourceId === 'default') {
+          if (selectedSkill.originId === 'default') {
             void editInExternalEditor(
               'Edit skill definition',
               () => service.editSkillDefinition({
-                sourceId: selectedSkill.sourceId,
+                originId: selectedSkill.originId,
                 skillId: selectedSkill.id
               })
             );
-          } else if (selectedSkill.sourceId.startsWith('managed:')) {
-            const sourceId = selectedSkill.sourceId.slice('managed:'.length);
-            setMessage({
-              tone: 'info',
-              text: `Run \`bazframe sources build ${sourceId}\` after editing provider input through its provider workflow. This skill is from an immutable managed-source snapshot; Bazframe cannot infer a corresponding editable child file.`
-            });
+          } else if (selectedSkill.originId.startsWith('library:') || selectedSkill.originId.startsWith('package:')) {
+            const [kind, id] = selectedSkill.originId.split(':');
+            setMessage({ tone: 'info', text: `Edit provider input, then run \`bazframe ${kind === 'library' ? 'libraries update' : 'packages build'} ${id}\`. This Skill is from an immutable snapshot.` });
           }
           return;
         }
@@ -1117,13 +1109,15 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
         }
         return;
       }
+      if (currentState.skillRoute === 'object-details') return;
       if (input === 'a') {
         clearTransientMessage();
-        setSourceCandidate(undefined);
-        dispatch({ type: 'open-modal', modal: { kind: 'source-root', value: '' } });
+        setLibraryCandidate(undefined);
+        dispatch({ type: 'open-modal', modal: { kind: 'library-root', value: '' } });
         return;
       }
-      const ids = browserNodeIds(currentSnapshot, currentState.expandedSourceIds);
+      const rows = skillBrowserRows(currentSnapshot, currentState.expandedSkillGroupIds);
+      const ids = rows.map((row) => row.id);
       if (
         key.upArrow || key.downArrow || vimUp || vimDown
         || key.pageUp || key.pageDown || key.home || key.end
@@ -1150,36 +1144,40 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
         });
         return;
       }
-      const owner = owningSourceId(currentSnapshot, currentState.browserSkillId);
+      const owner = owningSkillGroupId(currentSnapshot, currentState.browserSkillId);
       if (input === 'o' && owner !== undefined) {
         clearTransientMessage();
-        dispatch({ type: 'toggle-source', id: owner, expanded: true });
+        dispatch({ type: 'toggle-skill-group', id: owner, expanded: true });
         return;
       }
       if (input === 'c' && owner !== undefined) {
         clearTransientMessage();
-        if (!currentState.browserSkillId?.startsWith('source:')) {
+        if (!currentState.browserSkillId?.startsWith('collection:')) {
           dispatch({
             type: 'select-browser-skill',
-            id: `source:${owner}`,
+            id: `collection:${owner}`,
             ids,
             viewportRows: viewportRowsRef.current.skillsBrowser
           });
         }
-        dispatch({ type: 'toggle-source', id: owner, expanded: false });
+        dispatch({ type: 'toggle-skill-group', id: owner, expanded: false });
         return;
       }
-      const sourcePrefix = 'source:';
-      if (currentState.browserSkillId?.startsWith(sourcePrefix)) {
-        const sourceId = currentState.browserSkillId.slice(sourcePrefix.length);
+      const groupPrefix = 'collection:';
+      if (currentState.browserSkillId?.startsWith(groupPrefix)) {
+        const originId = currentState.browserSkillId.slice(groupPrefix.length);
         if (routeForward) {
           clearTransientMessage();
-          dispatch({ type: 'toggle-source', id: sourceId });
+          if ((currentSnapshot.collections ?? []).some((item) => item.key === originId)) {
+            dispatch({ type: 'skill-route', route: 'object-details' });
+          } else {
+            dispatch({ type: 'toggle-skill-group', id: originId });
+          }
         } else if (key.rightArrow || vimRight) {
           clearTransientMessage();
-          if (currentState.expandedSourceIds.includes(sourceId)) {
-            const firstSkill = (currentSnapshot.skillRoots ?? currentSnapshot.sources ?? []).find(
-              (source) => source.id === sourceId
+          if (currentState.expandedSkillGroupIds.includes(originId)) {
+            const firstSkill = (currentSnapshot.skillGroups ?? []).find(
+              (group) => group.id === originId
             )?.skills[0];
             if (firstSkill !== undefined) {
               dispatch({
@@ -1189,10 +1187,10 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
                 viewportRows: viewportRowsRef.current.skillsBrowser
               });
             }
-          } else dispatch({ type: 'toggle-source', id: sourceId, expanded: true });
+          } else dispatch({ type: 'toggle-skill-group', id: originId, expanded: true });
         } else if (key.leftArrow || vimLeft) {
           clearTransientMessage();
-          dispatch({ type: 'toggle-source', id: sourceId, expanded: false });
+          dispatch({ type: 'toggle-skill-group', id: originId, expanded: false });
         }
         return;
       }
@@ -1208,7 +1206,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
         clearTransientMessage();
         dispatch({
           type: 'select-browser-skill',
-          id: `source:${owner}`,
+          id: `collection:${owner}`,
           ids,
           viewportRows: viewportRowsRef.current.skillsBrowser
         });
@@ -1223,7 +1221,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
         rows={rows}
         modal={state.modal}
         busy={mutation !== undefined}
-        sourceCandidate={sourceCandidate}
+        libraryCandidate={libraryCandidate}
       />
     );
   }
@@ -1243,7 +1241,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
               directoryBrowser={directoryBrowser}
               browserChoice={browserChoice}
               browserOffset={browserOffset}
-              sourceCandidate={sourceCandidate}
+              libraryCandidate={libraryCandidate}
             />
           : loadError !== undefined && snapshot === undefined
             ? <LoadFailureView message={loadError} />
@@ -1256,15 +1254,23 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
                   breadcrumb
                   focused={state.focusedRegion === 'body'}
                 />
+              : compact && state.skillRoute === 'object-details' && state.browserSkillId?.startsWith('collection:')
+                ? <CollectionDetails
+                    snapshot={snapshot}
+                    originId={state.browserSkillId.slice('collection:'.length)}
+                    breadcrumb
+                    compact
+                    focused={state.focusedRegion === 'body'}
+                  />
               : <SkillsMasterDetail
                   snapshot={snapshot}
                   selectedId={state.browserSkillId}
                   offset={state.skillsBrowserOffset}
-                  expandedSourceIds={state.expandedSourceIds}
+                  expandedSkillGroupIds={state.expandedSkillGroupIds}
                   preview={preview}
                   previewOffset={state.skillPreviewOffset}
                   focused={state.focusedRegion === 'body'}
-                  previewFocused={state.skillRoute === 'preview'}
+                  previewFocused={state.skillRoute !== 'browser'}
                   maxRows={bodyRows - 4}
                   previewContentRows={viewportRows.skillPreview}
                   compact={compact}
@@ -1283,8 +1289,8 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
                       />
                     : <ProfileEditor
                         profile={selectedProfile}
-                        availableSources={availableSources}
-                        expandedAvailableSourceIds={state.expandedAvailableSourceIds}
+                        availableGroups={availableGroups}
+                        expandedAvailableGroupIds={state.expandedAvailableGroupIds}
                         focusedPane={state.focusedRegion === 'body' ? state.focusedPane : undefined}
                         includedSelectionId={state.includedSkillId}
                         availableSelectionId={state.availableSkillId}
@@ -1299,8 +1305,8 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
                       selectedId={state.selectedProfileId}
                       profileOffset={state.profileListOffset}
                       profile={selectedProfile}
-                      availableSources={availableSources}
-                      expandedAvailableSourceIds={state.expandedAvailableSourceIds}
+                      availableGroups={availableGroups}
+                      expandedAvailableGroupIds={state.expandedAvailableGroupIds}
                       editing={state.profileRoute === 'editor'}
                       focused={state.focusedRegion === 'body'}
                       focusedPane={state.focusedPane}
@@ -1336,13 +1342,13 @@ function BelowMinimumView({
   rows,
   modal,
   busy,
-  sourceCandidate
+  libraryCandidate
 }: {
   columns: number;
   rows: number;
   modal: TuiModal | undefined;
   busy: boolean;
-  sourceCandidate: SourceCandidateSummary | undefined;
+  libraryCandidate: LibraryCandidateSummary | undefined;
 }) {
   const sizeLine = `Terminal too small (${columns}x${rows}); minimum ${MIN_COLUMNS}x${MIN_ROWS}.`;
   if (modal === undefined) {
@@ -1376,11 +1382,11 @@ function BelowMinimumView({
     );
   }
 
-  if (modal.kind.startsWith('source-')) {
-    const blocked = sourceCandidate?.manifest.state !== 'absent';
-    const step = modal.kind === 'source-root'
-      ? 'Physical source root'
-      : `Review ${modal.sourceId ?? '(unknown source)'}`;
+  if (modal.kind.startsWith('library-')) {
+    const blocked = libraryCandidate?.packageManifest.state !== 'absent';
+    const step = modal.kind === 'library-root'
+      ? 'Physical library root'
+      : `Review ${modal.originId ?? '(unknown library)'}`;
     return (
       <Box
         width={columns}
@@ -1390,14 +1396,14 @@ function BelowMinimumView({
         flexDirection="column"
         overflow="hidden"
       >
-        <Text bold>Add manifest-free managed source</Text>
+        <Text bold>Add library</Text>
         <Text wrap="truncate-end">{step}</Text>
-        {modal.kind === 'source-confirm'
+        {modal.kind === 'library-confirm'
           ? <>
               <Text wrap="truncate-end">Entered: {modal.enteredRoot ?? modal.root}</Text>
               <Text wrap="truncate-end">Canonical: {modal.canonicalRoot ?? '(unavailable)'}</Text>
               <Text color={blocked ? 'red' : 'yellow'} wrap="truncate-end">
-                {blocked ? 'Blocked manifest; use the CLI.' : 'Resize to authorize; y is disabled here.'}
+                {blocked ? 'Package manifest present; use `bazframe packages add`.' : 'Resize to authorize; y is disabled here.'}
               </Text>
               <Text bold>n/Esc/Backspace back</Text>
             </>
@@ -1406,7 +1412,7 @@ function BelowMinimumView({
               <Text bold>Enter next  Esc back/cancel</Text>
             </>}
         <Text color="yellow" wrap="truncate-end">{sizeLine}</Text>
-        <Text bold>Final source authorization is disabled at this size.</Text>
+        <Text bold>Final library authorization is disabled at this size.</Text>
       </Box>
     );
   }
@@ -1519,6 +1525,11 @@ function TabBar({
 
 type MasterPaneFocus = 'active' | 'parent' | 'inactive';
 
+function formatProfileReferences(references: ProfileSummary['libraryReferences']): string {
+  if (references === undefined || references.length === 0) return '(none)';
+  return references.map((reference) => reference.availability === 'available' ? reference.id : `${reference.id} [unavailable: ${reference.diagnostic ?? 'unknown failure'}]`).join(', ');
+}
+
 function ProfilesList({
   profiles,
   selectedId,
@@ -1592,8 +1603,8 @@ function ProfilesList({
 
 function ProfileEditor({
   profile,
-  availableSources,
-  expandedAvailableSourceIds,
+  availableGroups,
+  expandedAvailableGroupIds,
   focusedPane,
   includedSelectionId,
   availableSelectionId,
@@ -1604,8 +1615,8 @@ function ProfileEditor({
   breadcrumb = false
 }: {
   profile: ProfileSummary | undefined;
-  availableSources: readonly SkillSourceSummary[];
-  expandedAvailableSourceIds: readonly string[];
+  availableGroups: readonly SkillGroupSummary[];
+  expandedAvailableGroupIds: readonly string[];
   focusedPane: 'included' | 'available' | undefined;
   includedSelectionId: string | undefined;
   availableSelectionId: string | undefined;
@@ -1630,15 +1641,8 @@ function ProfileEditor({
         : <Text dimColor wrap="truncate-end">
             {profile.membershipDiagnostic ?? profile.directory}
           </Text>}
-      {compact
-        ? null
-        : <Text wrap="truncate-end">
-            Source references: {profile.sourceReferences?.length
-              ? profile.sourceReferences.map((reference) => reference.availability === 'available'
-                ? reference.source
-                : `${reference.source} [unavailable: ${reference.diagnostic ?? 'unknown failure'}]`).join(', ')
-              : '(none)'} (read-only)
-          </Text>}
+      {compact ? null : <Text wrap="truncate-end">Referenced Libraries: {formatProfileReferences(profile.libraryReferences)} (read-only)</Text>}
+      {compact ? null : <Text wrap="truncate-end">Referenced Packages: {formatProfileReferences(profile.packageReferences)} (read-only)</Text>}
       <MembershipPane
         title="Included skills"
         memberships={profile.memberships}
@@ -1649,8 +1653,8 @@ function ProfileEditor({
       />
       <SkillPane
         title="Available skills"
-        sources={availableSources}
-        expandedSourceIds={expandedAvailableSourceIds}
+        groups={availableGroups}
+        expandedSkillGroupIds={expandedAvailableGroupIds}
         selectedId={availableSelectionId}
         offset={availableOffset}
         focused={focusedPane === 'available'}
@@ -1714,24 +1718,24 @@ function MembershipPane({
 
 function SkillPane({
   title,
-  sources,
-  expandedSourceIds,
+  groups,
+  expandedSkillGroupIds,
   selectedId,
   offset,
   focused,
   maxRows
 }: {
   title: string;
-  sources: readonly SkillSourceSummary[];
-  expandedSourceIds: readonly string[];
+  groups: readonly SkillGroupSummary[];
+  expandedSkillGroupIds: readonly string[];
   selectedId: string | undefined;
   offset: number;
   focused: boolean;
   maxRows: number;
 }) {
-  const rows = availableRowsFor(sources, new Set<string>(), expandedSourceIds);
-  const skillCount = sources.reduce((count, source) => count + source.skills.length, 0);
-  const labels = new Map(sources.map((source) => [source.id, source.label]));
+  const rows = availableRowsFor(groups, new Set<string>(), expandedSkillGroupIds);
+  const skillCount = groups.reduce((count, group) => count + group.skills.length, 0);
+  const labels = new Map(groups.map((group) => [group.id, group.label]));
   return (
     <Box
       borderStyle={focused ? 'bold' : 'classic'}
@@ -1752,13 +1756,13 @@ function SkillPane({
         offset={offset}
         maxRows={maxRows}
         empty={<Text dimColor aria-label={`${title} pane is empty`}>(empty)</Text>}
-        renderRow={(row) => row.kind === 'source'
+        renderRow={(row) => row.kind === 'group'
           ? <Text
               key={row.id}
               inverse={focused && row.id === selectedId}
               bold
               wrap="truncate-end"
-              aria-label={`Available source ${row.label}, ${row.expanded ? 'expanded' : 'collapsed'}${focused && row.id === selectedId ? ', active selection' : ''}, ${row.root}`}
+              aria-label={`Available group ${row.label}, ${row.expanded ? 'expanded' : 'collapsed'}${focused && row.id === selectedId ? ', active selection' : ''}, ${row.root}`}
             >
               {row.expanded ? '[-]' : '[+]'}{' '}{row.label}
             </Text>
@@ -1767,9 +1771,9 @@ function SkillPane({
               inverse={focused && row.id === selectedId}
               bold={focused && row.id === selectedId}
               wrap="truncate-end"
-              aria-label={`Available skill ${row.skill.id}, source ${row.skill.sourceId}${focused && row.id === selectedId ? ', active selection' : ''}`}
+              aria-label={`Available skill ${row.skill.id}, origin ${row.skill.originId}${focused && row.id === selectedId ? ', active selection' : ''}`}
             >
-              {maxRows === 1 ? `[${labels.get(row.sourceId) ?? row.sourceId}] ` : '  '}{row.skill.id}
+              {maxRows === 1 ? `[${labels.get(row.originId) ?? row.originId}] ` : '  '}{row.skill.id}
             </Text>}
       />
     </Box>
@@ -1800,8 +1804,8 @@ function ProfilesMasterDetail({
   selectedId,
   profileOffset,
   profile,
-  availableSources,
-  expandedAvailableSourceIds,
+  availableGroups,
+  expandedAvailableGroupIds,
   editing,
   focused,
   focusedPane,
@@ -1815,8 +1819,8 @@ function ProfilesMasterDetail({
   selectedId: string | undefined;
   profileOffset: number;
   profile: ProfileSummary | undefined;
-  availableSources: readonly SkillSourceSummary[];
-  expandedAvailableSourceIds: readonly string[];
+  availableGroups: readonly SkillGroupSummary[];
+  expandedAvailableGroupIds: readonly string[];
   editing: boolean;
   focused: boolean;
   focusedPane: 'included' | 'available';
@@ -1840,8 +1844,8 @@ function ProfilesMasterDetail({
       <Box width="64%" paddingLeft={1} overflow="hidden">
         <ProfileEditor
           profile={profile}
-          availableSources={availableSources}
-          expandedAvailableSourceIds={expandedAvailableSourceIds}
+          availableGroups={availableGroups}
+          expandedAvailableGroupIds={expandedAvailableGroupIds}
           focusedPane={focused && editing ? focusedPane : undefined}
           includedSelectionId={includedSelectionId}
           availableSelectionId={availableSelectionId}
@@ -1859,7 +1863,7 @@ function SkillsMasterDetail({
   snapshot,
   selectedId,
   offset,
-  expandedSourceIds,
+  expandedSkillGroupIds,
   preview,
   previewOffset,
   focused,
@@ -1871,10 +1875,10 @@ function SkillsMasterDetail({
   snapshot: DashboardSnapshot | undefined;
   selectedId: string | undefined;
   offset: number;
-  expandedSourceIds: readonly string[];
-  preview: { state: 'loading'; sourceId: string; skillId: string }
+  expandedSkillGroupIds: readonly string[];
+  preview: { state: 'loading'; originId: string; skillId: string }
     | { state: 'available'; value: SkillPreview }
-    | { state: 'error'; sourceId: string; skillId: string; message: string }
+    | { state: 'error'; originId: string; skillId: string; message: string }
     | undefined;
   previewOffset: number;
   focused: boolean;
@@ -1884,7 +1888,7 @@ function SkillsMasterDetail({
   compact: boolean;
 }) {
   if (compact) {
-    return <SkillsBrowser snapshot={snapshot} selectedId={selectedId} offset={offset} expandedSourceIds={expandedSourceIds} focus={focused ? 'active' : 'inactive'} maxRows={maxRows} />;
+    return <SkillsBrowser snapshot={snapshot} selectedId={selectedId} offset={offset} expandedSkillGroupIds={expandedSkillGroupIds} focus={focused ? 'active' : 'inactive'} maxRows={maxRows} />;
   }
   return (
     <Box flexDirection="row" width="100%" height="100%">
@@ -1893,43 +1897,61 @@ function SkillsMasterDetail({
           snapshot={snapshot}
           selectedId={selectedId}
           offset={offset}
-          expandedSourceIds={expandedSourceIds}
+          expandedSkillGroupIds={expandedSkillGroupIds}
           focus={focused ? previewFocused ? 'parent' : 'active' : 'inactive'}
           maxRows={maxRows}
         />
       </Box>
       <Box width="54%" paddingLeft={1} overflow="hidden">
-        {selectedId?.startsWith('source:')
-          ? <SourceDetails snapshot={snapshot} sourceId={selectedId.slice('source:'.length)} />
+        {selectedId?.startsWith('collection:')
+          ? <CollectionDetails snapshot={snapshot} originId={selectedId.slice('collection:'.length)} focused={focused && previewFocused} />
           : <SkillPreviewPane preview={preview} offset={previewOffset} contentRows={previewContentRows} focused={focused && previewFocused} />}
       </Box>
     </Box>
   );
 }
 
-function SourceDetails({
+function CollectionDetails({
   snapshot,
-  sourceId
+  originId,
+  breadcrumb = false,
+  compact = false,
+  focused = false
 }: {
   snapshot: DashboardSnapshot | undefined;
-  sourceId: string;
+  originId: string;
+  breadcrumb?: boolean;
+  compact?: boolean;
+  focused?: boolean;
 }) {
-  if (snapshot === undefined) return <LoadingView title="Source details" message="Loading source..." />;
-  const managed = snapshot.managedSources?.find((source) => source.id === sourceId);
-  const root = (snapshot.skillRoots ?? snapshot.sources ?? []).find((source) => source.id === sourceId);
+  if (snapshot === undefined) return <LoadingView title="Library/package details" message="Loading object details..." />;
+  const managed = snapshot.collections?.find((item) => item.key === originId);
+  const root = (snapshot.skillGroups ?? []).find((group) => group.id === originId);
   if (managed !== undefined) {
     return (
-      <Box borderStyle="classic" flexDirection="column" paddingX={1}>
-        <Text bold aria-label={managedSourceAccessibilityLabel(managed, true)}>{managed.source}</Text>
-        <Text>Health: {managed.health}</Text>
-        <Text>Profile references: {managed.referenceCount}</Text>
-        <Text wrap="truncate-end">Provider input: {managed.root}</Text>
-        <Text wrap="truncate-end">Activated digest: sha256:{managed.digest}</Text>
-        <Text>Source-unit root: {managed.sourceUnitRoot}</Text>
-        <Text>Rebuild: {managed.rebuildAvailability} (CLI only)</Text>
-        {managed.diagnostics.length === 0
-          ? <Text dimColor>Diagnostics: (none)</Text>
-          : managed.diagnostics.map((item, index) => <Text key={index} color="red" wrap="truncate-end">! {item}</Text>)}
+      <Box borderStyle={focused ? 'bold' : 'classic'} borderColor={focusBorderColor(focused)} borderDimColor={!focused} flexDirection="column" paddingX={1}>
+        <Text bold aria-label={`${breadcrumb ? 'Back to Skills browser, ' : ''}${collectionAccessibilityLabel(managed, true)}${focused ? ', active and focused' : ''}`}>{breadcrumb ? '<- Skills / ' : ''}{managed.kind === 'library' ? 'Library' : 'Package'}: {managed.id}</Text>
+        {compact
+          ? <>
+              <Text>Health: {managed.health}; {managed.skillCount} Skills; references: {managed.referenceCount}</Text>
+              <Text wrap="truncate-end">Provider input: {managed.root}</Text>
+              <Text wrap="truncate-end">Activated digest: sha256:{managed.digest}</Text>
+              <Text>Artifact root: {managed.artifactRoot ?? '.'}; Skills root: {managed.skillsRoot}</Text>
+              <Text>{managed.kind === 'library' ? 'Update' : 'Build'}: {managed.refreshAvailability} (CLI only)</Text>
+            </>
+          : <>
+              <Text>Health: {managed.health}</Text>
+              <Text>{managed.skillCount} Skills</Text>
+              <Text>Profile references: {managed.referenceCount}</Text>
+              <Text wrap="truncate-end">Provider input: {managed.root}</Text>
+              <Text wrap="truncate-end">Activated digest: sha256:{managed.digest}</Text>
+              <Text>Artifact root: {managed.artifactRoot ?? '.'}</Text>
+              <Text>Skills root: {managed.skillsRoot}</Text>
+              <Text>{managed.kind === 'library' ? 'Update' : 'Build'}: {managed.refreshAvailability} (CLI only)</Text>
+              {managed.diagnostics.length === 0
+                ? <Text dimColor>Diagnostics: (none)</Text>
+                : managed.diagnostics.map((item, index) => <Text key={index} color="red" wrap="truncate-end">! {item}</Text>)}
+            </>}
       </Box>
     );
   }
@@ -1946,7 +1968,7 @@ function SourceDetails({
       </Box>
     );
   }
-  return <Text>Source unavailable.</Text>;
+  return <Text>Library/package object unavailable.</Text>;
 }
 
 function SkillPreviewPane({
@@ -1956,9 +1978,9 @@ function SkillPreviewPane({
   focused,
   breadcrumb = false
 }: {
-  preview: { state: 'loading'; sourceId: string; skillId: string }
+  preview: { state: 'loading'; originId: string; skillId: string }
     | { state: 'available'; value: SkillPreview }
-    | { state: 'error'; sourceId: string; skillId: string; message: string }
+    | { state: 'error'; originId: string; skillId: string; message: string }
     | undefined;
   offset: number;
   contentRows: number;
@@ -1996,14 +2018,14 @@ function SkillsBrowser({
   snapshot,
   selectedId,
   offset,
-  expandedSourceIds,
+  expandedSkillGroupIds,
   focus,
   maxRows
 }: {
   snapshot: DashboardSnapshot | undefined;
   selectedId: string | undefined;
   offset: number;
-  expandedSourceIds: readonly string[];
+  expandedSkillGroupIds: readonly string[];
   focus: MasterPaneFocus;
   maxRows: number;
 }) {
@@ -2021,14 +2043,14 @@ function SkillsBrowser({
         paddingX={1}
         width="100%"
       >
-        <Text bold aria-label={`Skill sources browser${contextLabel}`}>
-          Skill sources
+        <Text bold aria-label={`Skills browser${contextLabel}`}>
+          Skills
         </Text>
         <Text>Loading skills...</Text>
       </Box>
     );
   }
-  const rows = sourceBrowserRows(snapshot, expandedSourceIds);
+  const rows = skillBrowserRows(snapshot, expandedSkillGroupIds);
   return (
     <Box
       borderStyle={selectionVisible ? 'bold' : 'classic'}
@@ -2038,24 +2060,26 @@ function SkillsBrowser({
       paddingX={1}
       width="100%"
     >
-      <Text bold aria-label={`Skill sources browser${contextLabel}`}>
-        Skill sources
+      <Text bold aria-label={`Skills browser${contextLabel}`}>
+        Skills
       </Text>
       <ScrollableRows
         rows={rows}
         offset={offset}
         maxRows={maxRows}
-        empty={<Text dimColor>No configured source is available.</Text>}
-        renderRow={(row) => row.kind === 'source'
+        empty={<Text dimColor>No added Skills, libraries, or packages are available.</Text>}
+        renderRow={(row) => row.kind === 'object'
           ? <Text
               key={row.id}
               inverse={active && row.id === selectedId}
               bold
               dimColor={parent && row.id === selectedId}
               wrap="truncate-end"
-              aria-label={`${row.label} source, ${row.expanded ? 'expanded' : 'collapsed'}${row.id === selectedId && selectionVisible ? active ? ', active selection' : ', parent selection' : ''}, ${row.root}`}
+              aria-label={`${row.objectKindLabel === 'Added Skills' ? row.label : `${row.objectKindLabel} ${row.label}`}, ${row.health}, ${row.skillCount} Skills, ${row.references}, ${row.digest}, root ${row.root}, ${row.expanded ? 'expanded' : 'collapsed'}${row.id === selectedId && selectionVisible ? active ? ', active selection' : ', parent selection' : ''}`}
             >
-              {row.expanded ? '[-]' : '[+]'}{' '}{row.label} - {row.root}
+              {row.expanded ? '[-]' : '[+]'}{' '}{row.objectKindLabel === 'Added Skills'
+                ? `${row.label} — ${row.skillCount} Skills; ${row.root}`
+                : `${row.objectKindLabel} ${row.label} — ${row.health}; ${row.skillCount} Skills; ${row.references}; ${row.digest}; ${row.root}`}
             </Text>
           : <Text
               key={row.id}
@@ -2063,7 +2087,7 @@ function SkillsBrowser({
               bold={selectionVisible && row.id === selectedId}
               dimColor={parent && row.id === selectedId}
               wrap="truncate-end"
-              aria-label={`Skill ${row.skillId}, source ${row.sourceId}${row.id === selectedId && selectionVisible ? active ? ', active selection' : ', parent selection' : ''}`}
+              aria-label={`Skill ${row.skillId}, ${row.ownerLabel}${row.id === selectedId && selectionVisible ? active ? ', active selection' : ', parent selection' : ''}`}
             >
                 {'  '}{row.skillId}
             </Text>}
@@ -2072,11 +2096,9 @@ function SkillsBrowser({
   );
 }
 
-export function managedSourceAccessibilityLabel(source: ManagedSourceSummary, selected: boolean): string {
-  const references = source.referenceCount === 'unknown'
-    ? 'profile reference count unknown'
-    : `${source.referenceCount} profile references`;
-  return `Source ${source.source}, ${source.health}, ${references}${selected ? ', selected' : ''}`;
+export function collectionAccessibilityLabel(collection: SkillCollectionSummary, selected: boolean): string {
+  const references = collection.referenceCount === 'unknown' ? 'profile reference count unknown' : `${collection.referenceCount} profile references`;
+  return `${collection.kind === 'library' ? 'Library' : 'Package'} ${collection.id}, ${collection.health}, ${collection.skillCount} Skills, ${references}, digest sha256:${collection.digest}, root ${collection.root}${selected ? ', selected' : ''}`;
 }
 
 function Adapters({
@@ -2163,7 +2185,7 @@ function Settings({
     ? 'outside Git (inherits global policy)'
     : `${setup.repository.root} (${setup.repository.projectState})`;
   const profile = setup.profile.state === 'ready'
-    ? `${setup.profile.id} (ready; ${setup.profile.skillCount} direct skills)`
+    ? `${setup.profile.id} (ready; ${setup.profile.skillCount} Skills)`
     : setup.profile.state === 'missing'
       ? `${setup.profile.id} (missing)`
       : setup.profile.state === 'unselected'
@@ -2211,14 +2233,14 @@ function Modal({
   directoryBrowser,
   browserChoice,
   browserOffset,
-  sourceCandidate
+  libraryCandidate
 }: {
   modal: TuiModal;
   busy: boolean;
   directoryBrowser: DirectoryBrowserSnapshot | undefined;
   browserChoice: number;
   browserOffset: number;
-  sourceCandidate: SourceCandidateSummary | undefined;
+  libraryCandidate: LibraryCandidateSummary | undefined;
 }) {
   if (modal.kind === 'help') {
     return (
@@ -2227,17 +2249,17 @@ function Modal({
         <Text wrap="truncate-end">1/2/3/4 and [/] open tabs directly. Tab/Shift+Tab cycle focus.</Text>
         <Text wrap="truncate-end">Focused tabs: Left/Right or h/l moves focus; Enter or uppercase L activates.</Text>
         <Text wrap="truncate-end">Body/tree: arrows or hjkl move; PageUp/PageDown/Home/End jump.</Text>
-        <Text wrap="truncate-end">Skills: Right/l/Enter preview; Left/h back; o/c source; e edits live (default); a adds source.</Text>
-        <Text wrap="truncate-end">Profiles: Right/l/Enter opens details; Left/h backs out after Available child/source unwind.</Text>
+        <Text wrap="truncate-end">Skills: Right/l/Enter preview; Left/h back; o/c group; e edits live Added Skills; a adds library.</Text>
+        <Text wrap="truncate-end">Profiles: Right/l/Enter opens details; Left/h backs out after Available child/group unwind.</Text>
         <Text wrap="truncate-end">Managed snapshots are immutable. Uppercase H/L remain Backspace/Enter aliases; J/K jumps profile panes.</Text>
         <Text wrap="truncate-end">r refreshes; q exits. Press Esc or Enter to close.</Text>
       </FocusedOverlay>
     );
   }
-  if (modal.kind === 'source-root') {
+  if (modal.kind === 'library-root') {
     return (
       <FocusedOverlay>
-        <Text bold wrap="truncate-end">Add source - Absolute root or ~/ path</Text>
+        <Text bold wrap="truncate-end">Add library - Absolute root or ~/ path</Text>
         <Text inverse wrap="truncate-start">Path: {modal.value.length === 0 ? ' ' : modal.value}</Text>
         {directoryBrowser === undefined
           ? <Text dimColor>Loading directories...</Text>
@@ -2256,22 +2278,22 @@ function Modal({
       </FocusedOverlay>
     );
   }
-  if (modal.kind === 'source-confirm') {
-    const blocked = sourceCandidate?.manifest.state !== 'absent';
+  if (modal.kind === 'library-confirm') {
+    const blocked = libraryCandidate?.packageManifest.state !== 'absent';
     return (
       <FocusedOverlay>
-        <Text bold color={blocked ? 'red' : 'yellow'}>Add global source {modal.sourceId}</Text>
-        <Text wrap="truncate-end">Entered source root: {modal.enteredRoot ?? modal.root}</Text>
-        <Text wrap="truncate-end">Canonical source root: {modal.canonicalRoot ?? sourceCandidate?.canonicalRoot}</Text>
+        <Text bold color={blocked ? 'red' : 'yellow'}>Add library {modal.originId}</Text>
+        <Text wrap="truncate-end">Entered library root: {modal.enteredRoot ?? modal.root}</Text>
+        <Text wrap="truncate-end">Canonical library root: {modal.canonicalRoot ?? libraryCandidate?.canonicalRoot}</Text>
         <Text wrap="truncate-end">Scope: snapshot the complete selected tree; no profile reference is added.</Text>
         <Text wrap="truncate-end">Provider input remains provider-owned; snapshots are retained.</Text>
-        <Text wrap="truncate-end">Declared builds are unsandboxed and cannot run from this TUI.</Text>
+        <Text wrap="truncate-end">Package builds are unsandboxed and remain CLI-only.</Text>
         {blocked
           ? <>
-              <Text color="red" wrap="truncate-end">Blocked: {sourceCandidate?.manifest.state === 'invalid' ? sourceCandidate.manifest.diagnostic : 'declared build present'}. Use `bazframe sources add {modal.enteredRoot ?? modal.root}`.</Text>
+              <Text color="red" wrap="truncate-end">Blocked: package manifest present. Use `bazframe packages add {modal.enteredRoot ?? modal.root}`.</Text>
               <Text bold>n/Esc/Backspace back  y/Enter cannot confirm</Text>
             </>
-          : <Text bold>{busy ? 'Working...' : 'y add source  n/Esc/Backspace back  Enter does not confirm'}</Text>}
+          : <Text bold>{busy ? 'Working...' : 'y add library  n/Esc/Backspace back  Enter does not confirm'}</Text>}
       </FocusedOverlay>
     );
   }
@@ -2408,7 +2430,9 @@ function routeActionHint(state: TuiState, compact: boolean): string {
   if (state.activeTab === 'skills') {
     return state.skillRoute === 'preview'
       ? 'Left/h back  e edit live skill  Up/Down/Page scroll  Esc/Backspace/H back  ? help  q quit'
-      : `Right/l/Enter open or toggle  o open  c collapse${compact ? '' : '  e edit live skill'}  a add source${compact ? '' : '  r refresh'}  ? help  q quit`;
+      : state.skillRoute === 'object-details'
+        ? 'Left/h/H/Esc/Backspace back  ? help  q quit'
+        : `Enter/L object details  Right/l hierarchy  o open  c collapse${compact ? '' : '  e edit live skill'}  a add library${compact ? '' : '  r refresh'}  ? help  q quit`;
   }
   if (state.activeTab === 'profiles') {
     return state.profileRoute === 'editor'
@@ -2440,15 +2464,15 @@ function directoryChoiceOffset(offset: number, choice: number, count: number): n
 function profileSnapshotSelection(
   snapshot: DashboardSnapshot,
   profile: ProfileSummary,
-  expandedAvailableSourceIds: readonly string[],
+  expandedAvailableGroupIds: readonly string[],
   viewportRows: ViewportRows,
   openEditor = false
 ): TuiAction {
-  const sources = availableSourcesForProfile(snapshot, profile);
+  const groups = availableGroupsForProfile(snapshot, profile);
   const availableRowIds = availableRowsFor(
-    sources,
+    groups,
     new Set<string>(),
-    expandedAvailableSourceIds
+    expandedAvailableGroupIds
   ).map((row) => row.id);
   return {
     type: 'select-profile-snapshot',
@@ -2515,84 +2539,90 @@ function scrollbarMetrics(
 }
 
 function compositeSkillId(skill: SkillSummary): string {
-  return `${skill.sourceId}:${skill.id}`;
+  return `${skill.originId}:${skill.id}`;
 }
 
-type SourceBrowserRow =
+type SkillBrowserRow =
   | {
       id: string;
-      kind: 'source';
-      sourceId: string;
+      kind: 'object';
+      originId: string;
+      objectKindLabel: 'Added Skills' | 'Library' | 'Package';
       label: string;
       root: string;
+      health: 'ready' | 'failed';
+      skillCount: number;
+      references: string;
+      digest: string;
       expanded: boolean;
     }
-  | { id: string; kind: 'skill'; sourceId: string; skillId: string };
+  | { id: string; kind: 'skill'; originId: string; ownerLabel: string; skillId: string };
 
-function sourceBrowserRows(
+function skillBrowserRows(
   snapshot: DashboardSnapshot,
-  expandedSourceIds: readonly string[]
-): SourceBrowserRow[] {
-  const roots = snapshot.skillRoots ?? snapshot.sources ?? [];
-  const defaultSource = roots.filter((source) => source.id === 'default');
-  const managed = (snapshot.managedSources ?? []).map((source) =>
-    roots.find((root) => root.id === source.id) ?? {
-      id: source.id,
-      label: `${source.source} [${source.health}]`,
-      root: source.root,
-      artifactWritesSupported: false as const,
-      skills: []
-    });
-  const managedIds = new Set(managed.map((source) => source.id));
-  const remaining = roots.filter((source) => source.id !== 'default' && !managedIds.has(source.id));
-  return [...defaultSource, ...managed, ...remaining].flatMap((source): SourceBrowserRow[] => {
-    const expanded = expandedSourceIds.includes(source.id);
+  expandedGroupIds: readonly string[]
+): SkillBrowserRow[] {
+  const roots = snapshot.skillGroups ?? [];
+  const added = roots.filter((group) => group.id === 'default');
+  const libraries = (snapshot.collections ?? []).filter((item) => item.kind === 'library');
+  const packages = (snapshot.collections ?? []).filter((item) => item.kind === 'package');
+  const groupRows = (group: SkillGroupSummary, objectKindLabel: 'Added Skills' | 'Library' | 'Package', collection?: SkillCollectionSummary): SkillBrowserRow[] => {
+    const expanded = expandedGroupIds.includes(group.id);
+    const root = group.canonicalRoot !== undefined && group.canonicalRoot !== group.root
+      ? `${group.root} (canonical: ${group.canonicalRoot})`
+      : group.root;
     return [{
-      id: `source:${source.id}`,
-      kind: 'source',
-      sourceId: source.id,
-      label: source.label,
-      root: source.canonicalRoot !== undefined && source.canonicalRoot !== source.root
-        ? `${source.root} (canonical: ${source.canonicalRoot})`
-        : source.root,
+      id: `collection:${group.id}`, kind: 'object', originId: group.id, objectKindLabel,
+      label: objectKindLabel === 'Added Skills' ? 'Added Skills' : collection!.id,
+      root: collection?.root ?? root,
+      health: collection?.health ?? 'ready',
+      skillCount: collection?.skillCount ?? group.skills.length,
+      references: collection === undefined
+        ? 'live catalog'
+        : collection.referenceCount === 'unknown' ? 'references unknown' : `${collection.referenceCount} references`,
+      digest: collection === undefined ? 'live' : `sha256:${collection.digest}`,
       expanded
-    }, ...(expanded
-      ? source.skills.map((skill) => ({
-          id: compositeSkillId(skill),
-          kind: 'skill' as const,
-          sourceId: source.id,
-          skillId: skill.id
-        }))
-      : [])];
-  });
+    }, ...(expanded ? group.skills.map((skill) => ({
+      id: compositeSkillId(skill),
+      kind: 'skill' as const,
+      originId: group.id,
+      ownerLabel: objectKindLabel === 'Added Skills' ? 'Added Skills' : `${objectKindLabel} ${collection!.id}`,
+      skillId: skill.id
+    })) : [])];
+  };
+  const collectionRows = (collection: SkillCollectionSummary): SkillBrowserRow[] => {
+    const group = roots.find((item) => item.id === collection.key) ?? {
+      id: collection.key, label: collection.id, root: collection.root,
+      artifactWritesSupported: false as const, skills: []
+    };
+    return groupRows(group, collection.kind === 'library' ? 'Library' : 'Package', collection);
+  };
+  return [
+    ...added.flatMap((group) => groupRows(group, 'Added Skills')),
+    ...libraries.flatMap(collectionRows),
+    ...packages.flatMap(collectionRows)
+  ];
 }
 
-function browserNodeIds(
-  snapshot: DashboardSnapshot,
-  expandedSourceIds: readonly string[]
-): string[] {
-  return sourceBrowserRows(snapshot, expandedSourceIds).map((row) => row.id);
-}
-
-function owningSourceId(
+function owningSkillGroupId(
   snapshot: DashboardSnapshot,
   selectedId: string | undefined
 ): string | undefined {
-  if (selectedId?.startsWith('source:')) return selectedId.slice('source:'.length);
+  if (selectedId?.startsWith('collection:')) return selectedId.slice('collection:'.length);
   if (selectedId === undefined) return undefined;
-  return (snapshot.skillRoots ?? snapshot.sources ?? [])
-    .map((source) => source.id)
+  return (snapshot.skillGroups ?? [])
+    .map((group) => group.id)
     .sort((left, right) => right.length - left.length)
-    .find((sourceId) => selectedId.startsWith(`${sourceId}:`));
+    .find((originId) => selectedId.startsWith(`${originId}:`));
 }
 
 function findBrowserSkill(
   snapshot: DashboardSnapshot,
   selectedId: string | undefined
 ): SkillSummary | undefined {
-  if (selectedId === undefined || selectedId.startsWith('source:')) return undefined;
-  return (snapshot.skillRoots ?? snapshot.sources ?? [])
-    .flatMap((source) => source.skills)
+  if (selectedId === undefined || selectedId.startsWith('collection:')) return undefined;
+  return (snapshot.skillGroups ?? [])
+    .flatMap((group) => group.skills)
     .find((skill) => compositeSkillId(skill) === selectedId);
 }
 
