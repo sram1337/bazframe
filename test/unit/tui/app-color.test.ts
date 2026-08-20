@@ -37,6 +37,72 @@ describe('TuiApp focus border color', () => {
     noColor.cleanup();
   });
 
+  it.each([
+    { noColor: false, label: 'color' },
+    { noColor: true, label: 'NO_COLOR' }
+  ])('keeps active, parent, and inactive Skills hierarchy under $label', async ({ noColor }) => {
+    if (noColor) {
+      delete process.env.FORCE_COLOR;
+      process.env.NO_COLOR = '1';
+    } else {
+      delete process.env.NO_COLOR;
+      process.env.FORCE_COLOR = '1';
+    }
+    const app = await renderIsolatedApp({ columns: 80, rows: 24 });
+    await vi.waitFor(() => expect(app.lastFrame()).toContain('demo-skill'));
+    app.stdin.write('\u001B[B');
+    app.stdin.write('l');
+    await vi.waitFor(() => expect(app.lastFrame()).toContain('Left/h back'));
+
+    const parentLine = plainLine(app.lastFrame(), 'Skill sources');
+    expect(parentLine).toMatch(/^┃/u);
+    expect(parentLine.split('┃').length - 1).toBeGreaterThanOrEqual(3);
+    if (noColor) expect(app.lastFrame()).not.toContain('\u001B[36m');
+    else expect(app.lastFrame()).toContain('\u001B[36m');
+    expect(app.lastFrame()).toContain('\u001B[2m');
+
+    app.stdin.write('\t');
+    await vi.waitFor(() => expect(plainLine(app.lastFrame(), 'Skill sources')).toMatch(/^\|/u));
+    app.stdin.write('\u001B[Z');
+    await vi.waitFor(() => expect(plainLine(app.lastFrame(), 'Skill sources')).toMatch(/^┃/u));
+    expect(app.lastFrame()).toContain('Left/h back');
+    app.cleanup();
+  });
+
+  it.each([
+    { noColor: false, label: 'color' },
+    { noColor: true, label: 'NO_COLOR' }
+  ])('keeps active, parent, and inactive Profiles hierarchy under $label', async ({ noColor }) => {
+    if (noColor) {
+      delete process.env.FORCE_COLOR;
+      process.env.NO_COLOR = '1';
+    } else {
+      delete process.env.NO_COLOR;
+      process.env.FORCE_COLOR = '1';
+    }
+    const app = await renderIsolatedApp({ columns: 80, rows: 24 });
+    await vi.waitFor(() => expect(app.lastFrame()).toContain('Status: Ready'));
+    app.stdin.write('2');
+    await vi.waitFor(() => expect(app.lastFrame()).toContain('Right/l/Enter/L edit'));
+    app.stdin.write('l');
+    await vi.waitFor(() => expect(app.lastFrame()).toContain('Left/h/H/Esc/Backspace'));
+
+    const parentLine = plainBodyLine(app.lastFrame(), 'Profiles');
+    expect(parentLine).toMatch(/^┃/u);
+    expect(plainLine(app.lastFrame(), 'Included skills')).toMatch(/┃Included skills/u);
+    if (noColor) expect(app.lastFrame()).not.toContain('\u001B[36m');
+    else expect(app.lastFrame()).toContain('\u001B[36m');
+    expect(app.lastFrame()).toContain('\u001B[2m');
+
+    app.stdin.write('\u001B[Z');
+    await vi.waitFor(() => expect(plainBodyLine(app.lastFrame(), 'Profiles')).toMatch(/^\|/u));
+    expect(plainLine(app.lastFrame(), 'Included skills')).toMatch(/\|Included skills/u);
+    app.stdin.write('\t');
+    await vi.waitFor(() => expect(plainBodyLine(app.lastFrame(), 'Profiles')).toMatch(/^┃/u));
+    expect(plainLine(app.lastFrame(), 'Included skills')).toMatch(/┃Included skills/u);
+    app.cleanup();
+  });
+
   it('uses the focused cyan bold border for every input-owning overlay', async () => {
     delete process.env.NO_COLOR;
     process.env.FORCE_COLOR = '1';
@@ -83,7 +149,7 @@ describe('TuiApp focus border color', () => {
   });
 });
 
-async function renderIsolatedApp() {
+async function renderIsolatedApp(dimensions = { columns: 60, rows: 16 }) {
   const [{ createElement }, testing, { TuiApp }, { BazframeError }] = await Promise.all([
     import('react'),
     import('ink-testing-library'),
@@ -97,6 +163,8 @@ async function renderIsolatedApp() {
     useProfile: vi.fn(),
     renameProfile: vi.fn(),
     removeProfile: vi.fn(),
+    editProfileInstructions: vi.fn(async () => ({ exitCode: 0, signal: null })),
+    editSkillDefinition: vi.fn(async () => ({ exitCode: 0, signal: null })),
     addMembership: vi.fn(),
     removeMembership: vi.fn(),
     loadSkillPreview: vi.fn(async ({ sourceId, skillId }) => ({
@@ -113,7 +181,7 @@ async function renderIsolatedApp() {
   } satisfies BazframeTuiService;
   const view = testing.render(createElement(TuiApp, {
     service,
-    dimensions: { columns: 60, rows: 16 }
+    dimensions
   }));
   return { ...view, service, BazframeError, cleanup: testing.cleanup };
 }
@@ -135,13 +203,38 @@ function dashboard(): DashboardSnapshot {
       membershipWritable: true,
       memberships: []
     }],
-    sources: [],
+    sources: [{
+      id: 'default',
+      label: '(default)',
+      root: '/skills',
+      artifactWritesSupported: false,
+      skills: [{
+        id: 'demo-skill',
+        sourceId: 'default',
+        directory: '/skills/demo-skill'
+      }]
+    }],
     status: {
       state: 'unavailable',
       diagnostic: { id: 'status', severity: 'error', message: 'Unavailable.' }
     },
     diagnostics: []
   };
+}
+
+function plainLine(frame: string | undefined, text: string): string {
+  const plain = plainFrame(frame);
+  return plain.split('\n').find((line) => line.includes(text)) ?? '';
+}
+
+function plainBodyLine(frame: string | undefined, text: string): string {
+  return plainFrame(frame).split('\n')
+    .find((line) => line.startsWith(`┃ ${text}`) || line.startsWith(`| ${text}`)) ?? '';
+}
+
+function plainFrame(frame: string | undefined): string {
+  const sgr = new RegExp(`${String.fromCodePoint(27)}\\[[0-9;]*m`, 'gu');
+  return (frame ?? '').replaceAll(sgr, '');
 }
 
 function restoreEnvironment(key: 'FORCE_COLOR' | 'NO_COLOR', value: string | undefined): void {

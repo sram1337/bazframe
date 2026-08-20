@@ -77,7 +77,7 @@ describe('TuiApp', () => {
     await vi.waitFor(() => expect(accessible.lastFrame()).toContain('Skill sources'));
     accessible.stdin.write('2');
     await vi.waitFor(() => expect(accessible.lastFrame()).toContain(
-      'Profile focused, active, selected, 0 skills'
+      'Profile focused, active, active selection, 0 skills'
     ));
   });
 
@@ -109,6 +109,400 @@ describe('TuiApp', () => {
     view.stdin.write('H');
     view.stdin.write('L');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Path: HL'));
+  });
+
+  it.each([
+    { columns: 80, rows: 24 },
+    { columns: 60, rows: 16 }
+  ])('uses natural horizontal Skills preview navigation at $columns x $rows', async (dimensions) => {
+    const service = fakeService();
+    const view = render(<TuiApp service={service} dimensions={dimensions} />);
+    await waitForDashboard(view);
+
+    // The expanded source keeps its tree meaning: l/Right selects its first child.
+    view.stdin.write('l');
+    await vi.waitFor(() => expect(service.loadSkillPreview).toHaveBeenCalledWith({
+      sourceId: 'default', skillId: 'demo-skill'
+    }));
+    expect(view.lastFrame()).toContain('Right/l/Enter open or toggle');
+    view.stdin.write('l');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Left/h back'));
+    view.stdin.write('h');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Right/l/Enter open or toggle'));
+
+    view.stdin.write('\u001B[C');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Left/h back'));
+    view.stdin.write('\u001B[D');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Right/l/Enter open or toggle'));
+  });
+
+  it('preserves source-node Left/h and Right/l expansion and parent semantics', async () => {
+    const service = fakeService();
+    const view = render(<TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />);
+    await waitForDashboard(view);
+
+    view.stdin.write('h');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[+] (default)'));
+    view.stdin.write('\u001B[C');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] (default)'));
+    view.stdin.write('\u001B[C');
+    await vi.waitFor(() => expect(service.loadSkillPreview).toHaveBeenCalledWith({
+      sourceId: 'default', skillId: 'demo-skill'
+    }));
+    view.stdin.write('\u001B[C');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Left/h back'));
+    view.stdin.write('\u001B[D');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Right/l/Enter open or toggle'));
+    view.stdin.write('h');
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    view.stdin.write('h');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[+] (default)'));
+    expect(view.lastFrame()).not.toContain('Left/h back');
+  });
+
+  it('shows and suppresses the preferred Skills parent hierarchy as focus moves', async () => {
+    const service = fakeService();
+    const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+    await waitForDashboard(view);
+    view.stdin.write('\u001B[B');
+    view.stdin.write('l');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Left/h back'));
+
+    const parentLine = view.lastFrame()!.split('\n').find((line) => line.includes('Skill sources'));
+    expect(parentLine).toBeDefined();
+    expect(parentLine).toMatch(/^┃/u);
+    expect(parentLine!.split('┃').length - 1).toBeGreaterThanOrEqual(3);
+
+    view.stdin.write('\t');
+    await vi.waitFor(() => {
+      const inactiveLine = view.lastFrame()!.split('\n').find((line) => line.includes('Skill sources'));
+      expect(inactiveLine).toMatch(/^\|/u);
+    });
+    view.stdin.write('\u001B[Z');
+    await vi.waitFor(() => {
+      const restoredLine = view.lastFrame()!.split('\n').find((line) => line.includes('Skill sources'));
+      expect(restoredLine).toMatch(/^┃/u);
+    });
+    expect(view.lastFrame()).toContain('Left/h back');
+  });
+
+  it('announces active, parent, inactive, and restored Skills hierarchy consistently', async () => {
+    vi.stubEnv('INK_SCREEN_READER', 'true');
+    const service = fakeService();
+    const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+    await waitForDashboard(view);
+    view.stdin.write('\u001B[B');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain(
+      'Skill demo-skill, source default, active selection'
+    ));
+
+    view.stdin.write('l');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Skill sources browser, parent context'));
+    expect(view.lastFrame()).toContain('Skill demo-skill, source default, parent selection');
+    expect(view.lastFrame()).toContain('Skills / demo-skill, active and focused');
+
+    view.stdin.write('\t');
+    await vi.waitFor(() => expect(view.lastFrame()).not.toContain('Skill sources browser, parent context'));
+    expect(view.lastFrame()).not.toContain('Skill demo-skill, source default, parent selection');
+    expect(view.lastFrame()).not.toContain('Skill demo-skill, source default, active selection');
+    expect(view.lastFrame()).not.toContain('Skills / demo-skill, active and focused');
+
+    view.stdin.write('\u001B[Z');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Skill sources browser, parent context'));
+    expect(view.lastFrame()).toContain('Skill demo-skill, source default, parent selection');
+    expect(view.lastFrame()).toContain('Skills / demo-skill, active and focused');
+  });
+
+  it.each([
+    { columns: 80, rows: 24 },
+    { columns: 60, rows: 16 }
+  ])('uses natural horizontal Profile detail navigation at $columns x $rows', async (dimensions) => {
+    const service = fakeService();
+    const view = render(<TuiApp service={service} dimensions={dimensions} />);
+    await waitForDashboard(view);
+    view.stdin.write('2');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Right/l/Enter/L edit'));
+
+    view.stdin.write('l');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Left/h/H/Esc/Backspace'));
+    view.stdin.write('h');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Right/l/Enter/L edit'));
+
+    view.stdin.write('\u001B[C');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Left/h/H/Esc/Backspace'));
+    view.stdin.write('\u001B[D');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Right/l/Enter/L edit'));
+
+    view.stdin.write('\u001B[B');
+    view.stdin.write('l');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Create profile'));
+    view.stdin.write('\u001B');
+    view.unmount();
+  });
+
+  it('unwinds Available child and source hierarchy before backing out of Profile detail', async () => {
+    const service = fakeService();
+    const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+    await waitForDashboard(view);
+    view.stdin.write('2');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Right/l/Enter/L edit'));
+    view.stdin.write('l');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Left/h/H/Esc/Backspace'));
+    view.stdin.write('J');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('┃Available skills'));
+
+    // Expanded source -> first child, then child -> source, source -> collapsed, collapsed -> list.
+    view.stdin.write('l');
+    view.stdin.write('h');
+    view.stdin.write('h');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('[+] (default)'));
+    expect(view.lastFrame()).toContain('Left/h/H/Esc/Backspace');
+    view.stdin.write('h');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Right/l/Enter/L edit'));
+
+    // From Included there is no deeper lateral action.
+    view.stdin.write('l');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Left/h/H/Esc/Backspace'));
+    view.stdin.write('h');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Right/l/Enter/L edit'));
+  });
+
+  it('shows, suppresses, and restores the preferred Profiles parent hierarchy', async () => {
+    const service = fakeService();
+    const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+    await waitForDashboard(view);
+    view.stdin.write('2');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Right/l/Enter/L edit'));
+    view.stdin.write('l');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Left/h/H/Esc/Backspace'));
+
+    const parentLine = view.lastFrame()!.split('\n').find((line) => line.includes('┃ Profiles'));
+    expect(parentLine).toBeDefined();
+    expect(view.lastFrame()).toContain('* focused');
+    expect(view.lastFrame()).toContain('┃Included skills');
+
+    view.stdin.write('\u001B[Z');
+    await vi.waitFor(() => {
+      const inactiveLine = view.lastFrame()!.split('\n').find((line) => line.includes('| Profiles'));
+      expect(inactiveLine).toBeDefined();
+      expect(view.lastFrame()).toContain('* focused');
+    });
+    expect(view.lastFrame()).not.toContain('┃Included skills');
+    expect(view.lastFrame()).not.toContain('┃Available skills');
+
+    view.stdin.write('\t');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('┃ Profiles'));
+    expect(view.lastFrame()).toContain('* focused');
+    expect(view.lastFrame()).toContain('┃Included skills');
+  });
+
+  it('announces only focused Profile selections and suppresses parent/detail suffixes at top tabs', async () => {
+    vi.stubEnv('INK_SCREEN_READER', 'true');
+    const service = fakeService();
+    const dashboard = await service.loadDashboard();
+    dashboard.profiles[0]!.memberships = [{
+      id: 'default:included-skill',
+      membershipId: 'focused:included-skill',
+      sourceId: 'default',
+      skillId: 'included-skill',
+      path: '/home/profiles/focused/skills/included-skill',
+      target: '/provider/included-skill',
+      kind: 'managed',
+      manageable: true
+    }];
+    vi.mocked(service.loadDashboard).mockClear();
+    const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+    await waitForDashboard(view);
+    view.stdin.write('2');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain(
+      'Profile focused, active, active selection, 1 skills'
+    ));
+    view.stdin.write('l');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Profiles list, parent context'));
+    expect(view.lastFrame()).toContain('Profile focused, active, parent selection, 1 skills');
+    expect(view.lastFrame()).toContain('included-skill, managed, active selection');
+    expect(view.lastFrame()).not.toContain('Available source (default), expanded, active selection');
+
+    view.stdin.write('\t');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain(
+      'Available skill demo-skill, source default, active selection'
+    ));
+    expect(view.lastFrame()).not.toContain('included-skill, managed, active selection');
+
+    view.stdin.write('\t');
+    await vi.waitFor(() => expect(view.lastFrame()).not.toContain('Profiles list, parent context'));
+    expect(view.lastFrame()).not.toContain('Profile focused, active, parent selection');
+    expect(view.lastFrame()).not.toContain('included-skill, managed, active selection');
+    expect(view.lastFrame()).not.toContain('Available skill demo-skill, source default, active selection');
+    expect(view.lastFrame()).toContain('Profile focused, active, editor');
+
+    view.stdin.write('\t');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Profiles list, parent context'));
+    expect(view.lastFrame()).toContain('Profile focused, active, parent selection, 1 skills');
+    expect(view.lastFrame()).toContain('included-skill, managed, active selection');
+  });
+
+  it('opens the selected inactive profile editor once, refreshes, and preserves the route', async () => {
+    const service = fakeService();
+    const dashboard = await service.loadDashboard();
+    dashboard.profiles.push({
+      id: 'reviewer',
+      directory: '/home/profiles/reviewer',
+      instructionsPath: '/home/profiles/reviewer/AGENTS.md',
+      removalIdentity: removalIdentity('reviewer'),
+      active: false,
+      membershipWritable: true,
+      memberships: []
+    });
+    vi.mocked(service.loadDashboard).mockClear();
+    let release!: (value: { exitCode: number; signal: null }) => void;
+    vi.mocked(service.editProfileInstructions).mockImplementation(() => new Promise((resolve) => {
+      release = resolve;
+    }));
+    const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+    await waitForDashboard(view);
+    view.stdin.write('2');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('reviewer'));
+    view.stdin.write('\u001B[B');
+    view.stdin.write('\r');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Profiles / reviewer'));
+
+    view.stdin.write('e');
+    view.stdin.write('e');
+    await vi.waitFor(() => expect(service.editProfileInstructions).toHaveBeenCalledTimes(1));
+    expect(service.editProfileInstructions).toHaveBeenCalledWith('reviewer');
+    release({ exitCode: 0, signal: null });
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Editor exited successfully'));
+    expect(view.lastFrame()).toContain('Profiles / reviewer');
+    expect(view.lastFrame()).toContain('Run `/bazframe reloa');
+    expect(service.loadDashboard).toHaveBeenCalledTimes(2);
+  });
+
+  it('opens a live default SKILL.md editor from preferred and compact previews, single-flight, then refreshes', async () => {
+    for (const dimensions of [
+      { columns: 80, rows: 24 },
+      { columns: 60, rows: 16 }
+    ]) {
+      const service = fakeService();
+      let release!: (value: { exitCode: number; signal: null }) => void;
+      vi.mocked(service.editSkillDefinition).mockImplementation(() => new Promise((resolve) => {
+        release = resolve;
+      }));
+      const view = render(<TuiApp service={service} dimensions={dimensions} />);
+      await waitForDashboard(view);
+      view.stdin.write('\u001B[B');
+      await vi.waitFor(() => expect(service.loadSkillPreview).toHaveBeenCalledWith({
+        sourceId: 'default', skillId: 'demo-skill'
+      }));
+      if (dimensions.columns === 60) {
+        await vi.waitFor(() => expect(view.lastFrame()).toContain('Right/l/Enter open or toggle'));
+        expect(view.lastFrame()).not.toContain('e edit live skill');
+        view.stdin.write('e');
+        await new Promise<void>((resolve) => setTimeout(resolve, 25));
+        expect(service.editSkillDefinition).not.toHaveBeenCalled();
+        view.stdin.write('\r');
+      }
+      await vi.waitFor(() => expect(view.lastFrame()).toContain('Skills / demo-skill'));
+
+      view.stdin.write('e');
+      view.stdin.write('e');
+      await vi.waitFor(() => expect(service.editSkillDefinition).toHaveBeenCalledTimes(1));
+      expect(service.editSkillDefinition).toHaveBeenCalledWith({
+        sourceId: 'default', skillId: 'demo-skill'
+      });
+      release({ exitCode: 0, signal: null });
+      await vi.waitFor(() => expect(view.lastFrame()).toContain('Editor exited successfully'));
+      expect(view.lastFrame()).toContain('Skills / demo-skill');
+      expect(service.loadDashboard).toHaveBeenCalledTimes(2);
+      view.unmount();
+    }
+  });
+
+  it('reconciles away from a skill preview when an edit makes the skill unavailable', async () => {
+    const service = fakeService();
+    const dashboard = await service.loadDashboard();
+    vi.mocked(service.loadDashboard).mockClear();
+    const view = render(<TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />);
+    await waitForDashboard(view);
+    view.stdin.write('\u001B[B');
+    await vi.waitFor(() => expect(service.loadSkillPreview).toHaveBeenCalledWith({
+      sourceId: 'default', skillId: 'demo-skill'
+    }));
+    view.stdin.write('\r');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('<- Skills / demo-skill'));
+    vi.mocked(service.editSkillDefinition).mockImplementation(async () => {
+      dashboard.sources![0]!.skills = [];
+      return { exitCode: 0, signal: null };
+    });
+    view.stdin.write('e');
+    await vi.waitFor(() => expect(service.loadDashboard).toHaveBeenCalledTimes(2));
+    expect(view.lastFrame()).toContain('Skill sources');
+    expect(view.lastFrame()).not.toContain('<- Skills / demo-skill');
+  });
+
+  it('refuses managed snapshot editing with rebuild guidance in preferred and compact previews', async () => {
+    for (const dimensions of [
+      { columns: 80, rows: 24 },
+      { columns: 60, rows: 16 }
+    ]) {
+      const service = fakeService();
+      const dashboard = await service.loadDashboard();
+      dashboard.sources = [{
+        id: 'managed:bundle',
+        label: 'bundle',
+        root: '/snapshots/bundle',
+        artifactWritesSupported: false,
+        skills: [{
+          id: 'managed-skill',
+          sourceId: 'managed:bundle',
+          directory: '/snapshots/bundle/managed-skill'
+        }]
+      }];
+      vi.mocked(service.loadDashboard).mockClear();
+      const view = render(<TuiApp service={service} dimensions={dimensions} />);
+      await waitForDashboard(view);
+      view.stdin.write('\r');
+      await vi.waitFor(() => expect(view.lastFrame()).toContain('[-] bundle'));
+      view.stdin.write('\u001B[B');
+      await vi.waitFor(() => expect(service.loadSkillPreview).toHaveBeenCalledWith({
+        sourceId: 'managed:bundle', skillId: 'managed-skill'
+      }));
+      if (dimensions.columns === 60) view.stdin.write('\r');
+      await vi.waitFor(() => expect(view.lastFrame()).toContain('Skills / managed-skill'));
+      view.stdin.write('e');
+      await vi.waitFor(() => expect(view.lastFrame()).toContain('bazframe sources build bundle'));
+      expect(service.editSkillDefinition).not.toHaveBeenCalled();
+      expect(service.loadDashboard).toHaveBeenCalledTimes(1);
+      view.unmount();
+    }
+  });
+
+  it('keeps the TUI open and refreshes after editor exit and launch failures', async () => {
+    for (const outcome of [
+      { kind: 'result' as const, value: { exitCode: 7, signal: null } },
+      { kind: 'result' as const, value: { exitCode: null, signal: 'SIGTERM' as const } },
+      { kind: 'error' as const, value: new BazframeError('EDITOR_LAUNCH_FAILED', 'editor missing') }
+    ]) {
+      const service = fakeService();
+      if (outcome.kind === 'error') vi.mocked(service.editProfileInstructions).mockRejectedValue(outcome.value);
+      else vi.mocked(service.editProfileInstructions).mockResolvedValue(outcome.value);
+      const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+      await waitForDashboard(view);
+      view.stdin.write('2');
+      await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
+      view.stdin.write('\r');
+      await vi.waitFor(() => expect(view.lastFrame()).toContain('Profiles / * focused'));
+      view.stdin.write('e');
+      await vi.waitFor(() => expect(service.loadDashboard).toHaveBeenCalledTimes(2));
+      const expected = outcome.kind === 'error'
+        ? 'editor missing'
+        : outcome.value.signal === 'SIGTERM'
+          ? 'Editor terminated by SIGTERM'
+          : 'Editor exited with status 7';
+      expect(view.lastFrame()).toContain(expected);
+      expect(view.lastFrame()).toContain('Profiles / * focused');
+      view.unmount();
+    }
   });
 
   it('makes uppercase L mirror Enter while top tabs own focus without entering a detail route', async () => {
@@ -320,7 +714,7 @@ describe('TuiApp', () => {
     view.stdin.write('\u001B[B');
     view.stdin.write('\r');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Skills / demo-skill'));
-    expect(view.lastFrame()!.split('\n').some((line) => /^\+.*┏/u.test(line))).toBe(true);
+    expect(view.lastFrame()!.split('\n').some((line) => /^┏.*┏/u.test(line))).toBe(true);
 
     view.stdin.write('\u001B[F');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('line-40'));
@@ -1612,7 +2006,7 @@ describe('TuiApp', () => {
     await vi.waitFor(() => expect(view.lastFrame()).toContain('┃Included skills'));
 
     view.stdin.write('\u001B');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('┃ Profiles'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Right/l/Enter/L edit'));
     view.stdin.write('c');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Create profile'));
     view.stdin.write('hjklJK');
@@ -1696,11 +2090,13 @@ describe('TuiApp', () => {
     view.stdin.write('2');
     view.stdin.write('\r');
     view.stdin.write('e');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('Instruction editor is unavailable'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Editor exited successfully'));
     view.stdin.write('z');
     await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(view.lastFrame()).toContain('Instruction editor is unavailable');
+    expect(view.lastFrame()).toContain('Editor exited successfully');
     view.stdin.write('J');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Warning: Skill source metadata'));
+    view.stdin.write('K');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Status: Ready'));
     expect(view.lastFrame()).not.toContain('Warning: Skill source metadata');
     expect(view.lastFrame()).toContain('* 2 Profiles');
@@ -1779,7 +2175,7 @@ describe('TuiApp', () => {
     view.stdin.write('\r');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Available skills'));
     view.stdin.write('e');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('Instruction editor is unavailable'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Editor exited successfully'));
 
     const warningSnapshot = await service.loadDashboard();
     warningSnapshot.diagnostics = [{ id: 'warning', severity: 'warning', message: 'Pending-operation warning.' }];
@@ -1793,7 +2189,7 @@ describe('TuiApp', () => {
     };
     view.rerender(<TuiApp service={operationService} dimensions={{ columns: 80, rows: 24 }} />);
     await vi.waitFor(() => expect(operationService.loadDashboard).toHaveBeenCalledOnce());
-    expect(view.lastFrame()).toContain('Instruction editor is unavailable');
+    expect(view.lastFrame()).toContain('Editor exited successfully');
 
     view.stdin.write('u');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Working: Activate profile...'));
@@ -2134,6 +2530,8 @@ function fakeService(): BazframeTuiService & Record<string, ReturnType<typeof vi
     useProfile: vi.fn(async () => undefined),
     renameProfile: vi.fn(async () => undefined),
     removeProfile: vi.fn(async () => undefined),
+    editProfileInstructions: vi.fn(async () => ({ exitCode: 0, signal: null })),
+    editSkillDefinition: vi.fn(async () => ({ exitCode: 0, signal: null })),
     addMembership: vi.fn(async () => undefined),
     removeMembership: vi.fn(async () => undefined),
     loadSkillPreview: vi.fn(async ({ sourceId, skillId }) => ({

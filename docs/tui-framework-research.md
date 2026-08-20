@@ -141,7 +141,7 @@ A framework is acceptable for the first management slice only if it proves:
 10. `npm pack` installation and launch on the declared OS/architecture matrix.
 11. No imports from Pi's global installation and no filesystem mutations in UI components.
 
-`$EDITOR` suspension, real additional sources, Settings writes, and provider-owned skill-artifact operations are separate acceptance gates for later slices.
+External-editor suspension is implemented under the bounded contract in `tui-design.md`, including explicit user-authorized live `(default)` `SKILL.md` handoff; real additional sources, Settings writes, and Bazframe-managed provider artifact lifecycle operations retain their own slice gates.
 
 ## Decision
 

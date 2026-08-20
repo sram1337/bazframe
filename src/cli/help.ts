@@ -20,6 +20,7 @@ export const ROOT_HELP = [
   '  bazframe profiles',
   '  bazframe sources',
   '  bazframe skills',
+  '  bazframe skill edit <skill>',
   '  bazframe status',
   '  bazframe tui',
   '',
@@ -110,6 +111,7 @@ export const PROFILE_HELP = [
   '  bazframe profile remove <profile> [--force]',
   '  bazframe profile rename <old> <new>',
   '  bazframe profile use <profile>',
+  '  bazframe profile edit <profile>',
   '  bazframe profile list',
   '  bazframe profile current',
   '',
@@ -158,6 +160,17 @@ export const PROFILE_USE_HELP = [
   ''
 ].join('\n');
 
+export const PROFILE_EDIT_HELP = [
+  'Usage: bazframe profile edit <profile>',
+  '',
+  'Open the named profile\'s actual AGENTS.md with the first nonblank VISUAL, then EDITOR.',
+  'The configured value is one executable name or path: Bazframe does not parse flags, use a shell, or choose a fallback.',
+  'Use a wrapper executable when the editor needs fixed flags such as a wait option.',
+  'The editor inherits the environment and terminal, runs in the profile directory, and receives AGENTS.md as its sole argument.',
+  'Bazframe waits and returns the editor process exit or signal status. Run `/bazframe reload` in an existing Pi session after editing.',
+  ''
+].join('\n');
+
 export const PROFILE_LIST_HELP = [
   'Usage: bazframe profile list',
   '',
@@ -177,10 +190,24 @@ export const SKILLS_HELP = [
   'Usage:',
   '  bazframe skill',
   '  bazframe skills',
+  '  bazframe skill edit <skill>',
   '',
   'List valid live external skill registrations in Bazframe\'s `(default)` catalog.',
+  '`skill edit` opens only a live `(default)` provider definition; managed snapshots remain immutable.',
   'This does not list Pi-native skills or managed-source-derived skills.',
   'Use `bazframe profile skills` to inspect the active profile.',
+  ''
+].join('\n');
+
+export const SKILL_EDIT_HELP = [
+  'Usage: bazframe skill edit <skill>',
+  '',
+  'Open the named `(default)` skill provider\'s actual SKILL.md with the first nonblank VISUAL, then EDITOR.',
+  'The configured value is one executable name or path: Bazframe does not parse flags, use a shell, or choose a fallback.',
+  'Use a wrapper executable when the editor needs fixed flags such as a wait option.',
+  'The editor inherits the environment and terminal, runs in the provider directory, and receives resolved SKILL.md as its sole argument.',
+  'Bazframe waits and returns the editor process exit or signal status; success does not claim that content was saved.',
+  'Existing Pi sessions observe provider changes after `/bazframe reload`; for a managed source, edit provider input through its provider workflow, then run `bazframe sources build <source>`.',
   ''
 ].join('\n');
 

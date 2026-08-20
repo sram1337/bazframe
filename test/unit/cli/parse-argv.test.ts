@@ -22,6 +22,11 @@ describe('parseArgv', () => {
     });
     expect(parseArgv(['add', 'skill', '--help'])).toEqual({ kind: 'help', topic: 'add-skill' });
     expect(parseArgv(['remove', 'skill', '--help'])).toEqual({ kind: 'help', topic: 'remove-skill' });
+    expect(parseArgv(['skill', 'edit', 'review-skill'])).toEqual({
+      kind: 'command', command: { name: 'skill-edit', skillId: 'review-skill' }
+    });
+    expect(parseArgv(['skill', 'edit', '--help'])).toEqual({ kind: 'help', topic: 'skill-edit' });
+    expect(parseArgv(['help', 'skill', 'edit'])).toEqual({ kind: 'help', topic: 'skill-edit' });
     expect(parseArgv(['add', '--help'])).toMatchObject({ kind: 'usage-error' });
     expect(parseArgv(['remove', '--help'])).toMatchObject({ kind: 'usage-error' });
     expect(parseArgv(['help', 'add', 'skill'])).toEqual({ kind: 'help', topic: 'add-skill' });
@@ -64,6 +69,12 @@ describe('parseArgv', () => {
     expect(parseArgv(['profile', 'use', 'focused'])).toEqual({
       kind: 'command', command: { name: 'profile-use', profileId: 'focused' }
     });
+    expect(parseArgv(['profile', 'edit', 'focused'])).toEqual({
+      kind: 'command', command: { name: 'profile-edit', profileId: 'focused' }
+    });
+    expect(parseArgv(['help', 'profile', 'edit'])).toEqual({
+      kind: 'help', topic: 'profile-edit'
+    });
     expect(parseArgv(['profile', 'list'])).toEqual({
       kind: 'command', command: { name: 'profile-list' }
     });
@@ -94,10 +105,32 @@ describe('parseArgv', () => {
     expect(parseArgv(['profile', 'skills', '--help'])).toEqual({
       kind: 'help', topic: 'profile-skills'
     });
-    for (const topic of ['add', 'duplicate', 'remove', 'rename', 'use', 'list', 'current']) {
+    for (const topic of ['add', 'duplicate', 'remove', 'rename', 'use', 'edit', 'list', 'current']) {
       expect(parseArgv(['profile', topic, '--help'])).toEqual({
         kind: 'help', topic: `profile-${topic}`
       });
+    }
+  });
+
+  it('rejects invalid skill editor arguments and plural command forms', () => {
+    for (const argv of [
+      ['skill', 'edit'],
+      ['skill', 'edit', 'review-skill', 'extra'],
+      ['skill', 'edit', '../review-skill'],
+      ['skill', 'unknown'],
+      ['skills', 'edit', 'review-skill']
+    ]) {
+      expect(parseArgv(argv)).toMatchObject({ kind: 'usage-error' });
+    }
+  });
+
+  it('rejects invalid profile editor arguments', () => {
+    for (const argv of [
+      ['profile', 'edit'],
+      ['profile', 'edit', 'focused', 'extra'],
+      ['profile', 'edit', '../focused']
+    ]) {
+      expect(parseArgv(argv)).toMatchObject({ kind: 'usage-error', topic: 'profile-edit' });
     }
   });
 

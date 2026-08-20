@@ -28,6 +28,7 @@ import type {
   SkillPreview,
   SourceCandidateSummary
 } from '../application/tui-service.js';
+import type { ChildResult } from '../core/child-process.js';
 import { BazframeError } from '../core/errors.js';
 import {
   availableRowsFor,
@@ -65,7 +66,7 @@ const MIN_ROWS = 16;
 const TABS: readonly TuiTab[] = ['skills', 'profiles', 'adapters', 'settings'];
 
 export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppProps) {
-  const { exit } = useApp();
+  const { exit, suspendTerminal, waitUntilRenderFlush } = useApp();
   const windowSize = useWindowSize();
   const columns = dimensions?.columns ?? windowSize.columns;
   const rows = dimensions?.rows ?? windowSize.rows;
@@ -288,6 +289,42 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
     }
     if (succeeded) await load();
   }, [finishExit, load]);
+
+  const editInExternalEditor = useCallback(async (
+    label: string,
+    operation: () => Promise<ChildResult>
+  ) => {
+    if (mutationActive.current) return;
+    mutationActive.current = true;
+    setMutation(label);
+    setMessage({ tone: 'info', text: 'Opening external editor...' });
+    try {
+      await waitUntilRenderFlush();
+      let result: ChildResult | undefined;
+      await suspendTerminal(async () => {
+        result = await operation();
+      });
+      if (result === undefined) {
+        setMessage({ tone: 'error', text: 'Editor did not report an outcome.' });
+      } else if (result.signal !== null) {
+        setMessage({ tone: 'error', text: `Editor terminated by ${result.signal}.` });
+      } else if (result.exitCode !== 0) {
+        setMessage({ tone: 'error', text: `Editor exited with status ${result.exitCode ?? 1}.` });
+      } else {
+        setMessage({
+          tone: 'success',
+          text: 'Editor exited successfully. Run `/bazframe reload` in an existing Pi session.'
+        });
+      }
+    } catch (error) {
+      setMessage({ tone: 'error', text: messageFor(error) });
+    } finally {
+      await load();
+      mutationActive.current = false;
+      setMutation(undefined);
+    }
+    if (exitRequested.current) finishExit(exitRequestedCode.current);
+  }, [finishExit, load, suspendTerminal, waitUntilRenderFlush]);
 
   const selectedProfile = snapshot?.profiles.find(
     (profile) => profile.id === state.selectedProfileId
@@ -662,7 +699,15 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
       dispatch({ type: 'cycle-focus', direction: key.shift ? -1 : 1 });
       return;
     }
-    const routeBack = key.escape || key.backspace || input === 'H';
+    const vimLeft = !key.ctrl && !key.meta && input === 'h';
+    const vimRight = !key.ctrl && !key.meta && input === 'l';
+    const vimUp = !key.ctrl && !key.meta && input === 'k';
+    const vimDown = !key.ctrl && !key.meta && input === 'j';
+    const skillPreviewBack = currentState.focusedRegion === 'body'
+      && currentState.activeTab === 'skills'
+      && currentState.skillRoute === 'preview'
+      && (key.leftArrow || vimLeft);
+    const routeBack = key.escape || key.backspace || input === 'H' || skillPreviewBack;
     const routeForward = key.return || input === 'L';
     if (routeBack) {
       if (currentState.activeTab === 'profiles' && currentState.profileRoute === 'editor') {
@@ -676,11 +721,6 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
         return;
       }
     }
-    const vimLeft = !key.ctrl && !key.meta && input === 'h';
-    const vimRight = !key.ctrl && !key.meta && input === 'l';
-    const vimUp = !key.ctrl && !key.meta && input === 'k';
-    const vimDown = !key.ctrl && !key.meta && input === 'j';
-
     if (currentState.focusedRegion === 'tabs') {
       if (key.leftArrow || key.rightArrow || vimLeft || vimRight) {
         clearTransientMessage();
@@ -767,12 +807,13 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
               ));
           return;
         }
-        if (routeForward && currentState.selectedProfileId === PROFILE_CREATE_ROW_ID) {
+        const profileListForward = routeForward || key.rightArrow || vimRight;
+        if (profileListForward && currentState.selectedProfileId === PROFILE_CREATE_ROW_ID) {
           clearTransientMessage();
           dispatch({ type: 'open-modal', modal: { kind: 'create', value: '' } });
           return;
         }
-        if (routeForward && currentSelectedProfile !== undefined) {
+        if (profileListForward && currentSelectedProfile !== undefined) {
           clearTransientMessage();
           dispatch(profileSnapshotSelection(
             currentSnapshot,
@@ -919,10 +960,12 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
               ids: currentAvailableRowIds,
               viewportRows: viewportRowsRef.current.available
             });
-          } else {
-            setAvailableSourceExpansion(selectedSourceId, false);
+            return;
           }
-          return;
+          if (selectedAvailableRow?.kind === 'source' && selectedAvailableRow.expanded) {
+            setAvailableSourceExpansion(selectedSourceId, false);
+            return;
+          }
         }
         if (input === 'o' && selectedSourceId !== undefined) {
           clearTransientMessage();
@@ -935,12 +978,17 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
           return;
         }
       }
-      if (input === 'e') {
+      if (key.leftArrow || vimLeft) {
         clearTransientMessage();
-        setMessage({
-          tone: 'error',
-          text: 'Instruction editor is unavailable pending the editor lifecycle review.'
-        });
+        dispatch({ type: 'profile-route', route: 'list' });
+        return;
+      }
+      if (input === 'e' && currentSelectedProfile !== undefined) {
+        clearTransientMessage();
+        void editInExternalEditor(
+          'Edit profile instructions',
+          () => service.editProfileInstructions(currentSelectedProfile.id)
+        );
         return;
       }
       if (
@@ -1020,6 +1068,28 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
     }
 
     if (currentState.activeTab === 'skills') {
+      if (input === 'e' && (!compact || currentState.skillRoute === 'preview')) {
+        const selectedSkill = findBrowserSkill(currentSnapshot, currentState.browserSkillId);
+        if (selectedSkill !== undefined) {
+          clearTransientMessage();
+          if (selectedSkill.sourceId === 'default') {
+            void editInExternalEditor(
+              'Edit skill definition',
+              () => service.editSkillDefinition({
+                sourceId: selectedSkill.sourceId,
+                skillId: selectedSkill.id
+              })
+            );
+          } else if (selectedSkill.sourceId.startsWith('managed:')) {
+            const sourceId = selectedSkill.sourceId.slice('managed:'.length);
+            setMessage({
+              tone: 'info',
+              text: `Run \`bazframe sources build ${sourceId}\` after editing provider input through its provider workflow. This skill is from an immutable managed-source snapshot; Bazframe cannot infer a corresponding editable child file.`
+            });
+          }
+          return;
+        }
+      }
       if (currentState.skillRoute === 'preview') {
         const lineCount = preview?.state === 'available'
           ? previewLines(preview.value.contents).length
@@ -1126,7 +1196,10 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
         }
         return;
       }
-      if (routeForward && currentState.browserSkillId !== undefined) {
+      if (
+        (routeForward || key.rightArrow || vimRight)
+        && currentState.browserSkillId !== undefined
+      ) {
         clearTransientMessage();
         dispatch({ type: 'skill-route', route: 'preview' });
         return;
@@ -1205,7 +1278,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
                         profiles={snapshot.profiles}
                         selectedId={state.selectedProfileId}
                         offset={state.profileListOffset}
-                        focused={state.focusedRegion === 'body'}
+                        focus={state.focusedRegion === 'body' ? 'active' : 'inactive'}
                         maxRows={bodyRows - 4}
                       />
                     : <ProfileEditor
@@ -1444,33 +1517,39 @@ function TabBar({
   );
 }
 
+type MasterPaneFocus = 'active' | 'parent' | 'inactive';
+
 function ProfilesList({
   profiles,
   selectedId,
   offset,
-  focused,
+  focus,
   maxRows
 }: {
   profiles: readonly ProfileSummary[];
   selectedId: string | undefined;
   offset: number;
-  focused: boolean;
+  focus: MasterPaneFocus;
   maxRows: number;
 }) {
+  const active = focus === 'active';
+  const parent = focus === 'parent';
+  const selectionVisible = active || parent;
+  const contextLabel = active ? ', active and focused' : parent ? ', parent context' : '';
   const rows: readonly (ProfileSummary | { id: typeof PROFILE_CREATE_ROW_ID })[] = [
     ...profiles,
     { id: PROFILE_CREATE_ROW_ID }
   ];
   return (
     <Box
-      borderStyle={focused ? 'bold' : 'classic'}
-      borderColor={focusBorderColor(focused)}
-      borderDimColor={!focused}
+      borderStyle={selectionVisible ? 'bold' : 'classic'}
+      borderColor={focusBorderColor(active)}
+      borderDimColor={!active}
       flexDirection="column"
       width="100%"
       paddingX={1}
     >
-      <Text bold aria-label={`Profiles list${focused ? ', focused' : ''}`}>
+      <Text bold aria-label={`Profiles list${contextLabel}`}>
         Profiles
       </Text>
       <ScrollableRows
@@ -1480,23 +1559,29 @@ function ProfilesList({
         renderRow={(profile) => !('active' in profile)
           ? <Text
               key={profile.id}
-              inverse={focused && profile.id === selectedId}
-              bold={profile.id === selectedId}
+              inverse={active && profile.id === selectedId}
+              bold={selectionVisible && profile.id === selectedId}
+              dimColor={parent && profile.id === selectedId}
               wrap="truncate-end"
-              aria-label={`Create new profile${profile.id === selectedId ? ', selected' : ''}`}
+              aria-label={`Create new profile${profile.id === selectedId && selectionVisible ? active ? ', active selection' : ', parent selection' : ''}`}
             >
                 + Create New Profile
             </Text>
           : <Box key={profile.id} width="100%" justifyContent="space-between">
               <Text
-                inverse={focused && profile.id === selectedId}
-                bold={profile.id === selectedId}
+                inverse={active && profile.id === selectedId}
+                bold={selectionVisible && profile.id === selectedId}
+                dimColor={parent && profile.id === selectedId}
                 wrap="truncate-end"
-                aria-label={`Profile ${profile.id}${profile.active ? ', active' : ''}${profile.id === selectedId ? ', selected' : ''}, ${profile.memberships.length} skills`}
+                aria-label={`Profile ${profile.id}${profile.active ? ', active' : ''}${profile.id === selectedId && selectionVisible ? active ? ', active selection' : ', parent selection' : ''}, ${profile.memberships.length} skills`}
               >
                 {profile.active ? '*' : ' '} {profile.id}
               </Text>
-              <Text inverse={focused && profile.id === selectedId} bold={profile.id === selectedId}>
+              <Text
+                inverse={active && profile.id === selectedId}
+                bold={selectionVisible && profile.id === selectedId}
+                dimColor={parent && profile.id === selectedId}
+              >
                 {profile.memberships.length}
               </Text>
             </Box>}
@@ -1614,9 +1699,9 @@ function MembershipPane({
           <Text
             key={membership.id}
             inverse={focused && membership.id === selectedId}
-            bold={membership.id === selectedId}
+            bold={focused && membership.id === selectedId}
             wrap="truncate-end"
-            aria-label={`${membership.skillId}, ${membership.manageable ? 'managed' : 'unmanaged'}${membership.id === selectedId ? ', selected' : ''}`}
+            aria-label={`${membership.skillId}, ${membership.manageable ? 'managed' : 'unmanaged'}${focused && membership.id === selectedId ? ', active selection' : ''}`}
           >
               {membership.manageable ? '+' : '!'} {membership.skillId}
             {membership.manageable ? '' : ' (unmanaged)'}
@@ -1673,16 +1758,16 @@ function SkillPane({
               inverse={focused && row.id === selectedId}
               bold
               wrap="truncate-end"
-              aria-label={`Available source ${row.label}, ${row.expanded ? 'expanded' : 'collapsed'}${row.id === selectedId ? ', selected' : ''}, ${row.root}`}
+              aria-label={`Available source ${row.label}, ${row.expanded ? 'expanded' : 'collapsed'}${focused && row.id === selectedId ? ', active selection' : ''}, ${row.root}`}
             >
               {row.expanded ? '[-]' : '[+]'}{' '}{row.label}
             </Text>
           : <Text
               key={row.id}
               inverse={focused && row.id === selectedId}
-              bold={row.id === selectedId}
+              bold={focused && row.id === selectedId}
               wrap="truncate-end"
-              aria-label={`Available skill ${row.skill.id}, source ${row.skill.sourceId}${row.id === selectedId ? ', selected' : ''}`}
+              aria-label={`Available skill ${row.skill.id}, source ${row.skill.sourceId}${focused && row.id === selectedId ? ', active selection' : ''}`}
             >
               {maxRows === 1 ? `[${labels.get(row.sourceId) ?? row.sourceId}] ` : '  '}{row.skill.id}
             </Text>}
@@ -1748,7 +1833,7 @@ function ProfilesMasterDetail({
           profiles={profiles}
           selectedId={selectedId}
           offset={profileOffset}
-          focused={focused && !editing}
+          focus={focused ? editing ? 'parent' : 'active' : 'inactive'}
           maxRows={maxRows - 4}
         />
       </Box>
@@ -1799,12 +1884,19 @@ function SkillsMasterDetail({
   compact: boolean;
 }) {
   if (compact) {
-    return <SkillsBrowser snapshot={snapshot} selectedId={selectedId} offset={offset} expandedSourceIds={expandedSourceIds} focused={focused} maxRows={maxRows} />;
+    return <SkillsBrowser snapshot={snapshot} selectedId={selectedId} offset={offset} expandedSourceIds={expandedSourceIds} focus={focused ? 'active' : 'inactive'} maxRows={maxRows} />;
   }
   return (
     <Box flexDirection="row" width="100%" height="100%">
       <Box width="46%" overflow="hidden">
-        <SkillsBrowser snapshot={snapshot} selectedId={selectedId} offset={offset} expandedSourceIds={expandedSourceIds} focused={focused && !previewFocused} maxRows={maxRows} />
+        <SkillsBrowser
+          snapshot={snapshot}
+          selectedId={selectedId}
+          offset={offset}
+          expandedSourceIds={expandedSourceIds}
+          focus={focused ? previewFocused ? 'parent' : 'active' : 'inactive'}
+          maxRows={maxRows}
+        />
       </Box>
       <Box width="54%" paddingLeft={1} overflow="hidden">
         {selectedId?.startsWith('source:')
@@ -1850,7 +1942,7 @@ function SourceDetails({
           ? null
           : <Text wrap="truncate-end">Canonical: {root.canonicalRoot}</Text>}
         <Text>Skills: {root.skills.length}</Text>
-        <Text dimColor>Provider-owned; artifact writes are unavailable.</Text>
+        <Text dimColor>Provider-owned; Bazframe artifact lifecycle is unavailable. Skill e hands off to your editor.</Text>
       </Box>
     );
   }
@@ -1878,7 +1970,7 @@ function SkillPreviewPane({
     : `${breadcrumb ? '<- Skills / ' : 'Skills / '}${preview.state === 'available' ? preview.value.skillId : preview.skillId}`;
   return (
     <Box borderStyle={focused ? 'bold' : 'classic'} borderColor={focusBorderColor(focused)} borderDimColor={!focused} flexDirection="column" paddingX={1}>
-      <Text bold aria-label={`${breadcrumb ? 'Back to Skills browser, ' : ''}${title}${focused ? ', focused' : ''}`}>{title}</Text>
+      <Text bold aria-label={`${breadcrumb ? 'Back to Skills browser, ' : ''}${title}${focused ? ', active and focused' : ''}`}>{title}</Text>
       {preview === undefined
         ? <Text dimColor>Select a skill to view its SKILL.md.</Text>
         : preview.state === 'loading'
@@ -1905,27 +1997,31 @@ function SkillsBrowser({
   selectedId,
   offset,
   expandedSourceIds,
-  focused,
+  focus,
   maxRows
 }: {
   snapshot: DashboardSnapshot | undefined;
   selectedId: string | undefined;
   offset: number;
   expandedSourceIds: readonly string[];
-  focused: boolean;
+  focus: MasterPaneFocus;
   maxRows: number;
 }) {
+  const active = focus === 'active';
+  const parent = focus === 'parent';
+  const selectionVisible = active || parent;
+  const contextLabel = active ? ', active and focused' : parent ? ', parent context' : '';
   if (snapshot === undefined) {
     return (
       <Box
-        borderStyle={focused ? 'bold' : 'classic'}
-        borderColor={focusBorderColor(focused)}
-        borderDimColor={!focused}
+        borderStyle={selectionVisible ? 'bold' : 'classic'}
+        borderColor={focusBorderColor(active)}
+        borderDimColor={!active}
         flexDirection="column"
         paddingX={1}
         width="100%"
       >
-        <Text bold aria-label={`Skill sources browser${focused ? ', focused' : ''}`}>
+        <Text bold aria-label={`Skill sources browser${contextLabel}`}>
           Skill sources
         </Text>
         <Text>Loading skills...</Text>
@@ -1935,14 +2031,14 @@ function SkillsBrowser({
   const rows = sourceBrowserRows(snapshot, expandedSourceIds);
   return (
     <Box
-      borderStyle={focused ? 'bold' : 'classic'}
-      borderColor={focusBorderColor(focused)}
-      borderDimColor={!focused}
+      borderStyle={selectionVisible ? 'bold' : 'classic'}
+      borderColor={focusBorderColor(active)}
+      borderDimColor={!active}
       flexDirection="column"
       paddingX={1}
       width="100%"
     >
-      <Text bold aria-label={`Skill sources browser${focused ? ', focused' : ''}`}>
+      <Text bold aria-label={`Skill sources browser${contextLabel}`}>
         Skill sources
       </Text>
       <ScrollableRows
@@ -1953,19 +2049,21 @@ function SkillsBrowser({
         renderRow={(row) => row.kind === 'source'
           ? <Text
               key={row.id}
-              inverse={focused && row.id === selectedId}
+              inverse={active && row.id === selectedId}
               bold
+              dimColor={parent && row.id === selectedId}
               wrap="truncate-end"
-              aria-label={`${row.label} source, ${row.expanded ? 'expanded' : 'collapsed'}${row.id === selectedId ? ', selected' : ''}, ${row.root}`}
+              aria-label={`${row.label} source, ${row.expanded ? 'expanded' : 'collapsed'}${row.id === selectedId && selectionVisible ? active ? ', active selection' : ', parent selection' : ''}, ${row.root}`}
             >
               {row.expanded ? '[-]' : '[+]'}{' '}{row.label} - {row.root}
             </Text>
           : <Text
               key={row.id}
-              inverse={focused && row.id === selectedId}
-              bold={row.id === selectedId}
+              inverse={active && row.id === selectedId}
+              bold={selectionVisible && row.id === selectedId}
+              dimColor={parent && row.id === selectedId}
               wrap="truncate-end"
-              aria-label={`Skill ${row.skillId}, source ${row.sourceId}${row.id === selectedId ? ', selected' : ''}`}
+              aria-label={`Skill ${row.skillId}, source ${row.sourceId}${row.id === selectedId && selectionVisible ? active ? ', active selection' : ', parent selection' : ''}`}
             >
                 {'  '}{row.skillId}
             </Text>}
@@ -2129,9 +2227,9 @@ function Modal({
         <Text wrap="truncate-end">1/2/3/4 and [/] open tabs directly. Tab/Shift+Tab cycle focus.</Text>
         <Text wrap="truncate-end">Focused tabs: Left/Right or h/l moves focus; Enter or uppercase L activates.</Text>
         <Text wrap="truncate-end">Body/tree: arrows or hjkl move; PageUp/PageDown/Home/End jump.</Text>
-        <Text wrap="truncate-end">Skills: o open, c collapse, Enter/L preview, a add manifest-free source.</Text>
-        <Text wrap="truncate-end">Profiles: c create, D duplicate, u activate, R rename, d remove.</Text>
-        <Text wrap="truncate-end">H/L mirror Backspace/Enter; editor J/K panes; Available o/c/Left/Right.</Text>
+        <Text wrap="truncate-end">Skills: Right/l/Enter preview; Left/h back; o/c source; e edits live (default); a adds source.</Text>
+        <Text wrap="truncate-end">Profiles: Right/l/Enter opens details; Left/h backs out after Available child/source unwind.</Text>
+        <Text wrap="truncate-end">Managed snapshots are immutable. Uppercase H/L remain Backspace/Enter aliases; J/K jumps profile panes.</Text>
         <Text wrap="truncate-end">r refreshes; q exits. Press Esc or Enter to close.</Text>
       </FocusedOverlay>
     );
@@ -2309,13 +2407,13 @@ function StatusBar({
 function routeActionHint(state: TuiState, compact: boolean): string {
   if (state.activeTab === 'skills') {
     return state.skillRoute === 'preview'
-      ? 'H or Esc/Backspace back  arrows/PageUp/PageDown scroll  ? help  q quit'
-      : `o open  c collapse  Enter/L open or toggle  a add source${compact ? '' : '  r refresh'}  ? help  q quit`;
+      ? 'Left/h back  e edit live skill  Up/Down/Page scroll  Esc/Backspace/H back  ? help  q quit'
+      : `Right/l/Enter open or toggle  o open  c collapse${compact ? '' : '  e edit live skill'}  a add source${compact ? '' : '  r refresh'}  ? help  q quit`;
   }
   if (state.activeTab === 'profiles') {
     return state.profileRoute === 'editor'
-      ? 'H/Esc/Backspace back  J/K panes  Available Enter/L/o/c/Left/Right  a add  x remove  ? help  q quit'
-      : `L/Enter edit  c create  D duplicate  u activate  R rename  d remove${compact ? '' : '  r refresh'}  ? help  q quit`;
+      ? 'Left/h/H/Esc/Backspace back/parent  e instructions  J/K panes  Available Right/l/Enter  a add  x remove  ? help  q quit'
+      : `Right/l/Enter/L edit  c create  D duplicate  u activate  R rename  d remove${compact ? '' : '  r refresh'}  ? help  q quit`;
   }
   return `${compact ? '' : 'r refresh  '}? help  q quit`;
 }

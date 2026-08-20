@@ -1,5 +1,6 @@
 import { chmod, lstat, readFile, readlink, realpath, rm, symlink, writeFile } from 'node:fs/promises';
-import { afterEach, describe, expect, it } from 'vitest';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createBazframeTuiService,
   type BazframeTuiServiceOptions
@@ -358,6 +359,67 @@ describe('Bazframe TUI service', () => {
     expect((await fixture.service.loadDashboard()).managedSources).not.toContainEqual(
       expect.objectContaining({ id: 'managed:declared' })
     );
+  });
+
+  it('edits an inactive profile by ID using a freshly derived target without changing selection', async () => {
+    const fixture = await createFixture();
+    const editorChildRunner = vi.fn(async () => ({ exitCode: 0, signal: null }));
+    const environment = { ...fixture.options.environment, EDITOR: '/editor executable' };
+    const service = createBazframeTuiService({
+      ...fixture.options,
+      environment,
+      editorChildRunner
+    });
+    const dashboard = await service.loadDashboard();
+    const disclosed = dashboard.profiles.find((profile) => profile.id === 'reviewer')!;
+    disclosed.instructionsPath = '/untrusted/snapshot/AGENTS.md';
+
+    await expect(service.editProfileInstructions('reviewer')).resolves.toEqual({
+      exitCode: 0, signal: null
+    });
+    expect(editorChildRunner).toHaveBeenCalledWith(
+      '/editor executable',
+      [fixture.directory.path('home/profiles/reviewer/AGENTS.md')],
+      {
+        cwd: fixture.directory.path('home/profiles/reviewer'),
+        environment,
+        ignoreParentSignals: ['SIGINT']
+      }
+    );
+    expect(await readActiveProfile(fixture.home)).toBe('focused');
+  });
+
+  it('edits only an authoritative live default skill target and rejects managed preview references', async () => {
+    const fixture = await createFixture();
+    const editorChildRunner = vi.fn(async () => ({ exitCode: 0, signal: null }));
+    const environment = { ...fixture.options.environment, EDITOR: '/editor executable' };
+    const service = createBazframeTuiService({
+      ...fixture.options,
+      environment,
+      editorChildRunner
+    });
+    const disclosed = await service.loadSkillPreview({
+      sourceId: 'default', skillId: 'demo-skill'
+    });
+    disclosed.path = '/untrusted/preview/SKILL.md';
+
+    await expect(service.editSkillDefinition({
+      sourceId: 'default', skillId: 'demo-skill'
+    })).resolves.toEqual({ exitCode: 0, signal: null });
+    expect(editorChildRunner).toHaveBeenCalledWith(
+      '/editor executable',
+      [join(fixture.source, 'SKILL.md')],
+      {
+        cwd: fixture.source,
+        environment,
+        ignoreParentSignals: ['SIGINT']
+      }
+    );
+
+    await expect(service.editSkillDefinition({
+      sourceId: 'managed:bundle', skillId: 'demo-skill'
+    })).rejects.toMatchObject({ code: 'SKILL_EDITOR_SOURCE_READ_ONLY' });
+    expect(editorChildRunner).toHaveBeenCalledTimes(1);
   });
 
   it('loads an empty dashboard without creating Bazframe state', async () => {

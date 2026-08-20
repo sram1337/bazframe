@@ -121,6 +121,61 @@ try {
     return { handledError: 'LOCK_BUSY', expectedStatus: 0 };
   }));
 
+  evidence.push(runScenario('editor-handoff', executable, packageRoot, ({ session, deadline, marker }) => {
+    beginEditorLaunch(session, deadline);
+    waitForMarker(`${marker}.editor-started`, 'started\n', deadline, session);
+    assertAlternate(session, '0');
+    const terminalState = readFileSync(`${marker}.editor-terminal`, 'utf8');
+    if (terminalState.includes('-icanon')) throw scenarioError(session, 'editor inherited a raw terminal');
+    publishMarker(`${marker}.editor-release`, 'release\n');
+    waitForCurrentText(session, 'Editor exited successfully', deadline);
+    assertAlternate(session, '1');
+    sendLiteral(session, 'q');
+    return {
+      expectedStatus: 0,
+      evidence: { editor: 'cooked-blocking-success', alternateScreenHandoff: true }
+    };
+  }, undefined, 'blocking-success'));
+
+  evidence.push(runScenario('editor-ctrl-c', executable, packageRoot, ({ session, deadline, marker }) => {
+    beginEditorLaunch(session, deadline);
+    waitForMarker(`${marker}.editor-started`, 'started\n', deadline, session);
+    assertAlternate(session, '0');
+    sendKey(session, 'C-c');
+    waitForMarker(`${marker}.editor-interrupted`, 'interrupted\n', deadline, session);
+    waitForCurrentText(session, 'Editor exited with status 130', deadline);
+    assertAlternate(session, '1');
+    sendLiteral(session, 'q');
+    return {
+      expectedStatus: 0,
+      evidence: { editor: 'ctrl-c-interrupted-child-parent-resumed' }
+    };
+  }, undefined, 'interruptible'));
+
+  evidence.push(runScenario('editor-nonzero', executable, packageRoot, ({ session, deadline }) => {
+    beginEditorLaunch(session, deadline);
+    waitForCurrentText(session, 'Editor exited with status 7', deadline);
+    assertAlternate(session, '1');
+    sendLiteral(session, 'q');
+    return { expectedStatus: 0, evidence: { editor: 'nonzero-recovered' } };
+  }, undefined, 'nonzero'));
+
+  evidence.push(runScenario('editor-signal', executable, packageRoot, ({ session, deadline }) => {
+    beginEditorLaunch(session, deadline);
+    waitForCurrentText(session, 'Editor terminated by SIGTERM', deadline);
+    assertAlternate(session, '1');
+    sendLiteral(session, 'q');
+    return { expectedStatus: 0, evidence: { editor: 'signal-recovered' } };
+  }, undefined, 'signal'));
+
+  evidence.push(runScenario('editor-spawn-failure', executable, packageRoot, ({ session, deadline }) => {
+    beginEditorLaunch(session, deadline);
+    waitForCurrentText(session, 'Could not find editor executable', deadline);
+    assertAlternate(session, '1');
+    sendLiteral(session, 'q');
+    return { expectedStatus: 0, evidence: { editor: 'spawn-failure-recovered' } };
+  }, undefined, 'missing'));
+
   evidence.push(runScenario('idle-ctrl-c', executable, packageRoot, ({ session, deadline }) => {
     waitForCurrentText(session, 'Status: Ready', deadline);
     assertAlternate(session, '1');
@@ -199,7 +254,7 @@ try {
   cleanup();
 }
 
-function runScenario(name, executable, packageRoot, drive, fixtureMode) {
+function runScenario(name, executable, packageRoot, drive, fixtureMode, editorMode) {
   const scenarioRoot = join(temporaryRoot, `scenario-${name}`);
   const home = join(scenarioRoot, 'bazframe-home');
   const provider = join(scenarioRoot, 'provider');
@@ -211,6 +266,35 @@ function runScenario(name, executable, packageRoot, drive, fixtureMode) {
   mkdirSync(scenarioRoot, { recursive: true });
   copyState(stateRoot, home, provider);
   mkdirSync(piAgent, { recursive: true });
+  let editorExecutable;
+  if (editorMode === 'missing') {
+    editorExecutable = join(scenarioRoot, 'missing-editor');
+  } else if (editorMode !== undefined) {
+    editorExecutable = join(scenarioRoot, 'editor');
+    const editorLines = [
+      '#!/bin/sh',
+      `printf '%s\\n' "$$" >${shellQuote(`${marker}.editor-pid`)}`,
+      ...(editorMode === 'blocking-success'
+        ? [
+            `stty -a >${shellQuote(`${marker}.editor-terminal`)}`,
+            `printf 'started\\n' >${shellQuote(`${marker}.editor-started`)}`,
+            `while [ ! -f ${shellQuote(`${marker}.editor-release`)} ]; do sleep 0.02; done`,
+            `printf '\\nedited by terminal fixture\\n' >>"$1"`,
+            'exit 0'
+          ]
+        : editorMode === 'interruptible'
+          ? [
+              `trap ${shellQuote(`printf 'interrupted\\n' >${shellQuote(`${marker}.editor-interrupted`)}; exit 130`)} INT`,
+              `printf 'started\n' >${shellQuote(`${marker}.editor-started`)}`,
+              'while :; do sleep 1; done'
+            ]
+          : editorMode === 'nonzero'
+            ? ['exit 7']
+            : ['kill -TERM "$$"', 'sleep 1']),
+      ''
+    ];
+    writeFileSync(editorExecutable, editorLines.join('\n'), { mode: 0o700 });
+  }
   const command = fixtureMode === undefined
     ? shellQuote(executable) + ' tui'
     : [
@@ -225,11 +309,13 @@ function runScenario(name, executable, packageRoot, drive, fixtureMode) {
     `BAZFRAME_HOME=${shellQuote(home)}`,
     `PI_CODING_AGENT_DIR=${shellQuote(piAgent)}`,
     'NO_COLOR=1',
-    'TERM=xterm-256color'
+    'TERM=xterm-256color',
+    ...(editorExecutable === undefined ? [] : [`VISUAL=${shellQuote(editorExecutable)}`])
   ].join(' ');
   const wrapped = [
     '#!/bin/sh',
     'before=$(stty -g)',
+    "trap ':' INT",
     `env ${environment} ${command} 2>${shellQuote(stderrPath)}`,
     'exit_code=$?',
     'after=$(stty -g)',
@@ -294,6 +380,14 @@ function runScenario(name, executable, packageRoot, drive, fixtureMode) {
   if (primaryError !== undefined) throw primaryError;
   if (cleanupError !== undefined) throw cleanupError;
   return result;
+}
+
+function beginEditorLaunch(session, deadline) {
+  waitForCurrentText(session, 'Status: Ready', deadline);
+  assertAlternate(session, '1');
+  sendLiteral(session, '2');
+  actAndWaitForCurrentText(session, () => sendKey(session, 'Enter'), 'Available skills', deadline);
+  sendLiteral(session, 'e');
 }
 
 function beginBlockingMutation(session, deadline) {

@@ -42,6 +42,10 @@ try {
   assertExists(join(packageRoot, 'dist', 'application', 'tui-service.js'));
   assertExists(join(packageRoot, 'dist', 'profiles', 'profile-source-reference.js'));
   assertExists(join(packageRoot, 'dist', 'profiles', 'profile-source-reference-lifecycle.js'));
+  assertExists(join(packageRoot, 'dist', 'profiles', 'profile-instruction-editor.js'));
+  assertExists(join(packageRoot, 'dist', 'skills', 'skill-definition-editor.js'));
+  assertExists(join(packageRoot, 'dist', 'core', 'child-process.js'));
+  assertExists(join(packageRoot, 'dist', 'core', 'external-editor.js'));
   assertExists(join(packageRoot, 'dist', 'sources', 'source-store.js'));
   assertExists(join(packageRoot, 'dist', 'sources', 'source-lifecycle.js'));
   assertExists(join(packageRoot, 'dist', 'source-units', 'source-unit-resolver.js'));
@@ -98,6 +102,33 @@ try {
   if (result.status !== 0 || result.stdout !== 'Bazframe 2 prototype 0.0.0-prototype.0\n') {
     throw new Error(
       `Installed CLI version check failed (${result.status}).\nstdout: ${result.stdout}\nstderr: ${result.stderr}`
+    );
+  }
+
+  const editorHelp = spawnSync(executable, ['help', 'profile', 'edit'], {
+    encoding: 'utf8', shell: false
+  });
+  if (
+    editorHelp.status !== 0
+    || !editorHelp.stdout.includes('bazframe profile edit <profile>')
+    || !editorHelp.stdout.includes('wrapper executable')
+  ) {
+    throw new Error(
+      `Packed profile editor help failed (${editorHelp.status}).\nstdout: ${editorHelp.stdout}\nstderr: ${editorHelp.stderr}`
+    );
+  }
+
+  const skillEditorHelp = spawnSync(executable, ['help', 'skill', 'edit'], {
+    encoding: 'utf8', shell: false
+  });
+  if (
+    skillEditorHelp.status !== 0
+    || !skillEditorHelp.stdout.includes('bazframe skill edit <skill>')
+    || !skillEditorHelp.stdout.includes('edit provider input through its provider workflow')
+    || !skillEditorHelp.stdout.includes('bazframe sources build <source>')
+  ) {
+    throw new Error(
+      `Packed skill editor help failed (${skillEditorHelp.status}).\nstdout: ${skillEditorHelp.stdout}\nstderr: ${skillEditorHelp.stderr}`
     );
   }
 

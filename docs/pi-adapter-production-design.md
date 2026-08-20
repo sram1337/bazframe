@@ -37,11 +37,11 @@ From any directory, configure the global active profile:
 
 ```bash
 bazframe profile add focused
-$EDITOR ~/.bazframe/profiles/focused/AGENTS.md
+bazframe profile edit focused
 bazframe profile use focused
 ```
 
-`profile add` creates the empty physical profile shape without selecting it. `profile use` validates and selects it; top-level `bazframe use focused` remains a supported alias. Every working directory that inherits enabled global policy uses that profile.
+`profile add` creates the empty physical profile shape without selecting it. `profile edit` opens its actual `AGENTS.md` with the first nonblank executable-only `VISUAL`, then `EDITOR`; `skill edit` applies the same process contract to an authoritative live `(default)` provider `SKILL.md`, while managed snapshots remain immutable. Fixed flags require a wrapper executable. `profile use` validates and selects it; top-level `bazframe use focused` remains a supported alias. Every working directory that inherits enabled global policy uses that profile.
 
 ### 2.3 Run and reload
 
@@ -205,7 +205,7 @@ A lock records PID, creation time, command, and target. A live lock produces an 
 
 Bazframe-managed state, including `active-profile`, rejects symlinks. Profile lifecycle requires a physical profile root, while runtime validation follows user-owned `AGENTS.md`, `skills/`, and immediate skill-entry symlinks as trusted profile content and applies the existing file and skill checks to resolved targets. Duplicate and rename intentionally validate only the source physical root so broken provider references do not prevent copying or preserving profile content. Duplication preserves symlinks verbatim, stages the full copy under the physical profiles directory, cleans failed staging, and publishes with a final rename.
 
-The CLI performs state mutations. Profile add/duplicate/remove/rename/select share the global state lock; membership takes it before a profile-specific lock. Actual create, duplicate, remove, and identity-changing rename clear affected alias cache, while idempotent add and same-ID rename preserve it. Runtime cache materialization uses atomic writes to deterministic profile/alias paths. Old alias files are inert because `resources_discover` returns only aliases selected for the current load. Adapter uninstall clears the full Pi alias cache.
+The CLI performs state mutations. Profile add/duplicate/remove/rename/select share the global state lock; membership takes it before a profile-specific lock. `profile edit` is a direct user-owned external write: after physical-root/final-file revalidation it launches without a lock, temporary copy, or rollback and waits for the shell-free inherited child. Actual create, duplicate, remove, and identity-changing rename clear affected alias cache, while idempotent add and same-ID rename preserve it. Runtime cache materialization uses atomic writes to deterministic profile/alias paths. Old alias files are inert because `resources_discover` returns only aliases selected for the current load. Adapter uninstall clears the full Pi alias cache.
 
 Locks coordinate Bazframe writers. A non-cooperating external process can still race profile check/create/duplicate/rename/remove pathnames or final membership unlink after verification because portable Node APIs do not provide every conditional pathname operation needed to exclude such writers.
 
@@ -259,6 +259,8 @@ Lifecycle behavior:
 
 - `profile add` creates zero-byte physical `AGENTS.md` and an empty physical `skills/` directory without selecting it; an existing runtime-valid physical-root profile is `current`;
 - `profile list` reports runtime-valid physical-root profiles and warns on invalid neighbors without contaminating stdout;
+- `profile edit <profile>` targets active or inactive profiles explicitly, preserves active selection, does not pre-read instruction bytes, and returns the configured editor's exit or signal status;
+- `skill edit <skill>` targets only a structurally authorized live `(default)` provider definition, does not parse its bytes before launch, and returns the same editor status without granting managed-snapshot or Bazframe artifact-lifecycle authority;
 - bare `profile` and `profiles` render the human profile overview, while `profile list` and `profile current` remain concise scripting commands;
 - duplicate copies all child content without resolving provider targets, preserves symlinks verbatim, refuses replacement and profile-root symlinks, publishes only after a complete staged copy, and leaves active selection unchanged;
 - rename preserves all child content without resolving provider targets, refuses replacement and profile-root symlinks, and updates active selection with rollback on pre-commit write failure;

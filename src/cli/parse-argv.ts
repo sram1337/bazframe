@@ -7,10 +7,10 @@ import { isSafeSkillId } from '../skills/skill-id.js';
 export type HelpTopic =
   | 'root' | 'use' | 'add-skill' | 'remove-skill' | 'pi' | 'adapter' | 'status' | 'global'
   | 'profile' | 'profile-add' | 'profile-duplicate' | 'profile-remove' | 'profile-rename'
-  | 'profile-use' | 'profile-list' | 'profile-current' | 'profile-skills'
+  | 'profile-use' | 'profile-edit' | 'profile-list' | 'profile-current' | 'profile-skills'
   | 'profile-skills-add' | 'profile-skills-remove' | 'profile-sources'
   | 'profile-sources-add' | 'profile-sources-remove' | 'sources' | 'sources-add' | 'sources-build' | 'sources-remove'
-  | 'skills' | 'project' | 'tui';
+  | 'skills' | 'skill-edit' | 'project' | 'tui';
 export type Command =
   | { name: 'profiles-overview' }
   | { name: 'skills-overview' }
@@ -28,6 +28,7 @@ export type Command =
   | { name: 'use'; profileId: string }
   | { name: 'default-skill-add'; skillRoot: string }
   | { name: 'default-skill-remove'; skillId: string }
+  | { name: 'skill-edit'; skillId: string }
   | { name: 'profile-skill-add'; skillId: string; profileId?: string }
   | { name: 'profile-skill-remove'; skillId: string; profileId?: string }
   | { name: 'profile-add'; profileId: string }
@@ -35,6 +36,7 @@ export type Command =
   | { name: 'profile-remove'; profileId: string; force: boolean }
   | { name: 'profile-rename'; previousProfileId: string; profileId: string }
   | { name: 'profile-use'; profileId: string }
+  | { name: 'profile-edit'; profileId: string }
   | { name: 'profile-list' }
   | { name: 'profile-current' }
   | { name: 'pi'; dryRun: boolean; forwardedArgs: string[] }
@@ -72,9 +74,8 @@ export function parseArgv(argv: readonly string[]): ParseResult {
   }
   if (first === 'profile') return parseProfile(rest);
   if (first === 'profiles') return parsePluralOverview(rest, 'profiles-overview', 'profile');
-  if (first === 'skill' || first === 'skills') {
-    return parseOverview(rest, 'skills-overview', 'skills');
-  }
+  if (first === 'skill') return parseSkill(rest);
+  if (first === 'skills') return parsePluralOverview(rest, 'skills-overview', 'skills', 'skill');
   if (first === 'sources') return parseSources(rest);
   if (first === 'project') return parseProject(rest);
   if (first === 'projects') return parsePluralOverview(rest, 'projects-overview', 'project');
@@ -97,12 +98,13 @@ function parseHelp(args: readonly string[]): ParseResult {
   const key = args.join(' ');
   const topic = new Map<string, HelpTopic>([
     ['profile', 'profile'], ['profiles', 'profile'],
+    ['profile edit', 'profile-edit'],
     ['profile skills', 'profile-skills'],
     ['profile sources', 'profile-sources'],
     ['profile sources add', 'profile-sources-add'],
     ['profile sources remove', 'profile-sources-remove'],
     ['sources', 'sources'], ['sources add', 'sources-add'], ['sources build', 'sources-build'], ['sources remove', 'sources-remove'],
-    ['skill', 'skills'], ['skills', 'skills'],
+    ['skill', 'skills'], ['skills', 'skills'], ['skill edit', 'skill-edit'],
     ['project', 'project'], ['projects', 'project'],
     ['global', 'global'],
     ['adapter', 'adapter'], ['adapters', 'adapter'],
@@ -115,28 +117,32 @@ function parseHelp(args: readonly string[]): ParseResult {
     : { kind: 'help', topic };
 }
 
-function parseOverview(
-  args: readonly string[],
-  command: Command['name'],
-  topic: HelpTopic
-): ParseResult {
-  if (args.length === 0) {
-    return { kind: 'command', command: { name: command } as Command };
-  }
-  if (args.length === 1 && HELP_FLAGS.has(args[0])) return { kind: 'help', topic };
-  return usageError(`${topic} accepts no arguments.`, topic);
-}
-
 function parsePluralOverview(
   args: readonly string[],
   command: Command['name'],
-  topic: HelpTopic
+  topic: HelpTopic,
+  singularResource: string = topic
 ): ParseResult {
   if (args.length === 0) {
     return { kind: 'command', command: { name: command } as Command };
   }
   if (args.length === 1 && HELP_FLAGS.has(args[0])) return { kind: 'help', topic };
-  return usageError(`Use the singular ${JSON.stringify(topic)} resource for commands.`, topic);
+  return usageError(`Use the singular ${JSON.stringify(singularResource)} resource for commands.`, topic);
+}
+
+function parseSkill(args: readonly string[]): ParseResult {
+  if (args.length === 0) return { kind: 'command', command: { name: 'skills-overview' } };
+  if (args.length === 1 && HELP_FLAGS.has(args[0])) return { kind: 'help', topic: 'skills' };
+  const [subcommand, ...rest] = args;
+  if (subcommand !== 'edit') {
+    return usageError('skill requires `edit`.', 'skills');
+  }
+  if (rest.length === 1 && HELP_FLAGS.has(rest[0])) return { kind: 'help', topic: 'skill-edit' };
+  if (rest.length !== 1) {
+    return usageError('skill edit requires exactly one <skill> argument.', 'skill-edit');
+  }
+  if (!isSafeSkillId(rest[0])) return invalidSkillId('skill-edit');
+  return { kind: 'command', command: { name: 'skill-edit', skillId: rest[0] } };
 }
 
 function parseUse(args: readonly string[]): ParseResult {
@@ -161,9 +167,9 @@ function parseProfile(args: readonly string[]): ParseResult {
   const [subcommand, ...rest] = args;
   if (subcommand === 'skills') return parseProfileSkills(rest);
   if (subcommand === 'sources') return parseProfileSources(rest);
-  if (!new Set(['add', 'duplicate', 'remove', 'rename', 'use', 'list', 'current']).has(subcommand)) {
+  if (!new Set(['add', 'duplicate', 'remove', 'rename', 'use', 'edit', 'list', 'current']).has(subcommand)) {
     return usageError(
-      'profile requires `skills`, `sources`, `add`, `duplicate`, `remove`, `rename`, `use`, `list`, or `current`.',
+      'profile requires `skills`, `sources`, `add`, `duplicate`, `remove`, `rename`, `use`, `edit`, `list`, or `current`.',
       'profile'
     );
   }

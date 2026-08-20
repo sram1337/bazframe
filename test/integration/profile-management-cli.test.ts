@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { lstat, mkdir, realpath, symlink } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readFile, realpath, symlink } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { snapshotFilesystem } from '../helpers/filesystem-snapshot.js';
@@ -96,6 +96,59 @@ describe('profile management CLI', () => {
       .toContain('Profile lifecycle: absent');
   });
 
+  it('edits the named profile through the built CLI with a shell-free inherited process', async () => {
+    if (process.platform === 'win32') return;
+    const directory = await createTempDirectory('bazframe profile editor integration ');
+    temporaryDirectories.push(directory);
+    const home = directory.path('home with spaces');
+    const cwd = await directory.mkdir('caller cwd');
+    const wrapper = directory.path('editor wrapper');
+    const record = directory.path('editor record.json');
+    await directory.write('editor wrapper', [
+      '#!/usr/bin/env node',
+      "const fs = require('node:fs');",
+      "fs.writeFileSync(process.env.EDITOR_RECORD, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), sentinel: process.env.EDITOR_SENTINEL }));",
+      "fs.appendFileSync(process.argv[2], '\\nedited by wrapper\\n');",
+      "process.exit(Number(process.env.EDITOR_EXIT || '0'));",
+      ''
+    ].join('\n'));
+    await chmod(wrapper, 0o755);
+    const environment = {
+      ...process.env,
+      BAZFRAME_HOME: home,
+      VISUAL: wrapper,
+      EDITOR: '/definitely/ignored-editor',
+      EDITOR_RECORD: record,
+      EDITOR_SENTINEL: 'inherited'
+    };
+    await runCli(['profile', 'add', 'focused'], cwd, environment);
+    await runCli(['profile', 'add', 'reviewer'], cwd, environment);
+    await runCli(['profile', 'use', 'focused'], cwd, environment);
+
+    const edited = await runCli(['profile', 'edit', 'reviewer'], cwd, environment);
+    expect(edited).toEqual({ status: 0, stdout: '', stderr: '' });
+    expect(JSON.parse(await readFile(record, 'utf8'))).toEqual({
+      argv: [directory.path('home with spaces/profiles/reviewer/AGENTS.md')],
+      cwd: await realpath(directory.path('home with spaces/profiles/reviewer')),
+      sentinel: 'inherited'
+    });
+    expect(await readFile(directory.path('home with spaces/profiles/reviewer/AGENTS.md'), 'utf8'))
+      .toContain('edited by wrapper');
+    expect((await runCli(['profile', 'current'], cwd, environment)).stdout).toBe('focused\n');
+
+    const nonzero = await runCli(['profile', 'edit', 'reviewer'], cwd, {
+      ...environment,
+      EDITOR_EXIT: '7'
+    });
+    expect(nonzero.status).toBe(7);
+    const literalFlags = await runCli(['profile', 'edit', 'reviewer'], cwd, {
+      ...environment,
+      VISUAL: `${wrapper} --wait`
+    });
+    expect(literalFlags.status).toBe(1);
+    expect(literalFlags.stderr).toContain('Could not find editor executable');
+  });
+
   it('keeps list stdout machine-readable while warning about invalid entries', async () => {
     if (process.platform === 'win32') return;
     const directory = await createTempDirectory('bazframe profile list ');
@@ -144,6 +197,7 @@ describe('profile management CLI', () => {
     expect(help).toMatchObject({ status: 0, stderr: '' });
     expect(help.stdout).toContain('bazframe profile add <profile>');
     expect(help.stdout).toContain('bazframe profile duplicate <source> <new>');
+    expect(help.stdout).toContain('bazframe profile edit <profile>');
     expect((await runCli(['help', 'profiles'], cwd, environment)).stdout).toBe(help.stdout);
     const duplicateHelp = await runCli(
       ['profile', 'duplicate', '--help'],

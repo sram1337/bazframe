@@ -292,12 +292,17 @@ function reconcileState(
     state.expandedAvailableSourceIds
   ).map((row) => row.id);
   const browserIds = browserIdsFor(snapshot, state.expandedSourceIds);
+  const browserSkillId = keepOrBrowserNeighbor(browserIds, state.browserSkillId);
   const next = {
     ...state,
     selectedProfileId,
     includedSkillId: keepOrFirst(includedIds, state.includedSkillId),
     availableSkillId: keepOrAvailableNeighbor(availableRowIds, state.availableSkillId),
-    browserSkillId: keepOrBrowserNeighbor(browserIds, state.browserSkillId)
+    browserSkillId,
+    skillRoute: state.skillRoute === 'preview'
+      && (browserSkillId === undefined || browserSkillId.startsWith('source:'))
+      ? 'browser' as const
+      : state.skillRoute
   };
   return clampOffsetsForIds(next, {
     profileList: [...profileIds, PROFILE_CREATE_ROW_ID],

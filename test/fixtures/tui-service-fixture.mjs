@@ -41,6 +41,8 @@ export function createBazframeTuiService() {
     useProfile: async () => undefined,
     renameProfile: async () => undefined,
     removeProfile: async () => undefined,
+    editProfileInstructions: async () => ({ exitCode: 0, signal: null }),
+    editSkillDefinition: async () => ({ exitCode: 0, signal: null }),
     addMembership: async () => {
       const mutation = blockMutation();
       writeMarker('mutation-started');

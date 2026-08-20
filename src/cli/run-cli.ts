@@ -9,6 +9,7 @@ import { buildPiArgs } from '../agents/pi-args.js';
 import { childExitStatus, spawnPi } from '../agents/spawn-pi.js';
 import { BazframeError } from '../core/errors.js';
 import { EXIT_STATUS } from '../core/exit-status.js';
+import type { InheritedChildRunner } from '../core/external-editor.js';
 import { composeInstructions } from '../harness/compose-instructions.js';
 import { createTemporaryInstructionFile } from '../harness/temporary-instructions.js';
 import { resolveEffectivePolicy } from '../policy/effective-policy.js';
@@ -50,6 +51,7 @@ import {
   resolveBazframeHome,
   selectProfile
 } from '../profiles/profile-store.js';
+import { editProfileInstructions } from '../profiles/profile-instruction-editor.js';
 import { findGitRoot } from '../project/git-root.js';
 import {
   disableRepository,
@@ -66,6 +68,7 @@ import {
   removeDefaultSkill,
   type DefaultSkillCatalogResult
 } from '../skills/default-skill-catalog.js';
+import { editSkillDefinition } from '../skills/skill-definition-editor.js';
 import {
   formatSourceDiagnostic,
   inspectGlobalSources,
@@ -96,6 +99,7 @@ import {
   PROFILE_ADD_HELP,
   PROFILE_CURRENT_HELP,
   PROFILE_DUPLICATE_HELP,
+  PROFILE_EDIT_HELP,
   PROFILE_HELP,
   PROFILE_LIST_HELP,
   PROFILE_REMOVE_HELP,
@@ -114,6 +118,7 @@ import {
   PROJECT_HELP,
   REMOVE_HELP,
   ROOT_HELP,
+  SKILL_EDIT_HELP,
   SKILLS_HELP,
   STATUS_HELP,
   TUI_HELP,
@@ -135,6 +140,7 @@ export interface CliDependencies {
   stdoutIsTty?: boolean;
   stderrIsTty?: boolean;
   terminateProcess?: (status: number) => void;
+  editorChildRunner?: InheritedChildRunner;
   launchTui?: (options: {
     bazframeHome: string;
     bazframeVersion: string;
@@ -353,6 +359,28 @@ async function runCommand(
       ''
     ].join('\n'));
     return EXIT_STATUS.success;
+  }
+  if (command.name === 'profile-edit') {
+    const result = await editProfileInstructions({
+      bazframeHome,
+      profileId: command.profileId,
+      environment,
+      ...(dependencies.editorChildRunner === undefined
+        ? {}
+        : { childRunner: dependencies.editorChildRunner })
+    });
+    return childExitStatus(result);
+  }
+  if (command.name === 'skill-edit') {
+    const result = await editSkillDefinition({
+      bazframeHome,
+      skillId: command.skillId,
+      environment,
+      ...(dependencies.editorChildRunner === undefined
+        ? {}
+        : { childRunner: dependencies.editorChildRunner })
+    });
+    return childExitStatus(result);
   }
   if (command.name === 'profile-add') {
     writeStdout(formatProfileLifecycle(await addProfile(bazframeHome, command.profileId)));
@@ -676,6 +704,7 @@ function formatProfilesOverview(
     colors.command('  bazframe profile add <profile>'),
     colors.command('  bazframe profile duplicate <source> <new>'),
     colors.command('  bazframe profile use <profile>'),
+    colors.command('  bazframe profile edit <profile>'),
     colors.command('  bazframe profile rename <old> <new>'),
     colors.command('  bazframe profile remove <profile> [--force]'),
     colors.command('  bazframe profile skills'),
@@ -702,6 +731,7 @@ function formatSkillsOverview(
     colors.heading('Commands:'),
     colors.command('  bazframe add skill <absolute-root>'),
     colors.command('  bazframe remove skill <skill>'),
+    colors.command('  bazframe skill edit <skill>'),
     colors.command('  bazframe profile skills'),
     colors.command('  bazframe profile skills add <skill> [--profile <profile>]'),
     colors.command('  bazframe profile skills remove <skill> [--profile <profile>]'),
@@ -970,6 +1000,7 @@ function helpFor(topic: HelpTopic): string {
     case 'profile': return PROFILE_HELP;
     case 'profile-add': return PROFILE_ADD_HELP;
     case 'profile-duplicate': return PROFILE_DUPLICATE_HELP;
+    case 'profile-edit': return PROFILE_EDIT_HELP;
     case 'profile-remove': return PROFILE_REMOVE_HELP;
     case 'profile-rename': return PROFILE_RENAME_HELP;
     case 'profile-use': return PROFILE_USE_HELP;
@@ -986,6 +1017,7 @@ function helpFor(topic: HelpTopic): string {
     case 'sources-build': return SOURCES_BUILD_HELP;
     case 'sources-remove': return SOURCES_REMOVE_HELP;
     case 'skills': return SKILLS_HELP;
+    case 'skill-edit': return SKILL_EDIT_HELP;
     case 'project': return PROJECT_HELP;
     case 'pi': return PI_HELP;
   }

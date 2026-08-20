@@ -39,6 +39,14 @@ bazframe remove skill <skill>
 
 Catalog removal is refused while any profile references the skill and never deletes provider content.
 
+Open a registered live provider definition explicitly:
+
+```bash
+bazframe skill edit <skill>
+```
+
+This re-derives the provider-contained `SKILL.md` from `(default)` and can open malformed content for repair. It uses the same executable-only `VISUAL` then `EDITOR` contract described below. A successful child exit does not claim a save. Managed snapshots cannot be edited; use the provider workflow and then `bazframe sources build <source>`.
+
 ## Managed sources
 
 Use managed sources for a skill or collection that should be built, snapshotted, and attached as a whole:
@@ -58,11 +66,14 @@ The source name is the canonical root basename. `sources add` and `sources build
 ```bash
 bazframe profiles
 bazframe profile add <profile>
+bazframe profile edit <profile>
 bazframe profile use <profile>
 bazframe profile current
 bazframe global
 bazframe project
 ```
+
+`profile edit` opens the named active or inactive profile's actual `AGENTS.md` without changing selection. It uses the first nonblank `VISUAL`, then `EDITOR`, as one executable name or path with no shell, flag parsing, or fallback. Use an executable wrapper for fixed flags or GUI wait behavior, and run `/bazframe reload` in an existing Pi session afterward.
 
 Global policy is enabled by default. A Git-worktree project override takes precedence.
 

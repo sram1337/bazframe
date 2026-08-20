@@ -60,10 +60,8 @@ Install the Bazframe adapter into Pi, create a profile, and give it one personal
 ```bash
 bazframe adapter install pi
 bazframe profile add focused
-
-PROFILE_FILE="${BAZFRAME_HOME:-$HOME/.bazframe}/profiles/focused/AGENTS.md"
-printf '%s\n' 'Prefer small, tested changes. Explain important tradeoffs.' > "$PROFILE_FILE"
-
+export EDITOR=/path/to/your/editor
+bazframe profile edit focused
 bazframe profile use focused
 bazframe status
 ```
@@ -102,7 +100,15 @@ bazframe profile use reviewer
 bazframe profiles
 ```
 
-Edit the profile shown by `bazframe profiles`, then start a new Pi session or run `/bazframe reload` in an existing one. Other lifecycle commands include `duplicate`, `rename`, and `remove`:
+Edit any active or inactive profile explicitly, then start a new Pi session or run `/bazframe reload` in an existing one:
+
+```bash
+bazframe profile edit reviewer
+```
+
+Bazframe uses the first nonblank `VISUAL`, then `EDITOR`, as one executable name or path. It does not parse flags, invoke a shell, or choose a fallback editor. If an editor needs fixed flags such as `--wait`, configure an executable wrapper. Bazframe edits the actual profile `AGENTS.md` directly and waits only for that process; a GUI launcher that returns immediately also needs a waiting wrapper.
+
+The manual equivalent is to open `${BAZFRAME_HOME:-$HOME/.bazframe}/profiles/<profile>/AGENTS.md` directly with an editor. Other lifecycle commands include `duplicate`, `rename`, and `remove`:
 
 ```bash
 bazframe profile --help
@@ -142,6 +148,14 @@ bazframe profile skills
 ```
 
 After `/bazframe reload`, `/bazframe info` should report `Flat direct skills: 1` and list `explain-code`.
+
+Open a registered live provider definition explicitly with the same external-editor contract used for profiles:
+
+```bash
+bazframe skill edit explain-code
+```
+
+The command derives the provider `SKILL.md` from the `(default)` registration rather than trusting a displayed path. A successful editor exit does not claim that content was saved. Managed-source skills are immutable snapshots and cannot be edited this way; edit their provider input through its provider workflow, then run `bazframe sources build <source>`.
 
 The catalog registration and profile membership are parallel links to the same provider directory. Provider changes are visible after a new Pi session or `/bazframe reload`. Remove the profile membership before `bazframe remove skill explain-code`; catalog removal is refused while any profile references it.
 
@@ -198,7 +212,7 @@ bazframe projects         # inspect repository settings
 
 ## Terminal interface
 
-`bazframe tui` opens a keyboard-driven `Skills`, `Profiles`, `Adapters`, `Settings` interface. Preferred layouts show profile and skill/source master-detail panes; compact layouts drill into profile details and plain-text `SKILL.md` previews with Esc/Backspace return. The interface preserves explicit inactive-profile membership editing and keeps adapter/settings status read-only.
+`bazframe tui` opens a keyboard-driven `Skills`, `Profiles`, `Adapters`, `Settings` interface. Preferred layouts show profile and skill/source master-detail panes; compact layouts drill into profile details and plain-text `SKILL.md` previews with Esc/Backspace return. Press `e` on a live `(default)` skill preview to open its provider `SKILL.md`; managed snapshots instead show provider-edit and rebuild guidance. Profile details retain `e` for the selected profile's `AGENTS.md`. The interface preserves explicit inactive-profile membership editing and keeps adapter/settings status read-only.
 
 ```bash
 bazframe tui

@@ -1,6 +1,8 @@
 import { lstat, readdir, readlink, realpath } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { readUtf8InstructionFile } from '../core/content.js';
+import type { ChildResult } from '../core/child-process.js';
+import type { InheritedChildRunner } from '../core/external-editor.js';
 import { BazframeError, errorCode } from '../core/errors.js';
 import {
   addProfile,
@@ -14,6 +16,7 @@ import {
   type ProfileSkillMembershipOptions
 } from '../profiles/profile-skill-membership.js';
 import { isSafeProfileId } from '../profiles/profile-id.js';
+import { editProfileInstructions as launchProfileInstructionEditor } from '../profiles/profile-instruction-editor.js';
 import {
   captureProfileRemovalIdentity,
   type ProfileRemovalIdentity
@@ -23,6 +26,7 @@ import {
   readActiveProfile,
   selectProfile
 } from '../profiles/profile-store.js';
+import { editSkillDefinition as launchSkillDefinitionEditor } from '../skills/skill-definition-editor.js';
 import { assertSafeSkillId, isSafeSkillId } from '../skills/skill-id.js';
 import {
   DEFAULT_SKILL_SOURCE_ID,
@@ -190,6 +194,8 @@ export interface BazframeTuiService {
   useProfile(profileId: string): Promise<void>;
   renameProfile(previousProfileId: string, profileId: string): Promise<void>;
   removeProfile(profileId: string, authorization: ProfileRemovalAuthorization): Promise<void>;
+  editProfileInstructions(profileId: string): Promise<ChildResult>;
+  editSkillDefinition(skill: SkillReference): Promise<ChildResult>;
   addMembership(profileId: string, skill: SkillReference): Promise<void>;
   removeMembership(profileId: string, membership: MembershipReference): Promise<void>;
   loadSkillPreview(skill: SkillReference): Promise<SkillPreview>;
@@ -204,6 +210,7 @@ export interface BazframeTuiServiceOptions extends ProfileSkillMembershipOptions
   environment: NodeJS.ProcessEnv;
   userHome?: string;
   adapterArtifactUrl?: URL;
+  editorChildRunner?: InheritedChildRunner;
 }
 
 export function createBazframeTuiService(
@@ -242,6 +249,33 @@ export function createBazframeTuiService(
         return;
       }
       await removeProfile(options.bazframeHome, profileId, false);
+    },
+    async editProfileInstructions(profileId) {
+      return launchProfileInstructionEditor({
+        bazframeHome: options.bazframeHome,
+        profileId,
+        environment: options.environment,
+        ...(options.editorChildRunner === undefined
+          ? {}
+          : { childRunner: options.editorChildRunner })
+      });
+    },
+    async editSkillDefinition(skill) {
+      assertSafeSkillId(skill.skillId);
+      if (skill.sourceId !== DEFAULT_SKILL_SOURCE_ID) {
+        throw new BazframeError(
+          'SKILL_EDITOR_SOURCE_READ_ONLY',
+          `Only live (default) skills can be opened in an editor: ${skill.sourceId}/${skill.skillId}`
+        );
+      }
+      return launchSkillDefinitionEditor({
+        bazframeHome: options.bazframeHome,
+        skillId: skill.skillId,
+        environment: options.environment,
+        ...(options.editorChildRunner === undefined
+          ? {}
+          : { childRunner: options.editorChildRunner })
+      });
     },
     async addMembership(profileId, skill) {
       assertKnownSource(skill.sourceId);

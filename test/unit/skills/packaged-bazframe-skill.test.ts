@@ -15,6 +15,8 @@ describe('packaged Bazframe skill source', () => {
       'bazframe add skill /absolute/path/to/skill',
       'bazframe remove skill <skill>',
       'bazframe profile skills add <skill>',
+      'bazframe profile edit <profile>',
+      'bazframe skill edit <skill>',
       'bazframe sources add /absolute/path/to/source',
       'bazframe profile sources add <source>',
       'bazframe adapter install pi',

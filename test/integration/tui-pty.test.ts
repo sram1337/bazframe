@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { realpath, rm, symlink } from 'node:fs/promises';
+import { chmod, readFile, realpath, rm, symlink } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createTempDirectory, type TempDirectory } from '../helpers/temp-directory.js';
@@ -55,7 +55,9 @@ describe('packed-style TUI terminal lifecycle', () => {
     expect(screenReaderResult.status, JSON.stringify(screenReaderResult)).toBe(0);
     expect(screenReaderResult.output).toContain('Profiles tab, selected, focused');
     expect(screenReaderResult.output).toContain('Skills tab, selected, focused');
-    expect(screenReaderResult.output).toContain('Profile focused, active, selected');
+    expect(screenReaderResult.output).toContain('Profile focused, active, 0 skills');
+    expect(screenReaderResult.output).not.toContain('Profile focused, active, active selection');
+    expect(screenReaderResult.output).not.toContain('Profile focused, active, parent selection');
     expect(screenReaderResult.output).toContain('Create new profile');
     expect(screenReaderResult.output).toContain('Status: Ready');
     expect(screenReaderResult.output).not.toContain('\u001B[?1049h');
@@ -67,6 +69,96 @@ describe('packed-style TUI terminal lifecycle', () => {
       expect(screenReaderResult.output).not.toContain(eraseSequence);
     }
     expect(screenReaderResult.output).not.toContain('\u001B[1A');
+  });
+
+  it.skipIf(terminalUnavailable)('hands a cooked terminal to the editor and redraws after return', async () => {
+    const fixture = await terminalFixture();
+    const wrapper = fixture.directory.path('editor-wrapper');
+    await fixture.directory.write('editor-wrapper', [
+      '#!/bin/sh',
+      'case "$(stty -a)" in',
+      '  *-icanon*) echo EDITOR-RAW ;;',
+      '  *) echo EDITOR-COOKED ;;',
+      'esac',
+      "printf '\\nedited in pty\\n' >> \"$1\"",
+      ''
+    ].join('\n'));
+    await chmod(wrapper, 0o755);
+
+    const result = await runInPseudoTerminal({ ...fixture.environment, VISUAL: wrapper }, [
+      { afterOutput: 'Status: Ready', input: '2' },
+      { afterOutput: '+ Create New Profile', input: '\r' },
+      { afterOutput: 'Left/h/H/Esc/Backspace', input: 'e' },
+      { afterOutput: 'Editor exited successfully', input: 'q' }
+    ]);
+
+    expect(result.status, JSON.stringify(result)).toBe(0);
+    expect(result.output).toContain('EDITOR-COOKED');
+    expect(result.output).not.toContain('EDITOR-RAW');
+    expect(result.output.split('\u001B[?1049h').length - 1).toBeGreaterThanOrEqual(2);
+    expect(result.output.split('\u001B[?1049l').length - 1).toBeGreaterThanOrEqual(2);
+    expect(result.output).toContain('Editor exited successfully');
+    expect(result.output).toContain('\u001B[?25h');
+    expect(await readFile(fixture.directory.path('home/profiles/focused/AGENTS.md'), 'utf8'))
+      .toContain('edited in pty');
+    expect(result.stderr).toBe('');
+  });
+
+  it.skipIf(terminalUnavailable)('launches a live skill editor from the Skills preview route', async () => {
+    const fixture = await terminalFixture();
+    const wrapper = fixture.directory.path('skill-editor-wrapper');
+    await fixture.directory.write('skill-editor-wrapper', [
+      '#!/bin/sh',
+      'echo SKILL-EDITOR-COOKED',
+      "printf '\nEdited from Skills preview.\n' >> \"$1\"",
+      ''
+    ].join('\n'));
+    await chmod(wrapper, 0o755);
+
+    const result = await runInPseudoTerminal({ ...fixture.environment, VISUAL: wrapper }, [
+      { afterOutput: 'Status: Ready', input: '\u001B[B' },
+      { afterOutput: 'description: PTY fixture', input: '\r' },
+      { afterOutput: 'Left/h back', input: 'e' },
+      { afterOutput: 'Editor exited successfully', input: 'q' }
+    ]);
+
+    expect(result.status, JSON.stringify(result)).toBe(0);
+    expect(result.output).toContain('SKILL-EDITOR-COOKED');
+    expect(result.output).toContain('Editor exited successfully');
+    expect(result.output.split('\u001B[?1049h').length - 1).toBeGreaterThanOrEqual(2);
+    expect(result.output.split('\u001B[?1049l').length - 1).toBeGreaterThanOrEqual(2);
+    expect(await readFile(fixture.directory.path('provider/demo-skill/SKILL.md'), 'utf8'))
+      .toContain('Edited from Skills preview.');
+    expect(result.stderr).toBe('');
+  });
+
+  it.skipIf(terminalUnavailable)('keeps the TUI alive when Ctrl+C interrupts the suspended editor', async () => {
+    const fixture = await terminalFixture();
+    const wrapper = fixture.directory.path('interruptible-editor');
+    await fixture.directory.write('interruptible-editor', [
+      '#!/bin/sh',
+      "trap 'echo EDITOR-INTERRUPTED; exit 130' INT",
+      'echo EDITOR-WAITING',
+      'while :; do sleep 1; done',
+      ''
+    ].join('\n'));
+    await chmod(wrapper, 0o755);
+
+    const result = await runInPseudoTerminal({ ...fixture.environment, VISUAL: wrapper }, [
+      { afterOutput: 'Status: Ready', input: '2' },
+      { afterOutput: '+ Create New Profile', input: '\r' },
+      { afterOutput: 'Left/h/H/Esc/Backspace', input: 'e' },
+      { afterOutput: 'EDITOR-WAITING', input: '\x03' },
+      { afterOutput: 'Editor exited with status 130', input: 'q' }
+    ]);
+
+    expect(result.status, JSON.stringify(result)).toBe(0);
+    expect(result.output).toContain('EDITOR-INTERRUPTED');
+    expect(result.output).toContain('Editor exited with status 130');
+    expect(result.output.split('\u001B[?1049h').length - 1).toBeGreaterThanOrEqual(2);
+    expect(result.output.split('\u001B[?1049l').length - 1).toBeGreaterThanOrEqual(2);
+    expect(result.output).toContain('\u001B[?25h');
+    expect(result.stderr).toBe('');
   });
 
   it.skipIf(terminalUnavailable)('handles idle Ctrl+C with exit 130 and complete terminal restoration', async () => {
@@ -124,6 +216,7 @@ async function runInPseudoTerminal(
 }> {
   const deadline = Date.now() + SCENARIO_DEADLINE_MS;
   const command = [
+    "trap ':' INT",
     `${shellQuote(process.execPath)} ${shellQuote(cliPath)} tui`,
     'status=$?',
     `printf '\\n${TUI_EXIT_MARKER}%s\\n' "$status"`,

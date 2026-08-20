@@ -18,6 +18,15 @@ export interface DefaultSkillRegistration {
   registrationPath: string;
   target: string;
 }
+
+export interface DefaultSkillEditorRegistration extends DefaultSkillRegistration {
+  catalogDevice: bigint;
+  catalogInode: bigint;
+  registrationDevice: bigint;
+  registrationInode: bigint;
+  targetDevice: bigint;
+  targetInode: bigint;
+}
 export interface DefaultSkillCatalog {
   root: string;
   registrations: DefaultSkillRegistration[];
@@ -78,6 +87,72 @@ export async function readDefaultSkillRegistration(
   if (root === undefined) throw notFound(skillId);
   try {
     return await readValidRegistrationFromRoot(bazframeHome, root, skillId);
+  } finally {
+    await root.handle.close().catch(() => undefined);
+  }
+}
+
+export async function readDefaultSkillEditorRegistration(
+  bazframeHome: string,
+  skillId: string
+): Promise<DefaultSkillEditorRegistration> {
+  assertSafeSkillId(skillId);
+  const root = await openCatalogRoot(bazframeHome, false);
+  if (root === undefined) throw notFound(skillId);
+  try {
+    const registrationPath = join(root.path, skillId);
+    const raw = await inspectRawRegistration(registrationPath);
+    if (raw === undefined) throw notFound(skillId);
+    if (raw.kind !== 'link' || !isAbsolute(raw.target)) {
+      throw occupiedRegistration(registrationPath, raw);
+    }
+    let canonical: string;
+    try { canonical = await realpath(raw.target); }
+    catch (error) {
+      throw new BazframeError(
+        'DEFAULT_SKILL_BROKEN',
+        `Default skill registration is broken: ${registrationPath} -> ${raw.target}${formatCode(error)}`,
+        { cause: error }
+      );
+    }
+    if (canonical !== raw.target) {
+      throw new BazframeError(
+        'DEFAULT_SKILL_TARGET_NOT_CANONICAL',
+        `Default skill registration target must be canonical: ${registrationPath} -> ${raw.target}`
+      );
+    }
+    const metadata = await lstat(canonical, { bigint: true });
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      throw new BazframeError(
+        'DEFAULT_SKILL_TARGET_NOT_PHYSICAL',
+        `Default skill target must be a physical directory: ${canonical}`
+      );
+    }
+    const canonicalHome = await canonicalExistingPath(bazframeHome);
+    if (isWithin(canonicalHome, canonical) || isWithin(canonical, canonicalHome)) {
+      throw new BazframeError(
+        'DEFAULT_SKILL_TARGET_OVERLAPS_BAZFRAME_HOME',
+        `Default skill target and BAZFRAME_HOME must not overlap: ${canonical}`
+      );
+    }
+    if (basename(canonical) !== skillId) {
+      throw new BazframeError(
+        'DEFAULT_SKILL_NAME_MISMATCH',
+        `Default skill target basename does not match ${JSON.stringify(skillId)}: ${canonical}`
+      );
+    }
+    await assertDirectoryStable(root);
+    return {
+      id: skillId,
+      registrationPath,
+      target: canonical,
+      catalogDevice: root.identity.device,
+      catalogInode: root.identity.inode,
+      registrationDevice: raw.device,
+      registrationInode: raw.inode,
+      targetDevice: metadata.dev,
+      targetInode: metadata.ino
+    };
   } finally {
     await root.handle.close().catch(() => undefined);
   }

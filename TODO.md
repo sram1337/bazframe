@@ -59,13 +59,15 @@
 - [x] Complete independent interaction, safety, and accessibility code reviews; fix and re-review all reported blockers.
 - [x] Apply the August TUI usability reviews: responsive Skills/Profiles master-detail views, plain-text skill preview, combined source presentation, Adapters/Settings regrouping, back/breadcrumb and `o`/`c` navigation, honest loading, path-only manifest-free source add, height-aware compact panes, aligned profile counts, grouped Available skills, centralized hints, transient-message clearing, immediate tab activation, and same-width growth repaint coverage.
 - [x] Apply the follow-up TUI feedback: uppercase `H`/`L` route navigation, first-tab startup, preferred master panes that fill their allocated columns, bare profile skill counts, independently collapsible Available groups for every healthy browsable source, CLI guidance for whole-source attachment, snapshot-warning dismissal with persistent errors, proportional visual scrollbars for offset-driven content, and healthy/failed managed-source visibility coverage.
-- [ ] Complete the TUI production-readiness gate: macOS direct-PTY/local-tmux and Linux arm64 digest-pinned-base container direct-PTY/tmux/loopback-SSH resize, handled/fatal-render error, Ctrl+C, restoration, cleanup, and bounded CJK/combining/emoji-ZWJ/ANSI/long-path cell-width behavior are automated with run-recorded package/tool versions; Windows Terminal, representative remote SSH, terminal/font/locale ambiguous-width differences, and manual assistive-technology evidence remain open.
+- [x] Apply natural Left/Right and lowercase `h`/`l` master/detail traversal globally to Skills and Profiles, retain uppercase `H`/`L` compatibility, unwind nested Available rows before returning, and show active/dim-parent/inactive hierarchy that disappears while top tabs own focus.
+- [x] Implement `bazframe profile edit <profile>` / `bazframe skill edit <skill>` and route-specific TUI `e` with explicit inactive-profile/live-`(default)` targeting, managed-snapshot refusal, executable-only `VISUAL`/`EDITOR`, physical contained-target revalidation, shell-free inherited child execution, Ink terminal suspension/restoration, outcome refresh/reconciliation, CLI parity, and focused terminal evidence.
+- [ ] Complete the TUI production-readiness gate: macOS direct-PTY/local-tmux and Linux arm64 digest-pinned-base container direct-PTY/tmux/loopback-SSH resize, external-editor handoff/recovery, handled/fatal-render error, Ctrl+C, restoration, cleanup, and bounded CJK/combining/emoji-ZWJ/ANSI/long-path cell-width behavior are automated with run-recorded package/tool versions; Windows Terminal, representative remote SSH, terminal/font/locale ambiguous-width differences, and manual assistive-technology evidence remain open.
 
 ## Deferred candidates (not active work)
 
 - Skill packs, profile export, child subsets, and snapshot garbage collection require separate product decisions.
 - TUI skill artifact move/rename requires provider ownership, writable-root, cross-root, identity, locking, rollback, and recovery semantics.
-- Writable Settings, deeper source browsing, and selected-profile instruction-editor launch remain candidate slices pending their documented lifecycle and interoperability gates.
+- Writable Settings and deeper source browsing remain candidate slices pending their documented lifecycle and interoperability gates.
 
 ## Research
 
