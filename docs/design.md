@@ -255,7 +255,7 @@ bazframe profile packages add <package> [--profile <profile>]
 bazframe profile packages remove <package> [--profile <profile>]
 ```
 
-There are no singular aliases and no `sources` commands. Library add/update snapshots already-prepared bytes. Package add/build explicitly runs the declared build. Profile reference changes never update a library or build a package. Removal is refused while referenced.
+There are no singular aliases and no `sources` commands. Library add performs the initial snapshot and activation; library update activates a later prepared provider tree. Package add performs the initial declared build and activation; package build builds and activates later provider changes. Profile reference changes never update a library, build a package, or select child Skills. Removal is refused while referenced.
 
 Candidate activation validates the complete object and every referencing profile before atomically replacing its record. Any failure preserves the previous digest for all profiles. Reference-index uncertainty fails closed. Valid zero-Skill libraries and packages remain healthy and visible.
 
