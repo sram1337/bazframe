@@ -163,7 +163,7 @@ Bazframe's npm package also ships `dist/skills/bazframe/`. Add that directory wi
 
 ### Add a Skill library or Skill package
 
-Use a **library** for an already-prepared directory of zero or more Skills:
+Use a **Skill library** for an already-prepared directory of zero or more Skills. Its ID is the canonical root basename and must be 1–64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen:
 
 ```bash
 TOOLKIT="$HOME/example-toolkit"
@@ -175,13 +175,13 @@ description: Review a change for correctness and maintainability.
 ---
 # Review code
 SKILL
-bazframe libraries add "$TOOLKIT"
-bazframe profile libraries add example-toolkit
+bazframe libraries add "$TOOLKIT"                 # initial snapshot and activation
+bazframe profile libraries add example-toolkit      # attach the whole library
 ```
 
 Provider changes become active only after `bazframe libraries update example-toolkit`.
 
-Use a **package** for a buildable project. Its required `bazframe-package.json` declares literal build argv, an artifact root, and a Skills root:
+Use a **Skill package** for a provider-owned buildable project containing zero or more ordinary Skills. Its ID is the canonical root basename and must be 1–64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen (`my-package` here). Its required `bazframe-package.json` declares literal build argv, an artifact root, and a Skills root:
 
 ```json
 {
@@ -193,12 +193,14 @@ Use a **package** for a buildable project. Its required `bazframe-package.json` 
 ```
 
 ```bash
-bazframe packages add /absolute/path/to/my-package
-bazframe profile packages add my-package
-bazframe packages build my-package
+bazframe packages add /absolute/path/to/my-package  # initial build and activation
+bazframe profile packages add my-package            # attach the whole package
+
+# After changing package source:
+bazframe packages build my-package                  # build and activate a new snapshot
 ```
 
-Package builds are explicit and unsandboxed. The complete artifact root is snapshotted, including shared resources, while Skill discovery begins only at the Skills root. See [Using Skills with Bazframe](docs/skills.md).
+Both package add and package build are explicit and unsandboxed. Bazframe snapshots the complete artifact root, including shared resources, while discovering Skills only below the Skills root. Profile references never build or select individual children. See [Using Skills with Bazframe](docs/skills.md) for the complete layout, lifecycle, and runnable example.
 
 
 ## Control where the profile applies

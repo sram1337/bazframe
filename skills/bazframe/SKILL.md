@@ -34,13 +34,13 @@ Catalog and profile links point to the same canonical provider directory. Provid
 ```bash
 bazframe libraries
 bazframe libraries add /absolute/path/to/library
-bazframe libraries update <library>
 bazframe profile libraries add <library> [--profile <profile>]
+bazframe libraries update <library>
 bazframe profile libraries remove <library> [--profile <profile>]
 bazframe libraries remove <library>
 ```
 
-A library ID is its canonical root basename. Profile references attach the complete library and never prepare it. Removal is refused while referenced.
+A library ID is its canonical root basename and must be 1–64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen. `libraries add` performs the initial snapshot and activation; `libraries update` activates provider changes. Profile references attach the complete library and never prepare it. Removal is refused while referenced.
 
 ## Skill packages
 
@@ -50,18 +50,18 @@ A package root must contain a physical regular `bazframe-package.json` with exac
 {"schemaVersion":1,"build":["npm","run","build"],"artifactRoot":"dist","skillsRoot":"skills"}
 ```
 
-`build` is a nonempty literal argv array. Both roots are portable relative paths (`.` is allowed). Bazframe runs `build` directly with no shell, snapshots the complete artifact root (including shared resources), and discovers Skills only below the Skills root.
+A package ID is its canonical root basename and must be 1–64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen. `build` is a nonempty literal argv array. Both roots are portable relative paths (`.` is allowed). Bazframe runs `build` directly with no shell, snapshots the complete artifact root (including shared resources), and discovers Skills only below the Skills root.
 
 ```bash
 bazframe packages
 bazframe packages add /absolute/path/to/package
-bazframe packages build <package>
 bazframe profile packages add <package> [--profile <profile>]
+bazframe packages build <package>
 bazframe profile packages remove <package> [--profile <profile>]
 bazframe packages remove <package>
 ```
 
-Profile reference changes never build. Removal is refused while referenced. A failed library update or package build leaves the previous activated snapshot in use. Libraries and packages have typed, separate namespaces, so both may have the same ID. A healthy library or package may contain `0 Skills`; profiles always reference the complete object, never selected children.
+`packages add` performs the initial build and activation; `packages build` activates later provider changes. Profile reference changes never build. Removal is refused while referenced. A failed library update or package build leaves the previous activated snapshot in use. Libraries and packages have typed, separate namespaces, so both may have the same ID. A healthy library or package may contain `0 Skills`; profiles always reference the complete object, never selected children.
 
 ## Profiles and policy
 

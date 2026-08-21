@@ -1,6 +1,6 @@
 # Using Skills with Bazframe
 
-Bazframe consumes standard [Agent Skills](https://agentskills.io/) directories. It adds lifecycle and profile composition; it does not define another Skill format. Every individual artifact remains a **Skill** whether it is live, in a library, or produced by a package.
+Bazframe consumes standard [Agent Skills](https://agentskills.io/) directories. It adds lifecycle and profile composition; it does not define another Skill format. The buildable collection is a **Skill package**, and every discovered child remains a **Skill** whether it is live, in a library, or produced by a package.
 
 ## The three layouts
 
@@ -36,17 +36,21 @@ my-library/                      ← library root
     └── SKILL.md
 ```
 
+The library ID is its canonical root basename and must be 1–64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen, such as `my-library`.
+
 ```bash
-bazframe libraries add /absolute/path/to/my-library
-bazframe libraries update my-library
-bazframe profile libraries add my-library
+bazframe libraries add /absolute/path/to/my-library  # initial snapshot and activation
+bazframe profile libraries add my-library            # attach the whole library
+
+# After changing the prepared provider tree:
+bazframe libraries update my-library                 # activate a new snapshot
 ```
 
-Library add/update never executes provider code. Bazframe snapshots the complete prepared tree. Provider changes remain invisible until explicit `libraries update` and an existing Pi session then needs `/bazframe reload`.
+Library add/update never executes provider code. Bazframe snapshots the complete prepared tree. Provider changes remain invisible until explicit `libraries update`; an existing Pi session then needs `/bazframe reload`.
 
 ### 3. Skill package
 
-A package is a buildable project:
+A package is a provider-owned buildable project. Its package ID is the canonical package-root basename and must be 1–64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen, such as `my-package`.
 
 ```text
 my-package/                      ← package root; build cwd
@@ -73,13 +77,19 @@ Exact `bazframe-package.json`:
 }
 ```
 
+The declared build must leave `artifactRoot` as the artifact tree. Each standard Agent Skill directory belongs below `artifactRoot/skillsRoot`; other artifact content, such as shared resources, may live elsewhere under `artifactRoot`.
+
 ```bash
-bazframe packages add /absolute/path/to/my-package
-bazframe packages build my-package
-bazframe profile packages add my-package
+bazframe packages add /absolute/path/to/my-package  # initial build and activation
+bazframe profile packages add my-package            # attach the whole package
+
+# After changing package source:
+bazframe packages build my-package                  # build and activate a new snapshot
 ```
 
-Package add/build executes the literal argv directly, without a shell or sandbox, using the package root as cwd and inherited environment/stdio. Bazframe snapshots the complete artifact root, preserving `shared/`, but discovers Skills only below `skillsRoot`.
+Both `packages add` and `packages build` execute the literal build argv directly, without a shell or sandbox, using the package root as cwd and inherited environment/stdio. Bazframe validates the output and snapshots the complete artifact root, preserving `shared/`, but discovers Skills only below `skillsRoot`. A failed initial add creates no package record; a failed later build leaves the previously activated snapshot in use. An existing Pi session needs `/bazframe reload` after activation.
+
+For a runnable repository example that creates a package, builds one Skill plus a shared resource, and attaches the package to a profile, see [`scripts/setup-library-package-demo.sh`](../scripts/setup-library-package-demo.sh).
 
 ## Whole-object references
 
