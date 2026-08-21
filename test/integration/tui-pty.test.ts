@@ -56,9 +56,9 @@ describe('packed-style TUI terminal lifecycle', () => {
     expect(screenReaderResult.status, JSON.stringify(screenReaderResult)).toBe(0);
     expect(screenReaderResult.output).toContain('Profiles tab, selected, focused');
     expect(screenReaderResult.output).toContain('Skills tab, selected, focused');
-    expect(screenReaderResult.output).toContain('Profile focused, active, 0 skills');
-    expect(screenReaderResult.output).not.toContain('Profile focused, active, active selection');
-    expect(screenReaderResult.output).not.toContain('Profile focused, active, parent selection');
+    expect(screenReaderResult.output).toContain('Profile focused, current, 0 skills');
+    expect(screenReaderResult.output).not.toContain('Profile focused, current, active selection');
+    expect(screenReaderResult.output).not.toContain('Profile focused, current, parent selection');
     expect(screenReaderResult.output).toContain('Create new profile');
     expect(screenReaderResult.output).toContain('Status: Ready');
     expect(screenReaderResult.output).not.toContain('\u001B[?1049h');

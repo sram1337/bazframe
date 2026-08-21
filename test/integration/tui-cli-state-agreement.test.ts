@@ -73,8 +73,8 @@ describe('CLI and TUI service state agreement', () => {
     expect(await service.loadDashboard()).toMatchObject({
       activeProfileId: 'reviewer',
       profiles: [
-        { id: 'focused', active: false },
-        { id: 'reviewer', active: true }
+        { id: 'reviewer', active: true },
+        { id: 'focused', active: false }
       ]
     });
 

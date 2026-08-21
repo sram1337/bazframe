@@ -215,7 +215,7 @@ bazframe projects         # inspect repository settings
 
 ## Terminal interface
 
-`bazframe tui` opens a keyboard-driven `Skills`, `Profiles`, `Adapters`, `Settings` interface. Preferred layouts show profile and Skills master-detail panes; compact layouts drill into profile details and plain-text `SKILL.md` previews with Esc/Backspace return. Press `e` on an added Skill's live `(default)` preview to open its provider `SKILL.md`; library/package Skills instead show provider-input and refresh guidance. Profile details retain `e` for the selected profile's `AGENTS.md`. The interface preserves explicit inactive-profile membership editing and keeps adapter/settings status read-only.
+`bazframe tui` opens a keyboard-driven `Skills`, `Profiles`, `Adapters`, `Settings` interface. Preferred layouts show profile and Skills master-detail panes; compact layouts drill into profile details and plain-text `SKILL.md` previews with Esc/Backspace return. The Profiles list keeps Create first, then the current profile, favorite inactive profiles, and remaining profiles. Press lowercase `f` to toggle a persistent profile favorite and lowercase `x` for guarded profile deletion; lowercase `d` does not delete. Press `e` on an added Skill's live `(default)` preview to open its provider `SKILL.md`; library/package Skills instead show provider-input and refresh guidance. Profile details retain `e` for the selected profile's `AGENTS.md` and `x` for contextual membership removal. The interface preserves explicit inactive-profile membership editing and keeps adapter/settings status read-only.
 
 ```bash
 bazframe tui
@@ -250,6 +250,7 @@ Bazframe stores user state in `~/.bazframe` by default:
 ```text
 ~/.bazframe/
 ├── active-profile
+├── profile-favorites.json
 ├── skills/
 ├── profiles/
 ├── libraries/

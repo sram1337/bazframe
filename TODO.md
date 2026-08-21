@@ -50,6 +50,7 @@
 - [x] Implement reducer-owned persistent viewport offsets for the profile list, both membership panes, and the Skills browser, including reconciliation and resize clamping.
 - [x] Implement the read-only Skills browser as one uninterrupted list of collapsible `Added Skills`, `Library <id>`, and `Package <id>` peers, with provider-owned move/rename disabled and explained.
 - [x] Implement the Profiles list/lifecycle flows and two-pane selected-profile membership editor.
+- [x] Add persistent global profile favorites with create-first current/favorite ordering, responsive markers/alignment, and `x` guarded profile deletion.
 - [x] Render structured read-only setup status and corrective actions in Settings; keep writes disabled.
 - [x] Add deterministic compact/resize/exit/accessibility reducer/component coverage and a real macOS pseudo-terminal enter/restore smoke test.
 - [x] Exercise the installed tarball through a packed interactive TUI smoke when the host provides `script`.

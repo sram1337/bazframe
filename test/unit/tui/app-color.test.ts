@@ -89,6 +89,9 @@ describe('TuiApp focus border color', () => {
 
     const parentLine = plainBodyLine(app.lastFrame(), 'Profiles');
     expect(parentLine).toMatch(/^┃/u);
+    expect(plainFrame(app.lastFrame())).toContain('▶ focused');
+    expect(plainFrame(app.lastFrame())).toContain('★ reviewer');
+    expect(plainFrame(app.lastFrame())).not.toContain('★ focused');
     expect(plainLine(app.lastFrame(), 'Included skills')).toMatch(/┃Included skills/u);
     if (noColor) expect(app.lastFrame()).not.toContain('\u001B[36m');
     else expect(app.lastFrame()).toContain('\u001B[36m');
@@ -139,7 +142,7 @@ describe('TuiApp focus border color', () => {
       'PROFILE_NOT_EMPTY',
       'Profile is not empty.'
     ));
-    app.stdin.write('d');
+    app.stdin.write('x');
     await vi.waitFor(() => expect(app.lastFrame()).toContain('confirm generated-empty removal'));
     expectFocusedOverlay('confirm generated-empty removal');
     app.stdin.write('y');
@@ -161,6 +164,7 @@ async function renderIsolatedApp(dimensions = { columns: 60, rows: 16 }) {
     createProfile: vi.fn(),
     duplicateProfile: vi.fn(),
     useProfile: vi.fn(),
+    toggleProfileFavorite: vi.fn(),
     renameProfile: vi.fn(),
     removeProfile: vi.fn(),
     editProfileInstructions: vi.fn(async () => ({ exitCode: 0, signal: null })),
@@ -200,6 +204,20 @@ function dashboard(): DashboardSnapshot {
         fingerprint: 'focused'
       },
       active: true,
+      favorite: true,
+      membershipWritable: true,
+      memberships: []
+    }, {
+      id: 'reviewer',
+      directory: '/profiles/reviewer',
+      instructionsPath: '/profiles/reviewer/AGENTS.md',
+      removalIdentity: {
+        schemaVersion: 1,
+        directory: { device: '1', inode: '2' },
+        fingerprint: 'reviewer'
+      },
+      active: false,
+      favorite: true,
       membershipWritable: true,
       memberships: []
     }],

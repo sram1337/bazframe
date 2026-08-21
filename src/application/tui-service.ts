@@ -16,6 +16,10 @@ import {
   type ProfileSkillMembershipOptions
 } from '../profiles/profile-skill-membership.js';
 import { isSafeProfileId } from '../profiles/profile-id.js';
+import {
+  readProfileFavorites,
+  toggleProfileFavorite as toggleStoredProfileFavorite
+} from '../profiles/profile-favorites.js';
 import { editProfileInstructions as launchProfileInstructionEditor } from '../profiles/profile-instruction-editor.js';
 import {
   captureProfileRemovalIdentity,
@@ -91,6 +95,7 @@ export interface ProfileSummary {
   instructionsPath: string;
   removalIdentity: ProfileRemovalIdentity;
   active: boolean;
+  favorite: boolean;
   membershipWritable: boolean;
   membershipDiagnostic?: string;
   memberships: DirectMembership[];
@@ -193,6 +198,7 @@ export interface BazframeTuiService {
   createProfile(profileId: string): Promise<void>;
   duplicateProfile(sourceProfileId: string, profileId: string): Promise<void>;
   useProfile(profileId: string): Promise<void>;
+  toggleProfileFavorite(profileId: string): Promise<void>;
   renameProfile(previousProfileId: string, profileId: string): Promise<void>;
   removeProfile(profileId: string, authorization: ProfileRemovalAuthorization): Promise<void>;
   editProfileInstructions(profileId: string): Promise<ChildResult>;
@@ -232,6 +238,9 @@ export function createBazframeTuiService(
     },
     async useProfile(profileId) {
       await selectProfile(options.bazframeHome, profileId);
+    },
+    async toggleProfileFavorite(profileId) {
+      await toggleStoredProfileFavorite(options.bazframeHome, profileId);
     },
     async renameProfile(previousProfileId, profileId) {
       await renameProfile(options.bazframeHome, previousProfileId, profileId);
@@ -452,6 +461,7 @@ async function inspectDashboard(
 ): Promise<DashboardSnapshot> {
   const diagnostics: DashboardDiagnostic[] = [];
   const activeProfileId = await inspectActiveProfile(options.bazframeHome, diagnostics);
+  const favoriteProfileIds = await inspectProfileFavorites(options.bazframeHome, diagnostics);
   const defaultCatalog = await inspectDefaultSkillGroup(options, diagnostics);
   const global = await inspectGlobalSkillCollections(options.bazframeHome);
   for (const item of global.diagnostics) diagnostics.push({ id: `${item.collectionKind}-${item.collectionId}`, severity: 'error', message: formatSkillCollectionDiagnostic(item) });
@@ -474,9 +484,19 @@ async function inspectDashboard(
     options.bazframeHome,
     defaultCatalog?.registrations ?? [],
     activeProfileId,
+    new Set(favoriteProfileIds),
     global,
     diagnostics
   );
+  const projectedProfileIds = new Set(profiles.map((profile) => profile.id));
+  for (const profileId of favoriteProfileIds) {
+    if (projectedProfileIds.has(profileId)) continue;
+    diagnostics.push({
+      id: `profile-favorite-stale-${profileId}`,
+      severity: 'warning',
+      message: `Favorite profile ${JSON.stringify(profileId)} is not a current physical profile. The stored favorite is retained but not displayed.`
+    });
+  }
   const status = await inspectSetupStatus(options, diagnostics);
   const availableSkillGroups = defaultCatalog === undefined ? [] : [defaultCatalog.group];
   return {
@@ -529,6 +549,18 @@ async function inspectActiveProfile(
   }
 }
 
+async function inspectProfileFavorites(
+  bazframeHome: string,
+  diagnostics: DashboardDiagnostic[]
+): Promise<string[]> {
+  try {
+    return (await readProfileFavorites(bazframeHome)).favorites;
+  } catch (error) {
+    diagnostics.push(diagnostic('profile-favorites', error));
+    return [];
+  }
+}
+
 async function inspectDefaultSkillGroup(
   options: BazframeTuiServiceOptions,
   diagnostics: DashboardDiagnostic[]
@@ -566,6 +598,7 @@ async function inspectProfiles(
   bazframeHome: string,
   defaultRegistrations: readonly DefaultSkillRegistration[],
   activeProfileId: string | undefined,
+  favoriteProfileIds: ReadonlySet<string>,
   globalCollections: { collections: GlobalSkillCollectionInspection[]; diagnostics: SkillCollectionDiagnostic[] },
   diagnostics: DashboardDiagnostic[]
 ): Promise<ProfileSummary[]> {
@@ -674,6 +707,7 @@ async function inspectProfiles(
         instructionsPath,
         removalIdentity,
         active: entry.name === activeProfileId,
+        favorite: favoriteProfileIds.has(entry.name),
         membershipWritable,
         ...(membershipDiagnostic === undefined ? {} : { membershipDiagnostic }),
         memberships,
@@ -684,6 +718,11 @@ async function inspectProfiles(
       diagnostics.push(diagnostic(`profile-${entry.name}`, error));
     }
   }
+  profiles.sort((left, right) => {
+    if (left.active !== right.active) return left.active ? -1 : 1;
+    if (left.favorite !== right.favorite) return left.favorite ? -1 : 1;
+    return lexicalCompare(left.id, right.id);
+  });
   return profiles;
 }
 

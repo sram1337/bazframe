@@ -12,6 +12,7 @@
 - Direct profile Skills win over a colliding referenced object by withholding that complete object. Colliding libraries/packages are all withheld atomically; unrelated Skills remain effective. Kind-qualified keys keep same-ID objects independent.
 - CLI, status, the standalone Pi artifact, and `/bazframe info` report libraries and packages separately with kind-correct recovery commands.
 - The TUI Skills tab presents one uninterrupted list of collapsible `Added Skills`, `Library <id>`, and `Package <id>` peers without category sections. It can add a prepared library only; package commands and all refresh/remove/reference writes remain CLI-only. Library/package preview is immutable and points to provider edit plus `libraries update` or `packages build`.
+- The TUI Profiles list is create-first and orders the current profile, persistent global inactive favorites, then remaining profiles. Favorites use separate strict `profile-favorites.json` state; `f` toggles them, `x` starts guarded profile deletion, and `d` is inert.
 - `skills/bazframe/SKILL.md` is the tracked self-management Skill and build generates the byte-identical `dist/skills/bazframe/SKILL.md`.
 
 ## Current command surface
@@ -33,7 +34,7 @@ All development and acceptance tests use temporary Bazframe/Pi homes. Do not run
 
 ## Current validation
 
-- `npm test`: build, typecheck, lint, 450 unit tests, 36 integration tests, and packed-package validation pass.
+- `npm test`: build, typecheck, lint, 473 unit tests, 36 integration tests, and packed-package validation pass.
 - `npm run test:real-pi`: Pi 0.82 adapter, library update, package build, shared artifact, inert old state, provider preservation, and repository-stability checks pass.
 - `npm run test:tui-terminal:local`: all 12 recorded macOS tmux scenarios pass with terminal restoration.
 - Generated Bazframe Skill bytes match, obsolete production readers are absent, `git diff --check` passes, and the staging area is empty.

@@ -77,8 +77,67 @@ describe('TuiApp', () => {
     await vi.waitFor(() => expect(accessible.lastFrame()).toContain('Skills'));
     accessible.stdin.write('2');
     await vi.waitFor(() => expect(accessible.lastFrame()).toContain(
-      'Profile focused, active, active selection, 0 skills'
+      'Profile focused, current, active selection, 0 skills'
     ));
+  });
+
+  it('renders create first with responsive alignment and honest current/favorite markers', async () => {
+    const service = fakeService();
+    const dashboard = await service.loadDashboard();
+    dashboard.profiles[0]!.favorite = true;
+    dashboard.profiles.push({
+      ...dashboard.profiles[0]!,
+      id: 'reviewer',
+      directory: '/home/profiles/reviewer',
+      instructionsPath: '/home/profiles/reviewer/AGENTS.md',
+      removalIdentity: removalIdentity('reviewer'),
+      active: false,
+      favorite: true
+    });
+    vi.mocked(service.loadDashboard).mockClear();
+
+    const compact = render(<TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />);
+    await openProfiles(compact);
+    const compactLines = compact.lastFrame()!.split('\n');
+    const compactHeading = compactLines.findIndex((line) => line.includes('┃ Profiles'));
+    expect(compactLines[compactHeading + 1]).toContain('┃ + Create New Profile');
+    expect(compact.lastFrame()).toContain('▶ focused');
+    expect(compact.lastFrame()).toContain('★ reviewer');
+    expect(compact.lastFrame()).not.toContain('★ focused');
+    compact.unmount();
+
+    const preferred = render(<TuiApp service={service} dimensions={{ columns: 100, rows: 24 }} />);
+    await openProfiles(preferred);
+    const preferredLines = preferred.lastFrame()!.split('\n');
+    const preferredHeading = preferredLines.findIndex((line) => line.includes('┃ Profiles'));
+    const createLine = preferredLines[preferredHeading + 1]!;
+    expect(createLine).toContain('+ Create New Profile');
+    expect(createLine.indexOf('+')).toBeGreaterThan(10);
+    preferred.unmount();
+
+    vi.stubEnv('INK_SCREEN_READER', 'true');
+    const accessible = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+    await vi.waitFor(() => expect(accessible.lastFrame()).toContain('Skills tab'));
+    accessible.stdin.write('2');
+    await vi.waitFor(() => expect(accessible.lastFrame()).toContain(
+      'Profile focused, current, favorite, active selection'
+    ));
+    expect(accessible.lastFrame()).toContain('Profile reviewer, favorite');
+  });
+
+  it('toggles favorites with lowercase f while lowercase d cannot delete', async () => {
+    const service = fakeService();
+    const view = render(<TuiApp service={service} />);
+    await openProfiles(view);
+
+    view.stdin.write('d');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(service.removeProfile).not.toHaveBeenCalled();
+    expect(view.lastFrame()).not.toContain('confirm generated-empty removal');
+
+    view.stdin.write('f');
+    await vi.waitFor(() => expect(service.toggleProfileFavorite).toHaveBeenCalledWith('focused'));
+    expect(service.removeProfile).not.toHaveBeenCalled();
   });
 
   it('uses uppercase H/L as modal-safe lateral route aliases', async () => {
@@ -233,7 +292,7 @@ describe('TuiApp', () => {
     view.stdin.write('\u001B[D');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Right/l/Enter/L edit'));
 
-    view.stdin.write('\u001B[B');
+    view.stdin.write('\u001B[A');
     view.stdin.write('l');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Create profile'));
     view.stdin.write('\u001B');
@@ -278,21 +337,21 @@ describe('TuiApp', () => {
 
     const parentLine = view.lastFrame()!.split('\n').find((line) => line.includes('┃ Profiles'));
     expect(parentLine).toBeDefined();
-    expect(view.lastFrame()).toContain('* focused');
+    expect(view.lastFrame()).toContain('▶ focused');
     expect(view.lastFrame()).toContain('┃Included skills');
 
     view.stdin.write('\u001B[Z');
     await vi.waitFor(() => {
       const inactiveLine = view.lastFrame()!.split('\n').find((line) => line.includes('| Profiles'));
       expect(inactiveLine).toBeDefined();
-      expect(view.lastFrame()).toContain('* focused');
+      expect(view.lastFrame()).toContain('▶ focused');
     });
     expect(view.lastFrame()).not.toContain('┃Included skills');
     expect(view.lastFrame()).not.toContain('┃Available skills');
 
     view.stdin.write('\t');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('┃ Profiles'));
-    expect(view.lastFrame()).toContain('* focused');
+    expect(view.lastFrame()).toContain('▶ focused');
     expect(view.lastFrame()).toContain('┃Included skills');
   });
 
@@ -315,11 +374,11 @@ describe('TuiApp', () => {
     await waitForDashboard(view);
     view.stdin.write('2');
     await vi.waitFor(() => expect(view.lastFrame()).toContain(
-      'Profile focused, active, active selection, 1 skills'
+      'Profile focused, current, active selection, 1 skills'
     ));
     view.stdin.write('l');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Profiles list, parent context'));
-    expect(view.lastFrame()).toContain('Profile focused, active, parent selection, 1 skills');
+    expect(view.lastFrame()).toContain('Profile focused, current, parent selection, 1 skills');
     expect(view.lastFrame()).toContain('included-skill, managed, active selection');
     expect(view.lastFrame()).not.toContain('Available group (default), expanded, active selection');
 
@@ -331,14 +390,14 @@ describe('TuiApp', () => {
 
     view.stdin.write('\t');
     await vi.waitFor(() => expect(view.lastFrame()).not.toContain('Profiles list, parent context'));
-    expect(view.lastFrame()).not.toContain('Profile focused, active, parent selection');
+    expect(view.lastFrame()).not.toContain('Profile focused, current, parent selection');
     expect(view.lastFrame()).not.toContain('included-skill, managed, active selection');
     expect(view.lastFrame()).not.toContain('Available skill demo-skill, origin default, active selection');
-    expect(view.lastFrame()).toContain('Profile focused, active, editor');
+    expect(view.lastFrame()).toContain('Profile focused, current, editor');
 
     view.stdin.write('\t');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Profiles list, parent context'));
-    expect(view.lastFrame()).toContain('Profile focused, active, parent selection, 1 skills');
+    expect(view.lastFrame()).toContain('Profile focused, current, parent selection, 1 skills');
     expect(view.lastFrame()).toContain('included-skill, managed, active selection');
   });
 
@@ -351,6 +410,7 @@ describe('TuiApp', () => {
       instructionsPath: '/home/profiles/reviewer/AGENTS.md',
       removalIdentity: removalIdentity('reviewer'),
       active: false,
+      favorite: false,
       membershipWritable: true,
       memberships: []
     });
@@ -496,7 +556,7 @@ describe('TuiApp', () => {
       view.stdin.write('2');
       await vi.waitFor(() => expect(view.lastFrame()).toContain('focused'));
       view.stdin.write('\r');
-      await vi.waitFor(() => expect(view.lastFrame()).toContain('Profiles / * focused'));
+      await vi.waitFor(() => expect(view.lastFrame()).toContain('Profiles / ▶ focused'));
       view.stdin.write('e');
       await vi.waitFor(() => expect(service.loadDashboard).toHaveBeenCalledTimes(2));
       const expected = outcome.kind === 'error'
@@ -505,7 +565,7 @@ describe('TuiApp', () => {
           ? 'Editor terminated by SIGTERM'
           : 'Editor exited with status 7';
       expect(view.lastFrame()).toContain(expected);
-      expect(view.lastFrame()).toContain('Profiles / * focused');
+      expect(view.lastFrame()).toContain('Profiles / ▶ focused');
       view.unmount();
     }
   });
@@ -1331,7 +1391,7 @@ describe('TuiApp', () => {
       />
     );
     await openProfiles(view);
-    view.stdin.write('d');
+    view.stdin.write('x');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('confirm generated-empty removal'));
 
     view.rerender(
@@ -1360,7 +1420,7 @@ describe('TuiApp', () => {
       />
     );
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Profiles /'));
-    view.stdin.write('d');
+    view.stdin.write('x');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('confirm generated-empty removal'));
     view.rerender(
       <TuiApp
@@ -1388,7 +1448,7 @@ describe('TuiApp', () => {
     const view = render(<TuiApp service={service} />);
     await openProfiles(view);
 
-    view.stdin.write('d');
+    view.stdin.write('x');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('confirm generated-empty removal'));
     expect(view.lastFrame()).toContain('Physical profile path: /home/profiles/focused');
     expect(view.lastFrame()).toContain('Scope: Bazframe generated-empty profile content only.');
@@ -1431,7 +1491,7 @@ describe('TuiApp', () => {
     const view = render(<TuiApp service={service} />);
     await openProfiles(view);
 
-    view.stdin.write('d');
+    view.stdin.write('x');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('confirm generated-empty removal'));
     view.stdin.write('y');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Type exact profile ID: focused'));
@@ -1459,7 +1519,7 @@ describe('TuiApp', () => {
     const view = render(<TuiApp service={service} />);
     await openProfiles(view);
 
-    view.stdin.write('d');
+    view.stdin.write('x');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('confirm generated-empty removal'));
     view.stdin.write('y');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Type exact profile ID: focused'));
@@ -1510,7 +1570,7 @@ describe('TuiApp', () => {
     );
     await openProfiles(view);
 
-    view.stdin.write('d');
+    view.stdin.write('x');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('confirm generated-empty removal'));
     expect(view.lastFrame()).toContain('! Destructive action: Remove profile focused');
     expect(view.lastFrame()).toContain('Physical profile path:');
@@ -1556,7 +1616,7 @@ describe('TuiApp', () => {
     );
     await openProfiles(view);
 
-    view.stdin.write('d');
+    view.stdin.write('x');
     await vi.waitFor(() => expect(view.lastFrame()).toContain(
       'Preserved membership targets (not followed): 24 known; examples:'
     ));
@@ -1745,14 +1805,14 @@ describe('TuiApp', () => {
 
     view.stdin.write('\u001B[6~');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('profile-06'));
-    view.stdin.write('\u001B[F');
+    view.stdin.write('\u001B[H');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('+ Create New Profile'));
     view.stdin.write('\r');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Create profile'));
     view.stdin.write('\u001B');
     await vi.waitFor(() => expect(view.lastFrame()).not.toContain('New profile ID'));
-    view.stdin.write('\u001B[H');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('* profile-00'));
+    view.stdin.write('\u001B[B');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('▶ profile-00'));
   });
 
   it('shows a proportional Skills scrollbar at distinct top, middle, and bottom positions', async () => {
@@ -2076,13 +2136,14 @@ describe('TuiApp', () => {
         instructionsPath: `/home/profiles/${id}/AGENTS.md`,
         removalIdentity: removalIdentity(id),
         active: false,
+        favorite: false,
         membershipWritable: true,
         memberships: []
       });
     });
     const view = render(<TuiApp service={service} />);
     await openProfiles(view);
-    view.stdin.write('\u001B[F');
+    view.stdin.write('\u001B[H');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('+ Create New Profile'));
     view.stdin.write('\r');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('New profile ID'));
@@ -2260,7 +2321,7 @@ describe('TuiApp', () => {
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Status: Ready'));
     expect(view.lastFrame()).not.toContain('Warning: Skill source metadata');
     expect(view.lastFrame()).toContain('* 2 Profiles');
-    expect(view.lastFrame()).toContain('* focused');
+    expect(view.lastFrame()).toContain('▶ focused');
     expect(Math.max(...view.lastFrame()!.split('\n').map((line) => stringWidth(line)))).toBeLessThanOrEqual(60);
   });
 
@@ -2637,6 +2698,7 @@ function fakeService(): BazframeTuiService & Record<string, ReturnType<typeof vi
       instructionsPath: '/home/profiles/focused/AGENTS.md',
       removalIdentity: removalIdentity('focused'),
       active: true,
+      favorite: false,
       membershipWritable: true,
       memberships: []
     }],
@@ -2689,6 +2751,7 @@ function fakeService(): BazframeTuiService & Record<string, ReturnType<typeof vi
     createProfile: vi.fn(async () => undefined),
     duplicateProfile: vi.fn(async () => undefined),
     useProfile: vi.fn(async () => undefined),
+    toggleProfileFavorite: vi.fn(async () => undefined),
     renameProfile: vi.fn(async () => undefined),
     removeProfile: vi.fn(async () => undefined),
     editProfileInstructions: vi.fn(async () => ({ exitCode: 0, signal: null })),

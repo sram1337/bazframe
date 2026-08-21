@@ -20,6 +20,11 @@ import {
 import { withStateLock } from '../state/lock.js';
 import { assertSafeProfileId, isSafeProfileId } from './profile-id.js';
 import {
+  readValidProfileFavoritesForLifecycle,
+  writeProfileFavoritesUnlocked,
+  type ProfileFavoritesState
+} from './profile-favorites.js';
+import {
   captureProfileRemovalIdentity,
   staleProfileRemovalAuthorization,
   type ProfileRemovalIdentity
@@ -194,6 +199,7 @@ export async function removeProfile(
   assertSafeProfileId(profileId);
   return withGlobalStateLock(bazframeHome, 'bazframe profile remove', async () => {
     const directory = profileDirectory(bazframeHome, profileId);
+    const favoriteState = await readValidProfileFavoritesForLifecycle(bazframeHome);
     const activeProfile = await readActiveProfileIfPresent(bazframeHome);
     if (activeProfile === profileId) {
       throw new BazframeError(
@@ -206,6 +212,7 @@ export async function removeProfile(
     if (metadata === undefined) {
       if (authorization !== undefined) throw staleProfileRemovalAuthorization(profileId);
       await clearProfileAliasCache(bazframeHome, profileId);
+      await clearRemovedProfileFavorite(bazframeHome, profileId, favoriteState, false);
       return { action: 'absent', profileId, directory };
     }
     try {
@@ -229,6 +236,7 @@ export async function removeProfile(
       }
     }
     await removeManagedDirectoryTree(bazframeHome, directory);
+    await clearRemovedProfileFavorite(bazframeHome, profileId, favoriteState, true);
     return { action: 'removed', profileId, directory };
   });
 }
@@ -273,6 +281,7 @@ export async function renameProfile(
     }
 
     const activeProfile = await readActiveProfileIfPresent(bazframeHome);
+    const favoriteState = await readValidProfileFavoritesForLifecycle(bazframeHome);
     const activeSelectionUpdated = activeProfile === previousProfileId;
     await clearProfileAliasCache(bazframeHome, previousProfileId);
     await clearProfileAliasCache(bazframeHome, profileId);
@@ -304,6 +313,13 @@ export async function renameProfile(
         );
       }
     }
+
+    await carryRenamedProfileFavorite(
+      bazframeHome,
+      previousProfileId,
+      profileId,
+      favoriteState
+    );
 
     return {
       action: 'renamed',
@@ -467,6 +483,50 @@ async function clearProfileAliasCache(bazframeHome: string, profileId: string): 
     bazframeHome,
     join(bazframeHome, 'adapter-cache', 'pi', 'skill-aliases', profileId)
   );
+}
+
+async function clearRemovedProfileFavorite(
+  bazframeHome: string,
+  profileId: string,
+  state: ProfileFavoritesState | undefined,
+  removalCommitted: boolean
+): Promise<void> {
+  if (state === undefined || !state.favorites.includes(profileId)) return;
+  try {
+    await writeProfileFavoritesUnlocked(
+      bazframeHome,
+      state.favorites.filter((favorite) => favorite !== profileId)
+    );
+  } catch (error) {
+    throw new BazframeError(
+      'PROFILE_FAVORITE_CLEANUP_FAILED',
+      removalCommitted
+        ? `Profile ${JSON.stringify(profileId)} was removed, but its favorite-state cleanup failed. The stale favorite will not be displayed; retry removal after repairing the preference state.`
+        : `Absent profile ${JSON.stringify(profileId)} could not be cleared from favorite state.`,
+      { cause: error }
+    );
+  }
+}
+
+async function carryRenamedProfileFavorite(
+  bazframeHome: string,
+  previousProfileId: string,
+  profileId: string,
+  state: ProfileFavoritesState | undefined
+): Promise<void> {
+  if (state === undefined || !state.favorites.includes(previousProfileId)) return;
+  const favorites = state.favorites.map((favorite) => (
+    favorite === previousProfileId ? profileId : favorite
+  ));
+  try {
+    await writeProfileFavoritesUnlocked(bazframeHome, favorites);
+  } catch (error) {
+    throw new BazframeError(
+      'PROFILE_FAVORITE_RENAME_FAILED',
+      `Profile was renamed to ${JSON.stringify(profileId)}, but its favorite-state update failed. The stale favorite will not be displayed; repair the preference state and toggle the renamed profile again.`,
+      { cause: error }
+    );
+  }
 }
 
 async function readActiveProfileIfPresent(bazframeHome: string): Promise<string | undefined> {

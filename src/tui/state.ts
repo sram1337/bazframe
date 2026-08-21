@@ -8,6 +8,10 @@ import type { ProfileRemovalIdentity } from '../profiles/profile-removal-identit
 
 export const PROFILE_CREATE_ROW_ID = '@create-profile';
 
+export function profileRowIds(profiles: readonly Pick<ProfileSummary, 'id'>[]): string[] {
+  return [PROFILE_CREATE_ROW_ID, ...profiles.map((profile) => profile.id)];
+}
+
 export type TuiTab = 'skills' | 'profiles' | 'adapters' | 'settings';
 export type TuiFocusRegion = 'tabs' | 'body';
 export type ProfileRoute = 'list' | 'editor';
@@ -145,7 +149,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         includedSkillId,
         availableSkillId,
         profileListOffset: clampViewportOffset(
-          [...action.profileIds, PROFILE_CREATE_ROW_ID],
+          [PROFILE_CREATE_ROW_ID, ...action.profileIds],
           action.id,
           state.profileListOffset,
           action.viewportRows.profileList
@@ -281,9 +285,12 @@ function reconcileState(
   viewportRows: ViewportRows
 ): TuiState {
   const profileIds = snapshot.profiles.map((profile) => profile.id);
+  const activeProfileId = snapshot.profiles.find((profile) => profile.active)?.id;
   const selectedProfileId = state.selectedProfileId === PROFILE_CREATE_ROW_ID
     ? PROFILE_CREATE_ROW_ID
-    : keepOrFirst(profileIds, state.selectedProfileId) ?? PROFILE_CREATE_ROW_ID;
+    : state.selectedProfileId !== undefined && profileIds.includes(state.selectedProfileId)
+      ? state.selectedProfileId
+      : activeProfileId ?? profileIds[0] ?? PROFILE_CREATE_ROW_ID;
   const selectedProfile = snapshot.profiles.find((profile) => profile.id === selectedProfileId);
   const includedIds = selectedProfile?.memberships.map((membership) => membership.id) ?? [];
   const availableRowIds = availableRowsFor(
@@ -307,7 +314,7 @@ function reconcileState(
       : state.skillRoute
   };
   return clampOffsetsForIds(next, {
-    profileList: [...profileIds, PROFILE_CREATE_ROW_ID],
+    profileList: profileRowIds(snapshot.profiles),
     included: includedIds,
     available: availableRowIds,
     skillsBrowser: browserRowIdsFor(snapshot, state.expandedSkillGroupIds),
@@ -333,7 +340,7 @@ function clampViewportOffsets(
     ...state,
     availableSkillId: keepOrAvailableNeighbor(availableRowIds, state.availableSkillId)
   }, {
-    profileList: [...snapshot.profiles.map((profile) => profile.id), PROFILE_CREATE_ROW_ID],
+    profileList: profileRowIds(snapshot.profiles),
     included: includedIds,
     available: availableRowIds,
     skillsBrowser: browserRowIdsFor(snapshot, state.expandedSkillGroupIds),

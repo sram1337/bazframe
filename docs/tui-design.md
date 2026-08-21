@@ -24,7 +24,7 @@ The dashboard service exposes:
 DashboardSnapshot
   activeProfileId?
   profiles[]
-    id, directory, instructionsPath, memberships[]
+    id, directory, instructionsPath, active, favorite, memberships[]
     libraryReferences[], packageReferences[]
   collections[]
     key, kind, id, root, digest, artifactRoot?, skillsRoot
@@ -39,7 +39,7 @@ Collection keys and Skill origins are kind-qualified (`library:<id>` and `packag
 The write surface is:
 
 ```text
-createProfile / duplicateProfile / useProfile / renameProfile / removeProfile
+createProfile / duplicateProfile / useProfile / toggleProfileFavorite / renameProfile / removeProfile
 editProfileInstructions
 editSkillDefinition                 # Added Skills only
 addMembership / removeMembership    # Added Skills only
@@ -74,7 +74,9 @@ Preferred layout uses a Profiles master and detail pane; compact layout drills i
 
 Added Skill children support individual membership through `a`. A selected library/package object or child reports the whole-object CLI reference command and never toggles a child. Unavailable references remain visible with diagnostics.
 
-Profile lifecycle, explicit inactive-profile membership, instruction editing, stable selection, and viewport behavior retain their existing guarded core contracts. Selecting an inactive profile never changes global active selection unless the user invokes Use.
+The Profiles master is exactly one logical list: `+ Create New Profile` first, then the valid current profile, inactive favorites in lexical order, and all remaining profiles in lexical order. Initial and fallback reconciliation selects the current profile when present; Up from it reaches Create, and an empty profile set selects Create. Compact layout left-aligns Create, while preferred/wide layout right-aligns it within the same Profiles-column row. Current profiles use `▶`; inactive favorites use `★`. A current favorite remains stored and is announced accessibly, but only `▶` is visible.
+
+Lowercase `f` toggles persistent global favorites for the selected current physical profile. Lowercase `x` starts the existing guarded profile-deletion confirmation; lowercase `d` does not delete. Profile-detail `x` continues to remove the selected direct membership. Profile lifecycle, explicit inactive-profile membership, instruction editing, stable selection, stale removal authorization, and viewport behavior retain their existing guarded core contracts. Selecting an inactive profile never changes global active selection unless the user invokes Use.
 
 ## Focus, layout, and accessibility
 
@@ -91,6 +93,7 @@ Color is supplementary. `NO_COLOR` and accessibility output retain text markers,
 - Snapshot previews are immutable.
 - Library/package references are whole-object and read-only in this TUI slice.
 - A mutation is serialized, followed by authoritative refresh; no optimistic domain state is shown.
+- Favorite state is an exact bounded schema-v1 physical state file under `BAZFRAME_HOME`, written atomically under the shared state lock. Malformed state is diagnosed without hiding profiles and is never replaced by a toggle.
 - Dismissible snapshot warnings are separate from persistent errors.
 - External editor handoff suspends Ink, restores the terminal, redraws, and refreshes after every child outcome.
 - Adapter and Settings tabs remain read-only and consume structured status diagnostics.

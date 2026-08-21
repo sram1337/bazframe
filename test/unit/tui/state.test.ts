@@ -8,6 +8,7 @@ import {
   moveAvailableSelectionByRows,
   moveSelection,
   PROFILE_CREATE_ROW_ID,
+  profileRowIds,
   tuiReducer,
   type TuiState,
   type ViewportRows
@@ -176,6 +177,19 @@ describe('TUI state', () => {
     expect(state.browserSkillId).toBe('collection:package:two');
   });
 
+  it('uses create-first profile rows while initially selecting the current profile', () => {
+    const dashboard = snapshot(['current', 'alpha', 'zeta'], []);
+    const state = tuiReducer(initialTuiState, {
+      type: 'reconcile',
+      snapshot: dashboard,
+      viewportRows: VIEWPORT_ROWS
+    });
+    const rows = profileRowIds(dashboard.profiles);
+    expect(rows).toEqual([PROFILE_CREATE_ROW_ID, 'current', 'alpha', 'zeta']);
+    expect(state.selectedProfileId).toBe('current');
+    expect(moveSelection(rows, state.selectedProfileId, -1)).toBe(PROFILE_CREATE_ROW_ID);
+  });
+
   it('selects the create row when no profiles exist', () => {
     const state = tuiReducer(initialTuiState, {
       type: 'reconcile',
@@ -314,7 +328,7 @@ describe('TUI state', () => {
       viewportRows: VIEWPORT_ROWS
     });
     expect(state).toMatchObject({
-      profileListOffset: 6,
+      profileListOffset: 7,
       includedOffset: 7,
       availableOffset: 9,
       skillsBrowserOffset: 11
@@ -325,7 +339,7 @@ describe('TUI state', () => {
     state = tuiReducer(state, { type: 'profile-route', route: 'list' });
     state = tuiReducer(state, { type: 'profile-route', route: 'editor' });
     expect(state).toMatchObject({
-      profileListOffset: 6,
+      profileListOffset: 7,
       includedOffset: 7,
       availableOffset: 9,
       skillsBrowserOffset: 11
@@ -374,7 +388,7 @@ describe('TUI state', () => {
       profileRoute: 'editor',
       includedSkillId: 'reviewer-member-00',
       availableSkillId: '@group:default',
-      profileListOffset: 1,
+      profileListOffset: 2,
       includedOffset: 0,
       availableOffset: 0,
       browserSkillId: 'default:browser-09',
@@ -429,11 +443,11 @@ describe('TUI state', () => {
     });
 
     expect(state).toMatchObject({
-      selectedProfileId: 'profile-07',
+      selectedProfileId: 'profile-00',
       includedSkillId: 'included-05',
       availableSkillId: '@group:default',
       browserSkillId: 'default:available-04',
-      profileListOffset: 4,
+      profileListOffset: 1,
       includedOffset: 2,
       availableOffset: 0,
       skillsBrowserOffset: 0
@@ -500,7 +514,7 @@ describe('TUI state', () => {
       viewportRows: { profileList: 5, included: 3, available: 3, skillsBrowser: 5, skillPreview: 5 }
     });
     expect(state).toMatchObject({
-      profileListOffset: 16,
+      profileListOffset: 17,
       includedOffset: 13,
       availableOffset: 19,
       skillsBrowserOffset: 22
@@ -542,6 +556,7 @@ function snapshot(
         fingerprint: `fingerprint-${id}`
       },
       active: id === profileIds[0],
+      favorite: false,
       membershipWritable: true,
       memberships: membershipIds.map((skillId) => ({
         id: skillId,

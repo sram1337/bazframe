@@ -40,6 +40,7 @@ import {
   moveAvailableSelectionByRows,
   moveSelection,
   PROFILE_CREATE_ROW_ID,
+  profileRowIds,
   tuiReducer,
   type TuiAction,
   type TuiModal,
@@ -769,10 +770,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
 
     if (currentState.activeTab === 'profiles') {
       if (currentState.profileRoute === 'list') {
-        const ids = [
-          ...currentSnapshot.profiles.map((profile) => profile.id),
-          PROFILE_CREATE_ROW_ID
-        ];
+        const ids = profileRowIds(currentSnapshot.profiles);
         if (
           key.upArrow || key.downArrow || vimUp || vimDown
           || key.pageUp || key.pageDown || key.home || key.end
@@ -839,9 +837,17 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
           openProfileModal('rename', currentSelectedProfile);
           return;
         }
-        if (input === 'd' && currentSelectedProfile !== undefined) {
+        if (input === 'x' && currentSelectedProfile !== undefined) {
           clearTransientMessage();
           openRemoveConfirmation(currentSelectedProfile);
+          return;
+        }
+        if (input === 'f' && currentSelectedProfile !== undefined) {
+          clearTransientMessage();
+          void mutate(
+            currentSelectedProfile.favorite ? 'Unfavorite profile' : 'Favorite profile',
+            () => service.toggleProfileFavorite(currentSelectedProfile.id)
+          );
           return;
         }
         if (input === 'u' && currentSelectedProfile !== undefined) {
@@ -1286,6 +1292,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
                         offset={state.profileListOffset}
                         focus={state.focusedRegion === 'body' ? 'active' : 'inactive'}
                         maxRows={bodyRows - 4}
+                        createAlignment="left"
                       />
                     : <ProfileEditor
                         profile={selectedProfile}
@@ -1535,21 +1542,23 @@ function ProfilesList({
   selectedId,
   offset,
   focus,
-  maxRows
+  maxRows,
+  createAlignment
 }: {
   profiles: readonly ProfileSummary[];
   selectedId: string | undefined;
   offset: number;
   focus: MasterPaneFocus;
   maxRows: number;
+  createAlignment: 'left' | 'right';
 }) {
   const active = focus === 'active';
   const parent = focus === 'parent';
   const selectionVisible = active || parent;
   const contextLabel = active ? ', active and focused' : parent ? ', parent context' : '';
   const rows: readonly (ProfileSummary | { id: typeof PROFILE_CREATE_ROW_ID })[] = [
-    ...profiles,
-    { id: PROFILE_CREATE_ROW_ID }
+    { id: PROFILE_CREATE_ROW_ID },
+    ...profiles
   ];
   return (
     <Box
@@ -1568,25 +1577,26 @@ function ProfilesList({
         offset={offset}
         maxRows={maxRows}
         renderRow={(profile) => !('active' in profile)
-          ? <Text
-              key={profile.id}
-              inverse={active && profile.id === selectedId}
-              bold={selectionVisible && profile.id === selectedId}
-              dimColor={parent && profile.id === selectedId}
-              wrap="truncate-end"
-              aria-label={`Create new profile${profile.id === selectedId && selectionVisible ? active ? ', active selection' : ', parent selection' : ''}`}
-            >
+          ? <Box key={profile.id} width="100%" justifyContent={createAlignment === 'right' ? 'flex-end' : 'flex-start'}>
+              <Text
+                inverse={active && profile.id === selectedId}
+                bold={selectionVisible && profile.id === selectedId}
+                dimColor={parent && profile.id === selectedId}
+                wrap="truncate-end"
+                aria-label={`Create new profile${profile.id === selectedId && selectionVisible ? active ? ', active selection' : ', parent selection' : ''}`}
+              >
                 + Create New Profile
-            </Text>
+              </Text>
+            </Box>
           : <Box key={profile.id} width="100%" justifyContent="space-between">
               <Text
                 inverse={active && profile.id === selectedId}
                 bold={selectionVisible && profile.id === selectedId}
                 dimColor={parent && profile.id === selectedId}
                 wrap="truncate-end"
-                aria-label={`Profile ${profile.id}${profile.active ? ', active' : ''}${profile.id === selectedId && selectionVisible ? active ? ', active selection' : ', parent selection' : ''}, ${profile.memberships.length} skills`}
+                aria-label={`Profile ${profile.id}${profile.active ? ', current' : ''}${profile.favorite ? ', favorite' : ''}${profile.id === selectedId && selectionVisible ? active ? ', active selection' : ', parent selection' : ''}, ${profile.memberships.length} skills`}
               >
-                {profile.active ? '*' : ' '} {profile.id}
+                {profile.active ? '▶' : profile.favorite ? '★' : ' '} {profile.id}
               </Text>
               <Text
                 inverse={active && profile.id === selectedId}
@@ -1632,9 +1642,9 @@ function ProfileEditor({
     <Box flexDirection="column" width="100%">
       <Text
         bold
-        aria-label={`${breadcrumb ? 'Back to Profiles list, ' : ''}Profile ${profile.id}${profile.active ? ', active' : ''}, editor`}
+        aria-label={`${breadcrumb ? 'Back to Profiles list, ' : ''}Profile ${profile.id}${profile.active ? ', current' : ''}${profile.favorite ? ', favorite' : ''}, editor`}
       >
-        {breadcrumb ? '<- Profiles / ' : 'Profiles / '}{profile.active ? '* ' : ''}{profile.id}{profile.active ? ' [active]' : ''}
+        {breadcrumb ? '<- Profiles / ' : 'Profiles / '}{profile.active ? '▶ ' : profile.favorite ? '★ ' : ''}{profile.id}{profile.active ? ' [active]' : ''}
       </Text>
       {compact
         ? null
@@ -1839,6 +1849,7 @@ function ProfilesMasterDetail({
           offset={profileOffset}
           focus={focused ? editing ? 'parent' : 'active' : 'inactive'}
           maxRows={maxRows - 4}
+          createAlignment="right"
         />
       </Box>
       <Box width="64%" paddingLeft={1} overflow="hidden">
@@ -2250,7 +2261,7 @@ function Modal({
         <Text wrap="truncate-end">Focused tabs: Left/Right or h/l moves focus; Enter or uppercase L activates.</Text>
         <Text wrap="truncate-end">Body/tree: arrows or hjkl move; PageUp/PageDown/Home/End jump.</Text>
         <Text wrap="truncate-end">Skills: Right/l/Enter preview; Left/h back; o/c group; e edits live Added Skills; a adds library.</Text>
-        <Text wrap="truncate-end">Profiles: Right/l/Enter opens details; Left/h backs out after Available child/group unwind.</Text>
+        <Text wrap="truncate-end">Profiles: list f favorite, x remove, d inert; details x removes membership; Right/l/Enter opens.</Text>
         <Text wrap="truncate-end">Managed snapshots are immutable. Uppercase H/L remain Backspace/Enter aliases; J/K jumps profile panes.</Text>
         <Text wrap="truncate-end">r refreshes; q exits. Press Esc or Enter to close.</Text>
       </FocusedOverlay>
@@ -2437,7 +2448,7 @@ function routeActionHint(state: TuiState, compact: boolean): string {
   if (state.activeTab === 'profiles') {
     return state.profileRoute === 'editor'
       ? 'Left/h/H/Esc/Backspace back/parent  e instructions  J/K panes  Available Right/l/Enter  a add  x remove  ? help  q quit'
-      : `Right/l/Enter/L edit  c create  D duplicate  u activate  R rename  d remove${compact ? '' : '  r refresh'}  ? help  q quit`;
+      : `Right/l/Enter/L edit  c create  D duplicate  f favorite  u activate  R rename  x remove${compact ? '' : '  r refresh'}  ? help  q quit`;
   }
   return `${compact ? '' : 'r refresh  '}? help  q quit`;
 }

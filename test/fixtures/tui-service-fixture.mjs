@@ -39,6 +39,7 @@ export function createBazframeTuiService() {
     createProfile: async () => undefined,
     duplicateProfile: async () => undefined,
     useProfile: async () => undefined,
+    toggleProfileFavorite: async () => undefined,
     renameProfile: async () => undefined,
     removeProfile: async () => undefined,
     editProfileInstructions: async () => ({ exitCode: 0, signal: null }),
@@ -116,6 +117,7 @@ function dashboard() {
         fingerprint: 'fixture'
       },
       active: true,
+      favorite: false,
       membershipWritable: true,
       memberships: []
     }],

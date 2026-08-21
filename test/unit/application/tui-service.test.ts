@@ -10,6 +10,11 @@ import {
   listProfiles,
   renameProfile
 } from '../../../src/profiles/profile-management.js';
+import {
+  encodeProfileFavorites,
+  profileFavoritesPath,
+  readProfileFavorites
+} from '../../../src/profiles/profile-favorites.js';
 import { readActiveProfile, writeActiveProfile } from '../../../src/profiles/profile-store.js';
 import { encodeProfileCollectionReference } from '../../../src/profiles/profile-skill-collection-reference.js';
 import { addLibrary } from '../../../src/skill-collections/skill-collection-lifecycle.js';
@@ -433,6 +438,74 @@ describe('Bazframe TUI service', () => {
       originId: 'library:bundle', skillId: 'demo-skill'
     })).rejects.toMatchObject({ code: 'SKILL_EDITOR_SOURCE_READ_ONLY' });
     expect(editorChildRunner).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists favorites across service instances and orders current, favorites, then remaining profiles', async () => {
+    const fixture = await createFixture();
+    await addProfile(fixture.home, 'alpha');
+    await addProfile(fixture.home, 'beta');
+    await addProfile(fixture.home, 'zeta');
+
+    await fixture.service.toggleProfileFavorite('reviewer');
+    await fixture.service.toggleProfileFavorite('beta');
+    const secondService = createBazframeTuiService(fixture.options);
+    let dashboard = await secondService.loadDashboard();
+    expect(dashboard.profiles.map((profile) => ({
+      id: profile.id,
+      active: profile.active,
+      favorite: profile.favorite
+    }))).toEqual([
+      { id: 'focused', active: true, favorite: false },
+      { id: 'beta', active: false, favorite: true },
+      { id: 'reviewer', active: false, favorite: true },
+      { id: 'alpha', active: false, favorite: false },
+      { id: 'zeta', active: false, favorite: false }
+    ]);
+
+    await secondService.toggleProfileFavorite('focused');
+    dashboard = await createBazframeTuiService(fixture.options).loadDashboard();
+    expect(dashboard.profiles[0]).toMatchObject({
+      id: 'focused', active: true, favorite: true
+    });
+    expect((await readProfileFavorites(fixture.home)).favorites)
+      .toEqual(['beta', 'focused', 'reviewer']);
+  });
+
+  it('diagnoses malformed favorite state while projecting profiles with no favorites', async () => {
+    const fixture = await createFixture();
+    const malformed = '{"schemaVersion":1,"favorites":["reviewer"],"extra":true}\n';
+    await writeFile(profileFavoritesPath(fixture.home), malformed);
+
+    const dashboard = await fixture.service.loadDashboard();
+    expect(dashboard.profiles.map((profile) => profile.id)).toEqual(['focused', 'reviewer']);
+    expect(dashboard.profiles.every((profile) => !profile.favorite)).toBe(true);
+    expect(dashboard.diagnostics).toContainEqual(expect.objectContaining({
+      id: 'profile-favorites',
+      severity: 'error',
+      message: expect.stringContaining('exactly the schema-v1 fields')
+    }));
+    await expect(fixture.service.toggleProfileFavorite('reviewer')).rejects.toMatchObject({
+      code: 'PROFILE_FAVORITES_INVALID'
+    });
+    expect(await readFile(profileFavoritesPath(fixture.home), 'utf8')).toBe(malformed);
+  });
+
+  it('retains and reports externally stale favorite IDs without projecting them', async () => {
+    const fixture = await createFixture();
+    await writeFile(
+      profileFavoritesPath(fixture.home),
+      encodeProfileFavorites(['ghost', 'reviewer'])
+    );
+
+    const dashboard = await fixture.service.loadDashboard();
+    expect(dashboard.profiles.find((profile) => profile.id === 'reviewer')?.favorite).toBe(true);
+    expect(dashboard.profiles.some((profile) => profile.id === 'ghost')).toBe(false);
+    expect(dashboard.diagnostics).toContainEqual(expect.objectContaining({
+      id: 'profile-favorite-stale-ghost',
+      severity: 'warning',
+      message: expect.stringContaining('retained but not displayed')
+    }));
+    expect((await readProfileFavorites(fixture.home)).favorites).toEqual(['ghost', 'reviewer']);
   });
 
   it('loads an empty dashboard without creating Bazframe state', async () => {
