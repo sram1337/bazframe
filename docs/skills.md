@@ -91,6 +91,43 @@ Both `packages add` and `packages build` execute the literal build argv directly
 
 For a runnable repository example that creates a package, builds one Skill plus a shared resource, and attaches the package to a profile, see [`scripts/setup-library-package-demo.sh`](../scripts/setup-library-package-demo.sh).
 
+## Convert one Skill with Bazify
+
+Bazframe ships a `bazify` Agent Skill beside the `bazframe` self-management Skill under `dist/skills/`. Installation does not register either one automatically. After adding `bazify` to `(default)` and a profile, invoke the Skill or run its dependency-free Node script directly.
+
+Bazify accepts one local Agent Skills-compatible directory and produces a provider-owned package with a Bazframe-compatible build manifest. It uses `./bazframe/` for working files. The package name defaults to the Skill name unchanged, with no Bazframe suffix, and the package destination defaults to `~/<package-name>`. A custom destination basename must equal the selected package name and use a separate location from the working area.
+
+```bash
+node <bazify-skill-root>/scripts/bazify.mjs create /absolute/path/to/skill --dry-run
+node <bazify-skill-root>/scripts/bazify.mjs create /absolute/path/to/skill
+node <bazify-skill-root>/scripts/bazify.mjs validate ~/<skill-name>
+```
+
+Create copies physical source files into `src/skills/<skill-name>/`, excluding provider `.git` state and `node_modules`; rejects links, special entries, descendant Skill definitions, and several obvious credential forms; writes the exact Bazframe manifest plus dependency-free build, README, and provider instructions; and validates through `bazframe packages add` using disposable state. It never changes the source, overwrites a destination, registers the generated package, or changes a profile.
+
+The generated package has this lifecycle:
+
+```text
+<package-name>/
+├── AGENTS.md
+├── README.md
+├── bazframe-package.json
+├── package.json
+├── scripts/build.mjs
+└── src/skills/<skill-name>/
+```
+
+The Skill treats `./bazframe/`, relative to its current working directory, as Bazframe's working area. It first uses any applicable local todo/task-tracking convention there; otherwise it creates one lightweight temporary checklist there and removes it after resolving dependency, setup, provenance, license, privacy, and rights questions. Bazify can automate byte copying and structural validation; it cannot infer redistribution rights, prove that secrets are absent, or determine semantic setup requirements from arbitrary provider code.
+
+Publication is separate, private-only, and consent-gated:
+
+```bash
+node <bazify-skill-root>/scripts/bazify.mjs publish ~/<skill-name> --dry-run
+node <bazify-skill-root>/scripts/bazify.mjs publish ~/<skill-name> --yes --approval '<preview-token>'
+```
+
+The dry run reports fixed host `github.com`, the authenticated GitHub owner, repository, local package path, visibility, source digest, publishable-byte digest, and an approval token binding those facts. The Bazify Skill asks for confirmation before passing `--yes` and that exact token unless the original invocation already included `-y` or `--yes`. Publication rejects account/path/byte drift, validates again, verifies the staged Git index against the approved digest, initializes one new Git repository, commits the package without generated `dist/`, and runs fixed shell-free `gh repo create <owner>/<package-name> --private --source <path> --remote origin --push`. It refuses existing Git worktrees and existing repositories and never falls back to public visibility.
+
 ## Whole-object references
 
 Profiles attach libraries and packages as wholes:

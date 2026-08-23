@@ -63,6 +63,10 @@ bazframe packages remove <package>
 
 `packages add` performs the initial build and activation; `packages build` activates later provider changes. Profile reference changes never build. Removal is refused while referenced. A failed library update or package build leaves the previous activated snapshot in use. Libraries and packages have typed, separate namespaces, so both may have the same ID. A healthy library or package may contain `0 Skills`; profiles always reference the complete object, never selected children.
 
+## Bundled Skills
+
+The npm package ships generated `bazframe` and `bazify` Skills under `dist/skills/`. Installation registers neither one. Add a desired generated directory explicitly with `bazframe add skill <installed-package>/dist/skills/<skill>`, then add its membership to a profile. `bazify` uses `./bazframe/` for working files, clones one local Skill into a provider-owned Bazframe-compatible package at `~/<name>`, and publishes only to a new private GitHub repository after explicit consent.
+
 ## Profiles and policy
 
 ```bash

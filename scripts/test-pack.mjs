@@ -61,7 +61,18 @@ try {
   if (readFileSync(packagedSkill, 'utf8') !== readFileSync(join(projectRoot, 'skills', 'bazframe', 'SKILL.md'), 'utf8')) {
     throw new Error('Packaged Bazframe skill does not exactly match its tracked source.');
   }
+  const packagedBazifyRoot = join(packageRoot, 'dist', 'skills', 'bazify');
+  const packagedBazifyScript = join(packagedBazifyRoot, 'scripts', 'bazify.mjs');
+  for (const relativePath of ['SKILL.md', join('scripts', 'bazify.mjs')]) {
+    const packagedPath = join(packagedBazifyRoot, relativePath);
+    const trackedPath = join(projectRoot, 'skills', 'bazify', relativePath);
+    assertExists(packagedPath);
+    if (readFileSync(packagedPath, 'utf8') !== readFileSync(trackedPath, 'utf8')) {
+      throw new Error(`Packaged Bazify file does not exactly match its tracked source: ${relativePath}`);
+    }
+  }
   assertMissing(join(packageRoot, 'skills', 'bazframe'));
+  assertMissing(join(packageRoot, 'skills', 'bazify'));
   assertExists(join(packageRoot, 'artifacts', 'pi', 'bazframe.ts'));
   assertExists(join(packageRoot, 'README.md'));
   assertExists(join(packageRoot, 'docs', 'prototype.md'));
@@ -110,6 +121,42 @@ try {
     throw new Error(
       `Installed CLI version check failed (${result.status}).\nstdout: ${result.stdout}\nstderr: ${result.stderr}`
     );
+  }
+
+  const bazifySource = join(temporaryRoot, 'bazify-provider', 'packed-bazify-skill');
+  const bazifyDestination = join(temporaryRoot, 'bazify-output', 'packed-bazify-skill');
+  mkdirSync(bazifySource, { recursive: true });
+  mkdirSync(join(temporaryRoot, 'bazify-output'), { recursive: true });
+  writeFileSync(join(bazifySource, 'SKILL.md'), '---\nname: packed-bazify-skill\ndescription: Packed Bazify acceptance Skill.\n---\n# Packed Bazify Skill\n');
+  writeFileSync(join(bazifySource, 'reference.txt'), 'packed reference\n');
+  const bazified = spawnSync(process.execPath, [
+    packagedBazifyScript,
+    'create',
+    bazifySource,
+    '--destination',
+    bazifyDestination,
+    '--bazframe-command',
+    executable
+  ], { encoding: 'utf8', shell: false });
+  if (bazified.status !== 0) {
+    throw new Error(`Packed Bazify create failed (${bazified.status}).\nstdout: ${bazified.stdout}\nstderr: ${bazified.stderr}`);
+  }
+  const bazifiedResult = JSON.parse(bazified.stdout);
+  if (bazifiedResult.packageName !== 'packed-bazify-skill' || bazifiedResult.status !== 'created') {
+    throw new Error(`Packed Bazify create returned an unexpected result: ${bazified.stdout}`);
+  }
+  assertExists(join(bazifyDestination, 'bazframe-package.json'));
+  assertExists(join(bazifyDestination, 'src', 'skills', 'packed-bazify-skill', 'reference.txt'));
+  assertExists(join(bazifyDestination, 'dist', 'skills', 'packed-bazify-skill', 'SKILL.md'));
+  const bazifyValidated = spawnSync(process.execPath, [
+    packagedBazifyScript,
+    'validate',
+    bazifyDestination,
+    '--bazframe-command',
+    executable
+  ], { encoding: 'utf8', shell: false });
+  if (bazifyValidated.status !== 0 || JSON.parse(bazifyValidated.stdout).status !== 'valid') {
+    throw new Error(`Packed Bazify validation failed (${bazifyValidated.status}).\nstdout: ${bazifyValidated.stdout}\nstderr: ${bazifyValidated.stderr}`);
   }
 
   const collectionHome = join(temporaryRoot, 'packed-collection-home');

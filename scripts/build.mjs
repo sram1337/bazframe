@@ -13,9 +13,11 @@ if (result.status !== 0) {
   process.exit(typeof result.status === 'number' ? result.status : 1);
 }
 
-await cp(
-  new URL('../skills/bazframe', import.meta.url),
-  new URL('../dist/skills/bazframe', import.meta.url),
-  { recursive: true }
-);
+for (const skill of ['bazframe', 'bazify']) {
+  await cp(
+    new URL(`../skills/${skill}`, import.meta.url),
+    new URL(`../dist/skills/${skill}`, import.meta.url),
+    { recursive: true }
+  );
+}
 await chmod(new URL('../dist/cli.js', import.meta.url), 0o755);

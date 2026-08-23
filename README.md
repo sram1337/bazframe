@@ -159,7 +159,7 @@ The command derives the provider `SKILL.md` from the `(default)` entry rather th
 
 The added Skill and its profile membership are parallel links to the same provider directory. Provider changes are visible after a new Pi session or `/bazframe reload`. Remove the profile membership before `bazframe remove skill explain-code`; catalog removal is refused while any profile references it.
 
-Bazframe's npm package also ships `dist/skills/bazframe/`. Add that directory with `bazframe add skill <installed-package>/dist/skills/bazframe` when the `bazframe` Skill is desired.
+Bazframe's npm package ships the `bazframe` and `bazify` Skills under `dist/skills/`. Add either generated directory with `bazframe add skill <installed-package>/dist/skills/<skill>`; installation itself never changes the `(default)` catalog or profile membership.
 
 ### Add a Skill library or Skill package
 
@@ -202,6 +202,18 @@ bazframe packages build my-package                  # build and activate a new s
 
 Both package add and package build are explicit and unsandboxed. Bazframe snapshots the complete artifact root, including shared resources, while discovering Skills only below the Skills root. Profile references never build or select individual children. See [Using Skills with Bazframe](docs/skills.md) for the complete layout, lifecycle, and runnable example.
 
+### Convert a Skill with Bazify
+
+The shipped `bazify` Skill clones one local Skill into a provider-owned, Bazframe-compatible package. It uses `./bazframe/` for working files, defaults the package destination to `~/<skill-name>`, and uses the unchanged Skill name—without a Bazframe suffix—for both the package and private GitHub repository.
+
+```bash
+node <bazify-skill-root>/scripts/bazify.mjs create /absolute/path/to/skill
+node <bazify-skill-root>/scripts/bazify.mjs validate ~/<skill-name>
+node <bazify-skill-root>/scripts/bazify.mjs publish ~/<skill-name> --dry-run
+node <bazify-skill-root>/scripts/bazify.mjs publish ~/<skill-name> --yes --approval '<preview-token>'
+```
+
+Create and validate use disposable Bazframe state and never publish or change profiles. For dependency, setup, provenance, license, privacy, and rights review, the Skill uses an existing local task system under `./bazframe/` or a lightweight temporary checklist there that it removes when resolved. The dry run supplies an approval token bound to `github.com`, the authenticated account, canonical package path, and every publishable byte. The Bazify Skill asks for confirmation unless its original invocation included `-y` or `--yes`. It never overwrites local or GitHub repositories. See [Using Skills with Bazframe](docs/skills.md#convert-one-skill-with-bazify) for the complete workflow.
 
 ## Control where the profile applies
 
