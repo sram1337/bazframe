@@ -11,6 +11,7 @@ import {
   type DefaultSkillEditorRegistration
 } from './default-skill-catalog.js';
 import { assertSafeSkillId } from './skill-id.js';
+import { optionalManagedGitRecord } from '../providers/managed-git-record.js';
 
 export interface SkillDefinitionEditorOptions {
   bazframeHome: string;
@@ -49,6 +50,12 @@ export async function resolveSkillDefinitionEditorTarget(
   options: Pick<SkillDefinitionEditorOptions, 'bazframeHome' | 'skillId' | 'testHooks'>
 ): Promise<SkillDefinitionEditorTarget> {
   assertSafeSkillId(options.skillId);
+  if (await optionalManagedGitRecord(options.bazframeHome, 'skill', options.skillId) !== undefined) {
+    throw new BazframeError(
+      'MANAGED_GIT_SKILL_EDIT_REFUSED',
+      `Skill ${JSON.stringify(options.skillId)} is a managed Git provider. Edit its upstream repository, then run \`bazframe skill update ${options.skillId}\`.`
+    );
+  }
   const before = await readDefaultSkillEditorRegistration(
     options.bazframeHome,
     options.skillId

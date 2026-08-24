@@ -52,6 +52,8 @@ try {
   assertExists(join(packageRoot, 'dist', 'skill-collections', 'skill-collection-preparation.js'));
   assertExists(join(packageRoot, 'dist', 'skill-collections', 'skill-snapshot.js'));
   assertExists(join(packageRoot, 'dist', 'packages', 'package-manifest.js'));
+  assertExists(join(packageRoot, 'dist', 'providers', 'managed-git.js'));
+  assertExists(join(packageRoot, 'dist', 'providers', 'managed-git-record.js'));
   assertMissing(join(packageRoot, 'dist', 'sources'));
   assertMissing(join(packageRoot, 'dist', 'source-units'));
   assertMissing(join(packageRoot, 'dist', 'profiles', 'profile-source-reference.js'));
@@ -121,6 +123,47 @@ try {
     throw new Error(
       `Installed CLI version check failed (${result.status}).\nstdout: ${result.stdout}\nstderr: ${result.stderr}`
     );
+  }
+
+  const managedPackageHelp = spawnSync(executable, ['help', 'packages', 'update'], { encoding: 'utf8', shell: false });
+  if (managedPackageHelp.status !== 0
+    || !managedPackageHelp.stdout.includes('bazframe packages update <package>')
+    || !managedPackageHelp.stdout.includes('--accept-rewrite')
+    || !managedPackageHelp.stdout.includes('--yes')) {
+    throw new Error(`Installed managed package help failed (${managedPackageHelp.status}).\nstdout: ${managedPackageHelp.stdout}\nstderr: ${managedPackageHelp.stderr}`);
+  }
+
+  const packedManagedHome = join(temporaryRoot, 'packed-managed-home');
+  const managedMissing = spawnSync(executable, ['packages', 'update', 'missing', '--yes'], {
+    encoding: 'utf8', shell: false, env: { ...process.env, BAZFRAME_HOME: packedManagedHome, NO_COLOR: '1' }
+  });
+  if (managedMissing.status !== 1 || !managedMissing.stderr.includes('is not a managed Git provider')) {
+    throw new Error(`Installed managed package dispatch failed (${managedMissing.status}).\nstdout: ${managedMissing.stdout}\nstderr: ${managedMissing.stderr}`);
+  }
+
+  const packedRemote = join(temporaryRoot, 'packed-managed-remote', 'packed-managed-package');
+  mkdirSync(join(packedRemote, 'skills', 'packed-remote-skill'), { recursive: true });
+  writeFileSync(join(packedRemote, 'skills', 'packed-remote-skill', 'SKILL.md'), '---\nname: packed-remote-skill\ndescription: Packed managed Git Skill.\n---\n# Packed remote\n');
+  writeFileSync(join(packedRemote, '.gitignore'), 'dist/\n');
+  writeFileSync(join(packedRemote, 'build.mjs'), "import{cp,rm}from'node:fs/promises';await rm('dist',{recursive:true,force:true});await cp('skills','dist/skills',{recursive:true});\n");
+  writeFileSync(join(packedRemote, 'bazframe-package.json'), JSON.stringify({ schemaVersion: 1, build: [process.execPath, 'build.mjs'], artifactRoot: 'dist', skillsRoot: 'skills' }));
+  execFileSync('git', ['init', '-b', 'main'], { cwd: packedRemote, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.name', 'Pack Test'], { cwd: packedRemote });
+  execFileSync('git', ['config', 'user.email', 'pack@example.test'], { cwd: packedRemote });
+  execFileSync('git', ['add', '.'], { cwd: packedRemote });
+  execFileSync('git', ['commit', '-m', 'initial'], { cwd: packedRemote, stdio: 'ignore' });
+  const packedGitWrapper = join(temporaryRoot, 'packed-git-wrapper.mjs');
+  writeFileSync(packedGitWrapper, `#!/usr/bin/env node
+import{spawnSync}from'node:child_process';const args=process.argv.slice(2);let original;if(args.includes('clone')){if(process.env.TEST_FAIL_CLONE==='1')process.exit(87);const index=args.findIndex(value=>/^https?:|^ssh:/.test(value));original=args[index];args[index]=process.env.TEST_REMOTE;const protocol=args.indexOf('protocol.file.allow=never');if(protocol>=0)args[protocol]='protocol.file.allow=always';}const result=spawnSync('git',args,{stdio:'inherit',env:process.env});if(result.status!==0)process.exit(result.status??1);if(original){const destination=args.at(-1);const changed=spawnSync('git',['-C',destination,'remote','set-url','origin',original],{stdio:'inherit',env:process.env});process.exit(changed.status??1);}
+`);
+  chmodSync(packedGitWrapper, 0o755);
+  const packedManagedEnvironment = { ...process.env, BAZFRAME_HOME: packedManagedHome, NO_COLOR: '1', BAZFRAME_GIT_COMMAND: packedGitWrapper, BAZFRAME_GH_COMMAND: join(temporaryRoot, 'missing-gh'), TEST_REMOTE: packedRemote };
+  runInstalled(executable, ['packages', 'add', 'https://example.test/team/packed-managed-package.git', '--yes'], packedManagedEnvironment, 'Managed Git package: added');
+  runInstalled(executable, ['packages', 'add', 'https://example.test/team/packed-managed-package.git', '--yes'], { ...packedManagedEnvironment, TEST_FAIL_CLONE: '1' }, 'Managed Git package: current');
+  const packedManagedStatus = spawnSync(executable, ['status'], { encoding: 'utf8', shell: false, env: packedManagedEnvironment });
+  if (![0, 3].includes(packedManagedStatus.status ?? -1)
+    || !packedManagedStatus.stdout.includes('package packed-managed-package: ready; example.test/team/packed-managed-package')) {
+    throw new Error(`Installed managed package status failed (${packedManagedStatus.status}).\nstdout: ${packedManagedStatus.stdout}\nstderr: ${packedManagedStatus.stderr}`);
   }
 
   const bazifySource = join(temporaryRoot, 'bazify-provider', 'packed-bazify-skill');

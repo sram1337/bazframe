@@ -36,6 +36,7 @@
 - [x] Bring CLI/status, standalone Pi, pack, real-Pi, TUI projections, generated Skill, and current documentation to library/package parity.
 - [x] Unify author-facing Skill library/package messaging around canonical identity, initial activation, later refresh, whole-object profile attachment, and the runnable package example.
 - [x] Ship deterministic `bazify` extraction and in-place adaptation for one Skill or an immediate Skill collection, with isolated validation, `./bazframe/` review tracking, and consent-gated private publication for new packages.
+- [x] Add one shared managed Git acquisition/update lifecycle to resource-specific Skill, library, and package commands with exact provenance, explicit package-build authorization, transactional activation, and status diagnostics.
 - [x] Remove obsolete shipped readers, commands, aliases, and compiled modules; keep old state invisible and unchanged.
 
 ## Terminal UI

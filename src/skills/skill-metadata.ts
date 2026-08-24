@@ -8,6 +8,10 @@ export const SKILL_DEFINITION = 'SKILL.md';
 export async function readSkillDeclaredName(skillDirectory: string): Promise<string> {
   const definitionPath = join(skillDirectory, SKILL_DEFINITION);
   const contents = await readUtf8InstructionFile(definitionPath, 'Skill definition');
+  return parseSkillDeclaredName(contents, definitionPath);
+}
+
+export function parseSkillDeclaredName(contents: string, definitionPath: string): string {
   const normalized = contents.replace(/\r\n?/gu, '\n');
   const lines = normalized.split('\n');
   if (lines[0] !== '---') {

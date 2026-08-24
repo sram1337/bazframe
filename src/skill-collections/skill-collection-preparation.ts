@@ -37,10 +37,15 @@ export async function prepareLibrary(
 export async function preparePackage(
   bazframeHome: string,
   packageRoot: string,
-  environment: NodeJS.ProcessEnv = process.env
+  environment: NodeJS.ProcessEnv = process.env,
+  afterSnapshot?: () => Promise<void>,
+  expectedManifest?: PackageManifestSnapshot
 ): Promise<PreparedPackage> {
   const rootIdentity = await physicalRootIdentity(packageRoot);
   const initial = await readPackageManifest(packageRoot);
+  if (expectedManifest !== undefined && !samePackageManifestSnapshot(expectedManifest, initial)) {
+    throw new BazframeError('PACKAGE_MANIFEST_CHANGED', 'Package manifest changed after build authorization.');
+  }
   await executeBuild(initial.manifest.build, packageRoot, environment);
   await assertPhysicalRootIdentity(packageRoot, rootIdentity);
   const revalidated = await readPackageManifest(packageRoot);
@@ -49,6 +54,7 @@ export async function preparePackage(
   await resolvePhysicalRelativeDirectory(artifactPath, initial.manifest.skillsRoot);
   const snapshot = await publishSkillSnapshot(bazframeHome, artifactPath);
   await resolvePhysicalRelativeDirectory(snapshot.artifactPath, initial.manifest.skillsRoot);
+  await afterSnapshot?.();
   await assertPhysicalRootIdentity(packageRoot, rootIdentity);
   const finalManifest = await readPackageManifest(packageRoot);
   if (!samePackageManifestSnapshot(initial, finalManifest)) throw new BazframeError('PACKAGE_MANIFEST_CHANGED', 'Package manifest changed before activation.');

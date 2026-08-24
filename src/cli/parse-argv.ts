@@ -11,19 +11,20 @@ export type HelpTopic =
   | 'profile-skills-add' | 'profile-skills-remove' | 'profile-libraries' | 'profile-libraries-add' | 'profile-libraries-remove'
   | 'profile-packages' | 'profile-packages-add' | 'profile-packages-remove'
   | 'libraries' | 'libraries-add' | 'libraries-update' | 'libraries-remove'
-  | 'packages' | 'packages-add' | 'packages-build' | 'packages-remove'
-  | 'skills' | 'skill-edit' | 'project' | 'tui';
+  | 'packages' | 'packages-add' | 'packages-build' | 'packages-update' | 'packages-remove'
+  | 'skills' | 'skill-edit' | 'skill-update' | 'project' | 'tui';
 export type Command =
   | { name: 'profiles-overview' }
   | { name: 'skills-overview' }
   | { name: 'profile-skills-overview' }
   | { name: 'libraries-overview' }
   | { name: 'libraries-add'; root: string }
-  | { name: 'libraries-update'; id: string }
+  | { name: 'libraries-update'; id: string; acceptRewrite: boolean }
   | { name: 'libraries-remove'; id: string }
   | { name: 'packages-overview' }
-  | { name: 'packages-add'; root: string }
+  | { name: 'packages-add'; root: string; yes: boolean }
   | { name: 'packages-build'; id: string }
+  | { name: 'packages-update'; id: string; acceptRewrite: boolean; yes: boolean }
   | { name: 'packages-remove'; id: string }
   | { name: 'profile-libraries-overview' }
   | { name: 'profile-libraries-add'; id: string; profileId?: string }
@@ -38,6 +39,7 @@ export type Command =
   | { name: 'default-skill-add'; skillRoot: string }
   | { name: 'default-skill-remove'; skillId: string }
   | { name: 'skill-edit'; skillId: string }
+  | { name: 'skill-update'; skillId: string; acceptRewrite: boolean }
   | { name: 'profile-skill-add'; skillId: string; profileId?: string }
   | { name: 'profile-skill-remove'; skillId: string; profileId?: string }
   | { name: 'profile-add'; profileId: string }
@@ -113,8 +115,8 @@ function parseHelp(args: readonly string[]): ParseResult {
     ['profile libraries', 'profile-libraries'], ['profile libraries add', 'profile-libraries-add'], ['profile libraries remove', 'profile-libraries-remove'],
     ['profile packages', 'profile-packages'], ['profile packages add', 'profile-packages-add'], ['profile packages remove', 'profile-packages-remove'],
     ['libraries', 'libraries'], ['libraries add', 'libraries-add'], ['libraries update', 'libraries-update'], ['libraries remove', 'libraries-remove'],
-    ['packages', 'packages'], ['packages add', 'packages-add'], ['packages build', 'packages-build'], ['packages remove', 'packages-remove'],
-    ['skill', 'skills'], ['skills', 'skills'], ['skill edit', 'skill-edit'],
+    ['packages', 'packages'], ['packages add', 'packages-add'], ['packages build', 'packages-build'], ['packages update', 'packages-update'], ['packages remove', 'packages-remove'],
+    ['skill', 'skills'], ['skills', 'skills'], ['skill edit', 'skill-edit'], ['skill update', 'skill-update'],
     ['project', 'project'], ['projects', 'project'],
     ['global', 'global'],
     ['adapter', 'adapter'], ['adapters', 'adapter'],
@@ -144,15 +146,20 @@ function parseSkill(args: readonly string[]): ParseResult {
   if (args.length === 0) return { kind: 'command', command: { name: 'skills-overview' } };
   if (args.length === 1 && HELP_FLAGS.has(args[0])) return { kind: 'help', topic: 'skills' };
   const [subcommand, ...rest] = args;
-  if (subcommand !== 'edit') {
-    return usageError('skill requires `edit`.', 'skills');
+  if (subcommand !== 'edit' && subcommand !== 'update') {
+    return usageError('skill requires `edit` or `update`.', 'skills');
   }
-  if (rest.length === 1 && HELP_FLAGS.has(rest[0])) return { kind: 'help', topic: 'skill-edit' };
-  if (rest.length !== 1) {
-    return usageError('skill edit requires exactly one <skill> argument.', 'skill-edit');
+  const topic = `skill-${subcommand}` as HelpTopic;
+  if (rest.length === 1 && HELP_FLAGS.has(rest[0])) return { kind: 'help', topic };
+  if (subcommand === 'edit') {
+    if (rest.length !== 1) return usageError('skill edit requires exactly one <skill> argument.', topic);
+    if (!isSafeSkillId(rest[0])) return invalidSkillId(topic);
+    return { kind: 'command', command: { name: 'skill-edit', skillId: rest[0] } };
   }
-  if (!isSafeSkillId(rest[0])) return invalidSkillId('skill-edit');
-  return { kind: 'command', command: { name: 'skill-edit', skillId: rest[0] } };
+  const acceptRewrite = rest.length === 2 && rest[1] === '--accept-rewrite';
+  if (!(rest.length === 1 || acceptRewrite)) return usageError('skill update requires <skill> followed only by optional --accept-rewrite.', topic);
+  if (!isSafeSkillId(rest[0])) return invalidSkillId(topic);
+  return { kind: 'command', command: { name: 'skill-update', skillId: rest[0], acceptRewrite } };
 }
 
 function parseUse(args: readonly string[]): ParseResult {
@@ -277,16 +284,32 @@ function parseCollections(kind: 'library' | 'package', args: readonly string[]):
   if (args.length === 0) return { kind: 'command', command: { name: `${plural}-overview` } as Command };
   if (args.length === 1 && HELP_FLAGS.has(args[0])) return { kind: 'help', topic: plural };
   const [subcommand, ...rest] = args;
-  const allowed = kind === 'library' ? new Set(['add', 'update', 'remove']) : new Set(['add', 'build', 'remove']);
-  if (!allowed.has(subcommand)) return usageError(`${plural} requires ${kind === 'library' ? '`add`, `update`, or `remove`' : '`add`, `build`, or `remove`'}.`, plural);
+  const allowed = kind === 'library' ? new Set(['add', 'update', 'remove']) : new Set(['add', 'build', 'update', 'remove']);
+  if (!allowed.has(subcommand)) return usageError(`${plural} requires ${kind === 'library' ? '`add`, `update`, or `remove`' : '`add`, `build`, `update`, or `remove`'}.`, plural);
   const topic = `${plural}-${subcommand}` as HelpTopic;
   if (rest.length === 1 && HELP_FLAGS.has(rest[0])) return { kind: 'help', topic };
-  if (rest.length !== 1) return usageError(`${plural} ${subcommand} requires ${subcommand === 'add' ? '<absolute-root>' : `<${kind}>`}.`, topic);
   if (subcommand === 'add') {
+    const yes = kind === 'package' && rest.length === 2 && rest[1] === '--yes';
+    if (!(rest.length === 1 || yes)) return usageError(`${plural} add requires one <absolute-root-or-git-source>${kind === 'package' ? ' followed only by optional --yes' : ''}.`, topic);
     const root = rest[0];
-    if (!isAbsolute(root) || root.includes('\0')) return usageError(`${kind === 'library' ? 'Library' : 'Package'} root must be a non-empty absolute path without NUL bytes.`, topic);
-    return { kind: 'command', command: { name: `${plural}-add`, root } as Command };
+    if ((!isAbsolute(root) && !looksLikeManagedGitSource(root)) || root.includes('\0')) return usageError(`${kind === 'library' ? 'Library' : 'Package'} input must be an absolute path or managed Git source without NUL bytes.`, topic);
+    if (yes && isAbsolute(root)) return usageError('--yes applies only to managed Git package acquisition.', topic);
+    return { kind: 'command', command: { name: `${plural}-add`, root, ...(kind === 'package' ? { yes } : {}) } as Command };
   }
+  if (subcommand === 'update') {
+    let id: string | undefined;
+    let acceptRewrite = false;
+    let yes = false;
+    for (const value of rest) {
+      if (value === '--accept-rewrite' && !acceptRewrite) acceptRewrite = true;
+      else if (kind === 'package' && value === '--yes' && !yes) yes = true;
+      else if (id === undefined) id = value;
+      else return usageError(`${plural} update accepts <${kind}> plus optional --accept-rewrite${kind === 'package' ? ' and --yes' : ''}.`, topic);
+    }
+    if (id === undefined || !isSafeSkillId(id)) return invalidCollectionId(kind, topic);
+    return { kind: 'command', command: { name: `${plural}-update`, id, acceptRewrite, ...(kind === 'package' ? { yes } : {}) } as Command };
+  }
+  if (rest.length !== 1) return usageError(`${plural} ${subcommand} requires <${kind}>.`, topic);
   if (!isSafeSkillId(rest[0])) return invalidCollectionId(kind, topic);
   return { kind: 'command', command: { name: `${plural}-${subcommand}`, id: rest[0] } as Command };
 }
@@ -309,12 +332,12 @@ function parseDefaultSkillLifecycle(name: 'add' | 'remove', args: readonly strin
     return { kind: 'help', topic };
   }
   if (args.length !== 2 || args[0] !== 'skill') {
-    return usageError(`${name} requires exactly \`skill\` followed by ${name === 'add' ? '<absolute-root>' : '<skill>'}.`, topic);
+    return usageError(`${name} requires exactly \`skill\` followed by ${name === 'add' ? '<absolute-root-or-git-source>' : '<skill>'}.`, topic);
   }
   const value = args[1];
   if (name === 'add') {
-    if (!isAbsolute(value) || value.length === 0 || value.includes('\0')) {
-      return usageError('Skill root must be a non-empty absolute path without NUL bytes.', topic);
+    if ((!isAbsolute(value) && !looksLikeManagedGitSource(value)) || value.length === 0 || value.includes('\0')) {
+      return usageError('Skill input must be an absolute path or managed Git source without NUL bytes.', topic);
     }
     return { kind: 'command', command: { name: 'default-skill-add', skillRoot: value } };
   }
@@ -342,6 +365,11 @@ function parseMembership(
       ? { name: `profile-skill-${name}`, skillId }
       : { name: `profile-skill-${name}`, skillId, profileId }
   } as ParseResult;
+}
+
+function looksLikeManagedGitSource(value: string): boolean {
+  return value.startsWith('git:') || value.startsWith('https://') || value.startsWith('ssh://')
+    || value.startsWith('file:') || /^[^/\s@]+@[^:]+:/u.test(value);
 }
 
 function invalidSkillId(topic: HelpTopic): ParseResult {

@@ -13,13 +13,16 @@
 - CLI, status, the standalone Pi artifact, and `/bazframe info` report libraries and packages separately with kind-correct recovery commands.
 - The TUI Skills tab presents one uninterrupted list of collapsible `Added Skills`, `Library <id>`, and `Package <id>` peers without category sections. It can add a prepared library only; package commands and all refresh/remove/reference writes remain CLI-only. Library/package preview is immutable and points to provider edit plus `libraries update` or `packages build`.
 - The TUI Profiles list is create-first and orders the current profile, persistent global inactive favorites, then remaining profiles. Favorites use separate strict `profile-favorites.json` state; `f` toggles them, `x` starts guarded profile deletion, and `d` is inert.
+- Managed Git providers share one source parser, clone/update transaction, exact provenance codec, and recovery namespace under `<BAZFRAME_HOME>/providers/git/`; resource-specific Skill, library, and package adapters retain their existing validation and profile-membership boundaries.
 - `skills/bazframe/` and `skills/bazify/` are tracked product Skills; build generates byte-identical copies under `dist/skills/`. Bazify uses `./bazframe/` for review tracking, extracts one Skill or an immediate collection into a provider-owned package at `~/<name>`, adapts dedicated Skill repositories in place, validates with disposable Bazframe state, and privately publishes only new packages after explicit consent.
 
 ## Current command surface
 
 ```text
-bazframe libraries [add <absolute-root> | update <library> | remove <library>]
-bazframe packages [add <absolute-root> | build <package> | remove <package>]
+bazframe add skill <absolute-root-or-git-source>
+bazframe skill update <skill> [--accept-rewrite]
+bazframe libraries [add <absolute-root-or-git-source> | update <library> [--accept-rewrite] | remove <library>]
+bazframe packages [add <absolute-root-or-git-source> [--yes] | build <package> | update <package> [--accept-rewrite] [--yes] | remove <package>]
 bazframe profile libraries [add|remove <library> [--profile <profile>]]
 bazframe profile packages [add|remove <package> [--profile <profile>]]
 ```
@@ -28,17 +31,17 @@ Individual `add skill`, `remove skill`, and `profile skills` behavior remains li
 
 ## Ownership and safety
 
-Library providers own prepared bytes and external preparation. Package providers own project bytes, dependencies, build behavior/output, credentials, and publication. Bazframe owns explicit package-process execution, snapshot staging/publication, records, references, activation validation, runtime projection, and diagnostics. Profiles own whole-object selection and individual Skill membership.
+Providers own upstream bytes, dependencies, build behavior, credentials, and publication. Bazframe owns explicit managed Git acquisition/provenance/update/recovery, package-process execution, snapshot staging/publication, records, references, activation validation, runtime projection, and diagnostics. Profiles own whole-object selection and individual Skill membership.
 
 All development and acceptance tests use temporary Bazframe/Pi homes. Do not run tests against `$HOME/.bazframe`.
 
 ## Current validation
 
-- `npm test`: build, typecheck, lint, 487 unit tests, 36 integration tests, and packed-package validation pass.
+- `npm test`: build, typecheck, lint, 502 unit tests, 47 integration tests, and packed-package validation pass.
 - `npm run test:real-pi`: Pi 0.82 adapter, library update, package build, shared artifact, inert old state, provider preservation, and repository-stability checks pass.
 - `npm run test:tui-terminal:local`: all 12 recorded macOS tmux scenarios pass with terminal restoration.
-- Generated `bazframe`/`bazify` Skill bytes match tracked sources; packed Bazify create/adapt/validate and fake private-publication argv checks pass; obsolete production readers are absent; `git diff --check` passes; and the staging area is empty.
-- Independent core/security, TUI/product, and proof-matrix reviews accept the migration with no remaining blockers.
+- Generated `bazframe`/`bazify` Skill bytes match tracked sources; managed Git Skill/library/package acquisition, repeat, update, current-result locking, reference-safe removal/re-add, rewrite authorization, terminal-safe trust output, package-build cleanup, identity-bound rollback, concurrent staging cleanup, operation-specific recovery diagnostics, identity-verified forward removal recovery, authenticated GitHub CLI success/fallback, status, and profile non-mutation pass with local/fake transports; an authenticated live Personal Agent Network add/repeat completes in disposable Bazframe state; the installed tarball completes managed package add/repeat/status; packed Bazify create/adapt/validate and fake private-publication argv checks pass; obsolete production readers are absent; `git diff --check` passes; and the staging area is empty.
+- Seven managed Git correctness/security review rounds are addressed; the final independent acceptance re-review is clean.
 
 ## Deferred questions
 

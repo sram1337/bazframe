@@ -137,13 +137,17 @@ describe('parseArgv', () => {
   it('parses typed library/package lifecycle and rejects obsolete source grammar', () => {
     expect(parseArgv(['libraries'])).toEqual({ kind: 'command', command: { name: 'libraries-overview' } });
     expect(parseArgv(['libraries','add','/absolute/library'])).toEqual({ kind:'command', command:{name:'libraries-add',root:'/absolute/library'} });
-    expect(parseArgv(['libraries','update','tools'])).toEqual({ kind:'command', command:{name:'libraries-update',id:'tools'} });
-    expect(parseArgv(['packages','add','/absolute/package'])).toEqual({ kind:'command', command:{name:'packages-add',root:'/absolute/package'} });
+    expect(parseArgv(['libraries','update','tools'])).toEqual({ kind:'command', command:{name:'libraries-update',id:'tools',acceptRewrite:false} });
+    expect(parseArgv(['libraries','add','git:owner/tools'])).toEqual({ kind:'command', command:{name:'libraries-add',root:'git:owner/tools'} });
+    expect(parseArgv(['packages','add','/absolute/package'])).toEqual({ kind:'command', command:{name:'packages-add',root:'/absolute/package',yes:false} });
+    expect(parseArgv(['packages','add','git:owner/suite','--yes'])).toEqual({ kind:'command', command:{name:'packages-add',root:'git:owner/suite',yes:true} });
+    expect(parseArgv(['packages','update','suite','--accept-rewrite','--yes'])).toEqual({ kind:'command', command:{name:'packages-update',id:'suite',acceptRewrite:true,yes:true} });
+    expect(parseArgv(['skill','update','review-skill'])).toEqual({ kind:'command', command:{name:'skill-update',skillId:'review-skill',acceptRewrite:false} });
     expect(parseArgv(['packages','build','suite'])).toEqual({ kind:'command', command:{name:'packages-build',id:'suite'} });
     expect(parseArgv(['profile','libraries','add','tools','--profile','reviewer'])).toEqual({kind:'command',command:{name:'profile-libraries-add',id:'tools',profileId:'reviewer'}});
     expect(parseArgv(['profile','packages','remove','suite'])).toEqual({kind:'command',command:{name:'profile-packages-remove',id:'suite'}});
     expect(parseArgv(['help','packages','build'])).toEqual({kind:'help',topic:'packages-build'});
-    for (const argv of [['source'],['sources'],['sources','add','/root'],['profile','sources'],['library'],['package'],['libraries','build','tools'],['packages','update','suite'],['libraries','add','relative'],['packages','remove','Bad']]) expect(parseArgv(argv)).toMatchObject({kind:'usage-error'});
+    for (const argv of [['source'],['sources'],['sources','add','/root'],['profile','sources'],['library'],['package'],['libraries','build','tools'],['libraries','add','relative'],['packages','remove','Bad']]) expect(parseArgv(argv)).toMatchObject({kind:'usage-error'});
   });
 
   it('rejects malformed profile lifecycle arguments without changing skill commands', () => {

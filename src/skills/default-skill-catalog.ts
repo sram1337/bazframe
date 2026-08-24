@@ -9,6 +9,7 @@ import {
 import { withStateLock } from '../state/lock.js';
 import { assertSafeSkillId, isSafeSkillId } from './skill-id.js';
 import { readSkillDeclaredName } from './skill-metadata.js';
+import { managedGitRecordForRoot } from '../providers/managed-git-record.js';
 
 export const DEFAULT_SKILL_SOURCE_ID = 'default';
 export const DEFAULT_SKILL_SOURCE_LABEL = '(default)';
@@ -42,6 +43,8 @@ export interface DefaultSkillCatalogResult extends DefaultSkillRegistration {
 export interface DefaultSkillCatalogTestHooks {
   beforeCommit?: () => void | Promise<void>;
   beforePublish?: () => void | Promise<void>;
+  /** Internal seam for a managed-provider operation already holding the global state lock. */
+  stateLockHeld?: boolean;
 }
 
 interface DirectoryIdentity { device: bigint; inode: bigint }
@@ -128,13 +131,7 @@ export async function readDefaultSkillEditorRegistration(
         `Default skill target must be a physical directory: ${canonical}`
       );
     }
-    const canonicalHome = await canonicalExistingPath(bazframeHome);
-    if (isWithin(canonicalHome, canonical) || isWithin(canonical, canonicalHome)) {
-      throw new BazframeError(
-        'DEFAULT_SKILL_TARGET_OVERLAPS_BAZFRAME_HOME',
-        `Default skill target and BAZFRAME_HOME must not overlap: ${canonical}`
-      );
-    }
+    await assertAllowedSkillLocation(bazframeHome, canonical, skillId);
     if (basename(canonical) !== skillId) {
       throw new BazframeError(
         'DEFAULT_SKILL_NAME_MISMATCH',
@@ -194,20 +191,19 @@ export async function addDefaultSkill(
   if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
     throw new BazframeError('SKILL_ROOT_NOT_PHYSICAL', `Skill root must resolve to a physical directory: ${target}`);
   }
-  const canonicalHome = await canonicalExistingPath(bazframeHome);
-  if (isWithin(canonicalHome, target) || isWithin(target, canonicalHome)) {
-    throw new BazframeError('SKILL_ROOT_OVERLAPS_BAZFRAME_HOME', `Skill root and BAZFRAME_HOME must not overlap: ${target}`);
-  }
   const id = basename(target);
+  await assertAllowedSkillLocation(bazframeHome, target, id);
   assertSafeSkillId(id);
   const declared = await readSkillDeclaredName(target);
   if (declared !== id) {
     throw new BazframeError('SKILL_NAME_MISMATCH', `Skill root ${target} declares name ${JSON.stringify(declared)} instead of canonical basename ${JSON.stringify(id)}.`);
   }
   const registrationPath = join(defaultSkillCatalogRoot(bazframeHome), id);
-  return withStateLock(
-    join(bazframeHome, 'locks', 'state.lock'),
-    { command: 'bazframe add skill', target: registrationPath },
+  return withCatalogLock(
+    bazframeHome,
+    'bazframe add skill',
+    registrationPath,
+    testHooks.stateLockHeld === true,
     async () => {
       await ensureCatalogRoot(bazframeHome);
       const root = await openCatalogRoot(bazframeHome, true);
@@ -239,8 +235,7 @@ export async function addDefaultSkill(
       } finally {
         await root.handle.close().catch(() => undefined);
       }
-    },
-    { managedRoot: bazframeHome }
+    }
   );
 }
 
@@ -251,9 +246,11 @@ export async function removeDefaultSkill(
 ): Promise<DefaultSkillCatalogResult> {
   assertSafeSkillId(skillId);
   const registrationPath = join(defaultSkillCatalogRoot(bazframeHome), skillId);
-  return withStateLock(
-    join(bazframeHome, 'locks', 'state.lock'),
-    { command: 'bazframe remove skill', target: registrationPath },
+  return withCatalogLock(
+    bazframeHome,
+    'bazframe remove skill',
+    registrationPath,
+    testHooks.stateLockHeld === true,
     async () => {
       const root = await openCatalogRoot(bazframeHome, false);
       if (root === undefined) return { action: 'absent', id: skillId, registrationPath, target: '' };
@@ -290,9 +287,25 @@ export async function removeDefaultSkill(
       } finally {
         await root.handle.close().catch(() => undefined);
       }
-    },
-    { managedRoot: bazframeHome }
+    }
   );
+}
+
+function withCatalogLock<T>(
+  bazframeHome: string,
+  command: string,
+  target: string,
+  stateLockHeld: boolean,
+  operation: () => Promise<T>
+): Promise<T> {
+  return stateLockHeld
+    ? operation()
+    : withStateLock(
+        join(bazframeHome, 'locks', 'state.lock'),
+        { command, target },
+        operation,
+        { managedRoot: bazframeHome }
+      );
 }
 
 async function inspectRawRegistration(path: string): Promise<RawRegistration | undefined> {
@@ -321,10 +334,7 @@ async function readValidRegistrationFromRoot(
   if (canonical !== raw.target) throw new BazframeError('DEFAULT_SKILL_TARGET_NOT_CANONICAL', `Default skill registration target must be canonical: ${registrationPath} -> ${raw.target}`);
   const metadata = await lstat(canonical);
   if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new BazframeError('DEFAULT_SKILL_TARGET_NOT_PHYSICAL', `Default skill target must be a physical directory: ${canonical}`);
-  const canonicalHome = await canonicalExistingPath(bazframeHome);
-  if (isWithin(canonicalHome, canonical) || isWithin(canonical, canonicalHome)) {
-    throw new BazframeError('DEFAULT_SKILL_TARGET_OVERLAPS_BAZFRAME_HOME', `Default skill target and BAZFRAME_HOME must not overlap: ${canonical}`);
-  }
+  await assertAllowedSkillLocation(bazframeHome, canonical, id);
   if (basename(canonical) !== id) throw new BazframeError('DEFAULT_SKILL_NAME_MISMATCH', `Default skill target basename does not match ${JSON.stringify(id)}: ${canonical}`);
   const declared = await readSkillDeclaredName(canonical);
   if (declared !== id) throw new BazframeError('DEFAULT_SKILL_NAME_MISMATCH', `Default skill ${JSON.stringify(id)} declares name ${JSON.stringify(declared)}.`);
@@ -337,10 +347,7 @@ async function assertExternalSkillTarget(home: string, target: string, id: strin
   if (canonical !== target) throw new BazframeError('DEFAULT_SKILL_TARGET_NOT_CANONICAL', `Default skill target must be canonical: ${target}`);
   const metadata = await lstat(target);
   if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new BazframeError('DEFAULT_SKILL_TARGET_NOT_PHYSICAL', `Default skill target must be a physical directory: ${target}`);
-  const canonicalHome = await canonicalExistingPath(home);
-  if (isWithin(canonicalHome, target) || isWithin(target, canonicalHome)) {
-    throw new BazframeError('DEFAULT_SKILL_TARGET_OVERLAPS_BAZFRAME_HOME', `Default skill target and BAZFRAME_HOME must not overlap: ${target}`);
-  }
+  await assertAllowedSkillLocation(home, target, id);
   if (basename(target) !== id || await readSkillDeclaredName(target) !== id) throw new BazframeError('DEFAULT_SKILL_NAME_MISMATCH', `Default skill target identity changed: ${target}`);
 }
 
@@ -401,6 +408,14 @@ function occupiedRegistration(path: string, raw: RawRegistration | undefined): B
   const detail = raw?.kind === 'link' ? `targets ${JSON.stringify(raw.target)}` : 'is a physical or unreadable entry';
   return new BazframeError('DEFAULT_SKILL_OCCUPIED', `Default skill registration is occupied: ${path} ${detail}.`);
 }
+async function assertAllowedSkillLocation(home: string, target: string, id: string): Promise<void> {
+  const canonicalHome = await canonicalExistingPath(home);
+  if (!isWithin(canonicalHome, target) && !isWithin(target, canonicalHome)) return;
+  const managed = await managedGitRecordForRoot(home, 'skill', target);
+  if (managed?.id === id) return;
+  throw new BazframeError('DEFAULT_SKILL_TARGET_OVERLAPS_BAZFRAME_HOME', `Default skill target and BAZFRAME_HOME must not overlap: ${target}`);
+}
+
 async function canonicalExistingPath(path: string): Promise<string> {
   const missing: string[] = [];
   let cursor = resolve(path);

@@ -20,7 +20,7 @@ bazframe add skill /absolute/path/to/explain-code
 bazframe profile skills add explain-code
 ```
 
-The provider owns the live bytes. Bazframe stores parallel absolute links in `(default)` and the profile.
+Absolute-path providers own their live bytes. Managed Git Skills use a stable Bazframe provider path so `(default)` and profile links remain parallel across explicit updates.
 
 ### 2. Skill library
 
@@ -91,6 +91,28 @@ Both `packages add` and `packages build` execute the literal build argv directly
 
 For a runnable repository example that creates a package, builds one Skill plus a shared resource, and attaches the package to a profile, see [`scripts/setup-library-package-demo.sh`](../scripts/setup-library-package-demo.sh).
 
+## Managed Git providers
+
+Resource-specific add commands accept `git:<owner>/<repository>`, credential-free HTTPS, and `ssh://` URLs:
+
+```bash
+bazframe add skill git:owner/root-skill
+bazframe libraries add https://github.com/owner/skill-library.git
+bazframe packages add git:sram1337/personal-agent-network
+```
+
+GitHub shorthand uses an authenticated GitHub CLI clone when available and Git HTTPS otherwise. Explicit URLs use Git. Authentication remains in the user's Git credential helper, SSH agent, or GitHub CLI; Bazframe records only the normalized remote, fetch URL, default branch, full revision, resource identity, and canonical managed root.
+
+The checkout lives under `<BAZFRAME_HOME>/providers/git/checkouts/<kind>/<id>`. Initial acquisition validates and activates the selected resource while leaving profile membership unchanged. A package clone is inspected before its literal build argv runs with ordinary user authority and no sandbox. Interactive confirmation defaults to decline; scripts use `--yes`.
+
+```bash
+bazframe skill update <skill> [--accept-rewrite]
+bazframe libraries update <library> [--accept-rewrite]
+bazframe packages update <package> [--accept-rewrite] [--yes]
+```
+
+Update acquires the recorded default branch into owned staging, verifies remote identity and a clean checkout, and activates a fast-forward revision transactionally. `--accept-rewrite` authorizes a reviewed non-fast-forward branch change. `packages build` rebuilds the recorded managed revision without network access and restores a clean checkout after success or failure. Repeating an already-current add verifies provenance, checkout, and registration locally. Resource removal applies the existing reference checks, then removes the Bazframe-owned checkout and provenance while leaving the upstream remote available. `bazframe status` reports each managed provider's remote, branch, full revision, path, health, and resource-specific update command. Retained recovery records describe the stopped operation and paths. Recovery is inspect-first and fail-closed. Add, update, and build recovery require manual reconciliation to one revision before removing the record and retrying. Removal recovery retains its record while the same remove command verifies and finishes any surviving resource, checkout, and provenance.
+
 ## Bazify Skills
 
 Bazframe ships a `bazify` Agent Skill beside the `bazframe` self-management Skill under `dist/skills/`. After adding it to `(default)` and a profile, invoke the Skill or its dependency-free Node script.
@@ -149,7 +171,7 @@ A profile Skill wins over a colliding library/package contribution. The complete
 
 ## Editing and ownership
 
-`bazframe skill edit <skill>` opens only an individually added live Skill. Library and package previews come from immutable snapshots and cannot be edited. Edit provider input, then run:
+`bazframe skill edit <skill>` opens an individually added absolute-path Skill. Managed Git Skills are edited upstream and activated with `bazframe skill update <skill>`. Library and package previews come from immutable snapshots and cannot be edited. Edit provider input, then run:
 
 ```bash
 bazframe libraries update <library>
@@ -157,11 +179,11 @@ bazframe libraries update <library>
 bazframe packages build <package>
 ```
 
-Bazframe never fetches, polls, deletes, or edits provider content. A package build may change provider-owned output because that change is performed by the explicitly authorized provider build.
+Bazframe fetches managed Git providers only during their resource-specific add and update commands. Absolute-path providers retain their existing ownership. A package build may change provider-owned output because that change is performed by the explicitly authorized provider build.
 
 ## Troubleshooting
 
-- **A provider change is missing:** run `libraries update` or `packages build`, then `/bazframe reload` in an existing Pi session.
+- **A provider change is missing:** run the resource's update command for managed Git, or `libraries update` / `packages build` for local provider changes, then `/bazframe reload` in an existing Pi session.
 - **`pi-loader` diagnostic:** fix the reported `SKILL.md`; Bazframe preserves the kind, object ID, relative path, and Pi loader message.
 - **Duplicate name:** rename or remove the conflicting Skill/reference. Bazframe does not alias stored-profile duplicates.
 - **Package declaration rejected:** use exactly `schemaVersion`, `build`, `artifactRoot`, and `skillsRoot`; paths must be portable relative paths or `.`.

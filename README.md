@@ -119,7 +119,7 @@ The second command explains the safeguards around profile deletion.
 
 ### Add an individual Skill
 
-A **Skill** is a directory conforming to the [Agent Skills specification](https://agentskills.io) and containing a `SKILL.md` file with instructions for a coding agent. A profile's Skills are optional. Bazframe's `(default)` catalog stores absolute links to canonical external Skill directories; providers retain their content. See [Using Skills with Bazframe](docs/skills.md) for the standard format, Bazframe lifecycle choices, validation timing, and troubleshooting.
+A **Skill** is a directory conforming to the [Agent Skills specification](https://agentskills.io) and containing a `SKILL.md` file with instructions for a coding agent. A profile's Skills are optional. Bazframe's `(default)` catalog stores absolute links to canonical Skill directories. Absolute-path providers retain their content; managed Git providers use Bazframe's recorded checkout lifecycle. See [Using Skills with Bazframe](docs/skills.md) for the standard format, Bazframe lifecycle choices, validation timing, and troubleshooting.
 
 Create a minimal local skill for this example:
 
@@ -157,7 +157,7 @@ bazframe skill edit explain-code
 
 The command derives the provider `SKILL.md` from the `(default)` entry rather than trusting a displayed path. A successful editor exit does not claim that content was saved. Skills from libraries and packages come from immutable snapshots and cannot be edited this way; edit provider input, then run `bazframe libraries update <library>` or `bazframe packages build <package>`.
 
-The added Skill and its profile membership are parallel links to the same provider directory. Provider changes are visible after a new Pi session or `/bazframe reload`. Remove the profile membership before `bazframe remove skill explain-code`; catalog removal is refused while any profile references it.
+The added Skill and its profile membership are parallel links to the same provider directory. Provider changes are visible after a new Pi session or `/bazframe reload`. A Git-hosted root Skill can be acquired with `bazframe add skill git:<owner>/<repository>` and advanced with `bazframe skill update <skill>`. Remove the profile membership before `bazframe remove skill explain-code`; catalog removal is refused while any profile references it.
 
 Bazframe's npm package ships the `bazframe` and `bazify` Skills under `dist/skills/`. Add either generated directory with `bazframe add skill <installed-package>/dist/skills/<skill>`; installation itself never changes the `(default)` catalog or profile membership.
 
@@ -201,6 +201,29 @@ bazframe packages build my-package                  # build and activate a new s
 ```
 
 Both package add and package build are explicit and unsandboxed. Bazframe snapshots the complete artifact root, including shared resources, while discovering Skills only below the Skills root. Profile references never build or select individual children. See [Using Skills with Bazframe](docs/skills.md) for the complete layout, lifecycle, and runnable example.
+
+### Acquire a Git-hosted resource
+
+Each resource-specific add command accepts GitHub shorthand, HTTPS, or `ssh://`:
+
+```bash
+bazframe add skill git:owner/root-skill
+bazframe libraries add git:owner/skill-library
+bazframe packages add git:sram1337/personal-agent-network
+bazframe profile packages add personal-agent-network
+```
+
+Bazframe places the checkout under `${BAZFRAME_HOME:-$HOME/.bazframe}/providers/git/`, records the credential-free remote, default branch, and full revision, then applies the selected resource's validation contract. Git and GitHub CLI use their existing authentication. A remote package is cloned and its manifest is shown before its declared build runs; interactive confirmation defaults to decline and non-interactive use supplies `--yes`.
+
+Managed updates are explicit:
+
+```bash
+bazframe skill update root-skill
+bazframe libraries update skill-library
+bazframe packages update personal-agent-network
+```
+
+Updates advance the recorded branch by fast-forward. `--accept-rewrite` authorizes a reviewed rewritten branch. Package updates present the build boundary again. Repeating an already-current add verifies the local provider and registration without network access. Managed resource removal applies the existing reference checks, then removes the Bazframe checkout and provenance while leaving the upstream remote available. Acquisition and updates leave profile selection and membership unchanged.
 
 ### Bazify Skills
 
@@ -272,6 +295,7 @@ Bazframe stores user state in `~/.bazframe` by default:
 ├── profiles/
 ├── libraries/
 ├── packages/
+├── providers/git/
 ├── skill-snapshots/
 ├── projects/
 └── adapters/
@@ -286,9 +310,9 @@ Each override must be an absolute path.
 
 ## Safety
 
-Profiles and skills become trusted input to a coding agent with filesystem and shell tools. Review their instructions and scripts before adding them. Review a package's build declaration before running `packages add` or `packages build`. `bazframe profile remove --force` permanently deletes the named non-active profile directory.
+Profiles and skills become trusted input to a coding agent with filesystem and shell tools. Review their instructions and scripts before adding them. Remote package acquisition reports the remote, revision, managed path, and literal build argv before the unsandboxed build is authorized. Review a package's build declaration before running `packages add`, `packages build`, or `packages update`. `bazframe profile remove --force` permanently deletes the named non-active profile directory.
 
-`bazframe status` reports adapter ownership, active-profile validity, effective project behavior, library/package health, and corrective actions.
+`bazframe status` reports adapter ownership, active-profile validity, effective project behavior, library/package health, managed Git provenance and recovery state, and corrective actions.
 
 ## Documentation
 

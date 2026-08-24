@@ -1,4 +1,5 @@
 import { tmpdir } from 'node:os';
+import { createInterface } from 'node:readline/promises';
 import { basename } from 'node:path';
 import {
   inspectPiAdapter,
@@ -10,6 +11,7 @@ import { childExitStatus, spawnPi } from '../agents/spawn-pi.js';
 import { BazframeError } from '../core/errors.js';
 import { EXIT_STATUS } from '../core/exit-status.js';
 import type { InheritedChildRunner } from '../core/external-editor.js';
+import { escapeUnsafeDisplayCharacters, stringifyForTerminal } from '../core/safe-text.js';
 import { composeInstructions } from '../harness/compose-instructions.js';
 import { createTemporaryInstructionFile } from '../harness/temporary-instructions.js';
 import { resolveEffectivePolicy } from '../policy/effective-policy.js';
@@ -83,6 +85,12 @@ import { addLibrary, addPackage, buildPackage, removeLibrary, removePackage, upd
 import { collectionKey, idForRecord, kindForRecord, skillsRootForRecord, type SkillCollectionKind } from '../skill-collections/skill-collection-store.js';
 import { buildStatus } from '../status/status.js';
 import {
+  addManagedGitLibrary, addManagedGitPackage, addManagedGitSkill, buildManagedGitPackage,
+  isManagedGitResource, isManagedGitSource, removeManagedGitLibrary, removeManagedGitPackage,
+  removeManagedGitSkill, updateManagedGitLibrary, updateManagedGitPackage, updateManagedGitSkill,
+  type ManagedGitBuildAuthorization, type ManagedGitLifecycleResult
+} from '../providers/managed-git.js';
+import {
   colorizeHelp,
   colorizeStatus,
   createCliColors,
@@ -108,12 +116,13 @@ import {
   PROFILE_LIBRARIES_ADD_HELP, PROFILE_LIBRARIES_HELP, PROFILE_LIBRARIES_REMOVE_HELP,
   PROFILE_PACKAGES_ADD_HELP, PROFILE_PACKAGES_HELP, PROFILE_PACKAGES_REMOVE_HELP,
   LIBRARIES_ADD_HELP, LIBRARIES_HELP, LIBRARIES_REMOVE_HELP, LIBRARIES_UPDATE_HELP,
-  PACKAGES_ADD_HELP, PACKAGES_BUILD_HELP, PACKAGES_HELP, PACKAGES_REMOVE_HELP,
+  PACKAGES_ADD_HELP, PACKAGES_BUILD_HELP, PACKAGES_UPDATE_HELP, PACKAGES_HELP, PACKAGES_REMOVE_HELP,
   PROFILE_USE_HELP,
   PROJECT_HELP,
   REMOVE_HELP,
   ROOT_HELP,
   SKILL_EDIT_HELP,
+  SKILL_UPDATE_HELP,
   SKILLS_HELP,
   STATUS_HELP,
   TUI_HELP,
@@ -136,6 +145,7 @@ export interface CliDependencies {
   stderrIsTty?: boolean;
   terminateProcess?: (status: number) => void;
   editorChildRunner?: InheritedChildRunner;
+  confirmManagedGitPackageBuild?: (details: ManagedGitBuildAuthorization) => boolean | Promise<boolean>;
   launchTui?: (options: {
     bazframeHome: string;
     bazframeVersion: string;
@@ -368,6 +378,15 @@ async function runCommand(
     });
     return childExitStatus(result);
   }
+  if (command.name === 'skill-update') {
+    const result = await updateManagedGitSkill({
+      bazframeHome,
+      environment,
+      acceptRewrite: command.acceptRewrite
+    }, command.skillId);
+    writeStdout(formatManagedGitLifecycleResult(result));
+    return EXIT_STATUS.success;
+  }
   if (command.name === 'profile-add') {
     writeStdout(formatProfileLifecycle(await addProfile(bazframeHome, command.profileId)));
     return EXIT_STATUS.success;
@@ -406,16 +425,58 @@ async function runCommand(
     writeStdout(`${await currentProfile(bazframeHome)}\n`);
     return EXIT_STATUS.success;
   }
-  if (command.name === 'libraries-add' || command.name === 'libraries-update' || command.name === 'libraries-remove' || command.name === 'packages-add' || command.name === 'packages-build' || command.name === 'packages-remove') {
+  if (command.name === 'libraries-add' || command.name === 'libraries-update' || command.name === 'libraries-remove' || command.name === 'packages-add' || command.name === 'packages-build' || command.name === 'packages-update' || command.name === 'packages-remove') {
     const options = { bazframeHome, environment };
+    if (command.name === 'libraries-add' && isManagedGitSource(command.root)) {
+      writeStdout(formatManagedGitLifecycleResult(await addManagedGitLibrary(options, command.root)));
+      return EXIT_STATUS.success;
+    }
+    if (command.name === 'packages-add' && isManagedGitSource(command.root)) {
+      writeStdout(formatManagedGitLifecycleResult(await addManagedGitPackage({
+        ...options,
+        yes: command.yes,
+        reportPackageBuild: (details) => writeStdout(formatManagedPackageBuildAuthorization(details)),
+        confirmPackageBuild: dependencies.confirmManagedGitPackageBuild ?? (() => confirmManagedPackageBuild(dependencies))
+      }, command.root)));
+      return EXIT_STATUS.success;
+    }
+    if (command.name === 'libraries-update' && await isManagedGitResource({ bazframeHome }, 'library', command.id)) {
+      writeStdout(formatManagedGitLifecycleResult(await updateManagedGitLibrary({ ...options, acceptRewrite: command.acceptRewrite }, command.id)));
+      return EXIT_STATUS.success;
+    }
+    if (command.name === 'packages-update') {
+      writeStdout(formatManagedGitLifecycleResult(await updateManagedGitPackage({
+        ...options,
+        acceptRewrite: command.acceptRewrite,
+        yes: command.yes,
+        reportPackageBuild: (details) => writeStdout(formatManagedPackageBuildAuthorization(details)),
+        confirmPackageBuild: dependencies.confirmManagedGitPackageBuild ?? (() => confirmManagedPackageBuild(dependencies))
+      }, command.id)));
+      return EXIT_STATUS.success;
+    }
+    if (command.name === 'libraries-remove' && await isManagedGitResource({ bazframeHome }, 'library', command.id)) {
+      writeStdout(formatManagedGitLifecycleResult(await removeManagedGitLibrary(options, command.id)));
+      return EXIT_STATUS.success;
+    }
+    if (command.name === 'packages-remove' && await isManagedGitResource({ bazframeHome }, 'package', command.id)) {
+      writeStdout(formatManagedGitLifecycleResult(await removeManagedGitPackage(options, command.id)));
+      return EXIT_STATUS.success;
+    }
     let result: SkillCollectionLifecycleResult;
     switch (command.name) {
       case 'libraries-add': result = await addLibrary(options, command.root); break;
-      case 'libraries-update': result = await updateLibrary(options, command.id); break;
+      case 'libraries-update':
+        if (command.acceptRewrite) throw new BazframeError('MANAGED_GIT_OPTION_INVALID', '--accept-rewrite applies only to managed Git libraries.');
+        result = await updateLibrary(options, command.id); break;
       case 'libraries-remove': result = await removeLibrary(options, command.id); break;
       case 'packages-add': result = await addPackage(options, command.root); break;
-      case 'packages-build': result = await buildPackage(options, command.id); break;
+      case 'packages-build':
+        result = await isManagedGitResource({ bazframeHome }, 'package', command.id)
+          ? await buildManagedGitPackage(options, command.id)
+          : await buildPackage(options, command.id);
+        break;
       case 'packages-remove': result = await removePackage(options, command.id); break;
+      default: throw new Error('unreachable package update dispatch');
     }
     writeStdout(formatCollectionLifecycleResult(result));
     return EXIT_STATUS.success;
@@ -432,6 +493,14 @@ async function runCommand(
     return EXIT_STATUS.success;
   }
   if (command.name === 'default-skill-add' || command.name === 'default-skill-remove') {
+    if (command.name === 'default-skill-add' && isManagedGitSource(command.skillRoot)) {
+      writeStdout(formatManagedGitLifecycleResult(await addManagedGitSkill({ bazframeHome, environment }, command.skillRoot)));
+      return EXIT_STATUS.success;
+    }
+    if (command.name === 'default-skill-remove' && await isManagedGitResource({ bazframeHome }, 'skill', command.skillId)) {
+      writeStdout(formatManagedGitLifecycleResult(await removeManagedGitSkill({ bazframeHome, environment }, command.skillId)));
+      return EXIT_STATUS.success;
+    }
     const result = command.name === 'default-skill-add'
       ? await addDefaultSkill(bazframeHome, command.skillRoot)
       : await removeDefaultSkill(bazframeHome, command.skillId);
@@ -892,6 +961,42 @@ function formatMembershipResult(
   ].join('\n');
 }
 
+function formatManagedPackageBuildAuthorization(details: ManagedGitBuildAuthorization): string {
+  return [
+    'Remote package build authorization',
+    `Remote: ${escapeUnsafeDisplayCharacters(details.remote)}`,
+    `Revision: ${escapeUnsafeDisplayCharacters(details.revision)}`,
+    `Managed provider: ${escapeUnsafeDisplayCharacters(details.root)}`,
+    `Build argv: ${stringifyForTerminal(details.build)}`,
+    'The declared build runs without a shell or sandbox with ordinary user authority.',
+    ''
+  ].join('\n');
+}
+
+async function confirmManagedPackageBuild(dependencies: CliDependencies): Promise<boolean> {
+  if (!(dependencies.stdinIsTty ?? process.stdin.isTTY === true)
+    || !(dependencies.stdoutIsTty ?? process.stdout.isTTY === true)) {
+    throw new BazframeError('MANAGED_GIT_BUILD_CONFIRMATION_REQUIRED', 'Non-interactive remote package acquisition requires --yes.');
+  }
+  const prompt = createInterface({ input: process.stdin, output: process.stdout });
+  try { return (await prompt.question('Run this package build? [y/N] ')).trim().toLowerCase() === 'y'; }
+  finally { prompt.close(); }
+}
+
+function formatManagedGitLifecycleResult(result: ManagedGitLifecycleResult): string {
+  return [
+    `Managed Git ${result.kind}: ${result.action}`,
+    `ID: ${escapeUnsafeDisplayCharacters(result.id)}`,
+    `Remote: ${escapeUnsafeDisplayCharacters(result.remote)}`,
+    `Branch: ${escapeUnsafeDisplayCharacters(result.branch)}`,
+    `Revision: ${escapeUnsafeDisplayCharacters(result.revision)}`,
+    `Provider root: ${escapeUnsafeDisplayCharacters(result.root)}`,
+    ...(result.resourceAction === undefined ? [] : [`Resource activation: ${escapeUnsafeDisplayCharacters(result.resourceAction)}`]),
+    'Profile membership: unchanged',
+    ''
+  ].join('\n');
+}
+
 function formatCollectionLifecycleResult(result:SkillCollectionLifecycleResult):string{const kind=kindForRecord(result);const id=idForRecord(result);return[`Global ${kind}: ${result.action}`,`${kind==='library'?'Library':'Package'}: ${id}`,`${kind==='library'?'Library':'Package'} root: ${result.root}`,`Snapshot: ${result.digest}`,`Skills root: ${skillsRootForRecord(result)}`,`Record: ${result.path}`,''].join('\n');}
 function formatCollectionReferenceResult(result:ProfileCollectionReferenceResult,explicit:boolean):string{if('library'in result)return[`Profile library reference: ${result.action}`,`${explicit?'Profile':'Active profile'}: ${result.profileId}`,`Library: ${result.library}`,`Reference: ${result.path}`,''].join('\n');return[`Profile package reference: ${result.action}`,`${explicit?'Profile':'Active profile'}: ${result.profileId}`,`Package: ${result.package}`,`Reference: ${result.path}`,''].join('\n');}
 
@@ -954,9 +1059,11 @@ function helpFor(topic: HelpTopic): string {
     case 'packages': return PACKAGES_HELP;
     case 'packages-add': return PACKAGES_ADD_HELP;
     case 'packages-build': return PACKAGES_BUILD_HELP;
+    case 'packages-update': return PACKAGES_UPDATE_HELP;
     case 'packages-remove': return PACKAGES_REMOVE_HELP;
     case 'skills': return SKILLS_HELP;
     case 'skill-edit': return SKILL_EDIT_HELP;
+    case 'skill-update': return SKILL_UPDATE_HELP;
     case 'project': return PROJECT_HELP;
     case 'pi': return PI_HELP;
   }

@@ -437,6 +437,39 @@ describe('Bazframe status', () => {
     ].join('\n'));
     expect(statusExitStatus(inspection)).toBe(3);
   });
+
+  it('formats inspectable managed Git provenance and resource-specific update guidance', () => {
+    const text = formatStatus({
+      bazframeHome: '/home/.bazframe',
+      piAgentDirectory: '/home/.pi/agent',
+      adapter: { state: 'current', targetPath: '/home/.pi/agent/extensions/bazframe.ts' },
+      globalPolicy: { policy: 'disabled', statePath: '/home/.bazframe/global-policy.json' },
+      repository: { kind: 'outside-git' },
+      effectiveBehavior: { kind: 'outside-git', enabled: false, reason: 'global-disabled' },
+      profile: { state: 'not-used', reason: 'global-disabled' },
+      cachedCollisionAliasCount: 0,
+      managedGitProviders: [{
+        health: `ready${String.fromCharCode(0x9b)}31m\u202e`,
+        record: {
+          schemaVersion: 1, kind: 'package', id: 'personal-agent-network',
+          root: `/home/.bazframe/providers/git/checkouts/package/personal-agent-network${String.fromCharCode(0x9b)}`,
+          remote: 'github.com/sram1337/personal-agent-network',
+          fetchUrl: 'https://github.com/sram1337/personal-agent-network.git',
+          transport: 'gh',
+          branch: 'main', revision: 'a'.repeat(40)
+        }
+      }],
+      managedGitDiagnostics: [`recovery${String.fromCharCode(0x9b)}\u202e`],
+      correctiveActions: []
+    });
+    expect(text).toContain('Managed Git providers:');
+    expect(text).toContain(`package personal-agent-network: ready\\u009b31m\\u202e; github.com/sram1337/personal-agent-network; branch:main; revision:${'a'.repeat(40)}`);
+    expect(text).toContain('provider:/home/.bazframe/providers/git/checkouts/package/personal-agent-network\\u009b');
+    expect(text).toContain('recovery\\u009b\\u202e');
+    expect(text).not.toContain(String.fromCharCode(0x9b));
+    expect(text).not.toContain('\u202e');
+    expect(text).toContain('update:bazframe packages update personal-agent-network');
+  });
 });
 
 async function readyProfile(directory: TempDirectory, options: StatusOptions): Promise<void> {

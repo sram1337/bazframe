@@ -4,6 +4,7 @@ import { inspectPiAdapter } from '../adapters/pi/installer.js';
 import type { PiAdapterInstallState } from '../adapters/pi/ownership.js';
 import { BazframeError, errorCode } from '../core/errors.js';
 import { EXIT_STATUS } from '../core/exit-status.js';
+import { escapeUnsafeDisplayCharacters } from '../core/safe-text.js';
 import {
   resolveEffectivePolicy,
   type EffectivePolicyReason
@@ -21,6 +22,8 @@ import {
   type SkillCollectionDiagnostic
 } from '../skill-collections/skill-collection-resolver.js';
 import { resolvePiAgentDirectory } from '../state/paths.js';
+import { inspectManagedGitRecordHealth } from '../providers/managed-git.js';
+import { scanManagedGitRecords, type ManagedGitRecord } from '../providers/managed-git-record.js';
 
 export interface StatusOptions {
   bazframeHome: string;
@@ -78,7 +81,7 @@ export type StatusProfile =
     };
 
 export interface StatusCorrectiveAction {
-  id: 'adapter' | 'active-profile' | 'collections';
+  id: 'adapter' | 'active-profile' | 'collections' | 'managed-git';
   message: string;
 }
 
@@ -99,6 +102,8 @@ export interface StatusInspection {
   effectiveBehavior: StatusEffectiveBehavior;
   profile: StatusProfile;
   cachedCollisionAliasCount: number;
+  managedGitProviders?: readonly { record: ManagedGitRecord; health: string }[];
+  managedGitDiagnostics?: readonly string[];
   correctiveActions: readonly StatusCorrectiveAction[];
 }
 
@@ -219,6 +224,19 @@ export async function inspectStatus(options: StatusOptions): Promise<StatusInspe
     }
   }
 
+  const managedGit = await scanManagedGitRecords(options.bazframeHome);
+  const managedGitProviders = await Promise.all(managedGit.records.map(async (record) => ({
+    record,
+    health: await inspectManagedGitRecordHealth(record, options.environment) ?? 'ready'
+  })));
+  const managedGitDiagnostics = managedGit.diagnostics.map((diagnostic) => `${diagnostic.kind} ${diagnostic.id}: ${diagnostic.message} (${diagnostic.path})`);
+  if (managedGitDiagnostics.length > 0 || managedGitProviders.some((provider) => provider.health !== 'ready')) {
+    corrections.set('managed-git', {
+      id: 'managed-git',
+      message: 'Inspect managed Git provider diagnostics and follow their operation-specific recovery instructions. A managed removal retry retains its recovery record for identity-verified forward cleanup; other operations require manual consistency restoration before the record is removed.'
+    });
+  }
+
   return {
     bazframeHome: options.bazframeHome,
     piAgentDirectory: resolvePiAgentDirectory(options.environment, options.userHome),
@@ -239,6 +257,8 @@ export async function inspectStatus(options: StatusOptions): Promise<StatusInspe
     effectiveBehavior,
     profile,
     cachedCollisionAliasCount: await countAliasCache(options.bazframeHome),
+    managedGitProviders,
+    managedGitDiagnostics,
     correctiveActions: [...corrections.values()]
   };
 }
@@ -324,6 +344,23 @@ export function formatStatus(status: StatusInspection): string {
       ? ['  (none)']
       : collectionDiagnostics.map((diagnostic) => `  - ${formatSkillCollectionDiagnostic(diagnostic)}`)),
     `Cached collision aliases: ${status.cachedCollisionAliasCount}`,
+    ...((status.managedGitProviders ?? []).length === 0 && (status.managedGitDiagnostics ?? []).length === 0
+      ? []
+      : [
+          'Managed Git providers:',
+          ...((status.managedGitProviders ?? []).length === 0
+            ? ['  (none)']
+            : (status.managedGitProviders ?? []).map(({ record, health }) => {
+                const command = record.kind === 'skill'
+                  ? `bazframe skill update ${record.id}`
+                  : record.kind === 'library'
+                    ? `bazframe libraries update ${record.id}`
+                    : `bazframe packages update ${record.id}`;
+                return escapeUnsafeDisplayCharacters(`  - ${record.kind} ${record.id}: ${health}; ${record.remote}; branch:${record.branch}; revision:${record.revision}; provider:${record.root}; update:${command}`);
+              })),
+          'Managed Git failures:',
+          ...((status.managedGitDiagnostics ?? []).length === 0 ? ['  (none)'] : (status.managedGitDiagnostics ?? []).map((diagnostic) => `  - ${escapeUnsafeDisplayCharacters(diagnostic)}`))
+        ]),
     'Launch:',
     ...(!status.effectiveBehavior.enabled
       ? ['  pi       # native Pi behavior (Bazframe disabled by effective policy)']

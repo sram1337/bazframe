@@ -17,7 +17,7 @@ export const ROOT_HELP = [
   '  tui        Open the interactive management interface',
   '',
   'Suggestions:',
-  '  bazframe add skill <absolute-root>',
+  '  bazframe add skill <absolute-root-or-git-source>',
   '  bazframe profiles',
   '  bazframe libraries',
   '  bazframe packages',
@@ -198,11 +198,21 @@ export const SKILLS_HELP = [
   '  bazframe skill',
   '  bazframe skills',
   '  bazframe skill edit <skill>',
+  '  bazframe skill update <skill> [--accept-rewrite]',
   '',
   'List valid added Skills in Bazframe\'s `(default)` catalog.',
   '`skill edit` opens only an added Skill\'s live provider definition; library and package snapshots remain immutable.',
   'This does not list Pi-native Skills or Skills from libraries and packages.',
   'Use `bazframe profile skills` to inspect the active profile\'s Skills.',
+  ''
+].join('\n');
+
+export const SKILL_UPDATE_HELP = [
+  'Usage: bazframe skill update <skill> [--accept-rewrite]',
+  '',
+  'Acquire and activate the recorded branch for a managed Git Skill.',
+  'The current revision is reported without changing profile membership.',
+  '--accept-rewrite authorizes a reviewed non-fast-forward branch change.',
   ''
 ].join('\n');
 
@@ -247,14 +257,15 @@ export const PROFILE_SKILLS_REMOVE_HELP = [
   ''
 ].join('\n');
 
-export const LIBRARIES_HELP = ['Usage:', '  bazframe libraries', '  bazframe libraries add <absolute-root>', '  bazframe libraries update <library>', '  bazframe libraries remove <library>', '', 'Manage prepared Skill libraries through immutable snapshots. Library operations never execute a build.', 'Remove is refused while any profile references the library.', ''].join('\n');
-export const LIBRARIES_ADD_HELP = ['Usage: bazframe libraries add <absolute-root>', '', 'Snapshot, validate, and activate an already-prepared Skill library. A package manifest is rejected.', ''].join('\n');
-export const LIBRARIES_UPDATE_HELP = ['Usage: bazframe libraries update <library>', '', 'Activate a new immutable snapshot without executing provider code.', ''].join('\n');
-export const LIBRARIES_REMOVE_HELP = ['Usage: bazframe libraries remove <library>', '', 'Remove only an unreferenced library record. Provider input and snapshots are preserved.', ''].join('\n');
-export const PACKAGES_HELP = ['Usage:', '  bazframe packages', '  bazframe packages add <absolute-root>', '  bazframe packages build <package>', '  bazframe packages remove <package>', '', 'Manage buildable Skill packages. Add and build explicitly execute bazframe-package.json without a shell or sandbox.', 'Inspection and profile-reference changes never build.', ''].join('\n');
-export const PACKAGES_ADD_HELP = ['Usage: bazframe packages add <absolute-root>', '', 'Explicitly build, validate, snapshot, and activate a package.', ''].join('\n');
-export const PACKAGES_BUILD_HELP = ['Usage: bazframe packages build <package>', '', 'Explicitly rebuild a package. Activation is rejected if any referencing profile would become invalid.', ''].join('\n');
-export const PACKAGES_REMOVE_HELP = ['Usage: bazframe packages remove <package>', '', 'Remove only an unreferenced package record. Provider input and snapshots are preserved.', ''].join('\n');
+export const LIBRARIES_HELP = ['Usage:', '  bazframe libraries', '  bazframe libraries add <absolute-root-or-git-source>', '  bazframe libraries update <library> [--accept-rewrite]', '  bazframe libraries remove <library>', '', 'Manage prepared Skill libraries through immutable snapshots. Library operations never execute a build.', 'Remove is refused while any profile references the library.', ''].join('\n');
+export const LIBRARIES_ADD_HELP = ['Usage: bazframe libraries add <absolute-root-or-git-source>', '', 'Snapshot, validate, and activate an already-prepared Skill library. Git sources are acquired under Bazframe-managed provider storage. A package manifest is rejected.', ''].join('\n');
+export const LIBRARIES_UPDATE_HELP = ['Usage: bazframe libraries update <library> [--accept-rewrite]', '', 'Activate a new immutable snapshot. Managed Git libraries first acquire their recorded branch; --accept-rewrite authorizes a reviewed non-fast-forward change.', ''].join('\n');
+export const LIBRARIES_REMOVE_HELP = ['Usage: bazframe libraries remove <library>', '', 'Remove an unreferenced library record. Absolute-path provider input is preserved; a managed Git checkout and its provenance are removed while the upstream remote remains available.', ''].join('\n');
+export const PACKAGES_HELP = ['Usage:', '  bazframe packages', '  bazframe packages add <absolute-root-or-git-source> [--yes]', '  bazframe packages build <package>', '  bazframe packages update <package> [--accept-rewrite] [--yes]', '  bazframe packages remove <package>', '', 'Manage buildable Skill packages. Add and build explicitly execute bazframe-package.json without a shell or sandbox.', 'Inspection and profile-reference changes never build.', ''].join('\n');
+export const PACKAGES_ADD_HELP = ['Usage: bazframe packages add <absolute-root-or-git-source> [--yes]', '', 'Build, validate, snapshot, and activate a package. Git packages are cloned and inspected before the declared unsandboxed build is authorized; --yes supplies authorization in non-interactive use.', ''].join('\n');
+export const PACKAGES_BUILD_HELP = ['Usage: bazframe packages build <package>', '', 'Rebuild the current provider revision. Activation is rejected if any referencing profile would become invalid.', ''].join('\n');
+export const PACKAGES_UPDATE_HELP = ['Usage: bazframe packages update <package> [--accept-rewrite] [--yes]', '', 'Acquire the recorded branch, authorize its declared unsandboxed build, and atomically activate a managed Git package revision. --accept-rewrite authorizes a reviewed non-fast-forward change.', ''].join('\n');
+export const PACKAGES_REMOVE_HELP = ['Usage: bazframe packages remove <package>', '', 'Remove an unreferenced package record. Absolute-path provider input is preserved; a managed Git checkout and its provenance are removed while the upstream remote remains available.', ''].join('\n');
 export const PROFILE_LIBRARIES_HELP = ['Usage:', '  bazframe profile libraries', '  bazframe profile libraries add <library> [--profile <profile>]', '  bazframe profile libraries remove <library> [--profile <profile>]', '', 'Inspect or change whole-library profile references. Reference changes never update a library.', ''].join('\n');
 export const PROFILE_LIBRARIES_ADD_HELP = ['Usage: bazframe profile libraries add <library> [--profile <profile>]', '', 'Add a validated reference to an existing library.', ''].join('\n');
 export const PROFILE_LIBRARIES_REMOVE_HELP = ['Usage: bazframe profile libraries remove <library> [--profile <profile>]', '', 'Remove only the profile-owned reference.', ''].join('\n');
@@ -263,18 +274,18 @@ export const PROFILE_PACKAGES_ADD_HELP = ['Usage: bazframe profile packages add 
 export const PROFILE_PACKAGES_REMOVE_HELP = ['Usage: bazframe profile packages remove <package> [--profile <profile>]', '', 'Remove only the profile-owned reference.', ''].join('\n');
 
 export const ADD_HELP = [
-  'Usage: bazframe add skill <absolute-root>',
+  'Usage: bazframe add skill <absolute-root-or-git-source>',
   '',
-  'Add one canonical external Skill root to Bazframe\'s `(default)` catalog.',
-  'Bazframe stores an absolute link and never copies or updates provider content.',
+  'Add one canonical Skill root to Bazframe\'s `(default)` catalog. Git sources are acquired under Bazframe-managed provider storage.',
+  'Profile membership remains a separate command.',
   ''
 ].join('\n');
 
 export const REMOVE_HELP = [
   'Usage: bazframe remove skill <skill>',
   '',
-  'Remove only an added Skill that no profile includes.',
-  'Profile memberships and provider content are preserved.',
+  'Remove an added Skill that no profile includes.',
+  'Absolute-path provider content is preserved. Managed Git checkout/provenance are removed while the upstream remote remains available.',
   ''
 ].join('\n');
 
