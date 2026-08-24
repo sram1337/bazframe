@@ -65,7 +65,7 @@ bazframe packages remove <package>
 
 ## Bundled Skills
 
-The npm package ships generated `bazframe` and `bazify` Skills under `dist/skills/`. Installation registers neither one. Add a desired generated directory explicitly with `bazframe add skill <installed-package>/dist/skills/<skill>`, then add its membership to a profile. `bazify` uses `./bazframe/` for working files, clones one local Skill into a provider-owned Bazframe-compatible package at `~/<name>`, and publishes only to a new private GitHub repository after explicit consent.
+The npm package ships generated `bazframe` and `bazify` Skills under `dist/skills/`. Installation registers neither one. Add a desired generated directory explicitly with `bazframe add skill <installed-package>/dist/skills/<skill>`, then add its membership to a profile. `bazify` uses `./bazframe/` for review tracking, extracts one Skill or a collection into a provider-owned package at `~/<name>`, adapts dedicated Skill repositories in place, and publishes new packages only to a private GitHub repository after explicit consent.
 
 ## Profiles and policy
 

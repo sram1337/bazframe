@@ -146,7 +146,7 @@ try {
     throw new Error(`Packed Bazify create returned an unexpected result: ${bazified.stdout}`);
   }
   assertExists(join(bazifyDestination, 'bazframe-package.json'));
-  assertExists(join(bazifyDestination, 'src', 'skills', 'packed-bazify-skill', 'reference.txt'));
+  assertExists(join(bazifyDestination, 'skills', 'packed-bazify-skill', 'reference.txt'));
   assertExists(join(bazifyDestination, 'dist', 'skills', 'packed-bazify-skill', 'SKILL.md'));
   const bazifyValidated = spawnSync(process.execPath, [
     packagedBazifyScript,
@@ -158,6 +158,23 @@ try {
   if (bazifyValidated.status !== 0 || JSON.parse(bazifyValidated.stdout).status !== 'valid') {
     throw new Error(`Packed Bazify validation failed (${bazifyValidated.status}).\nstdout: ${bazifyValidated.stdout}\nstderr: ${bazifyValidated.stderr}`);
   }
+  const adaptedRoot = join(temporaryRoot, 'packed-adapted-skills');
+  mkdirSync(join(adaptedRoot, 'skills', 'adapted-one'), { recursive: true });
+  mkdirSync(join(adaptedRoot, 'skills', 'adapted-two'), { recursive: true });
+  writeFileSync(join(adaptedRoot, 'skills', 'adapted-one', 'SKILL.md'), '---\nname: adapted-one\ndescription: First adapted Skill.\n---\n# One\n');
+  writeFileSync(join(adaptedRoot, 'skills', 'adapted-two', 'SKILL.md'), '---\nname: adapted-two\ndescription: Second adapted Skill.\n---\n# Two\n');
+  const adapted = spawnSync(process.execPath, [
+    packagedBazifyScript,
+    'adapt',
+    adaptedRoot,
+    '--bazframe-command',
+    executable
+  ], { encoding: 'utf8', shell: false });
+  if (adapted.status !== 0 || JSON.parse(adapted.stdout).status !== 'adapted') {
+    throw new Error(`Packed Bazify adapt failed (${adapted.status}).\nstdout: ${adapted.stdout}\nstderr: ${adapted.stderr}`);
+  }
+  assertExists(join(adaptedRoot, 'dist', 'skills', 'adapted-one', 'SKILL.md'));
+  assertExists(join(adaptedRoot, 'dist', 'skills', 'adapted-two', 'SKILL.md'));
 
   const collectionHome = join(temporaryRoot, 'packed-collection-home');
   const collectionEnvironment = { ...process.env, BAZFRAME_HOME: collectionHome, NO_COLOR: '1' };

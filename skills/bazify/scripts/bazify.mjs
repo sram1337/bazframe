@@ -11,7 +11,9 @@ import {
   open,
   readdir,
   realpath,
+  rename,
   rm,
+  rmdir,
   writeFile
 } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
@@ -71,9 +73,10 @@ export async function runCli(argv, environment = process.env) {
     return undefined;
   }
   if (parsed.command === 'create') return createPackage(parsed, environment);
+  if (parsed.command === 'adapt') return adaptPackage(parsed, environment);
   if (parsed.command === 'validate') return validateCommand(parsed, environment);
   if (parsed.command === 'publish') return publishPackage(parsed, environment);
-  throw new BazifyError('Expected a command: create, validate, or publish. Run with --help.', 2);
+  throw new BazifyError('Expected a command: create, adapt, validate, or publish. Run with --help.', 2);
 }
 
 function parseArguments(argv) {
@@ -102,11 +105,12 @@ function parseArguments(argv) {
     if (value?.startsWith('-')) throw new BazifyError(`Unknown option: ${value}`, 2);
     parsed.positionals.push(value);
   }
-  if (!new Set(['create', 'validate', 'publish']).has(command)) {
+  if (!new Set(['create', 'adapt', 'validate', 'publish']).has(command)) {
     throw new BazifyError(`Unknown command: ${String(command)}. Run with --help.`, 2);
   }
-  if (parsed.positionals.length !== 1) {
-    throw new BazifyError(`${command} requires exactly one path argument. Run with --help.`, 2);
+  if ((command === 'create' && parsed.positionals.length < 1)
+    || (command !== 'create' && parsed.positionals.length !== 1)) {
+    throw new BazifyError(`${command} requires ${command === 'create' ? 'one or more Skill paths' : 'exactly one path argument'}. Run with --help.`, 2);
   }
   if (command !== 'create' && (parsed.name !== undefined || parsed.destination !== undefined)) {
     throw new BazifyError('--name and --destination are valid only with create.', 2);
@@ -125,48 +129,47 @@ function requiredValue(values, option) {
 
 function helpText() {
   return `Usage:
-  node <bazify-skill-root>/scripts/bazify.mjs create <source-skill> [--name <package-name>] [--destination <path>] [--dry-run]
-  node <bazify-skill-root>/scripts/bazify.mjs validate <package-root>
+  node <bazify-skill-root>/scripts/bazify.mjs create <source-skill-or-collection> [<source-skill> ...] [--name <package-name>] [--destination <path>] [--dry-run]
+  node <bazify-skill-root>/scripts/bazify.mjs adapt <skill-repository> [--dry-run]
+  node <bazify-skill-root>/scripts/bazify.mjs validate <package-root> [--dry-run]
   node <bazify-skill-root>/scripts/bazify.mjs publish <package-root> --dry-run
   node <bazify-skill-root>/scripts/bazify.mjs publish <package-root> (-y | --yes) --approval <preview-token>
 
 Options:
-  --name <id>                 Package/repository name; defaults to the Skill name
-  --destination <path>        New package root outside ./bazframe/; defaults to ~/<package-name>
+  --name <id>                 Create only; defaults to one Skill name or the collection-root name
+  --destination <path>        Create only; defaults to ~/<package-name> outside ./bazframe/
   --bazframe-command <path>   Bazframe executable; defaults to bazframe
   --dry-run                   Inspect and report without filesystem/network mutation
   --approval <token>          Bind publication to the exact dry-run preview
   -y, --yes                   Confirm private GitHub publication
   -h, --help                  Show this help
 
-Create and validate never use the user's BAZFRAME_HOME. Publish is always private.
+Create, adapt, and validate use disposable Bazframe state. Publish is always private.
 `;
 }
 
 async function createPackage(options, environment) {
-  const source = await canonicalSkillRoot(options.positionals[0]);
-  const sourceInventory = await inspectSkillTree(source, { allowProviderMetadata: true });
-  const skillName = declaredSkillName(sourceInventory.skillDefinition);
-  if (basename(source) !== skillName) {
-    throw new BazifyError(`Source directory basename ${JSON.stringify(basename(source))} must match Skill name ${JSON.stringify(skillName)}.`);
-  }
-  const packageName = options.name ?? skillName;
+  const selection = await resolveCreateSelection(options.positionals);
+  const packageName = options.name ?? selection.defaultPackageName;
+  if (packageName === undefined) throw new BazifyError('Multiple explicit Skill roots require --name.', 2);
   assertSafeId(packageName, 'Package name');
   const destination = await destinationPath(options.destination, packageName);
   await assertOutsideBazframeWorkspace(destination);
-  assertNoOverlap(source, destination);
+  for (const source of selection.skills) assertNoOverlap(source.root, destination);
   await assertDestinationAbsent(destination);
-  const sourceDigest = digestInventory(sourceInventory.entries);
+  const sourceDigest = digestSkillSet(selection.skills);
+  const excluded = selection.skills.flatMap((skill) => skill.inventory.excluded.map((path) => `${skill.name}/${path}`)).sort(compare);
   const plan = {
     command: 'create',
     dryRun: options.dryRun,
-    source,
-    skillName,
+    sources: selection.skills.map((skill) => skill.root),
+    skillNames: selection.skills.map((skill) => skill.name),
     packageName,
     destination,
     sourceDigest: `sha256:${sourceDigest}`,
-    excluded: sourceInventory.excluded
+    excluded
   };
+  if (selection.skills.length === 1) plan.skillName = selection.skills[0].name;
   if (options.dryRun) return { ...plan, status: 'planned' };
 
   const parent = dirname(destination);
@@ -183,22 +186,160 @@ async function createPackage(options, environment) {
   const ownedIdentity = await fileIdentity(destination);
   let complete = false;
   try {
-    const copiedSkill = join(destination, 'src', 'skills', skillName);
-    await mkdir(copiedSkill, { recursive: true, mode: 0o755 });
-    await copyPhysicalTree(source, copiedSkill, { allowProviderMetadata: true });
-    const copiedInventory = await inspectSkillTree(copiedSkill, { allowProviderMetadata: false });
-    const currentSource = await inspectSkillTree(source, { allowProviderMetadata: true });
-    if (digestInventory(copiedInventory.entries) !== sourceDigest
-      || digestInventory(currentSource.entries) !== sourceDigest) {
-      throw new BazifyError('Source Skill changed while it was being copied; no package was created.');
+    const skillsRoot = join(destination, 'skills');
+    await mkdir(skillsRoot, { mode: 0o755 });
+    for (const source of selection.skills) {
+      const copiedSkill = join(skillsRoot, source.name);
+      await mkdir(copiedSkill, { mode: 0o755 });
+      await copyPhysicalTree(source.root, copiedSkill, { allowProviderMetadata: true });
+      const copiedInventory = await inspectSkillTree(copiedSkill, { allowProviderMetadata: false });
+      const currentSource = await inspectSkillTree(source.root, { allowProviderMetadata: true });
+      if (digestInventory(copiedInventory.entries) !== digestInventory(source.inventory.entries)
+        || digestInventory(currentSource.entries) !== digestInventory(source.inventory.entries)) {
+        throw new BazifyError(`Source Skill changed while it was being copied: ${source.name}`);
+      }
     }
-    await writeScaffold(destination, packageName, skillName, sourceDigest, sourceInventory.excluded);
+    await writeScaffold(destination, packageName, selection.skills, sourceDigest, excluded);
     const validation = await validatePackage(destination, options.bazframeCommand, environment);
     complete = true;
     return { ...plan, dryRun: false, status: 'created', validation };
   } finally {
     if (!complete) await removeOwnedDirectory(destination, ownedIdentity);
   }
+}
+
+async function resolveCreateSelection(inputs) {
+  if (inputs.length === 1) {
+    const source = await canonicalDirectory(expandHome(inputs[0]), 'Source root');
+    const rootSkill = await optionalSkill(source, true);
+    if (rootSkill !== undefined) return { skills: [rootSkill], defaultPackageName: rootSkill.name };
+    const skills = await discoverSkillCollection(source, true);
+    return { skills, defaultPackageName: basename(source) };
+  }
+  const skills = [];
+  for (const input of inputs) skills.push(await requiredSkill(await canonicalDirectory(expandHome(input), 'Source Skill root'), true));
+  assertDistinctSkills(skills);
+  return { skills: skills.sort((left, right) => compare(left.name, right.name)), defaultPackageName: undefined };
+}
+
+async function adaptPackage(options, environment) {
+  const packageRoot = await canonicalDirectory(expandHome(options.positionals[0]), 'Skill repository root');
+  await assertOutsideBazframeWorkspace(packageRoot);
+  const packageName = basename(packageRoot);
+  assertSafeId(packageName, 'Package directory basename');
+  const skills = await discoverRepositorySkills(packageRoot, true);
+  const selectedDigest = digestSkillSet(skills);
+  const mappings = sourceMappings(packageRoot, skills);
+  const manifestText = manifestTemplate();
+  const buildText = buildScriptTemplate(mappings);
+  const manifestPath = join(packageRoot, 'bazframe-package.json');
+  const buildPath = join(packageRoot, 'scripts', 'bazify-build.mjs');
+  const ignorePath = join(packageRoot, '.gitignore');
+  const scriptsPath = join(packageRoot, 'scripts');
+  const manifestState = await optionalFileState(manifestPath);
+  const buildState = await optionalFileState(buildPath);
+  const ignoreState = await optionalFileState(ignorePath);
+  const scriptsState = await optionalDirectoryState(scriptsPath);
+  if ((manifestState !== undefined && manifestState.text !== manifestText)
+    || (buildState !== undefined && buildState.text !== buildText)
+    || ((manifestState === undefined) !== (buildState === undefined))) {
+    throw new BazifyError('Existing Bazframe compatibility files do not match the exact Bazify scaffold.');
+  }
+  const current = manifestState !== undefined;
+  const ignoreText = appendIgnoreEntries(ignoreState?.text ?? '');
+  const ignoreCurrent = ignoreState?.text === ignoreText;
+  await assertCleanRepository(
+    packageRoot,
+    environment,
+    current && ignoreCurrent ? new Set(['.gitignore', 'bazframe-package.json', 'scripts/bazify-build.mjs']) : new Set()
+  );
+  const plan = {
+    command: 'adapt',
+    dryRun: options.dryRun,
+    packageRoot,
+    packageName,
+    skillNames: skills.map((skill) => skill.name),
+    status: current && ignoreCurrent ? 'current' : 'planned'
+  };
+  if (options.dryRun) return plan;
+
+  const lock = await acquireAdaptLock(packageRoot);
+  let createdScriptsIdentity;
+  let createdManifestState;
+  let createdBuildState;
+  let writtenIgnoreState;
+  let artifactBackup = { kind: 'unprepared' };
+  let trustedArtifactState;
+  let complete = false;
+  let result;
+  let failure;
+  try {
+    await assertOptionalFileState(manifestPath, manifestState, 'Bazframe manifest changed before adaptation');
+    await assertOptionalFileState(buildPath, buildState, 'Bazify build script changed before adaptation');
+    await assertOptionalFileState(ignorePath, ignoreState, '.gitignore changed before adaptation');
+    await assertOptionalDirectoryState(scriptsPath, scriptsState, 'scripts directory changed before adaptation');
+    if (!current) {
+      if (scriptsState === undefined) {
+        await mkdir(scriptsPath, { mode: 0o755 });
+        createdScriptsIdentity = await fileIdentity(scriptsPath);
+      }
+      await writeFile(manifestPath, manifestText, { encoding: 'utf8', flag: 'wx', mode: 0o644 });
+      createdManifestState = await optionalFileState(manifestPath);
+      await writeFile(buildPath, buildText, { encoding: 'utf8', flag: 'wx', mode: 0o755 });
+      await chmod(buildPath, 0o755);
+      createdBuildState = await optionalFileState(buildPath);
+    }
+    if (!ignoreCurrent) {
+      await replacePhysicalFile(ignorePath, ignoreText, ignoreState?.mode ?? 0o644, ignoreState);
+      writtenIgnoreState = await optionalFileState(ignorePath);
+    }
+    const refreshedSkills = await discoverRepositorySkills(packageRoot, true);
+    if (digestSkillSet(refreshedSkills) !== selectedDigest) {
+      throw new BazifyError('Selected Skill source changed during adaptation.');
+    }
+    artifactBackup = await backupArtifact(packageRoot);
+    const validation = await validatePackage(packageRoot, options.bazframeCommand, environment);
+    trustedArtifactState = await captureGeneratedArtifactState(packageRoot, selectedDigest);
+    const finalSkills = await discoverRepositorySkills(packageRoot, true);
+    if (digestSkillSet(finalSkills) !== selectedDigest) {
+      throw new BazifyError('Selected Skill source changed while adaptation was validated.');
+    }
+    await discardArtifactBackup(artifactBackup);
+    artifactBackup = { kind: 'discarded' };
+    complete = true;
+    result = { ...plan, dryRun: false, status: current && ignoreCurrent ? 'current' : 'adapted', validation };
+  } catch (error) {
+    failure = error;
+  }
+  const recoveryErrors = [];
+  if (!complete) {
+    await attemptRecovery(recoveryErrors, () => restoreArtifact(packageRoot, artifactBackup, trustedArtifactState));
+    if (createdBuildState !== undefined) {
+      await attemptRecovery(recoveryErrors, () => removeOwnedFile(buildPath, createdBuildState, 'Bazify build script'));
+    }
+    if (createdManifestState !== undefined) {
+      await attemptRecovery(recoveryErrors, () => removeOwnedFile(manifestPath, createdManifestState, 'Bazframe manifest'));
+    }
+    if (writtenIgnoreState !== undefined) {
+      await attemptRecovery(recoveryErrors, async () => {
+        await assertOptionalFileState(ignorePath, writtenIgnoreState, '.gitignore changed during rollback');
+        if (ignoreState === undefined) await rm(ignorePath, { force: true });
+        else await replacePhysicalFile(ignorePath, ignoreState.text, ignoreState.mode, writtenIgnoreState);
+      });
+    }
+    if (createdScriptsIdentity !== undefined) {
+      await attemptRecovery(recoveryErrors, () => removeOwnedEmptyDirectory(scriptsPath, createdScriptsIdentity, 'scripts directory'));
+    }
+  }
+  await attemptRecovery(recoveryErrors, () => releaseAdaptLock(lock));
+  if (recoveryErrors.length > 0) {
+    throw new AggregateError(
+      failure === undefined ? recoveryErrors : [failure, ...recoveryErrors],
+      `Bazify stopped because safe recovery could not be proven. Inspect ${packageRoot} and any .bazify-* recovery state before continuing.`
+    );
+  }
+  if (failure !== undefined) throw failure;
+  return result;
 }
 
 async function validateCommand(options, environment) {
@@ -214,8 +355,10 @@ async function publishPackage(options, environment) {
   if (!options.dryRun && !options.yes) {
     throw new BazifyError('Private GitHub publication requires explicit confirmation with --yes.', 2);
   }
-  const inspected = await inspectPackage(options.positionals[0]);
-  await assertNoGitRepository(inspected.packageRoot);
+  const inspectedPackage = await inspectPackage(options.positionals[0]);
+  await assertNoGitRepository(inspectedPackage.packageRoot);
+  const publishDigest = `sha256:${digestInventory(await inspectPublishTree(inspectedPackage.packageRoot))}`;
+  const inspected = { ...inspectedPackage, publishDigest };
   const ghCommand = environment.BAZIFY_GH_COMMAND || 'gh';
   const gitCommand = environment.BAZIFY_GIT_COMMAND || 'git';
   const ghEnvironment = { ...gitRoutingFreeEnvironment(environment), GH_HOST: GITHUB_HOST };
@@ -258,8 +401,8 @@ async function publishPackage(options, environment) {
   }
 
   await validatePackage(inspected.packageRoot, options.bazframeCommand, environment);
-  const refreshed = await inspectPackage(inspected.packageRoot);
-  if (refreshed.publishDigest !== inspected.publishDigest) {
+  const refreshedDigest = `sha256:${digestInventory(await inspectPublishTree(inspected.packageRoot))}`;
+  if (refreshedDigest !== inspected.publishDigest) {
     throw new BazifyError('Publishable package bytes changed after approval; run publish --dry-run and confirm again.');
   }
 
@@ -336,14 +479,8 @@ async function inspectPackage(packagePath) {
   const packageRoot = await canonicalDirectory(expandHome(packagePath), 'Package root');
   const packageName = basename(packageRoot);
   assertSafeId(packageName, 'Package directory basename');
-  const manifestPath = join(packageRoot, 'bazframe-package.json');
-  const manifest = await readExactJson(manifestPath, 'bazframe-package.json');
-  const expectedManifest = {
-    schemaVersion: 1,
-    build: ['node', 'scripts/build.mjs'],
-    artifactRoot: 'dist',
-    skillsRoot: 'skills'
-  };
+  const manifest = await readExactJson(join(packageRoot, 'bazframe-package.json'), 'bazframe-package.json');
+  const expectedManifest = JSON.parse(manifestTemplate());
   if (Object.keys(manifest).sort(compare).join(',') !== Object.keys(expectedManifest).sort(compare).join(',')
     || manifest.schemaVersion !== expectedManifest.schemaVersion
     || JSON.stringify(manifest.build) !== JSON.stringify(expectedManifest.build)
@@ -351,47 +488,114 @@ async function inspectPackage(packagePath) {
     || manifest.skillsRoot !== expectedManifest.skillsRoot) {
     throw new BazifyError('bazframe-package.json does not match the exact Bazify package contract.');
   }
-  const packageManifest = await readExactJson(join(packageRoot, 'package.json'), 'package.json');
-  if (packageManifest.name !== packageName || packageManifest.private !== true) {
-    throw new BazifyError('package.json name must match the package directory and private must be true.');
+  const skills = await discoverRepositorySkills(packageRoot, true);
+  const mappings = sourceMappings(packageRoot, skills);
+  const buildText = await readUtf8File(join(packageRoot, 'scripts', 'bazify-build.mjs'), 'Bazify build script');
+  if (buildText !== buildScriptTemplate(mappings)) throw new BazifyError('Bazify build script does not match the selected Skill layout.');
+  const result = {
+    packageRoot,
+    packageName,
+    skillNames: skills.map((skill) => skill.name),
+    sourceDigest: `sha256:${digestSkillSet(skills)}`
+  };
+  if (skills.length === 1) result.skillName = skills[0].name;
+  return result;
+}
+
+function manifestTemplate() {
+  return `${JSON.stringify({
+    schemaVersion: 1,
+    build: ['node', 'scripts/bazify-build.mjs'],
+    artifactRoot: 'dist',
+    skillsRoot: 'skills'
+  })}\n`;
+}
+
+async function discoverRepositorySkills(root, allowProviderMetadata) {
+  const rootSkill = await optionalSkill(root, allowProviderMetadata, true);
+  if (rootSkill !== undefined) return [rootSkill];
+  return discoverSkillCollection(root, allowProviderMetadata);
+}
+
+async function discoverSkillCollection(root, allowProviderMetadata) {
+  const lexicalSkillsRoot = join(root, 'skills');
+  const lexicalMetadata = await lstat(lexicalSkillsRoot).catch((error) => {
+    throw new BazifyError(`Skills collection root is unavailable: ${formatFsError(error)}`);
+  });
+  if (lexicalMetadata.isSymbolicLink() || !lexicalMetadata.isDirectory()) {
+    throw new BazifyError(`Skills collection root must be a physical directory: ${lexicalSkillsRoot}`);
   }
-  const skillsRoot = join(packageRoot, 'src', 'skills');
-  const skillDirectories = [];
+  const skillsRoot = await realpath(lexicalSkillsRoot);
+  if (skillsRoot !== resolve(lexicalSkillsRoot) || !within(root, skillsRoot)) {
+    throw new BazifyError(`Skills collection root escapes its repository: ${lexicalSkillsRoot}`);
+  }
+  const skills = [];
   for (const name of (await readdir(skillsRoot)).sort(compare)) {
     const path = join(skillsRoot, name);
     const metadata = await lstat(path);
     if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
-      throw new BazifyError(`src/skills must contain exactly one physical Skill directory: ${path}`);
+      throw new BazifyError(`Skills collection contains a non-physical directory entry: ${path}`);
     }
-    skillDirectories.push(path);
+    skills.push(await requiredSkill(path, allowProviderMetadata));
   }
-  if (skillDirectories.length !== 1) throw new BazifyError('src/skills must contain exactly one Skill directory.');
-  const inventory = await inspectSkillTree(skillDirectories[0], { allowProviderMetadata: false });
-  const skillName = declaredSkillName(inventory.skillDefinition);
-  if (basename(skillDirectories[0]) !== skillName) {
-    throw new BazifyError('Copied Skill directory basename does not match its declared name.');
-  }
-  const publishEntries = await inspectPublishTree(packageRoot);
-  await readUtf8File(join(packageRoot, 'README.md'), 'README.md');
-  return {
-    packageRoot,
-    packageName,
-    skillName,
-    sourceDigest: `sha256:${digestInventory(inventory.entries)}`,
-    publishDigest: `sha256:${digestInventory(publishEntries)}`
-  };
+  if (skills.length === 0) throw new BazifyError(`Skills collection is empty: ${skillsRoot}`);
+  assertDistinctSkills(skills);
+  return skills.sort((left, right) => compare(left.name, right.name));
 }
 
-async function canonicalSkillRoot(input) {
-  const source = await canonicalDirectory(expandHome(input), 'Source Skill root');
-  const definitionPath = join(source, 'SKILL.md');
-  const metadata = await lstat(definitionPath).catch((error) => {
-    throw new BazifyError(`Source Skill requires a physical SKILL.md: ${formatFsError(error)}`);
-  });
-  if (metadata.isSymbolicLink() || !metadata.isFile()) {
-    throw new BazifyError(`Source Skill requires a physical regular SKILL.md: ${definitionPath}`);
+async function optionalSkill(root, allowProviderMetadata, excludePackageState = false) {
+  const definitionPath = join(root, 'SKILL.md');
+  let metadata;
+  try { metadata = await lstat(definitionPath); }
+  catch (error) {
+    if (error?.code === 'ENOENT') return undefined;
+    throw new BazifyError(`Could not inspect Skill definition: ${formatFsError(error)}`);
   }
-  return source;
+  if (metadata.isSymbolicLink() || !metadata.isFile()) throw new BazifyError(`Skill requires a physical SKILL.md: ${definitionPath}`);
+  return requiredSkill(root, allowProviderMetadata, excludePackageState);
+}
+
+async function requiredSkill(root, allowProviderMetadata, excludePackageState = false) {
+  const canonicalRoot = await canonicalDirectory(root, 'Skill root');
+  const inventory = await inspectSkillTree(canonicalRoot, { allowProviderMetadata, excludePackageState });
+  const name = declaredSkillName(inventory.skillDefinition);
+  if (basename(canonicalRoot) !== name) {
+    throw new BazifyError(`Skill directory basename ${JSON.stringify(basename(canonicalRoot))} must match declared name ${JSON.stringify(name)}.`);
+  }
+  return { root: canonicalRoot, name, inventory };
+}
+
+function isReservedBazifyName(name) {
+  return /^\.bazify-(?:dist|backup|adapt|recovery)(?:-|$)/u.test(name);
+}
+
+function isRootPackageState(path) {
+  return path === '.gitignore' || path === 'dist' || path === 'bazframe-package.json'
+    || path === 'scripts/bazify-build.mjs' || isReservedBazifyName(path.split('/')[0]);
+}
+
+function assertDistinctSkills(skills) {
+  const names = new Set();
+  for (let index = 0; index < skills.length; index += 1) {
+    const skill = skills[index];
+    if (names.has(skill.name)) throw new BazifyError(`Duplicate selected Skill name: ${skill.name}`);
+    names.add(skill.name);
+    for (let other = 0; other < index; other += 1) {
+      if (within(skill.root, skills[other].root) || within(skills[other].root, skill.root)) {
+        throw new BazifyError(`Selected Skill roots overlap: ${skill.root} <> ${skills[other].root}`);
+      }
+    }
+  }
+}
+
+function sourceMappings(packageRoot, skills) {
+  return skills.map((skill) => ({ name: skill.name, source: relative(packageRoot, skill.root).split(sep).join('/') || '.' }));
+}
+
+function digestSkillSet(skills) {
+  const entries = skills.flatMap((skill) => skill.inventory.entries.map((entry) => ({ ...entry, path: `${skill.name}/${entry.path}` })))
+    .sort((left, right) => compare(left.path, right.path));
+  return digestInventory(entries);
 }
 
 async function canonicalDirectory(input, label) {
@@ -467,10 +671,12 @@ async function inspectSkillTree(root, options) {
   const visit = async (directory, relativeDirectory) => {
     const before = await fileIdentity(directory);
     const names = (await readdir(directory)).sort(compare);
+    let included = false;
     for (const name of names) {
       const path = relativeDirectory === '' ? name : `${relativeDirectory}/${name}`;
       const absolute = join(directory, name);
       const metadata = await lstat(absolute, { bigint: true });
+      if (options.excludePackageState && isRootPackageState(path)) continue;
       if (SKIPPED_SOURCE_NAMES.has(name)) {
         if (!options.allowProviderMetadata) throw new BazifyError(`Package source contains excluded provider state: ${path}`);
         excluded.push(path);
@@ -482,13 +688,17 @@ async function inspectSkillTree(root, options) {
         throw new BazifyError(`Skill entry escapes its root: ${path}`);
       }
       if (metadata.isDirectory()) {
-        entries.push({ path, type: 'directory' });
-        await visit(absolute, path);
+        const childIncluded = await visit(absolute, path);
+        if (!options.excludePackageState || childIncluded || (await readdir(absolute)).length === 0) {
+          entries.push({ path, type: 'directory' });
+          included = true;
+        }
       } else if (metadata.isFile()) {
         assertNotSecretName(name, path);
         const file = await readStableFile(absolute);
         assertNoPrivateKey(file.bytes, path);
         entries.push({ path, type: 'file', executable: executable(file.mode), sha256: sha256(file.bytes) });
+        included = true;
         if (name === 'SKILL.md') {
           if (path !== 'SKILL.md') throw new BazifyError(`A single Skill must not contain a descendant SKILL.md: ${path}`);
           skillDefinition = new TextDecoder('utf-8', { fatal: true }).decode(file.bytes);
@@ -498,9 +708,11 @@ async function inspectSkillTree(root, options) {
       }
     }
     await assertIdentity(directory, before, 'Skill directory changed during inspection');
+    return included;
   };
   await visit(canonicalRoot, '');
   if (skillDefinition === undefined) throw new BazifyError(`Skill root does not contain a physical SKILL.md: ${canonicalRoot}`);
+  entries.sort((left, right) => compare(left.path, right.path));
   return { entries, excluded, skillDefinition };
 }
 
@@ -510,6 +722,9 @@ async function inspectPublishTree(root) {
     for (const name of (await readdir(directory)).sort(compare)) {
       const path = relativeDirectory === '' ? name : `${relativeDirectory}/${name}`;
       if (relativeDirectory === '' && name === 'dist') continue;
+      if (relativeDirectory === '' && isReservedBazifyName(name)) {
+        throw new BazifyError(`Package contains unfinished Bazify staging or recovery state: ${path}`);
+      }
       if (name === '.git' || name === 'node_modules') {
         throw new BazifyError(`Package contains excluded repository or dependency state: ${path}`);
       }
@@ -631,23 +846,24 @@ async function copyPhysicalTree(source, destination, options) {
   await visit(source, destination);
 }
 
-async function writeScaffold(root, packageName, skillName, sourceDigest, excluded) {
+async function writeScaffold(root, packageName, skills, sourceDigest, excluded) {
   await mkdir(join(root, 'scripts'), { mode: 0o755 });
+  const mappings = sourceMappings(root, skills.map((skill) => ({ ...skill, root: join(root, 'skills', skill.name) })));
   const files = new Map([
-    ['.gitignore', '/dist/\n/.bazify-dist-*/\n'],
-    ['bazframe-package.json', `${JSON.stringify({ schemaVersion: 1, build: ['node', 'scripts/build.mjs'], artifactRoot: 'dist', skillsRoot: 'skills' })}\n`],
+    ['.gitignore', appendIgnoreEntries('')],
+    ['bazframe-package.json', manifestTemplate()],
     ['package.json', `${JSON.stringify({
       name: packageName,
       version: '0.1.0',
       private: true,
-      description: `Provider-owned Bazframe-compatible Skill package for ${skillName}.`,
+      description: `Provider-owned Bazframe-compatible Skill package containing ${skills.length} Skill${skills.length === 1 ? '' : 's'}.`,
       type: 'module',
-      scripts: { build: 'node scripts/build.mjs' },
+      scripts: { build: 'node scripts/bazify-build.mjs' },
       engines: { node: '>=22.19.0' }
     }, null, 2)}\n`],
-    ['README.md', readmeTemplate(packageName, skillName, sourceDigest, excluded)],
-    ['AGENTS.md', agentsTemplate(packageName, skillName)],
-    ['scripts/build.mjs', buildScriptTemplate()]
+    ['README.md', readmeTemplate(packageName, skills.map((skill) => skill.name), sourceDigest, excluded)],
+    ['AGENTS.md', agentsTemplate(packageName, skills.map((skill) => skill.name))],
+    ['scripts/bazify-build.mjs', buildScriptTemplate(mappings)]
   ]);
   for (const [relativePath, contents] of files) {
     const path = join(root, relativePath);
@@ -655,119 +871,177 @@ async function writeScaffold(root, packageName, skillName, sourceDigest, exclude
   }
 }
 
-function readmeTemplate(packageName, skillName, sourceDigest, excluded) {
+function readmeTemplate(packageName, skillNames, sourceDigest, excluded) {
   const excludedText = excluded.length === 0 ? '(none)' : excluded.map((path) => JSON.stringify(path)).join(', ');
+  const contents = skillNames.map((name) => `- \`skills/${name}/\` → \`dist/skills/${name}/\``).join('\n');
   return `# ${packageName}
 
-A provider-owned Agent Skill package containing \`${skillName}\`, with a Bazframe-compatible build manifest.
+A provider-owned Agent Skill package with a Bazframe-compatible build manifest.
 
-## Contents
+## Skills
 
-- Provider source: \`src/skills/${skillName}/\`
-- Generated artifact: \`dist/skills/${skillName}/\`
+${contents}
+
 - Source digest at conversion: \`sha256:${sourceDigest}\`
 - Excluded provider metadata/dependencies: ${excludedText}
 
-## Requirements and installation
+## Requirements
 
-The package scaffold requires Node.js 22.19 or newer and Bazframe 2. Source-specific runtime behavior and setup are documented by the copied \`src/skills/${skillName}/SKILL.md\` and its supporting files.
+The package scaffold requires Node.js 22.19 or newer and Bazframe 2. Each copied \`SKILL.md\` and its supporting files define source-specific runtime and setup requirements.
 
-## Build
+## Build and use
 
 \`\`\`bash
 npm run build
-\`\`\`
-
-Do not edit \`dist/\`; edit provider source under \`src/skills/${skillName}/\` and rebuild.
-
-## Optional Bazframe lifecycle
-
-Initial build, validation, and activation:
-
-\`\`\`bash
 bazframe packages add "$PWD"
 bazframe profile packages add ${packageName}
 \`\`\`
 
-After provider-source changes:
+Edit provider source under \`skills/\`, rebuild with \`bazframe packages build ${packageName}\`, and run \`/bazframe reload\` in an existing Pi session.
 
-\`\`\`bash
-bazframe packages build ${packageName}
-\`\`\`
+Bazframe builds are explicit and unsandboxed. Review \`bazframe-package.json\`, \`scripts/bazify-build.mjs\`, and the copied Skills before activation.
 
-Run \`/bazframe reload\` in an existing Pi session after activation. Remove the profile reference before removing the package:
+## Provenance and rights
 
-\`\`\`bash
-bazframe profile packages remove ${packageName}
-bazframe packages remove ${packageName}
-\`\`\`
-
-Bazframe builds are explicit and unsandboxed. Review \`bazframe-package.json\`, \`scripts/build.mjs\`, and the copied Skill before activation.
-
-## Source provenance
-
-This package was created from a local Agent Skill. Its conversion-time source digest is recorded above.
-
-## License and publication rights
-
-Use and redistribution follow the license and notice terms preserved in the copied source.
+This package was extracted from local Agent Skill source. Its conversion-time digest is recorded above. Use and redistribution follow the source's license, notice, privacy, and publication terms.
 `;
 }
 
-function agentsTemplate(packageName, skillName) {
+function agentsTemplate(packageName, skillNames) {
   return `# ${packageName} provider instructions
 
-- Treat \`src/skills/${skillName}/\` as provider-owned source and \`dist/\` as generated output.
-- Preserve Agent Skills compatibility: the Skill directory and frontmatter name remain \`${skillName}\`.
-- Keep \`bazframe-package.json\` exact. Its build command is a literal unsandboxed argv.
-- After source edits, run \`npm run build\`, then validate through \`bazframe packages build ${packageName}\` when this provider root is registered.
-- Keep README requirements, setup, provenance, and license status synchronized with source behavior.
-- Do not commit secrets, provider \`.git\` state, \`node_modules\`, or generated \`dist/\`.
+- Treat \`skills/\` as provider-owned source and \`dist/\` as generated output.
+- Preserve these Agent Skill names and directory basenames: ${skillNames.map((name) => `\`${name}\``).join(', ')}.
+- Keep \`bazframe-package.json\` and \`scripts/bazify-build.mjs\` synchronized with the selected Skills.
+- After source edits, run \`npm run build\`, then validate through \`bazframe packages build ${packageName}\` when registered.
+- Keep requirements, setup, provenance, and license status synchronized with source behavior.
+- Keep secrets, provider \`.git\` state, \`node_modules\`, and generated \`dist/\` out of commits.
 `;
 }
 
-function buildScriptTemplate() {
+function buildScriptTemplate(mappings) {
   return `#!/usr/bin/env node
 
 import { constants } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { chmod, lstat, mkdir, mkdtemp, open, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const sourceRoot = join(packageRoot, 'src', 'skills');
+const mappings = ${JSON.stringify(mappings)};
 const distRoot = join(packageRoot, 'dist');
 const stagingRoot = await mkdtemp(join(packageRoot, '.bazify-dist-'));
+const backupRoot = await mkdtemp(join(packageRoot, '.bazify-backup-'));
+let oldMoved = false;
+let newPublished = false;
 
 try {
-  const skills = (await readdir(sourceRoot)).sort(compare);
-  if (skills.length !== 1) throw new Error('src/skills must contain exactly one Skill directory');
-  const skillRoot = join(sourceRoot, skills[0]);
-  const skillMetadata = await lstat(skillRoot);
-  if (skillMetadata.isSymbolicLink() || !skillMetadata.isDirectory()) throw new Error('Skill root must be a physical directory');
-  const definition = await lstat(join(skillRoot, 'SKILL.md'));
-  if (definition.isSymbolicLink() || !definition.isFile()) throw new Error('Skill root must contain a physical SKILL.md');
   await mkdir(join(stagingRoot, 'skills'), { mode: 0o755 });
-  await copyTree(sourceRoot, join(stagingRoot, 'skills'), sourceRoot);
-  await rm(distRoot, { recursive: true, force: true });
+  const selected = [];
+  for (const mapping of mappings) {
+    const sourceRoot = resolve(packageRoot, mapping.source);
+    if (!within(packageRoot, sourceRoot)) throw new Error(\`Skill source escapes package root: \${mapping.source}\`);
+    const metadata = await lstat(sourceRoot);
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new Error(\`Skill root must be a physical directory: \${mapping.source}\`);
+    const definition = await lstat(join(sourceRoot, 'SKILL.md'));
+    if (definition.isSymbolicLink() || !definition.isFile()) throw new Error(\`Skill root must contain a physical SKILL.md: \${mapping.source}\`);
+    const packageRootSkill = sourceRoot === packageRoot;
+    const beforeInventory = await inventoryTree(sourceRoot, packageRootSkill);
+    const destination = join(stagingRoot, 'skills', mapping.name);
+    await mkdir(destination, { mode: 0o755 });
+    await copyTree(sourceRoot, destination, sourceRoot, '', packageRootSkill);
+    const stagedInventory = await inventoryTree(destination, false);
+    if (digest(beforeInventory) !== digest(stagedInventory)) {
+      throw new Error(\`Skill source changed while it was copied: \${mapping.source}\`);
+    }
+    selected.push({ mapping, sourceRoot, packageRootSkill, digest: digest(beforeInventory) });
+  }
+  for (const item of selected) {
+    const afterInventory = await inventoryTree(item.sourceRoot, item.packageRootSkill);
+    if (digest(afterInventory) !== item.digest) throw new Error(\`Skill source changed while it was built: \${item.mapping.source}\`);
+  }
+  const existing = await lstat(distRoot).catch((error) => error?.code === 'ENOENT' ? undefined : Promise.reject(error));
+  if (existing !== undefined) {
+    if (existing.isSymbolicLink() || !existing.isDirectory()) throw new Error('dist must be a physical directory');
+    await rename(distRoot, join(backupRoot, 'dist'));
+    oldMoved = true;
+  }
   await rename(stagingRoot, distRoot);
+  newPublished = true;
+  await rm(backupRoot, { recursive: true, force: true });
 } catch (error) {
+  if (newPublished) await rm(distRoot, { recursive: true, force: true }).catch(() => undefined);
+  let restorationError;
+  if (oldMoved) {
+    try { await rename(join(backupRoot, 'dist'), distRoot); }
+    catch (cause) { restorationError = cause; }
+  }
   await rm(stagingRoot, { recursive: true, force: true }).catch(() => undefined);
+  if (restorationError === undefined) await rm(backupRoot, { recursive: true, force: true }).catch(() => undefined);
+  if (restorationError !== undefined) throw new AggregateError([error, restorationError], \`Build failed and prior dist could not be restored from \${backupRoot}\`);
   throw error;
 }
 
-async function copyTree(source, destination, root) {
+async function inventoryTree(root, packageRootSkill) {
+  const entries = [];
+  const visit = async (directory, relativeDirectory) => {
+    const before = await identity(directory);
+    for (const name of (await readdir(directory)).sort(compare)) {
+      const relativePath = relativeDirectory === '' ? name : \`\${relativeDirectory}/\${name}\`;
+      if (skipEntry(name, relativePath, packageRootSkill)) continue;
+      const path = join(directory, name);
+      const metadata = await lstat(path);
+      if (metadata.isSymbolicLink()) throw new Error(\`Provider source contains a symbolic link: \${path}\`);
+      const canonical = await realpath(path);
+      if (canonical !== resolve(path) || !within(root, canonical)) throw new Error(\`Provider source escapes its root: \${path}\`);
+      if (metadata.isDirectory()) {
+        if (await omitControlOnlyDirectory(path, relativePath, packageRootSkill)) continue;
+        entries.push({ path: relativePath, type: 'directory' });
+        await visit(path, relativePath);
+      } else if (metadata.isFile()) {
+        const file = await readStableSource(path);
+        entries.push({
+          path: relativePath,
+          type: 'file',
+          executable: process.platform !== 'win32' && (file.mode & 0o111) !== 0,
+          sha256: createHash('sha256').update(file.bytes).digest('hex')
+        });
+      } else throw new Error(\`Provider source contains an unsupported entry: \${path}\`);
+    }
+    const after = await identity(directory);
+    if (before.device !== after.device || before.inode !== after.inode) throw new Error(\`Provider directory changed during build: \${directory}\`);
+  };
+  await visit(root, '');
+  entries.sort((left, right) => compare(left.path, right.path));
+  return entries;
+}
+
+function digest(entries) { return createHash('sha256').update(\`\${JSON.stringify(entries)}\\n\`, 'utf8').digest('hex'); }
+async function omitControlOnlyDirectory(path, relativePath, packageRootSkill) {
+  return packageRootSkill && relativePath === 'scripts'
+    && (await readdir(path)).every((name) => name === 'bazify-build.mjs');
+}
+function skipEntry(name, relativePath, packageRootSkill) {
+  return name === '.git' || name === 'node_modules'
+    || (packageRootSkill && (relativePath === '.gitignore' || relativePath === 'dist' || relativePath === 'bazframe-package.json'
+      || relativePath === 'scripts/bazify-build.mjs' || /^\\.bazify-(?:dist|backup|adapt|recovery)(?:-|$)/u.test(relativePath)));
+}
+
+async function copyTree(source, destination, root, relativeDirectory, packageRootSkill) {
   const before = await identity(source);
   for (const name of (await readdir(source)).sort(compare)) {
-    if (name === '.git' || name === 'node_modules') throw new Error(\`Provider source contains excluded state: \${name}\`);
+    const relativePath = relativeDirectory === '' ? name : \`\${relativeDirectory}/\${name}\`;
+    if (skipEntry(name, relativePath, packageRootSkill)) continue;
     const from = join(source, name); const to = join(destination, name);
     const metadata = await lstat(from);
     if (metadata.isSymbolicLink()) throw new Error(\`Provider source contains a symbolic link: \${from}\`);
     const canonical = await realpath(from);
     if (canonical !== resolve(from) || !within(root, canonical)) throw new Error(\`Provider source escapes its root: \${from}\`);
     if (metadata.isDirectory()) {
+      if (await omitControlOnlyDirectory(from, relativePath, packageRootSkill)) continue;
       await mkdir(to, { mode: 0o755 });
-      await copyTree(from, to, root);
+      await copyTree(from, to, root, relativePath, packageRootSkill);
     } else if (metadata.isFile()) await copyStableFile(from, to);
     else throw new Error(\`Provider source contains an unsupported entry: \${from}\`);
   }
@@ -776,6 +1050,13 @@ async function copyTree(source, destination, root) {
 }
 
 async function copyStableFile(source, destination) {
+  const file = await readStableSource(source);
+  const mode = (file.mode & 0o111) !== 0 ? 0o755 : 0o644;
+  await writeFile(destination, file.bytes, { flag: 'wx', mode });
+  await chmod(destination, mode);
+}
+
+async function readStableSource(source) {
   let handle;
   try {
     handle = await open(source, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -788,9 +1069,7 @@ async function copyStableFile(source, destination) {
       || before.dev !== after.dev || before.ino !== after.ino
       || after.dev !== current.dev || after.ino !== current.ino
       || before.size !== after.size || before.mtimeNs !== after.mtimeNs) throw new Error(\`Provider file changed during build: \${source}\`);
-    const mode = (Number(before.mode) & 0o111) !== 0 ? 0o755 : 0o644;
-    await writeFile(destination, bytes, { flag: 'wx', mode });
-    await chmod(destination, mode);
+    return { bytes, mode: Number(before.mode) };
   } finally {
     await handle?.close().catch(() => undefined);
   }
@@ -808,6 +1087,251 @@ function within(root, candidate) {
 }
 function compare(left, right) { return left < right ? -1 : left > right ? 1 : 0; }
 `;
+}
+
+async function assertCleanRepository(packageRoot, environment, allowedChanges) {
+  const gitCommand = environment.BAZIFY_GIT_COMMAND || 'git';
+  const gitEnvironment = isolatedGitEnvironment(environment);
+  const top = runProcess(gitCommand, ['rev-parse', '--show-toplevel'], {
+    cwd: packageRoot,
+    environment: gitEnvironment,
+    allowFailure: true
+  });
+  if (top.status !== 0) {
+    const gitEntry = await lstat(join(packageRoot, '.git')).catch((error) => error?.code === 'ENOENT' ? undefined : Promise.reject(error));
+    if (gitEntry !== undefined) throw new BazifyError(`Could not inspect repository state: ${cleanDiagnostic(top.stderr)}`);
+    return;
+  }
+  const canonicalTop = await realpath(top.stdout.trim());
+  if (canonicalTop !== packageRoot) throw new BazifyError(`Adapt path must be the Git repository top-level: ${canonicalTop}`);
+  const trackedArtifact = runProcess(gitCommand, ['ls-files', '-z', '--', 'dist'], {
+    cwd: packageRoot,
+    environment: gitEnvironment,
+    allowFailure: true
+  });
+  if (trackedArtifact.status !== 0) throw new BazifyError('Could not inspect tracked dist state.');
+  if (trackedArtifact.stdout !== '') throw new BazifyError('In-place adaptation requires dist to be generated, ignored, and untracked.');
+  const status = runProcess(gitCommand, ['status', '--porcelain', '--untracked-files=all'], {
+    cwd: packageRoot,
+    environment: gitEnvironment,
+    allowFailure: true
+  });
+  if (status.status !== 0) throw new BazifyError('Could not inspect Git worktree status.');
+  const changes = status.stdout.split('\n').filter(Boolean);
+  for (const line of changes) {
+    const path = line.slice(3);
+    if (!allowedChanges.has(path) || line.includes(' -> ')) {
+      throw new BazifyError('In-place adaptation requires a clean Git worktree.');
+    }
+    if (path === '.gitignore') {
+      const indexed = runProcess(gitCommand, ['show', ':.gitignore'], {
+        cwd: packageRoot,
+        environment: gitEnvironment,
+        allowFailure: true
+      });
+      const expected = appendIgnoreEntries(indexed.status === 0 ? indexed.stdout : '');
+      const working = await optionalFileState(join(packageRoot, '.gitignore'));
+      if (working?.text !== expected) throw new BazifyError('In-place adaptation requires a clean Git worktree.');
+    }
+  }
+}
+
+async function optionalFileState(path) {
+  let metadata;
+  try { metadata = await lstat(path); }
+  catch (error) {
+    if (error?.code === 'ENOENT') return undefined;
+    throw new BazifyError(`Could not inspect ${path}: ${formatFsError(error)}`);
+  }
+  if (metadata.isSymbolicLink() || !metadata.isFile()) throw new BazifyError(`Expected a physical regular file: ${path}`);
+  const file = await readStableFile(path);
+  let text;
+  try { text = new TextDecoder('utf-8', { fatal: true }).decode(file.bytes); }
+  catch { throw new BazifyError(`File is not valid UTF-8: ${path}`); }
+  return {
+    text,
+    bytes: file.bytes,
+    mode: file.mode & 0o777,
+    device: file.device,
+    inode: file.inode
+  };
+}
+
+async function optionalDirectoryState(path) {
+  let metadata;
+  try { metadata = await lstat(path, { bigint: true }); }
+  catch (error) {
+    if (error?.code === 'ENOENT') return undefined;
+    throw new BazifyError(`Could not inspect ${path}: ${formatFsError(error)}`);
+  }
+  if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new BazifyError(`Expected a physical directory: ${path}`);
+  return { device: metadata.dev, inode: metadata.ino };
+}
+
+function sameFileState(left, right) {
+  if (left === undefined || right === undefined) return left === right;
+  return left.device === right.device && left.inode === right.inode
+    && left.mode === right.mode && left.bytes.equals(right.bytes);
+}
+
+async function assertOptionalFileState(path, expected, message) {
+  const current = await optionalFileState(path);
+  if (!sameFileState(current, expected)) throw new BazifyError(`${message}: ${path}`);
+}
+
+async function assertOptionalDirectoryState(path, expected, message) {
+  const current = await optionalDirectoryState(path);
+  if (current === undefined || expected === undefined) {
+    if (current !== expected) throw new BazifyError(`${message}: ${path}`);
+    return;
+  }
+  if (current.device !== expected.device || current.inode !== expected.inode) throw new BazifyError(`${message}: ${path}`);
+}
+
+async function acquireAdaptLock(packageRoot) {
+  const path = join(packageRoot, '.bazify-adapt-lock');
+  try { await mkdir(path, { mode: 0o700 }); }
+  catch (error) {
+    if (error?.code === 'EEXIST') throw new BazifyError(`Another Bazify adaptation or recovery owns ${path}.`);
+    throw error;
+  }
+  return { path, identity: await fileIdentity(path) };
+}
+
+async function releaseAdaptLock(lock) {
+  await assertIdentity(lock.path, lock.identity, 'Bazify adaptation lock ownership changed');
+  if ((await readdir(lock.path)).length !== 0) throw new BazifyError(`Bazify adaptation lock contains unexpected recovery state: ${lock.path}`);
+  await rmdir(lock.path);
+}
+
+async function removeOwnedFile(path, expected, label) {
+  await assertOptionalFileState(path, expected, `${label} ownership changed during rollback`);
+  await rm(path, { force: true });
+}
+
+async function removeOwnedEmptyDirectory(path, expected, label) {
+  await assertIdentity(path, expected, `${label} ownership changed during rollback`);
+  if ((await readdir(path)).length !== 0) throw new BazifyError(`${label} is not empty during rollback: ${path}`);
+  await rmdir(path);
+}
+
+async function attemptRecovery(errors, operation) {
+  try { await operation(); }
+  catch (error) { errors.push(error); }
+}
+
+function appendIgnoreEntries(text) {
+  let result = text;
+  if (result.length > 0 && !result.endsWith('\n')) result += '\n';
+  for (const entry of ['/dist/', '/.bazify-dist-*/', '/.bazify-backup-*/', '/.bazify-adapt-*/', '/.bazify-recovery-*/']) {
+    if (!result.split(/\r?\n/u).includes(entry)) result += `${entry}\n`;
+  }
+  return result;
+}
+
+async function replacePhysicalFile(path, text, mode, expected) {
+  await assertOptionalFileState(path, expected, 'File changed before replacement');
+  if (expected === undefined) {
+    await writeFile(path, text, { encoding: 'utf8', flag: 'wx', mode });
+    await chmod(path, mode);
+    return;
+  }
+  const staging = await mkdtemp(join(dirname(path), '.bazify-adapt-write-'));
+  const temporary = join(staging, 'file');
+  try {
+    await writeFile(temporary, text, { encoding: 'utf8', flag: 'wx', mode });
+    await chmod(temporary, mode);
+    await assertOptionalFileState(path, expected, 'File changed before atomic replacement');
+    await rename(temporary, path);
+  } finally {
+    await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+async function backupArtifact(packageRoot) {
+  const dist = join(packageRoot, 'dist');
+  const metadata = await lstat(dist, { bigint: true }).catch((error) => error?.code === 'ENOENT' ? undefined : Promise.reject(error));
+  if (metadata === undefined) return { kind: 'absent' };
+  if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new BazifyError(`dist must be a physical directory: ${dist}`);
+  const container = await mkdtemp(join(packageRoot, '.bazify-adapt-'));
+  const containerIdentity = await fileIdentity(container);
+  try {
+    await rename(dist, join(container, 'dist'));
+    return {
+      kind: 'moved',
+      container,
+      containerIdentity,
+      distIdentity: { device: metadata.dev, inode: metadata.ino }
+    };
+  } catch (error) {
+    await removeOwnedDirectory(container, containerIdentity).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function discardArtifactBackup(backup) {
+  if (backup.kind === 'moved') {
+    await assertIdentity(backup.container, backup.containerIdentity, 'Artifact backup ownership changed');
+    await removeWritableTree(backup.container);
+  }
+}
+
+async function captureGeneratedArtifactState(packageRoot, expectedDigest) {
+  const dist = join(packageRoot, 'dist');
+  const before = await lstat(dist, { bigint: true }).catch((error) => {
+    throw new BazifyError(`Validated package did not produce a physical dist directory: ${formatFsError(error)}`);
+  });
+  if (before.isSymbolicLink() || !before.isDirectory()) {
+    throw new BazifyError(`Validated package did not produce a physical dist directory: ${dist}`);
+  }
+  if (JSON.stringify((await readdir(dist)).sort(compare)) !== JSON.stringify(['skills'])) {
+    throw new BazifyError('Validated package artifact must contain exactly the generated skills directory.');
+  }
+  const skills = await discoverSkillCollection(dist, false);
+  if (digestSkillSet(skills) !== expectedDigest) {
+    throw new BazifyError('Validated package artifact does not match the selected Skill source.');
+  }
+  const after = await lstat(dist, { bigint: true });
+  if (!after.isDirectory() || after.isSymbolicLink() || before.dev !== after.dev || before.ino !== after.ino) {
+    throw new BazifyError(`Validated package artifact changed during inspection: ${dist}`);
+  }
+  return { device: before.dev, inode: before.ino, digest: expectedDigest };
+}
+
+async function artifactMatchesState(packageRoot, expected) {
+  if (expected === undefined) return false;
+  try {
+    const dist = join(packageRoot, 'dist');
+    const before = await lstat(dist, { bigint: true });
+    if (before.isSymbolicLink() || !before.isDirectory()
+      || before.dev !== expected.device || before.ino !== expected.inode) return false;
+    if (JSON.stringify((await readdir(dist)).sort(compare)) !== JSON.stringify(['skills'])) return false;
+    const skills = await discoverSkillCollection(dist, false);
+    if (digestSkillSet(skills) !== expected.digest) return false;
+    const after = await lstat(dist, { bigint: true });
+    return after.isDirectory() && !after.isSymbolicLink()
+      && before.dev === after.dev && before.ino === after.ino
+      && after.dev === expected.device && after.ino === expected.inode;
+  } catch {
+    return false;
+  }
+}
+
+async function restoreArtifact(packageRoot, backup, trustedArtifactState) {
+  if (backup.kind === 'unprepared' || backup.kind === 'discarded') return;
+  const dist = join(packageRoot, 'dist');
+  const current = await lstat(dist).catch((error) => error?.code === 'ENOENT' ? undefined : Promise.reject(error));
+  if (current !== undefined) {
+    if (!await artifactMatchesState(packageRoot, trustedArtifactState)) {
+      throw new BazifyError(`Generated dist ownership changed; recovery state was preserved at ${backup.container ?? packageRoot}.`);
+    }
+    await removeWritableTree(dist);
+  }
+  if (backup.kind === 'absent') return;
+  await assertIdentity(backup.container, backup.containerIdentity, 'Artifact backup ownership changed');
+  await assertIdentity(join(backup.container, 'dist'), backup.distIdentity, 'Backed-up dist ownership changed');
+  await rename(join(backup.container, 'dist'), dist);
+  await removeOwnedEmptyDirectory(backup.container, backup.containerIdentity, 'Artifact backup container');
 }
 
 async function readExactJson(path, label) {
@@ -841,7 +1365,7 @@ async function readStableFile(path) {
       || before.size !== after.size || before.mtimeNs !== after.mtimeNs) {
       throw new BazifyError(`File changed while it was read: ${path}`);
     }
-    return { bytes, mode: Number(before.mode) };
+    return { bytes, mode: Number(before.mode), device: before.dev, inode: before.ino };
   } catch (error) {
     if (error instanceof BazifyError) throw error;
     throw new BazifyError(`Could not read a stable physical file ${path}: ${formatFsError(error)}`);
@@ -967,7 +1491,8 @@ function isolatedGitEnvironment(environment) {
   return {
     ...gitRoutingFreeEnvironment(environment),
     GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: '/dev/null'
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_OPTIONAL_LOCKS: '0'
   };
 }
 

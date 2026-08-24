@@ -35,7 +35,7 @@
 - [x] Resolve only active-profile typed references while retaining shared immutable snapshot security, bounded Pi validation, zero-Skill validity, and kind-qualified collision handling.
 - [x] Bring CLI/status, standalone Pi, pack, real-Pi, TUI projections, generated Skill, and current documentation to library/package parity.
 - [x] Unify author-facing Skill library/package messaging around canonical identity, initial activation, later refresh, whole-object profile attachment, and the runnable package example.
-- [x] Ship the deterministic `bazify` Skill for provider-owned one-Skill package creation at `~/<name>`, isolated validation, `./bazframe/` review tracking, and consent-gated private GitHub publication.
+- [x] Ship deterministic `bazify` extraction and in-place adaptation for one Skill or an immediate Skill collection, with isolated validation, `./bazframe/` review tracking, and consent-gated private publication for new packages.
 - [x] Remove obsolete shipped readers, commands, aliases, and compiled modules; keep old state invisible and unchanged.
 
 ## Terminal UI

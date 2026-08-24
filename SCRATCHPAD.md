@@ -13,7 +13,7 @@
 - CLI, status, the standalone Pi artifact, and `/bazframe info` report libraries and packages separately with kind-correct recovery commands.
 - The TUI Skills tab presents one uninterrupted list of collapsible `Added Skills`, `Library <id>`, and `Package <id>` peers without category sections. It can add a prepared library only; package commands and all refresh/remove/reference writes remain CLI-only. Library/package preview is immutable and points to provider edit plus `libraries update` or `packages build`.
 - The TUI Profiles list is create-first and orders the current profile, persistent global inactive favorites, then remaining profiles. Favorites use separate strict `profile-favorites.json` state; `f` toggles them, `x` starts guarded profile deletion, and `d` is inert.
-- `skills/bazframe/` and `skills/bazify/` are tracked product Skills; build generates byte-identical copies under `dist/skills/`. Bazify uses `./bazframe/` for review tracking and creates one provider-owned, Bazframe-compatible package at `~/<name>` without a name suffix or overwrite, validates with disposable Bazframe state, and publishes only to a new private GitHub repository after explicit consent.
+- `skills/bazframe/` and `skills/bazify/` are tracked product Skills; build generates byte-identical copies under `dist/skills/`. Bazify uses `./bazframe/` for review tracking, extracts one Skill or an immediate collection into a provider-owned package at `~/<name>`, adapts dedicated Skill repositories in place, validates with disposable Bazframe state, and privately publishes only new packages after explicit consent.
 
 ## Current command surface
 
@@ -34,10 +34,10 @@ All development and acceptance tests use temporary Bazframe/Pi homes. Do not run
 
 ## Current validation
 
-- `npm test`: build, typecheck, lint, 479 unit tests, 36 integration tests, and packed-package validation pass.
+- `npm test`: build, typecheck, lint, 487 unit tests, 36 integration tests, and packed-package validation pass.
 - `npm run test:real-pi`: Pi 0.82 adapter, library update, package build, shared artifact, inert old state, provider preservation, and repository-stability checks pass.
 - `npm run test:tui-terminal:local`: all 12 recorded macOS tmux scenarios pass with terminal restoration.
-- Generated `bazframe`/`bazify` Skill bytes match tracked sources; packed Bazify create/validate and fake private-publication argv checks pass; obsolete production readers are absent; `git diff --check` passes; and the staging area is empty.
+- Generated `bazframe`/`bazify` Skill bytes match tracked sources; packed Bazify create/adapt/validate and fake private-publication argv checks pass; obsolete production readers are absent; `git diff --check` passes; and the staging area is empty.
 - Independent core/security, TUI/product, and proof-matrix reviews accept the migration with no remaining blockers.
 
 ## Deferred questions
