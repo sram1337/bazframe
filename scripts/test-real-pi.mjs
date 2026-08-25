@@ -31,8 +31,11 @@ if (!npmExecPath) {
 
 try {
   const piVersion = execFileSync(piExecutable, ['--version'], { encoding: 'utf8' }).trim();
-  if (!/^0\.82\./u.test(piVersion)) {
-    throw new Error(`Real-Pi acceptance requires Pi 0.82.x; found ${piVersion}.`);
+  const piVersionMatch = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u.exec(piVersion);
+  const supportedPiVersion = piVersionMatch !== null
+    && (Number(piVersionMatch[1]) > 0 || Number(piVersionMatch[2]) >= 82);
+  if (!supportedPiVersion) {
+    throw new Error(`Real-Pi acceptance requires a stable Pi 0.82.0 or newer; found ${piVersion}.`);
   }
 
   const [{ filename }] = JSON.parse(execFileSync(

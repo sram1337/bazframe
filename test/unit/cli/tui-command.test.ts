@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { VERSION } from '../../../src/cli/help.js';
 import { runCli } from '../../../src/cli/run-cli.js';
 
 describe('tui command', () => {
@@ -54,7 +55,7 @@ describe('tui command', () => {
     expect(launchTui).toHaveBeenCalledOnce();
     expect(launchTui).toHaveBeenCalledWith(expect.objectContaining({
       bazframeHome: '/bazframe-home',
-      bazframeVersion: '0.0.0-prototype.0',
+      bazframeVersion: VERSION,
       cwd: '/working-directory',
       environment: { BAZFRAME_HOME: '/bazframe-home' },
       adapterArtifactUrl,

@@ -11,12 +11,17 @@ The first production slice integrates Bazframe with Pi through a global Pi exten
 The resulting flow is:
 
 ```bash
-npm install --global bazframe
+npm install --global --ignore-scripts @earendil-works/pi-coding-agent
+npm install --global bazframe@next
 bazframe adapter install pi
+bazframe profile add focused
+bazframe profile edit focused
 bazframe profile use focused
 cd my-project
 pi
 ```
+
+Bazframe supports Pi 0.82.0 or newer. The npm beta installs from the `next` channel; Pi, Skills, libraries, and packages retain their own distribution lifecycles.
 
 `bazframe adapter install pi` is a one-time, explicit setup step. It copies Bazframe's packaged extension into Pi's global extension directory and records ownership metadata so Bazframe can update, repair, or safely uninstall only that artifact. Pi then discovers the extension automatically.
 
@@ -151,7 +156,7 @@ contextFiles present -> append profile
 contextFiles empty   -> restore global Pi context, then append profile
 ```
 
-This structured signal gives the adapter one bounded rule for both invocations. For supported Pi 0.82.x, the exact appended form is the incoming Pi `systemPrompt`, two LF characters, and the profile section. When `contextFiles` is empty and a global Pi instruction file exists, the appended portion is the global section, two LF characters, then the profile section. Sections use `<bazframe_global_instructions path="…">` or `<bazframe_profile_instructions path="…">`, followed by LF, the instruction body unchanged, LF, and the matching closing tag. Attribute paths escape `&`, `"`, `<`, and `>` as `&amp;`, `&quot;`, `&lt;`, and `&gt;`; bodies are not escaped or interpreted.
+This structured signal gives the adapter one bounded rule for both invocations. For supported Pi versions, the exact appended form is the incoming Pi `systemPrompt`, two LF characters, and the profile section. When `contextFiles` is empty and a global Pi instruction file exists, the appended portion is the global section, two LF characters, then the profile section. Sections use `<bazframe_global_instructions path="…">` or `<bazframe_profile_instructions path="…">`, followed by LF, the instruction body unchanged, LF, and the matching closing tag. Attribute paths escape `&`, `"`, `<`, and `>` as `&amp;`, `&quot;`, `&lt;`, and `&gt;`; bodies are not escaped or interpreted.
 
 This order and encoding are a transport/provenance contract, not semantic precedence. `pi -nc` omits repository instruction context because the user selected Pi's suppression mode, not because Bazframe resolved a contradiction. Detailed semantics are recorded in [`pi-adaptive-context-adapter.md`](pi-adaptive-context-adapter.md).
 
@@ -169,7 +174,7 @@ Bazframe's built-in added Skill catalog is `(default)`, rooted at `<BAZFRAME_HOM
 
 Existing physical profile Skill directories and foreign links remain runtime-readable but are not managed by the membership commands. Managed Skill updates preserve the stable target path, so catalog and profile links continue to agree. Managed Skill editing is performed upstream and activated with `skill update`. There is no provider-specific environment reader, release migration, copy fallback, or Windows link fallback. Libraries and packages remain separate immutable-snapshot objects with whole-object profile references.
 
-Bazframe ships two product-owned Agent Skills from tracked source to generated npm artifacts: the `bazframe` self-management documentation Skill at `dist/skills/bazframe/` and the `bazify` provider helper at `dist/skills/bazify/`. The npm package carries only the generated copies. Either can be added through `bazframe add skill <installed-package>/dist/skills/<skill>`; build and installation perform no acquisition or membership changes.
+Bazframe ships two product-owned Agent Skills from tracked source to generated npm artifacts: the `bazframe` self-management documentation Skill at `dist/skills/bazframe/` and the `bazify` provider helper at `dist/skills/bazify/`. The npm package carries only the generated copies. A global installation root can be resolved as `$(npm root --global)/bazframe`; either Skill can then be added explicitly through `bazframe add skill <package-root>/dist/skills/<skill>`. Build and installation perform no acquisition or membership changes.
 
 `bazify` packages one selected local physical Skill or Skill collection with provider source under `skills/`, a generated `dist/skills/` artifact, and exact build argv `node scripts/bazify-build.mjs`. `create` accepts explicit Skill roots or one root Skill/immediate `skills/` collection, extracts only the selected Skill trees into a new package, defaults singleton IDs to the Skill name and collection IDs to the source-root name, defaults the destination to `~/<id>`, and requires `--name` for several explicit roots. `adapt` adds the manifest, build script, and ignore entries to a dedicated root-Skill or immediate-collection repository; Git repositories must be clean top-levels, existing provider and Git bytes remain provider-owned, exact generated state is current, and failed adaptation restores the previous files and artifact. Both routes reject overlap, duplicate names, links, special entries, basename/frontmatter mismatch, source drift, and obvious credential material; the generated multi-Skill build uses stable no-follow reads and transactional artifact replacement. Validation calls `packages add` under a disposable `BAZFRAME_HOME`. Semantic requirements, provenance, licensing, privacy, and publication review use the local task convention under `./bazframe/` or a cleaned-up temporary checklist. Private publication applies to new non-Git packages, binds approval to `github.com`, account, repository, canonical path, and publishable bytes, verifies the final Git index, and uses fixed shell-free `git`/`gh` argv. Adapted repositories continue through their provider Git workflow. Bazify does not mutate Bazframe catalog/profile state.
 
@@ -187,7 +192,7 @@ The complete alias is limited to 64 characters. When necessary, the Pi adapter t
 
 The alias is used only when its generated name is free from pre-existing Pi skill commands, every profile skill's original name, and aliases generated earlier in the same projection. An occupied generated alias is a visible Pi projection error: Bazframe returns no profile skill paths for that projection and does not replace the occupant or try another suffix. Successful aliases are runtime cache under `adapter-cache/pi`; they do not rename or mutate stored profile identity.
 
-Only Pi 0.82.x has an implemented and evidenced adapter contract. A future adapter must define and test its instruction order and provenance, loader compatibility, runtime command namespace, duplicate behavior, and collision projection. It may expose both definitions under adapter-specific deterministic reported names or fail visibly, but it cannot silently drop or overwrite either definition, mutate the profile skill's identity, or persist a runtime alias into the portable profile.
+Pi 0.82.0 is the minimum supported runtime and the initial executable compatibility baseline; the adapter supports newer Pi releases through the same public extension contract. A future coding-agent adapter must define and test its instruction order and provenance, loader compatibility, runtime command namespace, duplicate behavior, and collision projection. It may expose both definitions under adapter-specific deterministic reported names or fail visibly, but it cannot silently drop or overwrite either definition, mutate the profile skill's identity, or persist a runtime alias into the portable profile.
 
 ## Skill libraries, Skill packages, and profile composition
 
@@ -295,7 +300,7 @@ There are no singular aliases and no `sources` commands. Library add performs th
 
 Candidate activation validates the complete object and every referencing profile before atomically replacing its record. Any failure preserves the previous digest for all profiles. Reference-index uncertainty fails closed. Valid zero-Skill libraries and packages remain healthy and visible.
 
-Discovery retains lexical bounded traversal, no-follow containment, physical entries, `.git`/`node_modules` discovery skips, root-versus-descendant exclusion, and Pi 0.82-authoritative loading. Duplicate names within one object reject activation. A profile Skill wins over a colliding referenced object and the complete conflicting object contribution is withheld. Library/package collisions withhold every involved object contribution while unrelated Skills remain effective. Stored collisions never receive aliases.
+Discovery retains lexical bounded traversal, no-follow containment, physical entries, `.git`/`node_modules` discovery skips, root-versus-descendant exclusion, and authoritative loading through Pi's public Agent Skills loader. Duplicate names within one object reject activation. A profile Skill wins over a colliding referenced object and the complete conflicting object contribution is withheld. Library/package collisions withhold every involved object contribution while unrelated Skills remain effective. Stored collisions never receive aliases.
 
 The TUI presents `Added Skills`, `Library <id>`, and `Package <id>` as collapsible peers in one Skills list without category sections. It can add a prepared library only; package add/build remains CLI-only. Library/package Skill previews are immutable and direct the user to edit provider input, then run `libraries update` or `packages build`.
 

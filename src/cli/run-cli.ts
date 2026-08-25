@@ -182,7 +182,7 @@ export async function runCli(
     return EXIT_STATUS.success;
   }
   if (parsed.kind === 'version') {
-    writeStdout(`Bazframe 2 prototype ${VERSION}\n`);
+    writeStdout(`Bazframe 2 ${VERSION}\n`);
     return EXIT_STATUS.success;
   }
   if (parsed.kind === 'usage-error') {
@@ -1010,7 +1010,7 @@ function formatHarnessSummary(
   skillDirectories: readonly string[]
 ): string {
   return [
-    `Bazframe 2 experimental prototype${dryRun ? ' dry run' : ''}`,
+    `Bazframe 2 legacy launcher${dryRun ? ' dry run' : ''}`,
     `Profile: ${profileId}`,
     `Repository: ${repositoryRoot}`,
     `Working directory: ${cwd}`,

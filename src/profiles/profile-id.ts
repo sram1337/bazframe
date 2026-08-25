@@ -13,7 +13,7 @@ export function assertSafeProfileId(value: string): void {
   if (!isSafeProfileId(value)) {
     throw new BazframeError(
       'INVALID_PROFILE_ID',
-      `Invalid profile ID ${JSON.stringify(value)}. Prototype profile IDs must be 1-64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen.`
+      `Invalid profile ID ${JSON.stringify(value)}. Profile IDs must be 1-64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen.`
     );
   }
 }

@@ -98,7 +98,7 @@ Resource-specific add commands accept `git:<owner>/<repository>`, credential-fre
 ```bash
 bazframe add skill git:owner/root-skill
 bazframe libraries add https://github.com/owner/skill-library.git
-bazframe packages add git:sram1337/personal-agent-network
+bazframe packages add git:owner/skill-package
 ```
 
 GitHub shorthand uses an authenticated GitHub CLI clone when available and Git HTTPS otherwise. Explicit URLs use Git. Authentication remains in the user's Git credential helper, SSH agent, or GitHub CLI; Bazframe records only the normalized remote, fetch URL, default branch, full revision, resource identity, and canonical managed root.
@@ -115,7 +115,7 @@ Update acquires the recorded default branch into owned staging, verifies remote 
 
 ## Bazify Skills
 
-Bazframe ships a `bazify` Agent Skill beside the `bazframe` self-management Skill under `dist/skills/`. After adding it to `(default)` and a profile, invoke the Skill or its dependency-free Node script.
+Bazframe ships a `bazify` Agent Skill beside the `bazframe` self-management Skill under `dist/skills/`. Installation activates neither Skill. After a global npm install, locate the package with `BAZFRAME_PACKAGE_ROOT="$(npm root --global)/bazframe"`, then explicitly add `"$BAZFRAME_PACKAGE_ROOT/dist/skills/bazify"` to `(default)` and the desired profile before invoking the Skill or its dependency-free Node script.
 
 Bazify packages one Skill or a collection with provider source under `skills/<name>/`, generated artifacts under `dist/skills/<name>/`, and this exact manifest contract:
 

@@ -494,4 +494,4 @@ This is npm/operator friction rather than Bazframe product behavior, but it rein
 
 ## Historical handoff state
 
-At the end of the recorded SamPC session, the installation was complete and healthy under the then-current profile-local model, and this review document itself made no implementation changes. The later Mac review and product work superseded that handoff by approving and implementing global managed sources, immutable snapshot activation, exact profile references, and read-only TUI projections. Current behavior and remaining work are defined only by `docs/design.md`, `docs/tui-design.md`, `TODO.md`, and `SCRATCHPAD.md`.
+At the end of the recorded SamPC session, the installation was complete and healthy under the then-current profile-local model, and this review document itself made no implementation changes. The later Mac review and product work superseded that handoff by approving and implementing global managed sources, immutable snapshot activation, exact profile references, and read-only TUI projections. Current product behavior is defined by `docs/design.md` and `docs/tui-design.md`.

@@ -317,7 +317,7 @@ The user approved Tasks 0-3 with these exact experiment-only semantics:
 
 ## Stage 1 task and delegation plan
 
-Stage 1 implementation and runtime artifacts stay entirely under `experiments/provider-neutral-nested-source-unit-composition/`. Evidence-only updates to this note, `TODO.md`, and `SCRATCHPAD.md` are allowed. The experiment must not change `src/`, `artifacts/pi/bazframe.ts`, production profile state, CLI/TUI/status behavior, the package manifest or executable payload, or [`../design.md`](../design.md); no experiment code enters the package. Existing helpers and runtime patterns may be studied or invoked, but experiment types and behavior do not become production APIs.
+Stage 1 implementation and runtime artifacts stay entirely under `experiments/provider-neutral-nested-source-unit-composition/`. Evidence-only updates to this note are allowed. The experiment must not change `src/`, `artifacts/pi/bazframe.ts`, production profile state, CLI/TUI/status behavior, the package manifest or executable payload, or [`../design.md`](../design.md); no experiment code enters the package. Existing helpers and runtime patterns may be studied or invoked, but experiment types and behavior do not become production APIs.
 
 ### Task 0: approve the executable contract
 
@@ -421,7 +421,7 @@ One writer addresses accepted blockers. Affected gates and focused independent r
 
 - Write the experiment `REPORT.md` as **passed**, **falsified**, or **inconclusive/environment-blocked**.
 - Record exact commands, Pi version, effective records, negative results, manifests, reviewer dispositions, and residual risks.
-- Update `TODO.md` and `SCRATCHPAD.md` only for Stage 1 evidence.
+- Update this note only for Stage 1 evidence.
 - Keep Stage 2 deferred and leave [`../design.md`](../design.md) unchanged.
 
 ### Delegation order

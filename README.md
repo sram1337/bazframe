@@ -10,12 +10,12 @@ Current project's instructions  ─┼─> Pi session
 Active Bazframe profile ─────────┘
 ```
 
-The current release is an experimental source-installed prototype for macOS and Linux. It supports Pi 0.82.0.
+Bazframe is preparing its first public beta for macOS and Linux. Bazframe supports Pi 0.82.0 or newer.
 
 ## Requirements
 
 - [Node.js](https://nodejs.org/) 22.19.0 or newer. Node runs Bazframe and includes the `npm` package manager used below.
-- [Git](https://git-scm.com/), both to download Bazframe and to identify repositories for project-specific settings.
+- [Git](https://git-scm.com/), to identify repositories for project-specific settings and acquire Git-hosted Skills, libraries, and packages.
 - A terminal and shell on macOS or Linux.
 - Access to a model provider supported by Pi. Pi can authenticate with selected subscriptions or API keys.
 
@@ -28,30 +28,24 @@ The quick start introduces Pi and Agent Skills as they appear.
 Pi is the coding-agent application that hosts the model session, tools, project context, and Bazframe adapter.
 
 ```bash
-npm install --global --ignore-scripts @earendil-works/pi-coding-agent@0.82.0
+npm install --global --ignore-scripts @earendil-works/pi-coding-agent
 pi --version
 ```
 
-The version command should report `0.82.0`.
+The version must be `0.82.0` or newer. Install a current Pi release so its dependency security fixes are included.
 
 Start Pi once and enter `/login` to choose and authenticate with a model provider. See [Pi’s README](https://github.com/earendil-works/pi#readme) for its provider and interface documentation.
 
-> **Dependency notice:** Pi 0.82.0 is the supported runtime for this prototype. npm currently reports security advisories in its dependency tree. Review those advisories before using the prototype with sensitive repositories or credentials.
-
 ### 2. Install Bazframe
 
-Clone this repository, build the command-line program, and link it into your shell:
+After the first beta is published, install it from npm's `next` channel:
 
 ```bash
-git clone https://github.com/sram1337/bazframe.git
-cd bazframe
-npm install
-npm run build
-npm link
+npm install --global bazframe@next
 bazframe --version
 ```
 
-The version command should report `0.0.0-prototype.0`. After pulling a Bazframe update, run `npm install`, `npm run build`, and `bazframe adapter install pi` again.
+The version command should report `Bazframe 2 0.1.0-beta.1`. To update within the beta channel, run `npm install --global bazframe@next`, then rerun `bazframe adapter install pi` so Pi receives the packaged adapter version.
 
 ## Quick start
 
@@ -159,7 +153,13 @@ The command derives the provider `SKILL.md` from the `(default)` entry rather th
 
 The added Skill and its profile membership are parallel links to the same provider directory. Provider changes are visible after a new Pi session or `/bazframe reload`. A Git-hosted root Skill can be acquired with `bazframe add skill git:<owner>/<repository>` and advanced with `bazframe skill update <skill>`. Remove the profile membership before `bazframe remove skill explain-code`; catalog removal is refused while any profile references it.
 
-Bazframe's npm package ships the `bazframe` and `bazify` Skills under `dist/skills/`. Add either generated directory with `bazframe add skill <installed-package>/dist/skills/<skill>`; installation itself never changes the `(default)` catalog or profile membership.
+Bazframe's npm package ships the optional `bazframe` and `bazify` Skills under `dist/skills/`. Global npm installation does not change the `(default)` catalog or any profile. To activate one explicitly, locate the package root and add it through the normal catalog and profile commands:
+
+```bash
+BAZFRAME_PACKAGE_ROOT="$(npm root --global)/bazframe"
+bazframe add skill "$BAZFRAME_PACKAGE_ROOT/dist/skills/bazframe"
+bazframe profile skills add bazframe
+```
 
 ### Add a Skill library or Skill package
 
@@ -209,8 +209,8 @@ Each resource-specific add command accepts GitHub shorthand, HTTPS, or `ssh://`:
 ```bash
 bazframe add skill git:owner/root-skill
 bazframe libraries add git:owner/skill-library
-bazframe packages add git:sram1337/personal-agent-network
-bazframe profile packages add personal-agent-network
+bazframe packages add git:owner/skill-package
+bazframe profile packages add skill-package
 ```
 
 Bazframe places the checkout under `${BAZFRAME_HOME:-$HOME/.bazframe}/providers/git/`, records the credential-free remote, default branch, and full revision, then applies the selected resource's validation contract. Git and GitHub CLI use their existing authentication. A remote package is cloned and its manifest is shown before its declared build runs; interactive confirmation defaults to decline and non-interactive use supplies `--yes`.
@@ -220,7 +220,7 @@ Managed updates are explicit:
 ```bash
 bazframe skill update root-skill
 bazframe libraries update skill-library
-bazframe packages update personal-agent-network
+bazframe packages update skill-package
 ```
 
 Updates advance the recorded branch by fast-forward. `--accept-rewrite` authorizes a reviewed rewritten branch. Package updates present the build boundary again. Repeating an already-current add verifies the local provider and registration without network access. Managed resource removal applies the existing reference checks, then removes the Bazframe checkout and provenance while leaving the upstream remote available. Acquisition and updates leave profile selection and membership unchanged.
@@ -306,7 +306,7 @@ Bazframe stores user state in `~/.bazframe` by default:
 | `BAZFRAME_HOME` | Bazframe profiles, settings, libraries, packages, snapshots, and adapter records | `~/.bazframe` |
 | `PI_CODING_AGENT_DIR` | Pi’s global configuration and extension directory | `~/.pi/agent` |
 
-Each override must be an absolute path.
+Each override must be an absolute path. Profile export/import is deferred; installing Bazframe on another machine does not copy or activate the contents of an existing `BAZFRAME_HOME`.
 
 ## Safety
 
@@ -320,10 +320,11 @@ Profiles and skills become trusted input to a coding agent with filesystem and s
 - [Pi adapter](docs/pi-adaptive-context-adapter.md) — session context and runtime integration
 - [Terminal interface](docs/tui-design.md) — interaction model and current capabilities
 - [Command help](#command-map) — entry points for built-in reference text
+- [Release process](docs/releasing.md) — beta validation, first publication, and trusted publishing
 
 ## Contributing
 
-Bazframe contributors should read [DEV.md](DEV.md), [TODO.md](TODO.md), and the relevant section of the [product design](docs/design.md). Run the standard validation gate before submitting a change:
+Bazframe contributors should read the relevant section of the [product design](docs/design.md). Run the standard validation gate before submitting a change:
 
 ```bash
 npm test

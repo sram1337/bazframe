@@ -181,8 +181,11 @@ interface GitResult {
 }
 
 function compatibilityFailure(): string | undefined {
-	if (!/^0\.82\./.test(PI_VERSION)) {
-		return `Bazframe supports Pi 0.82.x; this process is Pi ${PI_VERSION}.`;
+	const piVersion = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(PI_VERSION);
+	const supported = piVersion !== null
+		&& (Number(piVersion[1]) > 0 || Number(piVersion[2]) >= 82);
+	if (!supported) {
+		return `Bazframe requires a stable Pi 0.82.0 or newer; this process is Pi ${PI_VERSION}.`;
 	}
 	const [major = 0, minor = 0] = process.versions.node.split(".").map(Number);
 	if (major < 22 || (major === 22 && minor < 19)) {

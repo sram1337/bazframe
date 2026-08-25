@@ -15,11 +15,17 @@ experiments/test-repo/
 *.swp
 *.swo
 
-# Agent-local state
-.pi/npm/
-.pi-subagents/
+# Local development harness
+/AGENTS.md
+/DEV.md
+/PLAY.md
+/SCRATCHPAD.md
+/TODO.md
+/plan.md
+/progress.md
+/reviews/
+/logs/
+/.pi/
+/.pi-subagents/
 .claude/settings.local.json
 .claude/worktrees/
-
-# Session artifacts
-logs/sessions.md

@@ -1,14 +1,14 @@
 {
-  "name": "bazframe-2-prototype",
-  "version": "0.0.0-prototype.0",
-  "private": true,
-  "description": "Experimental profile-specific Bazframe 2 prototype",
+  "name": "bazframe",
+  "version": "0.1.0-beta.1",
+  "description": "Compose reusable Agent Skills and personal profiles for Pi",
+  "license": "MIT",
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
   },
   "bin": {
-    "bazframe": "./dist/cli.js"
+    "bazframe": "dist/cli.js"
   },
   "files": [
     "artifacts/",
@@ -16,9 +16,26 @@
     "docs/",
     "!docs/reviews/",
     "examples/",
-    "README.md",
-    "TODO.md"
+    "README.md"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sram1337/bazframe.git"
+  },
+  "homepage": "https://github.com/sram1337/bazframe#readme",
+  "bugs": {
+    "url": "https://github.com/sram1337/bazframe/issues"
+  },
+  "keywords": [
+    "agent-skills",
+    "coding-agent",
+    "pi",
+    "profiles"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "tag": "next"
+  },
   "scripts": {
     "build": "node ./scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -30,6 +47,7 @@
     "test:tui-terminal:local": "npm run build && node ./scripts/test-tui-terminal.mjs",
     "test:tui-terminal:linux": "npm run build && node ./scripts/test-tui-terminal-linux.mjs",
     "test": "npm run build && npm run typecheck && npm run lint && npm run test:unit && npm run test:integration && npm run test:pack",
+    "release:check": "npm test && npm pack --dry-run --json",
     "prepack": "npm run build"
   },
   "devDependencies": {
@@ -46,7 +64,7 @@
     "vitest": "^4.1.0"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.82.0",
+    "@earendil-works/pi-coding-agent": ">=0.82.0",
     "ink": "7.1.1",
     "react": "19.2.8"
   }

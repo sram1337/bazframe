@@ -1,6 +1,6 @@
 # Pi Adaptive Context Adapter
 
-> Status: accepted first Pi integration boundary, validated by automated and manual Pi 0.82 trials
+> Status: accepted first Pi integration boundary; Pi 0.82.0 is the minimum and initial validated baseline
 
 ## Decision
 
@@ -11,7 +11,7 @@ pi       # native Pi context followed by the active profile
 pi -nc   # global Pi context followed by the active profile
 ```
 
-`-nc` is Pi's native `--no-context-files` flag. Pi represents its resulting context choice in `systemPromptOptions.contextFiles`. Pi 0.82.x is the only supported and evidenced runtime version for this adapter.
+`-nc` is Pi's native `--no-context-files` flag. Pi represents its resulting context choice in `systemPromptOptions.contextFiles`. Bazframe supports Pi 0.82.0 or newer; the recorded executable evidence begins with the Pi 0.82 baseline.
 
 ## Adaptive rule
 

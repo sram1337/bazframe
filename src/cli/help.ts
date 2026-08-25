@@ -1,4 +1,19 @@
-export const VERSION = '0.0.0-prototype.0';
+import { readFileSync } from 'node:fs';
+
+const packageMetadata: unknown = JSON.parse(
+  readFileSync(new URL('../../package.json', import.meta.url), 'utf8')
+);
+if (
+  packageMetadata === null
+  || typeof packageMetadata !== 'object'
+  || !('version' in packageMetadata)
+  || typeof packageMetadata.version !== 'string'
+  || packageMetadata.version.length === 0
+) {
+  throw new Error('Bazframe package metadata has no valid version.');
+}
+
+export const VERSION = packageMetadata.version;
 
 export const ROOT_HELP = [
   'Bazframe 2',

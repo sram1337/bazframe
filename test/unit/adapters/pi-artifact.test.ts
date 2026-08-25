@@ -49,6 +49,37 @@ afterEach(async () => {
 });
 
 describe('packaged Pi adapter command', () => {
+  it.each([
+    ['0.81.9', false],
+    ['0.82.0-beta.1', false],
+    ['not-a-version', false],
+    ['0.82.0', true],
+    ['0.84.3', true]
+  ])('enforces the stable Pi minimum for %s', async (piVersion, supported) => {
+    const fixture = await activeFixture(`pi-version-${piVersion.replaceAll('.', '-')}`);
+    const harness = register(await loadArtifact(fixture.directory, false, piVersion), []);
+    const notifications: Array<{ message: string; level: string }> = [];
+    await required(harness.events, 'session_start')({}, {
+      cwd: fixture.repository,
+      hasUI: true,
+      ui: {
+        notify: (message: string, level: string) => { notifications.push({ message, level }); }
+      }
+    });
+
+    if (supported) {
+      expect(notifications).toEqual([]);
+      const info = await runCommand(required(harness.commands, 'bazframe'), 'info', []);
+      expect(info.level).toBe('info');
+      expect(info.message).toContain('Profile: focused');
+    } else {
+      expect(notifications).toEqual([{
+        message: `Bazframe profile failed to load: Bazframe requires a stable Pi 0.82.0 or newer; this process is Pi ${piVersion}.`,
+        level: 'error'
+      }]);
+    }
+  });
+
   it('registers only /bazframe, completes its subcommands, and reports exact active info', async () => {
     const fixture = await activeFixture('active-info');
     const runtimeCommands: RuntimeCommand[] = [
@@ -1060,7 +1091,8 @@ function register(adapter: LoadedAdapter, runtimeCommands: RuntimeCommand[]): Ha
 
 async function loadArtifact(
   directory: TempDirectory,
-  loadSkills: false | true | 'reject' | 'parity' = false
+  loadSkills: false | true | 'reject' | 'parity' = false,
+  piVersion = '0.82.0'
 ): Promise<LoadedAdapter> {
   const source = await readFile(
     new URL('../../../artifacts/pi/bazframe.ts', import.meta.url),
@@ -1079,7 +1111,7 @@ async function loadArtifact(
     'runtime/node_modules/@earendil-works/pi-coding-agent/index.js',
     loadSkills === 'reject'
       ? [
-          'export const VERSION = "0.82.0";',
+          `export const VERSION = ${JSON.stringify(piVersion)};`,
           'export const getAgentDir = () => process.env.PI_CODING_AGENT_DIR;',
           'export const loadSkillsFromDir = () => ({',
           '  skills: [],',
@@ -1093,7 +1125,7 @@ async function loadArtifact(
       : loadSkills === 'parity'
         ? [
             'import { basename, join } from "node:path";',
-            'export const VERSION = "0.82.0";',
+            `export const VERSION = ${JSON.stringify(piVersion)};`,
             'export const getAgentDir = () => process.env.PI_CODING_AGENT_DIR;',
             'export const loadSkillsFromDir = ({ dir: directory }) => ({',
             '  skills: [{',
@@ -1108,7 +1140,7 @@ async function loadArtifact(
         : loadSkills
           ? [
             'import { basename, join } from "node:path";',
-            'export const VERSION = "0.82.0";',
+            `export const VERSION = ${JSON.stringify(piVersion)};`,
             'export const getAgentDir = () => process.env.PI_CODING_AGENT_DIR;',
             'export const loadSkillsFromDir = ({ dir: directory }) => ({',
             '  skills: [{ name: basename(directory), filePath: join(directory, "SKILL.md"), baseDir: directory }],',
@@ -1117,7 +1149,7 @@ async function loadArtifact(
             ''
           ].join('\n')
           : [
-            'export const VERSION = "0.82.0";',
+            `export const VERSION = ${JSON.stringify(piVersion)};`,
             'export const getAgentDir = () => process.env.PI_CODING_AGENT_DIR;',
             'export const loadSkillsFromDir = () => ({ skills: [], diagnostics: [] });',
             ''

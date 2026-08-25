@@ -32,7 +32,7 @@ export function composeInstructions(
   if (byteLength > maxBytes) {
     throw new BazframeError(
       'EFFECTIVE_INSTRUCTIONS_TOO_LARGE',
-      `Composed instructions are ${byteLength} bytes, exceeding the prototype ${maxBytes}-byte limit.`
+      `Composed instructions are ${byteLength} bytes, exceeding the ${maxBytes}-byte limit.`
     );
   }
   return effective;

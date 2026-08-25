@@ -64,7 +64,7 @@ describe('experimental CLI vertical slice', () => {
       signal: null,
       stdout: 'PRINT-LIKE-OUTPUT\n'
     });
-    expect(launched.stderr).toContain('Bazframe 2 experimental prototype');
+    expect(launched.stderr).toContain('Bazframe 2 legacy launcher');
     expect(launched.stderr).toContain(`Working directory: ${physicalCwd}`);
     expect(after).toEqual(before);
 
@@ -267,7 +267,7 @@ describe('experimental CLI vertical slice', () => {
     const after = await snapshotFilesystem(fixture.repository);
 
     expect(result).toMatchObject({ status: 0, stderr: '' });
-    expect(result.stdout).toContain('experimental prototype dry run');
+    expect(result.stdout).toContain('legacy launcher dry run');
     expect(result.stdout).toContain('Repository instructions: (none)');
     expect(result.stdout).toContain('--- effective instructions ---');
     expect(result.stdout).toContain('PROFILE-INSTRUCTIONS-Ω');

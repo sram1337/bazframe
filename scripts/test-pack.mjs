@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 
 const PACKED_TUI_DEADLINE_MS = 8_000;
 const projectRoot = process.cwd();
+const sourceManifest = JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf8'));
 const npmExecPath = process.env.npm_execpath;
 const temporaryRoot = mkdtempSync(join(tmpdir(), 'bazframe-2-pack-'));
 let tarballPath;
@@ -32,7 +33,7 @@ try {
     { cwd: temporaryRoot, stdio: 'ignore' }
   );
 
-  const packageRoot = join(temporaryRoot, 'node_modules', 'bazframe-2-prototype');
+  const packageRoot = join(temporaryRoot, 'node_modules', sourceManifest.name);
   const packagedCli = join(packageRoot, 'dist', 'cli.js');
   assertExists(packagedCli);
   if (process.platform !== 'win32' && (statSync(packagedCli).mode & 0o111) === 0) {
@@ -84,7 +85,9 @@ try {
   assertExists(join(packageRoot, 'docs', 'research', 'origin-and-rationale.md'));
   assertExists(join(packageRoot, 'docs', 'research', 'prototype-alternatives.md'));
   assertMissing(join(packageRoot, 'docs', 'reviews'));
-  assertExists(join(packageRoot, 'TODO.md'));
+  assertExists(join(packageRoot, 'docs', 'releasing.md'));
+  assertMissing(join(packageRoot, 'TODO.md'));
+  assertExists(join(packageRoot, 'examples', 'setup-fresh-machine.sh'));
   assertExists(join(packageRoot, 'examples', 'profiles', 'focused', 'AGENTS.md'));
   assertExists(join(packageRoot, 'examples', 'profiles', 'reviewer', 'AGENTS.md'));
   assertMissing(join(packageRoot, 'src'));
@@ -92,15 +95,39 @@ try {
   assertMissing(join(packageRoot, 'scripts'));
 
   const manifest = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'));
-  if (manifest.bin?.bazframe !== './dist/cli.js') {
+  if (
+    manifest.name !== sourceManifest.name
+    || manifest.version !== sourceManifest.version
+    || manifest.private !== sourceManifest.private
+    || manifest.license !== sourceManifest.license
+  ) {
+    throw new Error(`Packed metadata does not match source: ${manifest.name}@${manifest.version}`);
+  }
+  if (manifest.name !== 'bazframe') {
+    throw new Error(`Unexpected package name: ${manifest.name}`);
+  }
+  if (sourceManifest.license !== undefined && sourceManifest.license !== 'UNLICENSED') {
+    assertExists(join(packageRoot, 'LICENSE'));
+  }
+  if (manifest.bin?.bazframe !== 'dist/cli.js') {
     throw new Error(`Unexpected packaged bin target: ${manifest.bin?.bazframe}`);
   }
   if (
-    manifest.dependencies?.['@earendil-works/pi-coding-agent'] !== '0.82.0'
+    manifest.repository?.type !== 'git'
+    || manifest.repository?.url !== 'git+https://github.com/sram1337/bazframe.git'
+    || manifest.homepage !== 'https://github.com/sram1337/bazframe#readme'
+    || manifest.bugs?.url !== 'https://github.com/sram1337/bazframe/issues'
+    || manifest.publishConfig?.access !== 'public'
+    || manifest.publishConfig?.tag !== 'next'
+  ) {
+    throw new Error('Packed public-package metadata does not match the pending beta contract.');
+  }
+  if (
+    manifest.dependencies?.['@earendil-works/pi-coding-agent'] !== '>=0.82.0'
     || manifest.dependencies?.ink !== '7.1.1'
     || manifest.dependencies?.react !== '19.2.8'
   ) {
-    throw new Error('Expected exact packaged Pi 0.82.0, Ink, and React runtime dependencies.');
+    throw new Error('Expected minimum Pi 0.82.0 and exact Ink/React runtime dependencies.');
   }
 
   const executable = process.platform === 'win32'
@@ -119,7 +146,7 @@ try {
   }
 
   const result = spawnSync(executable, ['--version'], { encoding: 'utf8', shell: false });
-  if (result.status !== 0 || result.stdout !== 'Bazframe 2 prototype 0.0.0-prototype.0\n') {
+  if (result.status !== 0 || result.stdout !== `Bazframe 2 ${manifest.version}\n`) {
     throw new Error(
       `Installed CLI version check failed (${result.status}).\nstdout: ${result.stdout}\nstderr: ${result.stderr}`
     );

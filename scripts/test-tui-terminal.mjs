@@ -22,6 +22,7 @@ if (!Number.isInteger(gracefulRepeatCount) || gracefulRepeatCount < 1 || gracefu
   throw new Error('BAZFRAME_TUI_GRACEFUL_REPEATS must be an integer from 1 through 10.');
 }
 const projectRoot = process.cwd();
+const sourceManifest = JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf8'));
 const npmExecPath = process.env.npm_execpath;
 if (npmExecPath === undefined) throw new Error('Run terminal validation through npm.');
 for (const command of ['tmux', 'script']) requireCommand(command);
@@ -53,7 +54,7 @@ try {
     stdio: 'ignore'
   });
 
-  const packageRoot = join(consumer, 'node_modules', 'bazframe-2-prototype');
+  const packageRoot = join(consumer, 'node_modules', sourceManifest.name);
   const executable = process.platform === 'win32'
     ? join(consumer, 'node_modules', '.bin', 'bazframe.cmd')
     : join(consumer, 'node_modules', '.bin', 'bazframe');

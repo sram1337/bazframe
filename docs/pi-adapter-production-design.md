@@ -24,12 +24,13 @@ Pi owns runtime settings and resources. Bazframe owns profile lifecycle, selecti
 ### 2.1 Install
 
 ```bash
-npm install --global bazframe
+npm install --global --ignore-scripts @earendil-works/pi-coding-agent
+npm install --global bazframe@next
 bazframe adapter install pi
 bazframe status
 ```
 
-Adapter installation is explicit. The command places one self-contained Bazframe artifact in Pi's effective global extension directory and records its identity under the Bazframe home. Pi auto-discovers the extension, which lets the user invoke `pi` directly. Absent global state enables Bazframe without a policy file. Project overrides take precedence.
+Pi 0.82.0 is the minimum supported runtime; installation selects a current Pi release. Adapter installation is explicit. The command places one self-contained Bazframe artifact in Pi's effective global extension directory and records its identity under the Bazframe home. Pi auto-discovers the extension, which lets the user invoke `pi` directly. Absent global state enables Bazframe without a policy file. Project overrides take precedence.
 
 ### 2.2 Configure defaults
 
@@ -334,7 +335,7 @@ A default-enabled session applies the complete validated profile in Git and non-
 - Ownership hashes protect modified and independently owned extension files.
 - Locking and atomic operations coordinate concurrent Bazframe CLI operations; non-cooperating external pathname races remain a documented boundary.
 - Runtime Git discovery uses an argument array, sanitized environment, captured output, and timeout.
-- The initial verified platform is macOS with Node `>=22.19.0` and Pi `0.82.x`.
+- The initial verified platform baseline is macOS with Node `>=22.19.0` and Pi `0.82.x`; Pi 0.82.0 is the minimum supported version.
 - Adapter startup checks the Pi APIs required for `resources_discover`, command provenance, reload, and structured system-prompt options.
 - A Pi context API that supports selective context loading requires a new compatibility decision before activation.
 

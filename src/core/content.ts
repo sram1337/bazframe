@@ -43,7 +43,7 @@ export async function readUtf8InstructionFile(
     if (metadata.size > maxBytes) {
       throw new BazframeError(
         'INSTRUCTION_TOO_LARGE',
-        `${label} exceeds the prototype ${maxBytes}-byte instruction limit: ${path}`
+        `${label} exceeds the ${maxBytes}-byte instruction limit: ${path}`
       );
     }
 
@@ -107,7 +107,7 @@ export function decodeUtf8Instructions(
   if (bytes.byteLength > maxBytes) {
     throw new BazframeError(
       'INSTRUCTION_TOO_LARGE',
-      `${label} exceeds the prototype ${maxBytes}-byte instruction limit: ${path}`
+      `${label} exceeds the ${maxBytes}-byte instruction limit: ${path}`
     );
   }
 
@@ -125,7 +125,7 @@ export function decodeUtf8Instructions(
   if (text.includes('\0')) {
     throw new BazframeError(
       'INSTRUCTION_CONTAINS_NUL',
-      `${label} contains a NUL byte, which this prototype does not support: ${path}`
+      `${label} contains a NUL byte, which Bazframe does not support: ${path}`
     );
   }
   return text;
