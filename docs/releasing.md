@@ -48,7 +48,7 @@ shasum -a 256 --check "$TARBALL.sha256"
 npm publish "./$TARBALL" --access public --tag next
 ```
 
-Passing the tarball path published the inspected bytes rather than repacking the working tree. The explicit tag selected the `next` channel, but npm also assigned `latest` during the first publication; both tags currently resolve to `0.1.0-beta.1`. Verify registry bytes and tags rather than assuming `next` is exclusive:
+Passing the tarball path published the inspected bytes rather than repacking the working tree. The explicit tag selected the `next` channel, but npm also assigned `latest` during the first publication; both tags initially resolved to `0.1.0-beta.1`. Verify registry bytes and tags rather than assuming `next` is exclusive:
 
 ```bash
 npm view bazframe@0.1.0-beta.1 name version dist-tags repository --json

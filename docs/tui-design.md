@@ -14,7 +14,7 @@ The Skills tab presents one uninterrupted list of collapsible peers under `Skill
 
 There are no category headings or separator rows. The Added Skills parent appears first, followed by current library order and then current package order. Library/package children are informational. Profiles select whole libraries or packages; no child-selection model exists. Healthy zero-Skill objects remain visible with `0 Skills`.
 
-The TUI may add a prepared library after explicit literal-`y` consent. It does not add a profile reference. Package add/build, library update/remove, package remove, and library/package profile-reference mutations remain CLI-only. Package build output must remain visible in the invoking terminal, so no package build runs in the TUI.
+The TUI may add an already-prepared local library or acquire a managed Git library after explicit literal-`y` consent. It does not add a profile reference. Package add/build, library update/remove, package remove, and library/package profile-reference mutations remain CLI-only. Package build output must remain visible in the invoking terminal, so no package build runs in the TUI.
 
 ## Typed application boundary
 
@@ -31,7 +31,7 @@ DashboardSnapshot
     referenceCount, health, refreshAvailability, diagnostics[]
   skillGroups[]
     added-Skill group and kind-qualified library/package groups
-  status, diagnostics[]
+  adapterStatus, status, diagnostics[]
 ```
 
 Collection keys and Skill origins are kind-qualified (`library:<id>` and `package:<id>`). Displayed paths are not mutation authority. Every write re-resolves and revalidates its target in core services.
@@ -43,8 +43,9 @@ createProfile / duplicateProfile / useProfile / toggleProfileFavorite / renamePr
 editProfileInstructions
 editSkillDefinition                 # Added Skills only
 addMembership / removeMembership    # Added Skills only
+inspectLibraryInput                 # physical-directory browsing or managed Git source
 inspectLibraryCandidate
-addLibrary
+addLibrary                          # local snapshot or shared managed Git lifecycle
 ```
 
 Framework objects stop at the presentation boundary. Core profile, Skill, collection, status, and settings modules do not import React, Ink, or terminal types.
@@ -59,9 +60,9 @@ Added Skill previews read live provider `SKILL.md`. `e` may launch the external 
 
 ### Add Library
 
-The `a` flow accepts an absolute physical directory or exact `~`/`~/` expansion, then shows entered and canonical roots and the canonical-basename library ID. Browsing and inspection write nothing. Final literal `y` calls the library lifecycle once.
+The `a` flow accepts an absolute physical directory, exact `~`/`~/` expansion, or the same managed Git source grammar as `bazframe libraries add`. Local input shows entered and canonical roots plus the canonical-basename library ID. Managed Git input shows the entered source, normalized remote identity, and normalized repository-name ID. Browsing, parsing, and review write nothing. Final literal `y` calls the local or managed Git library lifecycle once; managed acquisition may access the network through configured Git or GitHub authentication.
 
-A root-level `bazframe-package.json` blocks the flow with `bazframe packages add <absolute-root>` guidance. Library addition executes no provider command and creates no profile reference.
+A local root-level `bazframe-package.json` blocks the flow with `bazframe packages add <absolute-root>` guidance. Managed input receives the same library/package distinction after acquisition. Library addition executes no provider code and creates no profile reference.
 
 ## Profiles interaction
 
@@ -88,7 +89,7 @@ Color is supplementary. `NO_COLOR` and accessibility output retain text markers,
 
 ## Safety invariants
 
-- Provider roots are never edited, deleted, fetched, or implicitly prepared by browsing or library operations.
+- Local provider roots are never edited, deleted, fetched, or implicitly prepared. Managed Git acquisition occurs only after literal-`y` authorization and uses the shared transactional provider lifecycle.
 - Package processes run only from explicit CLI package add/build.
 - Snapshot previews are immutable.
 - Library/package references are whole-object and read-only in this TUI slice.
@@ -100,6 +101,6 @@ Color is supplementary. `NO_COLOR` and accessibility output retain text markers,
 
 ## Verification and residual gates
 
-Deterministic reducer/component/service tests cover stable reconciliation, nested navigation, compact and preferred layouts, library consent, package-manifest refusal, profile references, immutable editor guidance, no-color/accessibility output, scrolling, resize, and error recovery.
+Deterministic reducer/component/service tests cover stable reconciliation, nested navigation, compact and preferred layouts, local and managed-Git library consent, package-manifest refusal, profile references, immutable editor guidance, no-color/accessibility output, scrolling, resize, and error recovery.
 
 PTY gates cover alternate-screen entry/restoration, Ctrl+C, resize, editor handoff, handled/fatal errors, cleanup, and bounded Unicode/ANSI cell widths on the recorded macOS and Linux environments. Windows Terminal, representative remote SSH, terminal/font/locale ambiguous-width differences, and manual assistive-technology evidence remain open before claiming broad production readiness.

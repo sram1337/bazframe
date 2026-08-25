@@ -137,9 +137,8 @@ export function normalizeManagedGitOrigin(value: string): ManagedGitSource {
   return scp === null ? parseManagedGitSource(value) : parseManagedGitSource(`ssh://git@${scp[1]}/${scp[2]}`);
 }
 export function isManagedGitSource(value: string): boolean {
-  if (value.startsWith('git:')) return true;
-  try { const url = new URL(value); return url.protocol === 'https:' || url.protocol === 'ssh:' || url.protocol === 'file:'; }
-  catch { return /^[^/\s@]+@[^:]+:/u.test(value); }
+  return value.startsWith('git:') || value.startsWith('https://') || value.startsWith('ssh://')
+    || value.startsWith('file:') || /^[^/\s@]+@[^:]+:/u.test(value);
 }
 
 export async function addManagedGitSkill(options: ManagedGitOptions, entered: string): Promise<ManagedGitLifecycleResult> { return addManaged(options, 'skill', parseManagedGitSource(entered)); }

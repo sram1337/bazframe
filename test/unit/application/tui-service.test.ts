@@ -318,30 +318,52 @@ describe('Bazframe TUI service', () => {
     await fixture.directory.mkdir('Documents');
     await fixture.directory.write('Downloads/skills/SKILL.md', skill('downloaded'));
 
-    const partial = await fixture.service.browseDirectories('~/Down');
-    expect(partial.entries).toEqual([{
-      name: 'Downloads', path: await realpath(fixture.directory.path('Downloads'))
-    }]);
-    const exact = await fixture.service.browseDirectories('~/Downloads/skills');
-    expect(exact.selectablePath).toBe(fixture.directory.path('Downloads/skills'));
-    await expect(fixture.service.browseDirectories('relative/path')).rejects.toThrow(/absolute/u);
+    const partial = await fixture.service.inspectLibraryInput('~/Down');
+    expect(partial).toMatchObject({
+      kind: 'directory',
+      browser: { entries: [{ name: 'Downloads', path: await realpath(fixture.directory.path('Downloads')) }] }
+    });
+    const exact = await fixture.service.inspectLibraryInput('~/Downloads/skills');
+    expect(exact).toMatchObject({
+      kind: 'directory',
+      browser: { selectablePath: fixture.directory.path('Downloads/skills') }
+    });
+    await expect(fixture.service.inspectLibraryInput('relative/path')).rejects.toThrow(/absolute/u);
+    await expect(fixture.service.inspectLibraryInput('HTTPS://example.com/owner/toolkit'))
+      .rejects.toThrow(/absolute/u);
     if (process.platform !== 'win32') {
       await symlink(fixture.directory.path('Downloads'), fixture.directory.path('Downloads-link'), 'dir');
-      await expect(fixture.service.browseDirectories('~/Downloads-link/skills'))
+      await expect(fixture.service.inspectLibraryInput('~/Downloads-link/skills'))
         .rejects.toThrow(/symbolic link/u);
-      await expect(fixture.service.browseDirectories('~/Downloads-link/sk'))
+      await expect(fixture.service.inspectLibraryInput('~/Downloads-link/sk'))
         .rejects.toThrow(/symbolic link/u);
-      await expect(fixture.service.browseDirectories('~/Downloads-link/skills/sk'))
+      await expect(fixture.service.inspectLibraryInput('~/Downloads-link/skills/sk'))
         .rejects.toThrow(/symbolic link/u);
     }
 
-    const candidate = await fixture.service.inspectLibraryCandidate({ root: '~/Downloads/skills' });
+    await expect(fixture.service.inspectLibraryInput('git:Sram1337/personal-agent-network'))
+      .resolves.toEqual({
+        kind: 'managed-git',
+        input: 'git:Sram1337/personal-agent-network',
+        libraryId: 'personal-agent-network',
+        remote: 'github.com/sram1337/personal-agent-network'
+      });
+    await expect(fixture.service.inspectLibraryCandidate({
+      source: 'git:Sram1337/personal-agent-network'
+    })).resolves.toEqual({
+      kind: 'managed-git',
+      libraryId: 'personal-agent-network',
+      enteredSource: 'git:Sram1337/personal-agent-network',
+      remote: 'github.com/sram1337/personal-agent-network'
+    });
+
+    const candidate = await fixture.service.inspectLibraryCandidate({ source: '~/Downloads/skills' });
     expect(candidate).toMatchObject({
-      libraryId: 'skills', enteredRoot: fixture.directory.path('Downloads/skills'),
+      kind: 'directory', libraryId: 'skills', enteredRoot: fixture.directory.path('Downloads/skills'),
       canonicalRoot: await realpath(fixture.directory.path('Downloads/skills')),
       packageManifest: { state: 'absent' }
     });
-    await fixture.service.addLibrary({ root: '~/Downloads/skills' });
+    await fixture.service.addLibrary({ source: '~/Downloads/skills' });
     const dashboard = await fixture.service.loadDashboard();
     expect(dashboard.collections).toContainEqual(expect.objectContaining({
       key: 'library:skills', health: 'ready', referenceCount: 0
@@ -354,7 +376,7 @@ describe('Bazframe TUI service', () => {
     const fixture = await createFixture();
     await fixture.directory.write('skilllib/myskill/SKILL.md', '# Missing frontmatter\n');
 
-    const failure = await fixture.service.addLibrary({ root: fixture.directory.path('skilllib') })
+    const failure = await fixture.service.addLibrary({ source: fixture.directory.path('skilllib') })
       .catch((error: unknown) => error);
 
     expect(failure).toMatchObject({
@@ -373,9 +395,9 @@ describe('Bazframe TUI service', () => {
       skillsRoot: '.'
     })}\n`);
     await fixture.directory.write('declared/demo/SKILL.md', skill('declared-demo'));
-    const candidate = await fixture.service.inspectLibraryCandidate({ root: fixture.directory.path('declared') });
-    expect(candidate.packageManifest.state).toBe('present');
-    await expect(fixture.service.addLibrary({ root: fixture.directory.path('declared') }))
+    const candidate = await fixture.service.inspectLibraryCandidate({ source: fixture.directory.path('declared') });
+    expect(candidate).toMatchObject({ kind: 'directory', packageManifest: { state: 'present' } });
+    await expect(fixture.service.addLibrary({ source: fixture.directory.path('declared') }))
       .rejects.toMatchObject({ code: 'LIBRARY_IS_PACKAGE' });
     await expect(lstat(fixture.directory.path('declared/ran'))).rejects.toMatchObject({ code: 'ENOENT' });
     expect((await fixture.service.loadDashboard()).collections).not.toContainEqual(

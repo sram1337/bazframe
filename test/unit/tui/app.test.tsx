@@ -4,8 +4,8 @@ import stringWidth from 'string-width';
 import type {
   BazframeTuiService,
   DashboardSnapshot,
-  DirectoryBrowserSnapshot,
-  LibraryCandidateSummary
+  LibraryCandidateSummary,
+  LibraryInputInspection
 } from '../../../src/application/tui-service.js';
 import { BazframeError } from '../../../src/core/errors.js';
 import type { ProfileRemovalIdentity } from '../../../src/profiles/profile-removal-identity.js';
@@ -198,10 +198,10 @@ describe('TuiApp', () => {
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Skills'));
 
     view.stdin.write('a');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('Absolute root or ~/ path'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Absolute path, ~/ path, or managed Git'));
     view.stdin.write('H');
     view.stdin.write('L');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('Path: HL'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Source: HL'));
   });
 
   it.each([
@@ -833,12 +833,12 @@ describe('TuiApp', () => {
   it('adds only the reviewed manifest-free candidate after explicit literal-y consent', async () => {
     const service = fakeService();
     vi.mocked(service.inspectLibraryCandidate).mockResolvedValue({
-      libraryId: 'tmp', enteredRoot: '/tmp', canonicalRoot: '/physical/tmp', packageManifest: { state: 'absent' }
+      kind: 'directory', libraryId: 'tmp', enteredRoot: '/tmp', canonicalRoot: '/physical/tmp', packageManifest: { state: 'absent' }
     });
     const view = render(<TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />);
     await waitForDashboard(view);
     view.stdin.write('a');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('Absolute root or ~/ path'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Absolute path, ~/ path, or managed Git'));
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Current: /tmp'));
     view.stdin.write('\r');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Add library tmp'));
@@ -848,14 +848,62 @@ describe('TuiApp', () => {
     view.stdin.write('\r');
     expect(service.addLibrary).not.toHaveBeenCalled();
     view.stdin.write('y');
-    await vi.waitFor(() => expect(service.addLibrary).toHaveBeenCalledWith({ root: '/physical/tmp' }));
+    await vi.waitFor(() => expect(service.addLibrary).toHaveBeenCalledWith({ source: '/physical/tmp' }));
+  });
+
+  it('reviews and adds a managed Git library source after literal-y consent', async () => {
+    const service = fakeService();
+    const source = 'git:sram1337/personal-agent-network';
+    vi.mocked(service.inspectLibraryInput).mockImplementation(async (input) => input === source
+      ? {
+          kind: 'managed-git', input, libraryId: 'personal-agent-network',
+          remote: 'github.com/sram1337/personal-agent-network'
+        }
+      : {
+          kind: 'directory', input,
+          browser: { input, resolvedPath: '/tmp', selectablePath: '/tmp', entries: [] }
+        });
+    vi.mocked(service.inspectLibraryCandidate).mockResolvedValue({
+      kind: 'managed-git', libraryId: 'personal-agent-network', enteredSource: source,
+      remote: 'github.com/sram1337/personal-agent-network'
+    });
+    const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+    await waitForDashboard(view);
+
+    view.stdin.write('a');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Absolute path'));
+    view.stdin.write(source);
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Managed Git library: personal-agent-network'));
+    expect(view.lastFrame()).toContain('Remote: github.com/sram1337/personal-agent-network');
+    view.stdin.write('\r');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain(`Managed Git source: ${source}`));
+    expect(view.lastFrame()).toContain('Network access may use configured Git or GitHub authentication.');
+    expect(service.addLibrary).not.toHaveBeenCalled();
+    view.stdin.write('y');
+
+    await vi.waitFor(() => expect(service.addLibrary).toHaveBeenCalledWith({ source }));
+  });
+
+  it('renders a durable source error instead of an indefinite loading state', async () => {
+    const service = fakeService();
+    vi.mocked(service.inspectLibraryInput).mockRejectedValue(
+      new BazframeError('MANAGED_GIT_SOURCE_INVALID', 'Managed Git source is invalid.')
+    );
+    const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
+    await waitForDashboard(view);
+
+    view.stdin.write('a');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain(
+      'Source unavailable: Managed Git source is invalid.'
+    ));
+    expect(view.lastFrame()).not.toContain('Inspecting source...');
   });
 
   it('shows actionable library validation failures after library-add confirmation', async () => {
     const service = fakeService();
     const diagnostic = 'skilllib:myskill/SKILL.md pi-loader[0]: description is required';
     vi.mocked(service.inspectLibraryCandidate).mockResolvedValue({
-      libraryId: 'skilllib', enteredRoot: '/skilllib',
+      kind: 'directory', libraryId: 'skilllib', enteredRoot: '/skilllib',
       canonicalRoot: '/physical/skilllib',
       packageManifest: { state: 'absent' }
     });
@@ -866,7 +914,7 @@ describe('TuiApp', () => {
     await waitForDashboard(view);
 
     view.stdin.write('a');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('Absolute root or ~/ path'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Absolute path, ~/ path, or managed Git'));
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Current: /tmp'));
     view.stdin.write('\r');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Add library skilllib'));
@@ -874,25 +922,31 @@ describe('TuiApp', () => {
 
     await vi.waitFor(() => expect(view.lastFrame()).toContain(diagnostic));
     expect(view.lastFrame()).not.toContain('collection resolution failed');
-    expect(service.addLibrary).toHaveBeenCalledWith({ root: '/physical/skilllib' });
+    expect(service.addLibrary).toHaveBeenCalledWith({ source: '/physical/skilllib' });
   });
 
   it('drops stale directory and candidate completions after library input or navigation changes', async () => {
     const service = fakeService();
-    let resolveInitialBrowse!: (value: DirectoryBrowserSnapshot) => void;
-    vi.mocked(service.browseDirectories).mockImplementation((input) => input.length === 0
-      ? new Promise<DirectoryBrowserSnapshot>((resolve) => { resolveInitialBrowse = resolve; })
-      : Promise.resolve({ input, resolvedPath: `/new/${input}`, selectablePath: `/new/${input}`, entries: [] }));
+    let resolveInitialBrowse!: (value: LibraryInputInspection) => void;
+    vi.mocked(service.inspectLibraryInput).mockImplementation((input) => input.length === 0
+      ? new Promise<LibraryInputInspection>((resolve) => { resolveInitialBrowse = resolve; })
+      : Promise.resolve({
+          kind: 'directory', input,
+          browser: { input, resolvedPath: `/new/${input}`, selectablePath: `/new/${input}`, entries: [] }
+        }));
     let resolveCandidate!: (value: LibraryCandidateSummary) => void;
     vi.mocked(service.inspectLibraryCandidate).mockImplementation(() =>
       new Promise<LibraryCandidateSummary>((resolve) => { resolveCandidate = resolve; }));
     const view = render(<TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />);
     await waitForDashboard(view);
     view.stdin.write('a');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('Loading directories...'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Inspecting source...'));
     view.stdin.write('x');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Current: /new/x'));
-    resolveInitialBrowse({ input: '', resolvedPath: '/stale', selectablePath: '/stale', entries: [] });
+    resolveInitialBrowse({
+      kind: 'directory', input: '',
+      browser: { input: '', resolvedPath: '/stale', selectablePath: '/stale', entries: [] }
+    });
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(view.lastFrame()).not.toContain('/stale');
 
@@ -900,7 +954,7 @@ describe('TuiApp', () => {
     await vi.waitFor(() => expect(service.inspectLibraryCandidate).toHaveBeenCalledTimes(1));
     view.stdin.write('\x1b');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Skills'));
-    resolveCandidate({ libraryId: 'x', enteredRoot: '/new/x', canonicalRoot: '/physical/new/x', packageManifest: { state: 'absent' } });
+    resolveCandidate({ kind: 'directory', libraryId: 'x', enteredRoot: '/new/x', canonicalRoot: '/physical/new/x', packageManifest: { state: 'absent' } });
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(view.lastFrame()).not.toContain('Canonical library root: /stale');
   });
@@ -908,13 +962,16 @@ describe('TuiApp', () => {
   it('drops a stale directory error after the library path changes', async () => {
     const service = fakeService();
     let rejectInitialBrowse!: (error: Error) => void;
-    vi.mocked(service.browseDirectories).mockImplementation((input) => input.length === 0
-      ? new Promise<DirectoryBrowserSnapshot>((_resolve, reject) => { rejectInitialBrowse = reject; })
-      : Promise.resolve({ input, resolvedPath: `/new/${input}`, selectablePath: `/new/${input}`, entries: [] }));
+    vi.mocked(service.inspectLibraryInput).mockImplementation((input) => input.length === 0
+      ? new Promise<LibraryInputInspection>((_resolve, reject) => { rejectInitialBrowse = reject; })
+      : Promise.resolve({
+          kind: 'directory', input,
+          browser: { input, resolvedPath: `/new/${input}`, selectablePath: `/new/${input}`, entries: [] }
+        }));
     const view = render(<TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />);
     await waitForDashboard(view);
     view.stdin.write('a');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('Loading directories...'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Inspecting source...'));
     view.stdin.write('x');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Current: /new/x'));
     rejectInitialBrowse(new Error('obsolete browse failure'));
@@ -935,7 +992,7 @@ describe('TuiApp', () => {
     view.stdin.write('\r');
     await vi.waitFor(() => expect(resolvers).toHaveLength(1));
     view.stdin.write('z');
-    resolvers[0]!({ libraryId: 'tmp', enteredRoot: '/tmp', canonicalRoot: '/stale-edit', packageManifest: { state: 'absent' } });
+    resolvers[0]!({ kind: 'directory', libraryId: 'tmp', enteredRoot: '/tmp', canonicalRoot: '/stale-edit', packageManifest: { state: 'absent' } });
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(view.lastFrame()).not.toContain('Add library tmp');
 
@@ -943,10 +1000,10 @@ describe('TuiApp', () => {
     view.stdin.write('\r');
     view.stdin.write('\r');
     await vi.waitFor(() => expect(resolvers).toHaveLength(3));
-    resolvers[1]!({ libraryId: 'tmp', enteredRoot: '/tmp', canonicalRoot: '/stale-request', packageManifest: { state: 'absent' } });
+    resolvers[1]!({ kind: 'directory', libraryId: 'tmp', enteredRoot: '/tmp', canonicalRoot: '/stale-request', packageManifest: { state: 'absent' } });
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(view.lastFrame()).not.toContain('Add library tmp');
-    resolvers[2]!({ libraryId: 'tmp', enteredRoot: '/tmp', canonicalRoot: '/current', packageManifest: { state: 'absent' } });
+    resolvers[2]!({ kind: 'directory', libraryId: 'tmp', enteredRoot: '/tmp', canonicalRoot: '/current', packageManifest: { state: 'absent' } });
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Canonical library root: /current'));
   });
 
@@ -956,8 +1013,9 @@ describe('TuiApp', () => {
       name: `choice-${index}`,
       path: `/tmp/choice-${index}`
     }));
-    vi.mocked(service.browseDirectories).mockImplementation(async (input) => ({
-      input, resolvedPath: '/tmp', selectablePath: '/tmp', entries
+    vi.mocked(service.inspectLibraryInput).mockImplementation(async (input) => ({
+      kind: 'directory', input,
+      browser: { input, resolvedPath: '/tmp', selectablePath: '/tmp', entries }
     }));
     const view = render(<TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />);
     await waitForDashboard(view);
@@ -967,13 +1025,13 @@ describe('TuiApp', () => {
     await vi.waitFor(() => expect(view.lastFrame()).toContain('/tmp/choice-5'));
     expect(view.lastFrame()).not.toContain('/tmp/choice-0');
     view.stdin.write('\r');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('Path: /tmp/choice-5'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Source: /tmp/choice-5'));
   });
 
   it('keeps package-manifest library confirmation bounded and blocked below minimum', async () => {
     const service = fakeService();
     vi.mocked(service.inspectLibraryCandidate).mockResolvedValue({
-      libraryId: 'tmp', enteredRoot: '/tmp', canonicalRoot: '/physical/tmp', packageManifest: { state: 'present' }
+      kind: 'directory', libraryId: 'tmp', enteredRoot: '/tmp', canonicalRoot: '/physical/tmp', packageManifest: { state: 'present' }
     });
     const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
     await waitForDashboard(view);
@@ -998,7 +1056,7 @@ describe('TuiApp', () => {
     const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
     await waitForDashboard(view);
     view.stdin.write('a');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('Absolute root'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Absolute path'));
     view.rerender(<TuiApp service={service} dimensions={{ columns: 59, rows: 15 }} />);
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Physical library root'));
     expect(view.lastFrame()).toContain('Enter next  Esc back/cancel');
@@ -1949,14 +2007,18 @@ describe('TuiApp', () => {
       path: `/library/skills/${skillId}/SKILL.md`,
       contents: Array.from({ length: 30 }, (_, index) => `preview-${String(index).padStart(2, '0')}`).join('\n')
     }));
-    vi.mocked(service.browseDirectories).mockImplementation(async (input) => ({
+    vi.mocked(service.inspectLibraryInput).mockImplementation(async (input) => ({
+      kind: 'directory',
       input,
-      resolvedPath: '/tmp',
-      selectablePath: '/tmp',
-      entries: Array.from({ length: 10 }, (_, index) => ({
-        name: `directory-${index}`,
-        path: `/tmp/directory-${index}`
-      }))
+      browser: {
+        input,
+        resolvedPath: '/tmp',
+        selectablePath: '/tmp',
+        entries: Array.from({ length: 10 }, (_, index) => ({
+          name: `directory-${index}`,
+          path: `/tmp/directory-${index}`
+        }))
+      }
     }));
     const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
 
@@ -2814,26 +2876,30 @@ function fakeService(): BazframeTuiService & Record<string, ReturnType<typeof vi
       path: `/library/skills/${skillId}/SKILL.md`,
       contents: `---\nname: ${skillId}\ndescription: preview\n---\nPreview body\n`
     })),
-    browseDirectories: vi.fn(async (input) => ({
+    inspectLibraryInput: vi.fn(async (input) => ({
+      kind: 'directory' as const,
       input,
-      resolvedPath: '/tmp',
-      selectablePath: '/tmp',
-      entries: [{ name: 'skills', path: '/tmp/skills' }]
+      browser: {
+        input,
+        resolvedPath: '/tmp',
+        selectablePath: '/tmp',
+        entries: [{ name: 'skills', path: '/tmp/skills' }]
+      }
     })),
-    inspectLibraryCandidate: vi.fn(async ({ root }) => ({
-      libraryId: root.split('/').filter(Boolean).at(-1) ?? 'library',
-      enteredRoot: root,
-      canonicalRoot: root,
+    inspectLibraryCandidate: vi.fn(async ({ source }) => ({
+      kind: 'directory' as const,
+      libraryId: source.split('/').filter(Boolean).at(-1) ?? 'library',
+      enteredRoot: source,
+      canonicalRoot: source,
       packageManifest: { state: 'absent' as const }
     })),
-    addLibrary: vi.fn(async ({ root }) => ({
+    addLibrary: vi.fn(async ({ source }) => ({
       schemaVersion: 1 as const,
-      library: root.split('/').filter(Boolean).at(-1) ?? 'library',
-      root,
+      library: source.split('/').filter(Boolean).at(-1) ?? 'library',
+      root: source,
       digest: 'a'.repeat(64),
-      skillsRoot: '.',
       action: 'added' as const,
-      path: `/home/libraries/${root.split('/').filter(Boolean).at(-1) ?? 'library'}.json`
+      path: `/home/libraries/${source.split('/').filter(Boolean).at(-1) ?? 'library'}.json`
     }))
   };
 }

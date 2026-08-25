@@ -2,6 +2,7 @@ import { assertSafeForwardedPiArgs } from '../agents/pi-args.js';
 import { isAbsolute } from 'node:path';
 import { BazframeError } from '../core/errors.js';
 import { isSafeProfileId } from '../profiles/profile-id.js';
+import { isManagedGitSource } from '../providers/managed-git.js';
 import { isSafeSkillId } from '../skills/skill-id.js';
 
 export type HelpTopic =
@@ -292,7 +293,7 @@ function parseCollections(kind: 'library' | 'package', args: readonly string[]):
     const yes = kind === 'package' && rest.length === 2 && rest[1] === '--yes';
     if (!(rest.length === 1 || yes)) return usageError(`${plural} add requires one <absolute-root-or-git-source>${kind === 'package' ? ' followed only by optional --yes' : ''}.`, topic);
     const root = rest[0];
-    if ((!isAbsolute(root) && !looksLikeManagedGitSource(root)) || root.includes('\0')) return usageError(`${kind === 'library' ? 'Library' : 'Package'} input must be an absolute path or managed Git source without NUL bytes.`, topic);
+    if ((!isAbsolute(root) && !isManagedGitSource(root)) || root.includes('\0')) return usageError(`${kind === 'library' ? 'Library' : 'Package'} input must be an absolute path or managed Git source without NUL bytes.`, topic);
     if (yes && isAbsolute(root)) return usageError('--yes applies only to managed Git package acquisition.', topic);
     return { kind: 'command', command: { name: `${plural}-add`, root, ...(kind === 'package' ? { yes } : {}) } as Command };
   }
@@ -336,7 +337,7 @@ function parseDefaultSkillLifecycle(name: 'add' | 'remove', args: readonly strin
   }
   const value = args[1];
   if (name === 'add') {
-    if ((!isAbsolute(value) && !looksLikeManagedGitSource(value)) || value.length === 0 || value.includes('\0')) {
+    if ((!isAbsolute(value) && !isManagedGitSource(value)) || value.length === 0 || value.includes('\0')) {
       return usageError('Skill input must be an absolute path or managed Git source without NUL bytes.', topic);
     }
     return { kind: 'command', command: { name: 'default-skill-add', skillRoot: value } };
@@ -365,11 +366,6 @@ function parseMembership(
       ? { name: `profile-skill-${name}`, skillId }
       : { name: `profile-skill-${name}`, skillId, profileId }
   } as ParseResult;
-}
-
-function looksLikeManagedGitSource(value: string): boolean {
-  return value.startsWith('git:') || value.startsWith('https://') || value.startsWith('ssh://')
-    || value.startsWith('file:') || /^[^/\s@]+@[^:]+:/u.test(value);
 }
 
 function invalidSkillId(topic: HelpTopic): ParseResult {

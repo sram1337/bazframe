@@ -1,4 +1,5 @@
-import { realpath } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { chmod, realpath } from 'node:fs/promises';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createBazframeTuiService } from '../../src/application/tui-service.js';
 import { runCli } from '../../src/cli/run-cli.js';
@@ -136,6 +137,63 @@ describe('CLI and TUI service state agreement', () => {
     expect(await snapshotFilesystem(provider)).toEqual(providerBefore);
   });
 
+  it('acquires a managed Git library without implicit profile composition', async () => {
+    const directory = await createTempDirectory('bazframe remote library state agreement ');
+    temporaryDirectories.push(directory);
+    const home = directory.path('home');
+    const cwd = await directory.mkdir('outside git');
+    const remote = await directory.mkdir('remote/remote-library');
+    await directory.write('remote/remote-library/demo/SKILL.md', skill('remote-demo'));
+    git(['init', '-b', 'main'], remote);
+    git(['config', 'user.name', 'Test'], remote);
+    git(['config', 'user.email', 'test@example.com'], remote);
+    git(['add', '.'], remote);
+    git(['commit', '-m', 'initial'], remote);
+    const gitWrapper = await managedGitWrapper(directory);
+    const environment: NodeJS.ProcessEnv = {
+      ...process.env,
+      BAZFRAME_HOME: home,
+      PI_CODING_AGENT_DIR: directory.path('pi-agent'),
+      NO_COLOR: '1',
+      BAZFRAME_GIT_COMMAND: gitWrapper,
+      BAZFRAME_GH_COMMAND: directory.path('missing-gh'),
+      REAL_GIT: gitExecutable(),
+      TEST_REMOTE: remote
+    };
+    const service = createBazframeTuiService({
+      bazframeHome: home,
+      bazframeVersion: '0.0.0-integration-test',
+      cwd,
+      environment,
+      userHome: directory.root
+    });
+    await service.createProfile('focused');
+    await service.useProfile('focused');
+    const source = 'git:test-owner/remote-library';
+
+    await expect(service.inspectLibraryInput(source)).resolves.toMatchObject({
+      kind: 'managed-git', libraryId: 'remote-library',
+      remote: 'github.com/test-owner/remote-library'
+    });
+    await expect(service.inspectLibraryCandidate({ source })).resolves.toMatchObject({
+      kind: 'managed-git', libraryId: 'remote-library', enteredSource: source
+    });
+    const added = await service.addLibrary({ source });
+
+    expect(added).toMatchObject({
+      action: 'added', kind: 'library', id: 'remote-library',
+      remote: 'github.com/test-owner/remote-library'
+    });
+    const dashboard = await service.loadDashboard();
+    const managedRoot = await realpath(directory.path(
+      'home/providers/git/checkouts/library/remote-library'
+    ));
+    expect(dashboard.collections).toContainEqual(expect.objectContaining({
+      kind: 'library', id: 'remote-library', referenceCount: 0, root: managedRoot
+    }));
+    expect(dashboard.profiles[0]?.libraryReferences).toEqual([]);
+  });
+
   it('shares prepared-library addition without implicit profile composition or provider mutation', async () => {
     const directory = await createTempDirectory('bazframe source state agreement ');
     temporaryDirectories.push(directory);
@@ -163,7 +221,7 @@ describe('CLI and TUI service state agreement', () => {
     await service.useProfile('spare');
     const providerBefore = await snapshotFilesystem(provider);
 
-    const added = await service.addLibrary({ root: provider });
+    const added = await service.addLibrary({ source: provider });
     expect(added).toMatchObject({ action: 'added', library: 'downloaded' });
 
     const overview = await cli(['libraries']);
@@ -203,6 +261,31 @@ async function runCapturedCli(
     writeStderr: (text) => { stderr += text; }
   });
   return { status, stdout, stderr };
+}
+
+async function managedGitWrapper(directory: TempDirectory): Promise<string> {
+  const wrapper = directory.path('git-wrapper.mjs');
+  await directory.write('git-wrapper.mjs', `#!/usr/bin/env node
+import{spawnSync}from'node:child_process';
+const args=process.argv.slice(2);const real=process.env.REAL_GIT;let original;
+if(args.includes('clone')){const index=args.findIndex(value=>/^https?:|^ssh:/.test(value));if(index<0)process.exit(88);original=args[index];args[index]=process.env.TEST_REMOTE;const protocol=args.indexOf('protocol.file.allow=never');if(protocol>=0)args[protocol]='protocol.file.allow=always';}
+const result=spawnSync(real,args,{stdio:'inherit',env:process.env});if(result.status!==0)process.exit(result.status??1);
+if(original){const destination=args.at(-1);const changed=spawnSync(real,['-C',destination,'remote','set-url','origin',original],{stdio:'inherit',env:process.env});process.exit(changed.status??1);}
+`);
+  await chmod(wrapper, 0o755);
+  return wrapper;
+}
+
+function git(args: string[], cwd: string): string {
+  const result = spawnSync(gitExecutable(), args, { cwd, encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(result.stderr || `git failed: ${args.join(' ')}`);
+  return result.stdout;
+}
+
+function gitExecutable(): string {
+  const result = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' });
+  if (result.status !== 0) throw new Error('git is required for managed Git integration tests');
+  return result.stdout.trim();
 }
 
 function skill(name: string): string {

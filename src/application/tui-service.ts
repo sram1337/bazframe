@@ -57,6 +57,12 @@ import { PACKAGE_MANIFEST } from '../packages/package-manifest.js';
 import { canonicalPhysicalCollectionRoot, collectionKey, idForRecord, kindForRecord, skillsRootForRecord, type SkillCollectionKind } from '../skill-collections/skill-collection-store.js';
 import { addLibrary as addGlobalLibrary, type SkillCollectionLifecycleResult } from '../skill-collections/skill-collection-lifecycle.js';
 import {
+  addManagedGitLibrary,
+  isManagedGitSource,
+  parseManagedGitSource,
+  type ManagedGitLifecycleResult
+} from '../providers/managed-git.js';
+import {
   captureProfileCollectionReferenceBulkIndex,
   idForReference,
   kindForReference,
@@ -195,16 +201,35 @@ export interface DirectoryBrowserSnapshot {
   entries: DirectoryBrowserEntry[];
 }
 
-export interface LibraryCandidateSummary {
-  libraryId: string;
-  enteredRoot: string;
-  canonicalRoot: string;
-  packageManifest: { state: 'absent' } | { state: 'present' };
-}
+export type LibraryInputInspection =
+  | { kind: 'directory'; input: string; browser: DirectoryBrowserSnapshot }
+  | {
+      kind: 'managed-git';
+      input: string;
+      libraryId: string;
+      remote: string;
+    };
+
+export type LibraryCandidateSummary =
+  | {
+      kind: 'directory';
+      libraryId: string;
+      enteredRoot: string;
+      canonicalRoot: string;
+      packageManifest: { state: 'absent' } | { state: 'present' };
+    }
+  | {
+      kind: 'managed-git';
+      libraryId: string;
+      enteredSource: string;
+      remote: string;
+    };
 
 export interface LibraryAddRequest {
-  root: string;
+  source: string;
 }
+
+export type LibraryAddResult = SkillCollectionLifecycleResult | ManagedGitLifecycleResult;
 
 export interface MembershipReference extends SkillReference {
   membershipId: string;
@@ -223,9 +248,9 @@ export interface BazframeTuiService {
   addMembership(profileId: string, skill: SkillReference): Promise<void>;
   removeMembership(profileId: string, membership: MembershipReference): Promise<void>;
   loadSkillPreview(skill: SkillReference): Promise<SkillPreview>;
-  browseDirectories(input: string): Promise<DirectoryBrowserSnapshot>;
+  inspectLibraryInput(input: string): Promise<LibraryInputInspection>;
   inspectLibraryCandidate(request: LibraryAddRequest): Promise<LibraryCandidateSummary>;
-  addLibrary(request: LibraryAddRequest): Promise<SkillCollectionLifecycleResult>;
+  addLibrary(request: LibraryAddRequest): Promise<LibraryAddResult>;
 }
 
 export interface BazframeTuiServiceOptions extends ProfileSkillMembershipOptions {
@@ -322,21 +347,36 @@ export function createBazframeTuiService(
     async loadSkillPreview(skill) {
       return loadSkillPreview(options, skill);
     },
-    async browseDirectories(input) {
-      return browseDirectories(options, input);
+    async inspectLibraryInput(input) {
+      return inspectLibraryInput(options, input);
     },
     async inspectLibraryCandidate(request) {
-      const enteredRoot = expandBrowserPath(options, request.root);
+      if (isManagedGitSource(request.source)) {
+        const source = parseManagedGitSource(request.source);
+        return {
+          kind: 'managed-git',
+          libraryId: source.id,
+          enteredSource: request.source,
+          remote: source.remote
+        };
+      }
+      const enteredRoot = expandBrowserPath(options, request.source);
       const canonicalRoot = await canonicalPhysicalCollectionRoot(enteredRoot, 'library');
       const libraryId = basename(canonicalRoot);
       assertSafeSkillId(libraryId);
-      let packageManifest: LibraryCandidateSummary['packageManifest'] = { state: 'absent' };
+      let packageManifest: Extract<LibraryCandidateSummary, { kind: 'directory' }>['packageManifest'] = { state: 'absent' };
       try { await lstat(join(canonicalRoot, PACKAGE_MANIFEST)); packageManifest = { state: 'present' }; }
       catch (error) { if (errorCode(error) !== 'ENOENT') throw error; }
-      return { libraryId, enteredRoot, canonicalRoot, packageManifest };
+      return { kind: 'directory', libraryId, enteredRoot, canonicalRoot, packageManifest };
     },
     async addLibrary(request) {
-      const root = expandBrowserPath(options, request.root);
+      if (isManagedGitSource(request.source)) {
+        return addManagedGitLibrary({
+          bazframeHome: options.bazframeHome,
+          environment: options.environment
+        }, request.source);
+      }
+      const root = expandBrowserPath(options, request.source);
       return addGlobalLibrary(options, root);
     }
   };
@@ -376,6 +416,22 @@ async function loadSkillPreview(
     path: definitionPath,
     contents: await readUtf8InstructionFile(definitionPath, 'Skill definition')
   };
+}
+
+async function inspectLibraryInput(
+  options: BazframeTuiServiceOptions,
+  input: string
+): Promise<LibraryInputInspection> {
+  if (isManagedGitSource(input)) {
+    const source = parseManagedGitSource(input);
+    return {
+      kind: 'managed-git',
+      input,
+      libraryId: source.id,
+      remote: source.remote
+    };
+  }
+  return { kind: 'directory', input, browser: await browseDirectories(options, input) };
 }
 
 async function browseDirectories(

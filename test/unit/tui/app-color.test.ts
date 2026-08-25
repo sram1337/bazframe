@@ -174,12 +174,17 @@ async function renderIsolatedApp(dimensions = { columns: 60, rows: 16 }) {
     loadSkillPreview: vi.fn(async ({ originId, skillId }) => ({
       originId, skillId, path: `/skills/${skillId}/SKILL.md`, contents: `# ${skillId}\n`
     })),
-    browseDirectories: vi.fn(async (input) => ({ input, resolvedPath: '/tmp', selectablePath: '/tmp', entries: [] })),
-    inspectLibraryCandidate: vi.fn(async ({ root }) => ({
-      libraryId: root.split('/').filter(Boolean).at(-1) ?? 'library', enteredRoot: root, canonicalRoot: root, packageManifest: { state: 'absent' as const }
+    inspectLibraryInput: vi.fn(async (input) => ({
+      kind: 'directory' as const, input,
+      browser: { input, resolvedPath: '/tmp', selectablePath: '/tmp', entries: [] }
     })),
-    addLibrary: vi.fn(async ({ root }) => ({
-      schemaVersion: 1 as const, library: root.split('/').filter(Boolean).at(-1) ?? 'library', root,
+    inspectLibraryCandidate: vi.fn(async ({ source }) => ({
+      kind: 'directory' as const,
+      libraryId: source.split('/').filter(Boolean).at(-1) ?? 'library',
+      enteredRoot: source, canonicalRoot: source, packageManifest: { state: 'absent' as const }
+    })),
+    addLibrary: vi.fn(async ({ source }) => ({
+      schemaVersion: 1 as const, library: source.split('/').filter(Boolean).at(-1) ?? 'library', root: source,
       digest: 'a'.repeat(64), action: 'added' as const, path: '/libraries/library.json'
     }))
   } satisfies BazframeTuiService;

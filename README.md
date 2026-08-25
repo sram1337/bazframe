@@ -45,7 +45,7 @@ npm install --global bazframe@next
 bazframe --version
 ```
 
-The version command should report `Bazframe 2 0.1.0-beta.1`. The first publication is also tagged `latest`; `next` remains the explicit beta channel. To update within that channel, run `npm install --global bazframe@next`, then rerun `bazframe adapter install pi` so Pi receives the packaged adapter version.
+The version command should report `Bazframe 2 0.1.0-beta.2`. The first publication remains tagged `latest`; `next` is the explicit beta channel. To update within that channel, run `npm install --global bazframe@next`, then rerun `bazframe adapter install pi` so Pi receives the packaged adapter version.
 
 ## Quick start
 
@@ -261,7 +261,7 @@ bazframe projects         # inspect repository settings
 bazframe tui
 ```
 
-Press `?` for its key guide. In Skills, `o`/`c` expand or collapse groups and `a` can add an already-prepared library. The library ID is its canonical root basename, and final literal `y` creates no profile reference. Package writes and all profile library/package reference changes remain CLI-only.
+Press `?` for its key guide. In Skills, `o`/`c` expand or collapse groups and `a` can add an already-prepared local library or acquire one from a managed Git source. Local library IDs use the canonical root basename; managed Git IDs use the normalized repository name. Final literal `y` is required and creates no profile reference. Package writes and all profile library/package reference changes remain CLI-only.
 
 ## Command map
 

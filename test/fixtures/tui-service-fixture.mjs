@@ -57,25 +57,30 @@ export function createBazframeTuiService() {
       path: '/fixture/library/skills/demo-skill/SKILL.md',
       contents: '---\nname: demo-skill\ndescription: fixture\n---\n\nTUI-PREVIEW-SENTINEL\n'
     }),
-    browseDirectories: async (input) => ({
+    inspectLibraryInput: async (input) => ({
+      kind: 'directory',
       input,
-      resolvedPath: '/fixture',
-      selectablePath: '/fixture',
-      entries: []
+      browser: {
+        input,
+        resolvedPath: '/fixture',
+        selectablePath: '/fixture',
+        entries: []
+      }
     }),
-    inspectLibraryCandidate: async ({ root }) => ({
-      libraryId: root.split('/').filter(Boolean).at(-1) ?? 'library',
-      enteredRoot: root,
-      canonicalRoot: root,
+    inspectLibraryCandidate: async ({ source }) => ({
+      kind: 'directory',
+      libraryId: source.split('/').filter(Boolean).at(-1) ?? 'library',
+      enteredRoot: source,
+      canonicalRoot: source,
       packageManifest: { state: 'absent' }
     }),
-    addLibrary: async ({ root }) => ({
+    addLibrary: async ({ source }) => ({
       schemaVersion: 1,
-      library: root.split('/').filter(Boolean).at(-1) ?? 'library',
-      root,
+      library: source.split('/').filter(Boolean).at(-1) ?? 'library',
+      root: source,
       digest: 'a'.repeat(64),
       action: 'added',
-      path: `/fixture/libraries/${root.split('/').filter(Boolean).at(-1) ?? 'library'}.json`
+      path: `/fixture/libraries/${source.split('/').filter(Boolean).at(-1) ?? 'library'}.json`
     })
   };
 }

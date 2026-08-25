@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { authorizeManagedGitPackageBuild, managedGitCloneInvocation, normalizeManagedGitOrigin, parseManagedGitSource, safeDiagnostic } from '../../../src/providers/managed-git.js';
+import { authorizeManagedGitPackageBuild, isManagedGitSource, managedGitCloneInvocation, normalizeManagedGitOrigin, parseManagedGitSource, safeDiagnostic } from '../../../src/providers/managed-git.js';
 import {
   decodeManagedGitJournal,
   decodeManagedGitRecord,
@@ -36,6 +36,19 @@ describe('managed Git source and provenance', () => {
     expect(normalizeManagedGitOrigin('git@github.com:sram1337/personal-agent-network.git')).toMatchObject({
       remote: 'github.com/sram1337/personal-agent-network', id: 'personal-agent-network'
     });
+  });
+
+  it('classifies the exact lowercase source forms accepted by command routing', () => {
+    for (const source of [
+      'git:owner/toolkit',
+      'https://example.com/owner/toolkit',
+      'ssh://git@example.com/owner/toolkit',
+      'file:///tmp/toolkit',
+      'git@example.com:owner/toolkit'
+    ]) expect(isManagedGitSource(source)).toBe(true);
+    for (const source of ['HTTPS://example.com/owner/toolkit', 'relative/toolkit', '/tmp/toolkit']) {
+      expect(isManagedGitSource(source)).toBe(false);
+    }
   });
 
   it('selects authenticated GitHub CLI cloning and shell-free Git fallback argv', () => {

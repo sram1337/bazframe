@@ -147,7 +147,7 @@ describe('parseArgv', () => {
     expect(parseArgv(['profile','libraries','add','tools','--profile','reviewer'])).toEqual({kind:'command',command:{name:'profile-libraries-add',id:'tools',profileId:'reviewer'}});
     expect(parseArgv(['profile','packages','remove','suite'])).toEqual({kind:'command',command:{name:'profile-packages-remove',id:'suite'}});
     expect(parseArgv(['help','packages','build'])).toEqual({kind:'help',topic:'packages-build'});
-    for (const argv of [['source'],['sources'],['sources','add','/root'],['profile','sources'],['library'],['package'],['libraries','build','tools'],['libraries','add','relative'],['packages','remove','Bad']]) expect(parseArgv(argv)).toMatchObject({kind:'usage-error'});
+    for (const argv of [['source'],['sources'],['sources','add','/root'],['profile','sources'],['library'],['package'],['libraries','build','tools'],['libraries','add','relative'],['libraries','add','HTTPS://example.com/owner/tools'],['packages','remove','Bad']]) expect(parseArgv(argv)).toMatchObject({kind:'usage-error'});
   });
 
   it('rejects malformed profile lifecycle arguments without changing skill commands', () => {

@@ -24,9 +24,9 @@ import type {
   ProfileSummary,
   SkillGroupSummary,
   SkillSummary,
-  DirectoryBrowserSnapshot,
   SkillPreview,
-  LibraryCandidateSummary
+  LibraryCandidateSummary,
+  LibraryInputInspection
 } from '../application/tui-service.js';
 import type { ChildResult } from '../core/child-process.js';
 import { BazframeError } from '../core/errors.js';
@@ -61,6 +61,11 @@ interface UiMessage {
   tone: MessageTone;
   text: string;
 }
+
+type LibraryInputState =
+  | { state: 'loading' }
+  | { state: 'available'; value: LibraryInputInspection }
+  | { state: 'error'; message: string };
 
 const MIN_COLUMNS = 60;
 const MIN_ROWS = 16;
@@ -103,7 +108,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
     | { state: 'available'; value: SkillPreview }
     | { state: 'error'; originId: string; skillId: string; message: string }
   >();
-  const [directoryBrowser, setDirectoryBrowser] = useState<DirectoryBrowserSnapshot>();
+  const [libraryInput, setLibraryInput] = useState<LibraryInputState>();
   const [browserChoice, setBrowserChoice] = useState(-1);
   const [browserOffset, setBrowserOffset] = useState(0);
   const [libraryCandidate, setLibraryCandidate] = useState<LibraryCandidateSummary>();
@@ -179,17 +184,17 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
     const generation = ++browserGeneration.current;
     ++libraryInspectionGeneration.current;
     if (modal?.kind !== 'library-root') {
-      setDirectoryBrowser(undefined);
+      setLibraryInput(undefined);
       setBrowserChoice(-1);
       setBrowserOffset(0);
       if (modal?.kind !== 'library-confirm') setLibraryCandidate(undefined);
       return;
     }
-    setDirectoryBrowser(undefined);
+    setLibraryInput({ state: 'loading' });
     setBrowserChoice(-1);
     setBrowserOffset(0);
     setLibraryCandidate(undefined);
-    void service.browseDirectories(modal.value)
+    void service.inspectLibraryInput(modal.value)
       .then((value) => {
         if (generation === browserGeneration.current) {
           const currentModal = stateRef.current.modal;
@@ -197,7 +202,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
             currentModal?.kind !== 'library-root'
             || currentModal.value !== value.input
           ) return;
-          setDirectoryBrowser(value);
+          setLibraryInput({ state: 'available', value });
           setBrowserChoice(-1);
           setBrowserOffset(0);
         }
@@ -206,8 +211,9 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
         if (generation !== browserGeneration.current) return;
         const currentModal = stateRef.current.modal;
         if (currentModal?.kind !== 'library-root' || currentModal.value !== modal.value) return;
-        setDirectoryBrowser(undefined);
-        setMessage({ tone: 'error', text: messageFor(error) });
+        const text = messageFor(error);
+        setLibraryInput({ state: 'error', message: text });
+        setMessage({ tone: 'error', text });
       });
   }, [service, state.modal?.kind, state.modal?.value]);
 
@@ -344,13 +350,19 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
       return;
     }
     if (modal.kind === 'library-root') {
+      const inspectedInput = libraryInput?.state === 'available'
+        ? libraryInput.value
+        : undefined;
+      const directoryBrowser = inspectedInput?.kind === 'directory'
+        ? inspectedInput.browser
+        : undefined;
       const selectedEntry = browserChoice < 0
         ? undefined
         : directoryBrowser?.entries[browserChoice];
       if (selectedEntry !== undefined) {
         ++libraryInspectionGeneration.current;
         setLibraryCandidate(undefined);
-        setDirectoryBrowser(undefined);
+        setLibraryInput(undefined);
         setBrowserChoice(-1);
         setBrowserOffset(0);
         dispatch({
@@ -359,14 +371,21 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
         });
         return;
       }
-      const root = directoryBrowser?.selectablePath;
-      if (root === undefined) {
-        setMessage({ tone: 'error', text: 'Select an existing physical directory.' });
+      const source = inspectedInput?.kind === 'managed-git'
+        ? inspectedInput.input
+        : directoryBrowser?.selectablePath;
+      if (source === undefined) {
+        setMessage({
+          tone: 'error',
+          text: libraryInput?.state === 'error'
+            ? libraryInput.message
+            : 'Select an existing physical directory or enter a valid managed Git source.'
+        });
         return;
       }
       const generation = ++libraryInspectionGeneration.current;
       setLibraryCandidate(undefined);
-      void service.inspectLibraryCandidate({ root }).then((candidate) => {
+      void service.inspectLibraryCandidate({ source }).then((candidate) => {
         const currentModal = stateRef.current.modal;
         if (
           generation !== libraryInspectionGeneration.current
@@ -380,9 +399,11 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
             kind: 'library-confirm',
             value: '',
             originId: candidate.libraryId,
-            root: candidate.enteredRoot,
-            enteredRoot: candidate.enteredRoot,
-            canonicalRoot: candidate.canonicalRoot
+            root: libraryCandidateAddSource(candidate),
+            enteredRoot: libraryCandidateEnteredSource(candidate),
+            ...(candidate.kind === 'directory'
+              ? { canonicalRoot: candidate.canonicalRoot }
+              : {})
           }
         });
       }).catch((error: unknown) => {
@@ -484,7 +505,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
         }
       );
     }
-  }, [browserChoice, directoryBrowser, load, mutation, mutate, service]);
+  }, [browserChoice, libraryInput, load, mutation, mutate, service]);
 
   const openProfileModal = useCallback((
     kind: 'duplicate' | 'rename',
@@ -549,11 +570,18 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
           return;
         }
         if (
-          libraryCandidate?.packageManifest.state !== 'absent'
+          libraryCandidate === undefined
           || modal.originId !== libraryCandidate.libraryId
-          || modal.enteredRoot !== libraryCandidate.enteredRoot
-          || modal.canonicalRoot !== libraryCandidate.canonicalRoot
+          || modal.root !== libraryCandidateAddSource(libraryCandidate)
+          || modal.enteredRoot !== libraryCandidateEnteredSource(libraryCandidate)
+          || modal.canonicalRoot !== (libraryCandidate.kind === 'directory'
+            ? libraryCandidate.canonicalRoot
+            : undefined)
         ) {
+          setMessage({ tone: 'error', text: 'Library authorization changed; review it again.' });
+          return;
+        }
+        if (libraryCandidateBlocked(libraryCandidate)) {
           setMessage({
             tone: 'error',
             text: 'Directories with a package manifest must be added with `bazframe packages add`.'
@@ -563,7 +591,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
         void mutate(
           'Add library',
           async () => {
-            await service.addLibrary({ root: libraryCandidate.canonicalRoot });
+            await service.addLibrary({ source: libraryCandidateAddSource(libraryCandidate) });
           },
           () => {
             setLibraryCandidate(undefined);
@@ -574,6 +602,10 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
       return;
     }
     if (modal.kind === 'library-root' && (key.upArrow || key.downArrow)) {
+      const directoryBrowser = libraryInput?.state === 'available'
+        && libraryInput.value.kind === 'directory'
+        ? libraryInput.value.browser
+        : undefined;
       const count = directoryBrowser?.entries.length ?? 0;
       if (count > 0) {
         clearTransientMessage();
@@ -592,7 +624,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
       if (modal.kind === 'library-root') {
         ++libraryInspectionGeneration.current;
         setLibraryCandidate(undefined);
-        setDirectoryBrowser(undefined);
+        setLibraryInput(undefined);
         setBrowserChoice(-1);
         setBrowserOffset(0);
       }
@@ -620,7 +652,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
       if (modal.kind === 'library-root') {
         ++libraryInspectionGeneration.current;
         setLibraryCandidate(undefined);
-        setDirectoryBrowser(undefined);
+        setLibraryInput(undefined);
         setBrowserChoice(-1);
         setBrowserOffset(0);
       }
@@ -634,14 +666,14 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
         if (modal.kind === 'library-root') {
           ++libraryInspectionGeneration.current;
           setLibraryCandidate(undefined);
-          setDirectoryBrowser(undefined);
+          setLibraryInput(undefined);
           setBrowserChoice(-1);
           setBrowserOffset(0);
         }
         dispatch({ type: 'set-modal-value', value: modal.value + printable });
       }
     }
-  }, [clearTransientMessage, directoryBrowser, mutate, service, libraryCandidate, submitModal, tooSmall]);
+  }, [clearTransientMessage, libraryInput, mutate, service, libraryCandidate, submitModal, tooSmall]);
 
   useInput((input, key) => {
     const currentState = stateRef.current;
@@ -1244,7 +1276,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
           ? <Modal
               modal={state.modal}
               busy={mutation !== undefined}
-              directoryBrowser={directoryBrowser}
+              libraryInput={libraryInput}
               browserChoice={browserChoice}
               browserOffset={browserOffset}
               libraryCandidate={libraryCandidate}
@@ -1390,9 +1422,9 @@ function BelowMinimumView({
   }
 
   if (modal.kind.startsWith('library-')) {
-    const blocked = libraryCandidate?.packageManifest.state !== 'absent';
+    const blocked = libraryCandidateBlocked(libraryCandidate);
     const step = modal.kind === 'library-root'
-      ? 'Physical library root'
+      ? 'Physical library root or managed Git source'
       : `Review ${modal.originId ?? '(unknown library)'}`;
     return (
       <Box
@@ -1407,8 +1439,16 @@ function BelowMinimumView({
         <Text wrap="truncate-end">{step}</Text>
         {modal.kind === 'library-confirm'
           ? <>
-              <Text wrap="truncate-end">Entered: {modal.enteredRoot ?? modal.root}</Text>
-              <Text wrap="truncate-end">Canonical: {modal.canonicalRoot ?? '(unavailable)'}</Text>
+              <Text wrap="truncate-end">
+                {libraryCandidate?.kind === 'managed-git'
+                  ? `Source: ${libraryCandidate.enteredSource}`
+                  : `Entered: ${modal.enteredRoot ?? modal.root}`}
+              </Text>
+              <Text wrap="truncate-end">
+                {libraryCandidate?.kind === 'managed-git'
+                  ? `Remote: ${libraryCandidate.remote}`
+                  : `Canonical: ${modal.canonicalRoot ?? '(unavailable)'}`}
+              </Text>
               <Text color={blocked ? 'red' : 'yellow'} wrap="truncate-end">
                 {blocked ? 'Package manifest present; use `bazframe packages add`.' : 'Resize to authorize; y is disabled here.'}
               </Text>
@@ -2246,14 +2286,14 @@ function Settings({
 function Modal({
   modal,
   busy,
-  directoryBrowser,
+  libraryInput,
   browserChoice,
   browserOffset,
   libraryCandidate
 }: {
   modal: TuiModal;
   busy: boolean;
-  directoryBrowser: DirectoryBrowserSnapshot | undefined;
+  libraryInput: LibraryInputState | undefined;
   browserChoice: number;
   browserOffset: number;
   libraryCandidate: LibraryCandidateSummary | undefined;
@@ -2273,37 +2313,64 @@ function Modal({
     );
   }
   if (modal.kind === 'library-root') {
+    const directoryBrowser = libraryInput?.state === 'available'
+      && libraryInput.value.kind === 'directory'
+      ? libraryInput.value.browser
+      : undefined;
+    const managedGit = libraryInput?.state === 'available'
+      && libraryInput.value.kind === 'managed-git'
+      ? libraryInput.value
+      : undefined;
     return (
       <FocusedOverlay>
-        <Text bold wrap="truncate-end">Add library - Absolute root or ~/ path</Text>
-        <Text inverse wrap="truncate-start">Path: {modal.value.length === 0 ? ' ' : modal.value}</Text>
-        {directoryBrowser === undefined
-          ? <Text dimColor>Loading directories...</Text>
-          : <>
-              <Text dimColor wrap="truncate-end">Current: {directoryBrowser.selectablePath ?? directoryBrowser.resolvedPath}</Text>
-              <ScrollableRows
-                rows={directoryBrowser.entries}
-                offset={browserOffset}
-                maxRows={4}
-                renderRow={(entry, index) => (
-                  <Text key={entry.path} inverse={browserChoice === index} wrap="truncate-end">  {entry.path}</Text>
-                )}
-              />
-            </>}
-        <Text bold>Up/Down choose  Enter select/review  Esc back</Text>
+        <Text bold wrap="truncate-end">Add library - Absolute path, ~/ path, or managed Git source</Text>
+        <Text inverse wrap="truncate-start">Source: {modal.value.length === 0 ? ' ' : modal.value}</Text>
+        {libraryInput === undefined || libraryInput.state === 'loading'
+          ? <Text dimColor>Inspecting source...</Text>
+          : libraryInput.state === 'error'
+            ? <Text color="red" wrap="truncate-end">Source unavailable: {libraryInput.message}</Text>
+            : managedGit !== undefined
+              ? <>
+                  <Text wrap="truncate-end">Managed Git library: {managedGit.libraryId}</Text>
+                  <Text dimColor wrap="truncate-end">Remote: {managedGit.remote}</Text>
+                </>
+              : directoryBrowser === undefined
+                ? <Text color="red">Source inspection returned no usable input.</Text>
+                : <>
+                    <Text dimColor wrap="truncate-end">Current: {directoryBrowser.selectablePath ?? directoryBrowser.resolvedPath}</Text>
+                    <ScrollableRows
+                      rows={directoryBrowser.entries}
+                      offset={browserOffset}
+                      maxRows={4}
+                      renderRow={(entry, index) => (
+                        <Text key={entry.path} inverse={browserChoice === index} wrap="truncate-end">  {entry.path}</Text>
+                      )}
+                    />
+                  </>}
+        <Text bold>Up/Down choose  Enter review  Esc back</Text>
       </FocusedOverlay>
     );
   }
   if (modal.kind === 'library-confirm') {
-    const blocked = libraryCandidate?.packageManifest.state !== 'absent';
+    const blocked = libraryCandidateBlocked(libraryCandidate);
+    const managedGit = libraryCandidate?.kind === 'managed-git' ? libraryCandidate : undefined;
     return (
       <FocusedOverlay>
         <Text bold color={blocked ? 'red' : 'yellow'}>Add library {modal.originId}</Text>
-        <Text wrap="truncate-end">Entered library root: {modal.enteredRoot ?? modal.root}</Text>
-        <Text wrap="truncate-end">Canonical library root: {modal.canonicalRoot ?? libraryCandidate?.canonicalRoot}</Text>
-        <Text wrap="truncate-end">Scope: snapshot the complete selected tree; no profile reference is added.</Text>
-        <Text wrap="truncate-end">Provider input remains provider-owned; snapshots are retained.</Text>
-        <Text wrap="truncate-end">Package builds are unsandboxed and remain CLI-only.</Text>
+        {managedGit === undefined
+          ? <>
+              <Text wrap="truncate-end">Entered library root: {modal.enteredRoot ?? modal.root}</Text>
+              <Text wrap="truncate-end">Canonical library root: {modal.canonicalRoot}</Text>
+              <Text wrap="truncate-end">Scope: snapshot the complete selected tree; no profile reference is added.</Text>
+              <Text wrap="truncate-end">Provider input remains provider-owned; snapshots are retained.</Text>
+            </>
+          : <>
+              <Text wrap="truncate-end">Managed Git source: {managedGit.enteredSource}</Text>
+              <Text wrap="truncate-end">Remote: {managedGit.remote}</Text>
+              <Text wrap="truncate-end">Scope: acquire, validate, and snapshot this library; no profile reference is added.</Text>
+              <Text wrap="truncate-end">Network access may use configured Git or GitHub authentication.</Text>
+            </>}
+        <Text wrap="truncate-end">No provider code runs; package builds remain CLI-only.</Text>
         {blocked
           ? <>
               <Text color="red" wrap="truncate-end">Blocked: package manifest present. Use `bazframe packages add {modal.enteredRoot ?? modal.root}`.</Text>
@@ -2650,6 +2717,19 @@ function previewLines(contents: string): string[] {
       ? `\\x${code.toString(16).padStart(2, '0')}`
       : character;
   }).join(''));
+}
+
+function libraryCandidateAddSource(candidate: LibraryCandidateSummary): string {
+  return candidate.kind === 'managed-git' ? candidate.enteredSource : candidate.canonicalRoot;
+}
+
+function libraryCandidateEnteredSource(candidate: LibraryCandidateSummary): string {
+  return candidate.kind === 'managed-git' ? candidate.enteredSource : candidate.enteredRoot;
+}
+
+function libraryCandidateBlocked(candidate: LibraryCandidateSummary | undefined): boolean {
+  return candidate === undefined
+    || (candidate.kind === 'directory' && candidate.packageManifest.state !== 'absent');
 }
 
 function messageFor(error: unknown): string {
