@@ -25,13 +25,16 @@ import { resolvePiAgentDirectory } from '../state/paths.js';
 import { inspectManagedGitRecordHealth } from '../providers/managed-git.js';
 import { scanManagedGitRecords, type ManagedGitRecord } from '../providers/managed-git-record.js';
 
-export interface StatusOptions {
+export interface AdapterStatusOptions {
   bazframeHome: string;
   bazframeVersion: string;
   environment: NodeJS.ProcessEnv;
-  cwd: string;
   userHome?: string;
   artifactUrl?: URL;
+}
+
+export interface StatusOptions extends AdapterStatusOptions {
+  cwd: string;
 }
 
 export type StatusProjectState =
@@ -89,14 +92,16 @@ export type StatusGlobalPolicy =
   | { policy: 'enabled' }
   | { policy: 'disabled'; statePath: string };
 
+export interface StatusAdapterInspection {
+  state: PiAdapterInstallState;
+  targetPath: string;
+  installedBazframeVersion?: string;
+}
+
 export interface StatusInspection {
   bazframeHome: string;
   piAgentDirectory: string;
-  adapter: {
-    state: PiAdapterInstallState;
-    targetPath: string;
-    installedBazframeVersion?: string;
-  };
+  adapter: StatusAdapterInspection;
   globalPolicy: StatusGlobalPolicy;
   repository: StatusRepository;
   effectiveBehavior: StatusEffectiveBehavior;
@@ -112,8 +117,9 @@ export interface StatusResult {
   text: string;
 }
 
-export async function inspectStatus(options: StatusOptions): Promise<StatusInspection> {
-  const corrections = new Map<StatusCorrectiveAction['id'], StatusCorrectiveAction>();
+export async function inspectAdapterStatus(
+  options: AdapterStatusOptions
+): Promise<StatusAdapterInspection> {
   const adapter = await inspectPiAdapter({
     bazframeHome: options.bazframeHome,
     bazframeVersion: options.bazframeVersion,
@@ -121,6 +127,18 @@ export async function inspectStatus(options: StatusOptions): Promise<StatusInspe
     ...(options.userHome === undefined ? {} : { userHome: options.userHome }),
     ...(options.artifactUrl === undefined ? {} : { artifactUrl: options.artifactUrl })
   });
+  return {
+    state: adapter.state,
+    targetPath: adapter.targetPath,
+    ...(adapter.manifest === undefined
+      ? {}
+      : { installedBazframeVersion: adapter.manifest.bazframeVersion })
+  };
+}
+
+export async function inspectStatus(options: StatusOptions): Promise<StatusInspection> {
+  const corrections = new Map<StatusCorrectiveAction['id'], StatusCorrectiveAction>();
+  const adapter = await inspectAdapterStatus(options);
   const globalPolicy = await readGlobalPolicy(options.bazframeHome);
 
   let repository: StatusRepository = { kind: 'outside-git' };
@@ -240,13 +258,7 @@ export async function inspectStatus(options: StatusOptions): Promise<StatusInspe
   return {
     bazframeHome: options.bazframeHome,
     piAgentDirectory: resolvePiAgentDirectory(options.environment, options.userHome),
-    adapter: {
-      state: adapter.state,
-      targetPath: adapter.targetPath,
-      ...(adapter.manifest === undefined
-        ? {}
-        : { installedBazframeVersion: adapter.manifest.bazframeVersion })
-    },
+    adapter,
     globalPolicy: globalPolicy === 'enabled'
       ? { policy: 'enabled' }
       : {

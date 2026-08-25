@@ -579,6 +579,10 @@ function snapshot(
         directory: `/skills/${id}`
       }))
     }],
+    adapterStatus: {
+      state: 'unavailable',
+      diagnostic: { id: 'adapter-status', severity: 'error', message: 'Unavailable in reducer fixture.' }
+    },
     status: {
       state: 'unavailable',
       diagnostic: { id: 'setup-status', severity: 'error', message: 'Unavailable in reducer fixture.' }

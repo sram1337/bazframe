@@ -62,6 +62,40 @@ describe('TuiApp', () => {
     expect(view.lastFrame()).toContain('Left/Right or h/l moves focus');
   });
 
+  it('shows adapter state independently when setup status is unavailable', async () => {
+    const service = fakeService();
+    const dashboard = await service.loadDashboard();
+    const diagnostic = {
+      id: 'setup-status',
+      severity: 'error' as const,
+      message: 'Could not find Git on PATH.'
+    };
+    dashboard.status = { state: 'unavailable', diagnostic };
+    dashboard.adapterStatus = {
+      state: 'available',
+      value: {
+        adapter: dashboard.adapterStatus.state === 'available'
+          ? dashboard.adapterStatus.value.adapter
+          : { state: 'current', targetPath: '/pi-agent/extensions/bazframe.ts' },
+        correctiveActions: [],
+        setupDiagnostic: diagnostic
+      }
+    };
+    dashboard.diagnostics = [diagnostic];
+    vi.mocked(service.loadDashboard).mockClear();
+    const view = render(<TuiApp service={service} />);
+
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('demo-skill'));
+    view.stdin.write('3');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Pi (read-only)'));
+    expect(view.lastFrame()).toContain('State: current');
+    expect(view.lastFrame()).toContain('Setup status unavailable; adapter state shown independently.');
+    expect(view.lastFrame()).not.toContain('Adapter status unavailable');
+
+    view.stdin.write('4');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Setup status unavailable: Could not find Git on PATH.'));
+  });
+
   it('keeps profile counts bare visually and descriptive for screen readers', async () => {
     const service = fakeService();
     const visual = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
@@ -1263,12 +1297,17 @@ describe('TuiApp', () => {
   it('renders setup corrective actions without exposing settings writes', async () => {
     const service = fakeService();
     const dashboard = await service.loadDashboard();
-    if (dashboard.status.state !== 'available') throw new Error('Expected setup status fixture.');
+    if (dashboard.status.state !== 'available' || dashboard.adapterStatus.state !== 'available') {
+      throw new Error('Expected setup status fixture.');
+    }
     dashboard.status.value.adapter.state = 'missing';
-    dashboard.status.value.correctiveActions = [{
-      id: 'adapter',
+    dashboard.adapterStatus.value.adapter.state = 'missing';
+    const correctiveActions = [{
+      id: 'adapter' as const,
       message: 'Install or update the adapter with `bazframe adapter install pi`.'
     }];
+    dashboard.status.value.correctiveActions = correctiveActions;
+    dashboard.adapterStatus.value.correctiveActions = correctiveActions;
     vi.mocked(service.loadDashboard).mockClear();
     const view = render(<TuiApp service={service} />);
     await waitForDashboard(view);
@@ -2713,6 +2752,17 @@ function fakeService(): BazframeTuiService & Record<string, ReturnType<typeof vi
         directory: '/library/skills/demo-skill'
       }]
     }],
+    adapterStatus: {
+      state: 'available',
+      value: {
+        adapter: {
+          state: 'current',
+          targetPath: '/pi-agent/extensions/bazframe.ts',
+          installedBazframeVersion: '0.1.0-test'
+        },
+        correctiveActions: []
+      }
+    },
     status: {
       state: 'available',
       value: {

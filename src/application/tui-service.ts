@@ -39,7 +39,13 @@ import {
   readDefaultSkillRegistration,
   type DefaultSkillRegistration
 } from '../skills/default-skill-catalog.js';
-import { inspectStatus, type StatusInspection } from '../status/status.js';
+import {
+  inspectAdapterStatus,
+  inspectStatus,
+  type StatusAdapterInspection,
+  type StatusCorrectiveAction,
+  type StatusInspection
+} from '../status/status.js';
 import {
   formatSkillCollectionDiagnostic,
   inspectGlobalSkillCollections,
@@ -137,6 +143,16 @@ export type DashboardSetupStatus =
   | { state: 'available'; value: StatusInspection }
   | { state: 'unavailable'; diagnostic: DashboardDiagnostic };
 
+export interface DashboardAdapterInspection {
+  adapter: StatusAdapterInspection;
+  correctiveActions: readonly StatusCorrectiveAction[];
+  setupDiagnostic?: DashboardDiagnostic;
+}
+
+export type DashboardAdapterStatus =
+  | { state: 'available'; value: DashboardAdapterInspection }
+  | { state: 'unavailable'; diagnostic: DashboardDiagnostic };
+
 export interface DashboardSnapshot {
   revision: number;
   activeProfileId?: string;
@@ -144,6 +160,7 @@ export interface DashboardSnapshot {
   collections?: SkillCollectionSummary[];
   skillGroups?: SkillGroupSummary[];
   availableSkillGroups?: SkillGroupSummary[];
+  adapterStatus: DashboardAdapterStatus;
   status: DashboardSetupStatus;
   diagnostics: DashboardDiagnostic[];
 }
@@ -497,7 +514,7 @@ async function inspectDashboard(
       message: `Favorite profile ${JSON.stringify(profileId)} is not a current physical profile. The stored favorite is retained but not displayed.`
     });
   }
-  const status = await inspectSetupStatus(options, diagnostics);
+  const { adapterStatus, status } = await inspectSetupStatuses(options, diagnostics);
   const availableSkillGroups = defaultCatalog === undefined ? [] : [defaultCatalog.group];
   return {
     revision,
@@ -506,33 +523,63 @@ async function inspectDashboard(
     collections,
     skillGroups: [...availableSkillGroups, ...collectionGroups],
     availableSkillGroups,
+    adapterStatus,
     status,
     diagnostics
   };
 }
 
-async function inspectSetupStatus(
+async function inspectSetupStatuses(
   options: BazframeTuiServiceOptions,
   diagnostics: DashboardDiagnostic[]
-): Promise<DashboardSetupStatus> {
+): Promise<{
+  adapterStatus: DashboardAdapterStatus;
+  status: DashboardSetupStatus;
+}> {
+  const inspectionOptions = {
+    bazframeHome: options.bazframeHome,
+    bazframeVersion: options.bazframeVersion,
+    environment: options.environment,
+    ...(options.userHome === undefined ? {} : { userHome: options.userHome }),
+    ...(options.adapterArtifactUrl === undefined
+      ? {}
+      : { artifactUrl: options.adapterArtifactUrl })
+  };
   try {
+    const value = await inspectStatus({ ...inspectionOptions, cwd: options.cwd });
     return {
-      state: 'available',
-      value: await inspectStatus({
-        bazframeHome: options.bazframeHome,
-        bazframeVersion: options.bazframeVersion,
-        environment: options.environment,
-        cwd: options.cwd,
-        ...(options.userHome === undefined ? {} : { userHome: options.userHome }),
-        ...(options.adapterArtifactUrl === undefined
-          ? {}
-          : { artifactUrl: options.adapterArtifactUrl })
-      })
+      adapterStatus: {
+        state: 'available',
+        value: {
+          adapter: value.adapter,
+          correctiveActions: value.correctiveActions.filter((action) => action.id === 'adapter')
+        }
+      },
+      status: { state: 'available', value }
     };
   } catch (error) {
     const statusDiagnostic = diagnostic('setup-status', error);
     diagnostics.push(statusDiagnostic);
-    return { state: 'unavailable', diagnostic: statusDiagnostic };
+    try {
+      return {
+        adapterStatus: {
+          state: 'available',
+          value: {
+            adapter: await inspectAdapterStatus(inspectionOptions),
+            correctiveActions: [],
+            setupDiagnostic: statusDiagnostic
+          }
+        },
+        status: { state: 'unavailable', diagnostic: statusDiagnostic }
+      };
+    } catch (adapterError) {
+      const adapterDiagnostic = diagnostic('adapter-status', adapterError);
+      diagnostics.push(adapterDiagnostic);
+      return {
+        adapterStatus: { state: 'unavailable', diagnostic: adapterDiagnostic },
+        status: { state: 'unavailable', diagnostic: statusDiagnostic }
+      };
+    }
   }
 }
 

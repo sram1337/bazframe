@@ -150,6 +150,14 @@ function dashboard() {
       }
     });
   } else {
+    value.adapterStatus = {
+      state: 'unavailable',
+      diagnostic: {
+        id: 'fixture-adapter-status',
+        severity: 'warning',
+        message: 'Fixture adapter status unavailable.'
+      }
+    };
     value.status = {
       state: 'unavailable',
       diagnostic: {

@@ -49,6 +49,10 @@ describe('Bazframe TUI service', () => {
       artifactWritesSupported: false,
       skills: [{ id: 'demo-skill', originId: 'default' }]
     }]);
+    expect(first.adapterStatus).toMatchObject({
+      state: 'available',
+      value: { adapter: { state: 'missing' }, correctiveActions: [{ id: 'adapter' }] }
+    });
     expect(first.status).toMatchObject({
       state: 'available',
       value: {
@@ -525,6 +529,38 @@ describe('Bazframe TUI service', () => {
       status: { state: 'available' }
     });
     await expect(lstat(home)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('keeps adapter status available when Git is not on PATH', async () => {
+    const fixture = await createFixture();
+    const service = createBazframeTuiService({
+      ...fixture.options,
+      environment: {
+        ...fixture.options.environment,
+        PATH: fixture.directory.path('missing-bin')
+      }
+    });
+
+    const dashboard = await service.loadDashboard();
+
+    expect(dashboard.status).toMatchObject({
+      state: 'unavailable',
+      diagnostic: {
+        id: 'setup-status',
+        message: 'Could not find Git on PATH; install Git to inspect worktree-specific Bazframe state.'
+      }
+    });
+    expect(dashboard.adapterStatus).toMatchObject({
+      state: 'available',
+      value: {
+        adapter: { state: 'missing' },
+        correctiveActions: [],
+        setupDiagnostic: { id: 'setup-status' }
+      }
+    });
+    expect(dashboard.diagnostics).not.toContainEqual(expect.objectContaining({
+      id: 'adapter-status'
+    }));
   });
 
   it('keeps profiles and setup status available when the default catalog root is malformed', async () => {

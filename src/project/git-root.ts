@@ -34,7 +34,7 @@ export async function findGitRoot(
     if (errorCode(result.error) === 'ENOENT') {
       throw new BazframeError(
         'GIT_NOT_FOUND',
-        'Could not find Git on PATH; this Bazframe command requires a Git worktree.',
+        'Could not find Git on PATH; install Git to inspect worktree-specific Bazframe state.',
         { cause: result.error }
       );
     }

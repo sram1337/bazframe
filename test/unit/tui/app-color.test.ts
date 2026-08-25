@@ -232,6 +232,10 @@ function dashboard(): DashboardSnapshot {
         directory: '/skills/demo-skill'
       }]
     }],
+    adapterStatus: {
+      state: 'unavailable',
+      diagnostic: { id: 'adapter-status', severity: 'error', message: 'Unavailable.' }
+    },
     status: {
       state: 'unavailable',
       diagnostic: { id: 'status', severity: 'error', message: 'Unavailable.' }

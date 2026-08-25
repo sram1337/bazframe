@@ -1324,7 +1324,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
                       maxRows={bodyRows}
                     />
               : state.activeTab === 'adapters'
-                ? <Adapters status={snapshot?.status} focused={state.focusedRegion === 'body'} />
+                ? <Adapters status={snapshot?.adapterStatus} focused={state.focusedRegion === 'body'} />
                 : <Settings
                     status={snapshot?.status}
                     focused={state.focusedRegion === 'body'}
@@ -2116,7 +2116,7 @@ function Adapters({
   status,
   focused
 }: {
-  status: DashboardSnapshot['status'] | undefined;
+  status: DashboardSnapshot['adapterStatus'] | undefined;
   focused: boolean;
 }) {
   const boxProps = {
@@ -2133,7 +2133,7 @@ function Adapters({
     return <Box {...boxProps}><Text bold>Adapters</Text><Text color="red">Adapter status unavailable: {status.diagnostic.message}</Text></Box>;
   }
   const setup = status.value;
-  const actions = setup.correctiveActions.filter((action) => action.id === 'adapter');
+  const actions = setup.correctiveActions;
   return (
     <Box {...boxProps}>
       <Text bold aria-label={`Adapters view${focused ? ', focused' : ''}`}>Adapters</Text>
@@ -2141,10 +2141,15 @@ function Adapters({
       <Text>State: {setup.adapter.state}</Text>
       <Text>Installed Bazframe: {setup.adapter.installedBazframeVersion ?? '(none)'}</Text>
       <Text wrap="truncate-end">Target: {setup.adapter.targetPath}</Text>
+      {setup.setupDiagnostic === undefined
+        ? null
+        : <Text color="yellow" wrap="truncate-end">Setup status unavailable; adapter state shown independently.</Text>}
       <Text bold>Attention needed:</Text>
-      {actions.length === 0
-        ? <Text dimColor>  (none)</Text>
-        : actions.map((action) => <Text key={action.id} color="yellow" wrap="truncate-end">  - {action.message}</Text>)}
+      {setup.setupDiagnostic !== undefined
+        ? <Text color="yellow">  (requires setup status)</Text>
+        : actions.length === 0
+          ? <Text dimColor>  (none)</Text>
+          : actions.map((action) => <Text key={action.id} color="yellow" wrap="truncate-end">  - {action.message}</Text>)}
       <Text dimColor>Adapter install, repair, and removal remain CLI-only.</Text>
     </Box>
   );
