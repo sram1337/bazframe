@@ -94,7 +94,7 @@ describe('profile library/package reference codec', () => {
     const directory = await createTempDirectory('bazframe-reference-stable-'); directories.push(directory);
     const path = await directory.write('home/profiles/focused/libraries/toolkit.json', encodeProfileCollectionReference(library));
     const first = await readProfileCollectionReferenceSnapshot(directory.path('home'), 'focused', { kind: 'library', id: 'toolkit' });
-    await unlink(path); await directory.write('home/profiles/focused/libraries/toolkit.json', encodeProfileCollectionReference(library));
+    await rename(path, `${path}.replaced`); await directory.write('home/profiles/focused/libraries/toolkit.json', encodeProfileCollectionReference(library));
     const replaced = await readProfileCollectionReferenceSnapshot(directory.path('home'), 'focused', { kind: 'library', id: 'toolkit' });
     expect(sameProfileCollectionReferenceSnapshot(first, replaced)).toBe(false);
   });
