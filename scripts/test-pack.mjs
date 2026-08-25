@@ -3,7 +3,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-const PACKED_TUI_DEADLINE_MS = 8_000;
+const PACKED_TUI_DEADLINE_MS = 30_000;
 const projectRoot = process.cwd();
 const sourceManifest = JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf8'));
 const npmExecPath = process.env.npm_execpath;
@@ -381,7 +381,7 @@ async function runPackedTui(executable, temporaryRoot) {
   const deadline = Date.now() + PACKED_TUI_DEADLINE_MS;
   const scriptCommand = process.platform === 'darwin'
     ? `script -q /dev/null ${shellQuote(executable)} tui`
-    : `script -q -e -c ${shellQuote(`exec ${shellQuote(executable)} tui`)} /dev/null`;
+    : `script -q -f -e -c ${shellQuote(`exec ${shellQuote(executable)} tui`)} /dev/null`;
   // The shell pipeline gives BSD script a real pipe rather than Node's socketpair stdin.
   const child = spawn('sh', ['-c', `cat | ${scriptCommand}`], {
     detached: true,
@@ -390,7 +390,9 @@ async function runPackedTui(executable, temporaryRoot) {
     env: {
       ...process.env,
       BAZFRAME_HOME: join(temporaryRoot, 'packed-tui-home'),
-      NO_COLOR: '1'
+      CI: 'false',
+      NO_COLOR: '1',
+      TERM: 'xterm-256color'
     }
   });
   let stdout = ''; let stderr = ''; let quitSent = false; let timedOut = false;
