@@ -193,7 +193,8 @@ async function terminalFixture(): Promise<{ environment: NodeJS.ProcessEnv; dire
     environment: {
       ...process.env,
       BAZFRAME_HOME: directory.path('home'),
-      NO_COLOR: '1'
+      NO_COLOR: '1',
+      TERM: 'xterm-256color'
     }
   };
 }
@@ -225,7 +226,7 @@ async function runInPseudoTerminal(
   ].join('; ');
   const scriptArguments = process.platform === 'darwin'
     ? ['-q', '/dev/null', 'sh', '-c', command]
-    : ['-q', '-e', '-c', `sh -c ${shellQuote(command)}`, '/dev/null'];
+    : ['-q', '-f', '-e', '-c', `sh -c ${shellQuote(command)}`, '/dev/null'];
 
   // macOS script(1) rejects Node's socket-backed stdin, so a fixed shell
   // program puts a real pipe in front of it. GNU script accepts Node's pipe.

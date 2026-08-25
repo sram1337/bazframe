@@ -73,6 +73,7 @@ interface AcquiredRepository {
   transport: 'git' | 'gh';
 }
 interface DirectoryIdentity { device: bigint; inode: bigint }
+interface HeldDirectoryIdentity { handle: FileHandle; identity: DirectoryIdentity }
 interface FileIdentity { device: bigint; inode: bigint; sha256: string }
 interface ProcessResult { status: number | null; stdout: string; stderr: string; error?: Error }
 interface TransactionState { resourceCommitted: boolean; journalState?: FileIdentity }
@@ -418,14 +419,15 @@ async function commitUpdate(
   await verifyProvider({ ...initial, root: acquired.root, revision: acquired.revision }, environment);
   const backup = join(managedGitRecoveryRoot(home), `${initial.kind}-${initial.id}-${randomUUID()}`);
   await ensureManagedDirectory(home, dirname(backup));
-  const previousIdentity = await directoryIdentity(initial.root);
   const next = makeRecord(initial.kind, acquired.source, initial.root, acquired.branch, acquired.revision, acquired.transport);
-  transaction.journalState = await createJournal(home, journalFor(next, 'update', 'staged', initial.revision, next.revision, acquired.container, backup));
+  const previous = await holdDirectoryIdentity(initial.root);
+  const previousIdentity = previous.identity;
   let oldMoved = false;
   let newPublished = false;
   let provenanceWritten = false;
   let updatedRecordSnapshot: ManagedGitRecordSnapshot | undefined;
   try {
+    transaction.journalState = await createJournal(home, journalFor(next, 'update', 'staged', initial.revision, next.revision, acquired.container, backup));
     await rename(initial.root, backup); oldMoved = true;
     await assertIdentity(acquired.root, acquired.identity, 'candidate changed before update publication');
     await rename(acquired.root, initial.root); newPublished = true;
@@ -464,6 +466,8 @@ async function commitUpdate(
     }
     if (recoveryErrors.length > 0) throw new AggregateError([error, ...recoveryErrors], `Managed Git update could not prove complete recovery for ${initial.kind} ${initial.id}; inspect ${managedGitJournalPath(home, initial.kind, initial.id)}.`, { cause: error });
     throw error;
+  } finally {
+    await previous.handle.close().catch(() => undefined);
   }
 }
 
@@ -762,6 +766,7 @@ export function safeDiagnostic(value: string): string {
   return redacted.slice(0, 1000);
 }
 async function directoryIdentity(path: string): Promise<DirectoryIdentity> { const metadata = await lstat(path, { bigint: true }); if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new BazframeError('MANAGED_GIT_ROOT_INVALID', `Expected a physical managed directory: ${path}`); return { device: metadata.dev, inode: metadata.ino }; }
+async function holdDirectoryIdentity(path: string): Promise<HeldDirectoryIdentity> { let handle: FileHandle | undefined; try { handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW); const opened = await handle.stat({ bigint: true }); const current = await lstat(path, { bigint: true }); if (!opened.isDirectory() || current.isSymbolicLink() || !current.isDirectory() || opened.dev !== current.dev || opened.ino !== current.ino) throw new BazframeError('MANAGED_GIT_ROOT_INVALID', `Expected a stable physical managed directory: ${path}`); return { handle, identity: { device: opened.dev, inode: opened.ino } }; } catch (error) { await handle?.close().catch(() => undefined); throw error; } }
 async function assertIdentity(path: string, expected: DirectoryIdentity, message: string): Promise<void> { const current = await directoryIdentity(path); if (current.device !== expected.device || current.inode !== expected.inode) throw new BazframeError('MANAGED_GIT_OWNERSHIP_CHANGED', `${message}: ${path}`); }
 async function removeOwnedTree(path: string, expected: DirectoryIdentity): Promise<void> { await assertIdentity(path, expected, 'managed directory ownership changed before cleanup'); await rm(path, { recursive: true }); }
 async function removeOwnedContainer(path: string, expected: DirectoryIdentity): Promise<void> { const metadata = await lstat(path, { bigint: true }).catch((error) => errorCode(error) === 'ENOENT' ? undefined : Promise.reject(error)); if (metadata === undefined) return; if (metadata.isSymbolicLink() || !metadata.isDirectory() || metadata.dev !== expected.device || metadata.ino !== expected.inode) throw new BazframeError('MANAGED_GIT_OWNERSHIP_CHANGED', `Managed staging container ownership changed: ${path}`); await rm(path, { recursive: true }); }
