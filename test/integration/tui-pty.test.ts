@@ -193,6 +193,7 @@ async function terminalFixture(): Promise<{ environment: NodeJS.ProcessEnv; dire
     environment: {
       ...process.env,
       BAZFRAME_HOME: directory.path('home'),
+      CI: 'false',
       NO_COLOR: '1',
       TERM: 'xterm-256color'
     }
