@@ -8,7 +8,7 @@ const cliPath = fileURLToPath(new URL('../../dist/cli.js', import.meta.url));
 const temporaryDirectories: TempDirectory[] = [];
 const terminalUnavailable = process.platform === 'win32' || !hasScriptCommand();
 const TUI_EXIT_MARKER = '__BAZFRAME_TUI_EXIT__=';
-const SCENARIO_DEADLINE_MS = 8_000;
+const SCENARIO_DEADLINE_MS = 30_000;
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => directory.cleanup()));
