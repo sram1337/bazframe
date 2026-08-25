@@ -54,7 +54,7 @@ Resolve `<bazify-skill-root>` from the directory containing this loaded `SKILL.m
 ## Safety
 
 - `create` copies physical Skill files into a new destination and preserves the source.
-- `adapt` requires a clean Git top-level, preserves provider files and Git state, and rolls back when ownership can be proven.
+- When Git is present, `adapt` requires the selected directory to be its clean top-level. Non-Git directories are also supported. It preserves provider files and Git state and rolls back when ownership can be proven.
 - Generated builds use stable physical-file reads and transactional artifact replacement.
 - Obvious credential filenames and private-key material are rejected; semantic and privacy review remains required.
 - GitHub publication is private, consent-bound, and byte-bound.

@@ -156,7 +156,7 @@ No semantic or dependency compatibility is inferred from skill prose, metadata, 
 
 ## Validation
 
-The executable prototype and report are under [`../experiments/pi-no-launcher-adapter/`](../experiments/pi-no-launcher-adapter/).
+The source repository retains the executable prototype and report under `experiments/pi-no-launcher-adapter/`; experiments are not included in the npm package.
 
 The isolated Pi 0.82 suite demonstrated:
 

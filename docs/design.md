@@ -402,4 +402,4 @@ Skill packs, child subsets, profile export, and snapshot garbage collection rema
 
 ## Implementation plan
 
-[`pi-adapter-production-design.md`](pi-adapter-production-design.md) records the implemented production baseline, lifecycle rules, milestones, and acceptance evidence. Executable Pi 0.82 evidence is retained in the [`pi-no-launcher-adapter` experiment](../experiments/pi-no-launcher-adapter/REPORT.md).
+[`pi-adapter-production-design.md`](pi-adapter-production-design.md) records the implemented production baseline, lifecycle rules, milestones, and acceptance evidence. Executable Pi 0.82 evidence is retained in the source repository at `experiments/pi-no-launcher-adapter/REPORT.md`; experiments are not included in the npm package.

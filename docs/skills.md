@@ -89,7 +89,7 @@ bazframe packages build my-package                  # build and activate a new s
 
 Both `packages add` and `packages build` execute the literal build argv directly, without a shell or sandbox, using the package root as cwd and inherited environment/stdio. Bazframe validates the output and snapshots the complete artifact root, preserving `shared/`, but discovers Skills only below `skillsRoot`. A failed initial add creates no package record; a failed later build leaves the previously activated snapshot in use. An existing Pi session needs `/bazframe reload` after activation.
 
-For a runnable repository example that creates a package, builds one Skill plus a shared resource, and attaches the package to a profile, see [`scripts/setup-library-package-demo.sh`](../scripts/setup-library-package-demo.sh).
+A source checkout includes `scripts/setup-library-package-demo.sh`, a runnable contributor example that creates a package, builds one Skill plus a shared resource, and attaches the package to a profile. Development scripts are not included in the npm package.
 
 ## Managed Git providers
 

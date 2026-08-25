@@ -2,9 +2,9 @@
 
 Bazframe's CLI/runtime is distributed through npm. Skills, libraries, and packages remain provider-owned Git resources, and `~/.bazframe` remains local profile and configuration state.
 
-## First-publication blockers
+## Release requirements
 
-Do not publish until all of these are true:
+Do not publish a new version until all of these are true:
 
 1. The owner has recorded the package rights decision: either a nonempty license field plus the corresponding root `LICENSE`, or an explicit `"license": "UNLICENSED"` choice. The owner has reviewed the public distribution rights of every packed byte.
 2. `package.json` no longer has `"private": true`.
@@ -39,24 +39,25 @@ npm install --prefix "$TEMP_ROOT" --ignore-scripts --no-audit --no-fund "./$TARB
 
 Use disposable `BAZFRAME_HOME` and `PI_CODING_AGENT_DIR` directories for adapter and status checks. Release validation must not touch a user's real Bazframe or Pi state.
 
-## First interactive publication
+## Initial interactive publication (completed)
 
-The package does not exist yet, so staged publishing and an existing-package trusted-publisher workflow cannot perform the first publication. After satisfying every blocker above, publish interactively with the account's 2FA challenge:
+The package did not exist before `0.1.0-beta.1`, so its first publication required the account's interactive 2FA flow. The exact reviewed tarball was published with:
 
 ```bash
 shasum -a 256 --check "$TARBALL.sha256"
 npm publish "./$TARBALL" --access public --tag next
 ```
 
-Passing the tarball path publishes the exact inspected bytes rather than repacking the working tree. The explicit tag and `publishConfig.tag` both keep the beta off `latest`. Verify the registry bytes and installation:
+Passing the tarball path published the inspected bytes rather than repacking the working tree. The explicit tag selected the `next` channel, but npm also assigned `latest` during the first publication; both tags currently resolve to `0.1.0-beta.1`. Verify registry bytes and tags rather than assuming `next` is exclusive:
 
 ```bash
 npm view bazframe@0.1.0-beta.1 name version dist-tags repository --json
+npm dist-tag ls bazframe
 npm install --global bazframe@next
 bazframe --version
 ```
 
-If a published version is wrong, publish a corrected new version. Deprecate a bad version when guidance is needed; do not attempt to overwrite it.
+Future releases use the trusted-publishing path below. If a published version is wrong, publish a corrected new version. Deprecate a bad version when guidance is needed; do not attempt to overwrite it.
 
 ## Configure trusted publishing after the first release
 

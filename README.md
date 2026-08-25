@@ -10,7 +10,7 @@ Current project's instructions  ─┼─> Pi session
 Active Bazframe profile ─────────┘
 ```
 
-Bazframe is preparing its first public beta for macOS and Linux. Bazframe supports Pi 0.82.0 or newer.
+Bazframe's first public beta is available for macOS and Linux. Bazframe supports Pi 0.82.0 or newer.
 
 ## Requirements
 
@@ -38,14 +38,14 @@ Start Pi once and enter `/login` to choose and authenticate with a model provide
 
 ### 2. Install Bazframe
 
-After the first beta is published, install it from npm's `next` channel:
+Install the public beta from npm's `next` channel:
 
 ```bash
 npm install --global bazframe@next
 bazframe --version
 ```
 
-The version command should report `Bazframe 2 0.1.0-beta.1`. To update within the beta channel, run `npm install --global bazframe@next`, then rerun `bazframe adapter install pi` so Pi receives the packaged adapter version.
+The version command should report `Bazframe 2 0.1.0-beta.1`. The first publication is also tagged `latest`; `next` remains the explicit beta channel. To update within that channel, run `npm install --global bazframe@next`, then rerun `bazframe adapter install pi` so Pi receives the packaged adapter version.
 
 ## Quick start
 
@@ -320,7 +320,7 @@ Profiles and skills become trusted input to a coding agent with filesystem and s
 - [Pi adapter](docs/pi-adaptive-context-adapter.md) — session context and runtime integration
 - [Terminal interface](docs/tui-design.md) — interaction model and current capabilities
 - [Command help](#command-map) — entry points for built-in reference text
-- [Release process](docs/releasing.md) — beta validation, first publication, and trusted publishing
+- [Release process](docs/releasing.md) — exact-artifact validation and trusted publishing
 
 ## Contributing
 
