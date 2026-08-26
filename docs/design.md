@@ -89,6 +89,16 @@ TUI profile favorites are global preference state in the separate physical `<BAZ
 
 A profile's Skills are managed canonically with `bazframe profile skills add <skill> [--profile <profile>]` and `bazframe profile skills remove <skill> [--profile <profile>]`. Omission targets the active profile; an explicit target changes that profile without changing or requiring the active selection. There are no top-level membership aliases. Bare `bazframe profile skills` lists the active profile's immediate Skills and shows membership commands; Pi remains authoritative for full runtime validation. Packs are outside the current scope.
 
+### Profile portability
+
+Profile export/import is the next approved feature. A reviewable export directory contains canonical `bazframe-profile.json` plus the profile's physical `profile/AGENTS.md`; it is not a raw home/profile copy, archive, source bundle, or snapshot transfer. The declaration captures portable profile contents and resource dependencies plus required sorted `omittedLocalSkills`. Only managed Git direct Skills are included. A healthy local direct Skill whose profile link exactly matches its same-ID added Skill produces a deterministic terminal-safe warning, is omitted, and has its ID permanently recorded. A broken or mismatched profile Skill link, or a Skill under a managed path without matching provenance, causes export to fail without publishing an artifact. Source composition validation still includes omitted direct Skills. Whole-library/package references remain exact resources. A path-free managed Git requirement is the normalized `remote`, credential-free `fetchUrl`, `branch`, and exact `revision` copied without network lookup from existing managed provenance; library/package records themselves store only source directory and digest.
+
+Import always inspects the artifact and displays a plan first. By default it then creates or reuses exact healthy included global resources and atomically publishes the composed profile; `--dry-run` stops before network access, builds, or writes. Import never changes the current active profile. Included direct Skills become or reuse `(default)` registrations; omitted local direct Skills remain reported omissions and are never mapped. Libraries and packages become or reuse their typed global objects in the stages that support them; their child Skills remain children and never enter `(default)`. Occupied mismatches fail; import requests no replacement, merge, update, repointing, or implicit rename within the documented portable final-syscall race. `--as` changes only the destination profile ID. An absent destination whose ID is already stored in `active-profile` is blocked so publication cannot activate it implicitly.
+
+Multi-resource import is resumable forward rather than globally atomic. A healthy resource committed before a later failure remains globally available and possibly unreferenced; the profile is not visible until every dependency and the complete prospective composition validate. Package builds retain exact manifest/argv reporting and explicit unsandboxed-execution authorization, and arbitrary source-process side effects are not rollbackable. Managed import must acquire the exported historical revision exactly and fails rather than substituting current branch head.
+
+[`profile-portability-design.md`](profile-portability-design.md) defines the artifact schema, included profile state and dependencies, explicit omissions, local-library/package mappings, exact-revision acquisition, inspection/execution flow, collision matrix, package consent, partial-failure behavior, staged delivery, and validation gates. Stage 1 supports managed direct Skills and managed libraries, omits only healthy local direct Skills whose profile links exactly match their added Skills, and blocks local libraries and every package reference on export; import rejects every `localMapping` and package before planning mutation and performs neither local mapping nor package execution. Stage 2 adds local-library mappings only, and Stage 3 adds packages. Portability is complete only after managed direct Skills, explicit local-Skill omissions, managed/local libraries, packages, and approved untrusted-input bounds are implemented.
+
 ### Project defaults and overrides
 
 Absent `~/.bazframe/global.json` means globally enabled. `bazframe global disable` writes an exact schema-v1 `{ disabled: true }` policy; `global enable` validates the adapter and active profile before removing it. Global disable is a recovery path and requires neither adapter nor profile.
@@ -366,6 +376,14 @@ bazframe adapter uninstall pi
 bazframe status
 ```
 
+The approved, not-yet-implemented portability grammar is:
+
+```text
+bazframe profile export <profile> --output <directory>
+bazframe profile import <directory> [--as <profile>] [--map <kind>:<id>=<absolute-source-directory>]... [--yes]
+bazframe profile import <directory> --dry-run [--as <profile>] [--map <kind>:<id>=<absolute-source-directory>]...
+```
+
 Bare singular and plural resources produce human overviews. Scoped verbs mutate the named resource. Concise `profile list` and `profile current` outputs remain available for scripts. Top-level `use` remains a compatibility alias; top-level `add skill` and `remove skill` exclusively manage `(default)` catalog registrations. Old `init`/`uninit` forms fail with migration guidance to `project enable`/`disable`, while `bazframe pi` remains only as the documented deprecated launcher. Root help stays intentionally small and points to `bazframe help <resource>` or `<resource> --help` for the detailed grammar.
 
 CLI color is presentation-only: it is enabled automatically for terminal streams, disabled for pipes and redirects, disabled when `NO_COLOR` is present, and explicitly enabled by nonzero `FORCE_COLOR` only when `NO_COLOR` is absent. Headings, active/current state, warnings, errors, and command hints retain text and symbols that remain understandable without color.
@@ -394,12 +412,13 @@ Product work now focuses on:
 - retaining the global library/package and typed-reference lifecycle, declared package builds, immutable snapshots, all-dependent activation validation, and snapshot-based bounded discovery;
 - keeping settings/adapter writes, declared-build execution in the TUI, library update/remove, package build/remove, profile-reference mutation, additional provider operations, and provider move/rename behind their explicit ownership and lifecycle decisions;
 - retaining Linux and local tmux evidence while validating Windows Terminal, representative remote SSH, terminal/font/locale width differences, and manual assistive-technology behavior before any production-ready TUI claim;
+- implementing reviewable profile portability through exact first-class resource materialization, an inspect-first execution plan with `--dry-run`, separate package-build consent, and inactive atomic profile publication;
 - preserving the profile's Skill-membership behavior while adding the smallest explicit library/package preparation lifecycle.
 
 The Agent Skills specification defines no standard dependency field; it permits arbitrary additional files and string-valued `metadata`, and recommends that scripts be self-contained or clearly document dependencies. Bazframe's current product decision is to add no inter-skill dependency schema or automation: library/package providers own shared resources and runtime packages, and Bazframe does not infer dependency semantics from prose, `compatibility`, `metadata`, `allowed-tools`, sibling paths, or co-packaging. Any future namespaced validate-only sidecar requires separate interoperability evidence and an explicit product decision before schema or automation.
 
-Skill packs, child subsets, profile export, and snapshot garbage collection remain deferred.
+Skill packs, child subsets, and snapshot garbage collection remain deferred.
 
 ## Implementation plan
 
-[`pi-adapter-production-design.md`](pi-adapter-production-design.md) records the implemented production baseline, lifecycle rules, milestones, and acceptance evidence. Executable Pi 0.82 evidence is retained in the source repository at `experiments/pi-no-launcher-adapter/REPORT.md`; experiments are not included in the npm package.
+[`profile-portability-design.md`](profile-portability-design.md) records the approved next-feature contract and staged implementation gates. [`pi-adapter-production-design.md`](pi-adapter-production-design.md) records the implemented Pi production baseline, lifecycle rules, milestones, and acceptance evidence. Executable Pi 0.82 evidence is retained in the source repository at `experiments/pi-no-launcher-adapter/REPORT.md`; experiments are not included in the npm package.

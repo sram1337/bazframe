@@ -19,6 +19,12 @@ export interface ManagedGitRecord {
   branch: string;
   revision: string;
 }
+export interface PathFreeManagedGitIdentity {
+  remote: string;
+  fetchUrl: string;
+  branch: string;
+  revision: string;
+}
 export interface ManagedGitRecordSnapshot {
   record: ManagedGitRecord;
   path: string;
@@ -59,10 +65,11 @@ export interface ManagedGitRecordDiagnostic {
 }
 
 const RECORD_KEYS = ['branch', 'fetchUrl', 'id', 'kind', 'remote', 'revision', 'root', 'schemaVersion', 'transport'] as const;
+const PATH_FREE_IDENTITY_KEYS = ['branch', 'fetchUrl', 'remote', 'revision'] as const;
 const JOURNAL_KEYS = ['backup', 'branch', 'fetchUrl', 'id', 'kind', 'nextRevision', 'operation', 'phase', 'previousRevision', 'remote', 'resourceStateSha256', 'root', 'schemaVersion', 'staging', 'transport'] as const;
 const KINDS = new Set<ManagedGitResourceKind>(['skill', 'library', 'package']);
 const OPERATIONS = new Set<ManagedGitOperation>(['add', 'update', 'remove', 'build']);
-const MAX_RECORD_BYTES = 16 * 1024;
+export const MAX_MANAGED_GIT_RECORD_BYTES = 16 * 1024;
 
 export function managedGitRoot(home: string): string { return join(home, 'providers', 'git'); }
 export function managedGitCheckoutsRoot(home: string): string { return join(managedGitRoot(home), 'checkouts'); }
@@ -88,14 +95,51 @@ export function decodeManagedGitRecord(value: unknown, expected?: { kind: Manage
   if (expected !== undefined && (kind !== expected.kind || candidate.id !== expected.id)) throw invalid('record identity does not match its path');
   const root = decodeRoot(candidate.root);
   if (basename(root) !== candidate.id) throw invalid('root basename does not match id');
+  const identity = decodePathFreeManagedGitIdentity({
+    remote: candidate.remote,
+    fetchUrl: candidate.fetchUrl,
+    branch: candidate.branch,
+    revision: candidate.revision
+  });
+  if (candidate.transport !== 'git' && candidate.transport !== 'gh') throw invalid('transport is invalid');
+  if (candidate.transport === 'gh' && !identity.remote.startsWith('github.com/')) throw invalid('gh transport requires a GitHub remote');
+  return { schemaVersion: 1, kind, id: candidate.id, root, ...identity, transport: candidate.transport };
+}
+
+export function decodePathFreeManagedGitIdentity(value: unknown): PathFreeManagedGitIdentity {
+  const candidate = exactObject(value, PATH_FREE_IDENTITY_KEYS, 'path-free identity', invalid);
+  assertBoundedPathFreeIdentityInput(candidate);
   const remote = decodeRemote(candidate.remote);
   const fetchUrl = decodeFetchUrl(candidate.fetchUrl);
   if (remoteForFetchUrl(fetchUrl) !== remote) throw invalid('fetchUrl does not match remote');
-  if (candidate.transport !== 'git' && candidate.transport !== 'gh') throw invalid('transport is invalid');
-  if (candidate.transport === 'gh' && !remote.startsWith('github.com/')) throw invalid('gh transport requires a GitHub remote');
   const branch = decodeBranch(candidate.branch);
   const revision = decodeRevision(candidate.revision);
-  return { schemaVersion: 1, kind, id: candidate.id, root, remote, fetchUrl, transport: candidate.transport, branch, revision };
+  const identity = { remote, fetchUrl, branch, revision };
+  if (Buffer.byteLength(`${JSON.stringify(identity, null, 2)}\n`, 'utf8') > MAX_MANAGED_GIT_RECORD_BYTES) {
+    throw invalid(`path-free identity exceeds the ${MAX_MANAGED_GIT_RECORD_BYTES}-byte managed Git record limit`);
+  }
+  return identity;
+}
+
+export function pathFreeManagedGitIdentityFromRecord(record: ManagedGitRecord): PathFreeManagedGitIdentity {
+  return decodePathFreeManagedGitIdentity({
+    remote: record.remote,
+    fetchUrl: record.fetchUrl,
+    branch: record.branch,
+    revision: record.revision
+  });
+}
+
+function assertBoundedPathFreeIdentityInput(candidate: Record<string, unknown>): asserts candidate is Record<keyof PathFreeManagedGitIdentity, string> {
+  let totalBytes = 0;
+  for (const key of PATH_FREE_IDENTITY_KEYS) {
+    const field = candidate[key];
+    if (typeof field !== 'string') throw invalid(`${key} is invalid`);
+    totalBytes += Buffer.byteLength(field, 'utf8');
+    if (totalBytes > MAX_MANAGED_GIT_RECORD_BYTES) {
+      throw invalid(`path-free identity exceeds the ${MAX_MANAGED_GIT_RECORD_BYTES}-byte managed Git record limit`);
+    }
+  }
 }
 
 export function decodeManagedGitJournal(value: unknown, expected?: { kind: ManagedGitResourceKind; id: string }): ManagedGitJournal {
@@ -157,7 +201,7 @@ export async function readManagedGitRecord(home: string, kind: ManagedGitResourc
       throw error;
     }
     const before = await handle.stat({ bigint: true });
-    if (!before.isFile() || before.size > BigInt(MAX_RECORD_BYTES)) throw invalid('record must be a bounded physical regular file');
+    if (!before.isFile() || before.size > BigInt(MAX_MANAGED_GIT_RECORD_BYTES)) throw invalid('record must be a bounded physical regular file');
     const bytes = await handle.readFile();
     const after = await handle.stat({ bigint: true });
     const current = await lstat(path, { bigint: true });
@@ -265,7 +309,7 @@ async function readBoundedJsonSnapshot(path: string): Promise<{ value: unknown; 
   try {
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const before = await handle.stat({ bigint: true });
-    if (!before.isFile() || before.size > BigInt(MAX_RECORD_BYTES)) throw invalidJournal('record must be a bounded physical regular file');
+    if (!before.isFile() || before.size > BigInt(MAX_MANAGED_GIT_RECORD_BYTES)) throw invalidJournal('record must be a bounded physical regular file');
     const bytes = await handle.readFile();
     const after = await handle.stat({ bigint: true });
     const current = await lstat(path, { bigint: true });

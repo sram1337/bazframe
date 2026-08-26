@@ -1,0 +1,319 @@
+import { describe, expect, it } from 'vitest';
+import {
+  assertStage1ProfileArtifactCapabilities,
+  decodeProfileArtifactBytes,
+  decodeProfileArtifactObject,
+  encodeProfileArtifact,
+  type ProfileArtifact,
+  type ProfileArtifactLimitPolicy
+} from '../../../src/profile-portability/profile-artifact.js';
+
+function managedSource(id: string) {
+  return {
+    type: 'managedGit' as const,
+    remote: `example.test/team/${id}`,
+    fetchUrl: `https://example.test/team/${id}.git`,
+    branch: 'main',
+    revision: 'a'.repeat(40)
+  };
+}
+
+function managedFixture(): ProfileArtifact {
+  return {
+    schemaVersion: 1,
+    kind: 'bazframe-profile-export',
+    profile: {
+      id: 'focused',
+      instructions: {
+        path: 'profile/AGENTS.md',
+        sha256: 'b'.repeat(64)
+      },
+      skills: ['review-tools'],
+      omittedLocalSkills: ['workstation-helper'],
+      libraries: ['toolkit'],
+      packages: []
+    },
+    resources: [
+      { kind: 'skill', id: 'review-tools', source: managedSource('review-tools') },
+      { kind: 'library', id: 'toolkit', source: managedSource('toolkit') }
+    ]
+  };
+}
+
+function clone(value: ProfileArtifact): ProfileArtifact {
+  return structuredClone(value);
+}
+
+function profileEntryCount(value: ProfileArtifact): number {
+  return value.profile.skills.length
+    + value.profile.omittedLocalSkills.length
+    + value.profile.libraries.length
+    + value.profile.packages.length;
+}
+
+// These policies are intentionally derived from each test fixture. They are not product defaults.
+function testPolicyFor(value: ProfileArtifact): ProfileArtifactLimitPolicy {
+  const fixtureBytes = Buffer.byteLength(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  const fixtureEntries = profileEntryCount(value);
+  return {
+    maxManifestBytes: fixtureBytes * 4,
+    maxProfileEntries: fixtureEntries + 8,
+    maxResources: value.resources.length + 8
+  };
+}
+
+function decode(value: ProfileArtifact): ProfileArtifact {
+  return decodeProfileArtifactObject(value, testPolicyFor(value));
+}
+
+describe('profile artifact object codec', () => {
+  it('canonically round-trips managed direct Skills and libraries', () => {
+    const fixture = managedFixture();
+    const policy = testPolicyFor(fixture);
+    const encoded = encodeProfileArtifact(fixture, policy);
+
+    expect(decodeProfileArtifactObject(JSON.parse(encoded), policy)).toEqual(fixture);
+    expect(encodeProfileArtifact(decodeProfileArtifactObject(fixture, policy), policy)).toBe(encoded);
+    expect(() => assertStage1ProfileArtifactCapabilities(decode(fixture))).not.toThrow();
+  });
+
+  it('requires omittedLocalSkills, accepts it empty, and requires sorted unique omissions', () => {
+    const fixture = managedFixture();
+    const empty = clone(fixture);
+    empty.profile.omittedLocalSkills = [];
+    expect(decode(empty).profile.omittedLocalSkills).toEqual([]);
+    expect(decode(fixture).profile.omittedLocalSkills).toEqual(['workstation-helper']);
+
+    const missing = clone(fixture) as unknown as Record<string, unknown>;
+    delete (missing.profile as Record<string, unknown>).omittedLocalSkills;
+    expect(() => decodeProfileArtifactObject(missing, testPolicyFor(fixture))).toThrow(/exactly/u);
+    for (const omittedLocalSkills of [
+      ['z-local', 'a-local'],
+      ['local-helper', 'local-helper']
+    ]) {
+      const invalid = clone(fixture);
+      invalid.profile.omittedLocalSkills = omittedLocalSkills;
+      expect(() => decode(invalid)).toThrow(/lexical order/u);
+    }
+  });
+
+  it('encodes fixed key order with two spaces and exactly one trailing LF', () => {
+    const fixture = managedFixture();
+    const encoded = encodeProfileArtifact(fixture, testPolicyFor(fixture));
+    expect(encoded).toBe(`${JSON.stringify(fixture, null, 2)}\n`);
+    expect(encoded.endsWith('\n')).toBe(true);
+    expect(encoded.endsWith('\n\n')).toBe(false);
+    expect(encoded.indexOf('"schemaVersion"')).toBeLessThan(encoded.indexOf('"kind"'));
+    expect(encoded.indexOf('"skills"')).toBeLessThan(encoded.indexOf('"omittedLocalSkills"'));
+  });
+
+  it('rejects unknown keys and malformed instruction digests, paths, and IDs', () => {
+    const fixture = managedFixture();
+    const policy = testPolicyFor(fixture);
+    expect(() => decodeProfileArtifactObject({ ...fixture, unknown: true }, policy)).toThrow(/exactly/u);
+
+    const unknownProfile = clone(fixture) as unknown as { profile: Record<string, unknown> };
+    unknownProfile.profile.unknown = true;
+    expect(() => decodeProfileArtifactObject(unknownProfile, policy)).toThrow(/exactly/u);
+
+    const unknownInstructions = clone(fixture) as unknown as { profile: { instructions: Record<string, unknown> } };
+    unknownInstructions.profile.instructions.unknown = true;
+    expect(() => decodeProfileArtifactObject(unknownInstructions, policy)).toThrow(/exactly/u);
+
+    const unknownResource = clone(fixture) as unknown as { resources: Record<string, unknown>[] };
+    unknownResource.resources[0]!.unknown = true;
+    expect(() => decodeProfileArtifactObject(unknownResource, policy)).toThrow(/exactly/u);
+
+    const badDigest = clone(fixture);
+    badDigest.profile.instructions.sha256 = 'B'.repeat(64);
+    expect(() => decode(badDigest)).toThrow(/sha256/u);
+    const badPath = clone(fixture);
+    badPath.profile.instructions.path = '../AGENTS.md' as 'profile/AGENTS.md';
+    expect(() => decode(badPath)).toThrow(/instruction path/u);
+    const badProfile = clone(fixture);
+    badProfile.profile.id = '../focused';
+    expect(() => decode(badProfile)).toThrow(/profile id/u);
+    const badSkill = clone(fixture);
+    badSkill.profile.skills = ['Bad_Skill'];
+    expect(() => decode(badSkill)).toThrow(/invalid ID/u);
+  });
+
+  it('rejects duplicate, unsorted, overlapping, missing, and orphan closure entries', () => {
+    const fixture = managedFixture();
+    const duplicate = clone(fixture);
+    duplicate.profile.skills = ['review-tools', 'review-tools'];
+    expect(() => decode(duplicate)).toThrow(/lexical order/u);
+
+    const unsorted = clone(fixture);
+    unsorted.profile.skills = ['z-skill', 'a-skill'];
+    expect(() => decode(unsorted)).toThrow(/lexical order/u);
+
+    const overlap = clone(fixture);
+    overlap.profile.omittedLocalSkills = ['review-tools'];
+    expect(() => decode(overlap)).toThrow(/disjoint/u);
+
+    const matchingOmissionResource = clone(fixture);
+    matchingOmissionResource.profile.omittedLocalSkills = ['review-tools'];
+    matchingOmissionResource.profile.skills = [];
+    expect(() => decode(matchingOmissionResource)).toThrow(/must not have matching resources/u);
+
+    const missing = clone(fixture);
+    missing.resources = missing.resources.slice(1);
+    expect(() => decode(missing)).toThrow(/exactly match/u);
+
+    const orphan = clone(fixture);
+    orphan.resources.push({ kind: 'library', id: 'unused', source: managedSource('unused') });
+    expect(() => decode(orphan)).toThrow(/ordered|exactly match/u);
+
+    const duplicateResource = clone(fixture);
+    duplicateResource.resources.splice(1, 0, clone(fixture).resources[0]!);
+    expect(() => decode(duplicateResource)).toThrow(/unique and ordered/u);
+
+    const wrongOrder = clone(fixture);
+    wrongOrder.resources.reverse();
+    expect(() => decode(wrongOrder)).toThrow(/unique and ordered/u);
+  });
+
+  it('rejects mismatched managed identity and path, transport, or unknown source leakage', () => {
+    const fixture = managedFixture();
+    const mismatched = clone(fixture);
+    const source = mismatched.resources[0]!.source as ReturnType<typeof managedSource>;
+    source.remote = 'elsewhere.test/team/review-tools';
+    expect(() => decode(mismatched)).toThrow(/managed source identity/u);
+
+    for (const extra of [
+      { root: '/tmp/review-tools' },
+      { transport: 'git' },
+      { token: 'secret' }
+    ]) {
+      const leaked = clone(fixture);
+      Object.assign(leaked.resources[0]!.source, extra);
+      expect(() => decode(leaked)).toThrow(/exactly/u);
+    }
+  });
+
+  it('recognizes future local library and managed/local package variants', () => {
+    const localLibrary = managedFixture();
+    localLibrary.resources[1]!.source = { type: 'localMapping' };
+    expect(decode(localLibrary).resources[1]!.source).toEqual({ type: 'localMapping' });
+
+    for (const packageSource of [managedSource('automation'), { type: 'localMapping' as const }]) {
+      const withPackage = managedFixture();
+      withPackage.profile.packages = ['automation'];
+      withPackage.resources.push({ kind: 'package', id: 'automation', source: packageSource });
+      expect(decode(withPackage).resources[2]!.source).toEqual(packageSource);
+    }
+  });
+
+  it('universally rejects local direct-Skill resources', () => {
+    const fixture = managedFixture();
+    fixture.resources[0]!.source = { type: 'localMapping' };
+    expect(() => decode(fixture)).toThrow(/not portable/u);
+  });
+
+  it('refuses local libraries and every package variant at the Stage 1 capability guard', () => {
+    const localLibrary = managedFixture();
+    localLibrary.resources[1]!.source = { type: 'localMapping' };
+    expect(() => assertStage1ProfileArtifactCapabilities(decode(localLibrary))).toThrow(/local mappings/u);
+
+    for (const packageSource of [managedSource('automation'), { type: 'localMapping' as const }]) {
+      const withPackage = managedFixture();
+      withPackage.profile.packages = ['automation'];
+      withPackage.resources.push({ kind: 'package', id: 'automation', source: packageSource });
+      expect(() => assertStage1ProfileArtifactCapabilities(decode(withPackage))).toThrow(/packages/u);
+    }
+  });
+
+  it('enforces fixture-derived below, at, and above canonical manifest byte ceilings', () => {
+    const fixture = managedFixture();
+    const exactBytes = Buffer.byteLength(`${JSON.stringify(fixture, null, 2)}\n`, 'utf8');
+    const base = testPolicyFor(fixture);
+    expect(() => decodeProfileArtifactObject(fixture, { ...base, maxManifestBytes: exactBytes - 1 })).toThrow(/canonical manifest/u);
+    expect(() => decodeProfileArtifactObject(fixture, { ...base, maxManifestBytes: exactBytes })).not.toThrow();
+    expect(() => decodeProfileArtifactObject(fixture, { ...base, maxManifestBytes: exactBytes + 1 })).not.toThrow();
+  });
+
+  it('enforces fixture-derived below, at, and above total profile-entry ceilings', () => {
+    const fixture = managedFixture();
+    const exactEntries = profileEntryCount(fixture);
+    const base = testPolicyFor(fixture);
+    expect(() => decodeProfileArtifactObject(fixture, { ...base, maxProfileEntries: exactEntries - 1 })).toThrow(/profile entries|entry limit/u);
+    expect(() => decodeProfileArtifactObject(fixture, { ...base, maxProfileEntries: exactEntries })).not.toThrow();
+    expect(() => decodeProfileArtifactObject(fixture, { ...base, maxProfileEntries: exactEntries + 1 })).not.toThrow();
+  });
+
+  it('enforces fixture-derived below, at, and above resource-count ceilings', () => {
+    const fixture = managedFixture();
+    const exactResources = fixture.resources.length;
+    const base = testPolicyFor(fixture);
+    expect(() => decodeProfileArtifactObject(fixture, { ...base, maxResources: exactResources - 1 })).toThrow(/resources.*entry limit/u);
+    expect(() => decodeProfileArtifactObject(fixture, { ...base, maxResources: exactResources })).not.toThrow();
+    expect(() => decodeProfileArtifactObject(fixture, { ...base, maxResources: exactResources + 1 })).not.toThrow();
+  });
+
+  it('decodes only exact canonical raw manifest bytes', () => {
+    const fixture = managedFixture();
+    const policy = testPolicyFor(fixture);
+    const canonical = Buffer.from(encodeProfileArtifact(fixture, policy), 'utf8');
+    expect(decodeProfileArtifactBytes(canonical, policy)).toEqual(fixture);
+
+    const text = canonical.toString('utf8');
+    const duplicateKey = Buffer.from(text.replace(
+      '  "schemaVersion": 1,',
+      '  "schemaVersion": 1,\n  "schemaVersion": 1,'
+    ), 'utf8');
+    const reordered = Buffer.from(`${JSON.stringify({
+      kind: fixture.kind,
+      schemaVersion: fixture.schemaVersion,
+      profile: fixture.profile,
+      resources: fixture.resources
+    }, null, 2)}\n`, 'utf8');
+    const compact = Buffer.from(`${JSON.stringify(fixture)}\n`, 'utf8');
+    const withoutFinalLf = canonical.subarray(0, canonical.byteLength - 1);
+    const extraFinalLf = Buffer.concat([canonical, Buffer.from('\n')]);
+
+    for (const bytes of [duplicateKey, reordered, compact, withoutFinalLf, extraFinalLf]) {
+      expect(() => decodeProfileArtifactBytes(bytes, {
+        ...policy,
+        maxManifestBytes: Math.max(canonical.byteLength, bytes.byteLength)
+      })).toThrow(/not canonical/u);
+    }
+  });
+
+  it('rejects invalid UTF-8, invalid JSON, and raw bytes outside the injected ceiling', () => {
+    const fixture = managedFixture();
+    const canonical = Buffer.from(encodeProfileArtifact(fixture, testPolicyFor(fixture)), 'utf8');
+    const policy = {
+      ...testPolicyFor(fixture),
+      maxManifestBytes: canonical.byteLength
+    };
+
+    expect(() => decodeProfileArtifactBytes(Uint8Array.from([0xff]), policy))
+      .toThrow(/valid UTF-8/u);
+    expect(() => decodeProfileArtifactBytes(Buffer.from('{', 'utf8'), policy))
+      .toThrow(/valid JSON/u);
+    expect(() => decodeProfileArtifactBytes(canonical, {
+      ...policy,
+      maxManifestBytes: canonical.byteLength - 1
+    })).toThrow(/byte limit/u);
+    expect(() => decodeProfileArtifactBytes(canonical, policy)).not.toThrow();
+    expect(() => decodeProfileArtifactBytes(canonical, {
+      ...policy,
+      maxManifestBytes: canonical.byteLength + 1
+    })).not.toThrow();
+
+    const padded = Buffer.concat([Buffer.from(' '), canonical]);
+    expect(() => decodeProfileArtifactBytes(padded, policy)).toThrow(/byte limit/u);
+  });
+
+  it('requires explicit finite nonnegative integer test policies', () => {
+    const fixture = managedFixture();
+    const policy = testPolicyFor(fixture);
+    for (const key of ['maxManifestBytes', 'maxProfileEntries', 'maxResources'] as const) {
+      for (const value of [Number.POSITIVE_INFINITY, Number.NaN, -1, 1.5]) {
+        expect(() => decodeProfileArtifactObject(fixture, { ...policy, [key]: value }))
+          .toThrow(/finite nonnegative integer/u);
+      }
+    }
+  });
+});

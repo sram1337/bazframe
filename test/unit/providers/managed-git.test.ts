@@ -6,11 +6,15 @@ import { authorizeManagedGitPackageBuild, isManagedGitSource, managedGitCloneInv
 import {
   decodeManagedGitJournal,
   decodeManagedGitRecord,
+  decodePathFreeManagedGitIdentity,
   encodeManagedGitJournal,
   encodeManagedGitRecord,
   managedGitCheckoutRoot,
+  MAX_MANAGED_GIT_RECORD_BYTES,
+  pathFreeManagedGitIdentityFromRecord,
   readManagedGitRecord,
-  scanManagedGitRecords
+  scanManagedGitRecords,
+  type ManagedGitRecord
 } from '../../../src/providers/managed-git-record.js';
 
 const roots: string[] = [];
@@ -155,6 +159,72 @@ describe('managed Git source and provenance', () => {
     expect((await scanManagedGitRecords(linkedHome)).diagnostics).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: 'package', id: 'toolkit', message: expect.stringContaining('recovery record is invalid') })
     ]));
+  });
+
+  it.each(['skill', 'library'] as const)('projects exact path-free identity from a managed %s record', (kind) => {
+    const record: ManagedGitRecord = {
+      schemaVersion: 1,
+      kind,
+      id: 'toolkit',
+      root: `/managed/${kind}/toolkit`,
+      remote: 'github.com/example/toolkit',
+      fetchUrl: 'https://github.com/example/toolkit.git',
+      transport: 'gh',
+      branch: 'feature/portable',
+      revision: 'd'.repeat(40)
+    };
+
+    const identity = pathFreeManagedGitIdentityFromRecord(record);
+    expect(identity).toEqual({
+      remote: record.remote,
+      fetchUrl: record.fetchUrl,
+      branch: record.branch,
+      revision: record.revision
+    });
+    expect(identity).not.toHaveProperty('root');
+    expect(identity).not.toHaveProperty('transport');
+    expect(decodePathFreeManagedGitIdentity(identity)).toEqual(identity);
+  });
+
+  it('strictly validates bounded path-free identity with the shared source validators', () => {
+    const identity = {
+      remote: 'example.test/team/toolkit',
+      fetchUrl: 'https://example.test/team/toolkit.git',
+      branch: 'main',
+      revision: 'a'.repeat(40)
+    };
+    expect(() => decodePathFreeManagedGitIdentity({ ...identity, root: '/tmp/toolkit' })).toThrow(/exactly/u);
+    expect(() => decodePathFreeManagedGitIdentity({ ...identity, transport: 'git' })).toThrow(/exactly/u);
+    expect(() => decodePathFreeManagedGitIdentity({ ...identity, remote: 'elsewhere.test/team/toolkit' })).toThrow(/does not match/u);
+    expect(() => decodePathFreeManagedGitIdentity({ ...identity, fetchUrl: 'https://user:secret@example.test/team/toolkit.git' })).toThrow(/fetchUrl/u);
+    expect(() => decodePathFreeManagedGitIdentity({ ...identity, branch: 'main~1' })).toThrow(/branch/u);
+    expect(() => decodePathFreeManagedGitIdentity({ ...identity, revision: 'a'.repeat(39) })).toThrow(/revision/u);
+    expect(() => decodePathFreeManagedGitIdentity({ ...identity, fetchUrl: `https://example.test/${'a'.repeat(2 * 1024 * 1024)}.git` }))
+      .toThrow(new RegExp(`${MAX_MANAGED_GIT_RECORD_BYTES}-byte`, 'u'));
+
+    const canonicalBytes = (value: object): number => Buffer.byteLength(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
+    const basePath = 'a';
+    const base = {
+      ...identity,
+      branch: 'b',
+      remote: `example.test/${basePath}`,
+      fetchUrl: `https://example.test/${basePath}.git`
+    };
+    const remainingBytes = MAX_MANAGED_GIT_RECORD_BYTES - canonicalBytes(base);
+    const branchExtra = remainingBytes % 2;
+    const pathExtra = (remainingBytes - branchExtra) / 2;
+    const exactPath = 'a'.repeat(basePath.length + pathExtra);
+    const exact = {
+      ...identity,
+      branch: 'b'.repeat(1 + branchExtra),
+      remote: `example.test/${exactPath}`,
+      fetchUrl: `https://example.test/${exactPath}.git`
+    };
+    const above = { ...exact, branch: `${exact.branch}b` };
+    expect(canonicalBytes(exact)).toBe(MAX_MANAGED_GIT_RECORD_BYTES);
+    expect(canonicalBytes(above)).toBe(MAX_MANAGED_GIT_RECORD_BYTES + 1);
+    expect(decodePathFreeManagedGitIdentity(exact)).toEqual(exact);
+    expect(() => decodePathFreeManagedGitIdentity(above)).toThrow(new RegExp(`${MAX_MANAGED_GIT_RECORD_BYTES}-byte`, 'u'));
   });
 
   it('bounds terminal-safe process diagnostics and redacts credentials', () => {

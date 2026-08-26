@@ -306,7 +306,7 @@ Bazframe stores user state in `~/.bazframe` by default:
 | `BAZFRAME_HOME` | Bazframe profiles, settings, libraries, packages, snapshots, and adapter records | `~/.bazframe` |
 | `PI_CODING_AGENT_DIR` | Pi’s global configuration and extension directory | `~/.pi/agent` |
 
-Each override must be an absolute path. Profile export/import is deferred; installing Bazframe on another machine does not copy or activate the contents of an existing `BAZFRAME_HOME`.
+Each override must be an absolute path. Profile export/import is the next approved feature but is not implemented in this release; installing Bazframe on another machine does not copy or activate the contents of an existing `BAZFRAME_HOME`. The approved design uses a reviewable declaration rather than copying that directory.
 
 ## Safety
 
@@ -317,6 +317,7 @@ Profiles and skills become trusted input to a coding agent with filesystem and s
 ## Documentation
 
 - [Product design](docs/design.md) — current behavior and data contracts
+- [Profile portability design](docs/profile-portability-design.md) — approved export/import contract and implementation stages
 - [Pi adapter](docs/pi-adaptive-context-adapter.md) — session context and runtime integration
 - [Terminal interface](docs/tui-design.md) — interaction model and current capabilities
 - [Command help](#command-map) — entry points for built-in reference text
