@@ -9,9 +9,8 @@ coverage/
 !.env.example
 .DS_Store
 
-# Experiment workspaces are independent repositories; keep reports/profiles visible.
-experiments/*/project/
-experiments/test-repo/
+# Local experiments
+/experiments/
 *.swp
 *.swo
 
@@ -20,9 +19,12 @@ experiments/test-repo/
 /DEV.md
 /PLAY.md
 /SCRATCHPAD.md
+/SESSION.md
 /TODO.md
 /plan.md
 /progress.md
+/todo_descriptions/
+/docs/reviews/
 /reviews/
 /logs/
 /.pi/

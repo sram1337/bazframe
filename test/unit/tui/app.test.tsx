@@ -679,7 +679,7 @@ describe('TuiApp', () => {
       : [defaultSource];
     dashboard.collections = [{
       key: 'library:mtg-deckbuilding', kind: 'library', id: 'mtg-deckbuilding',
-      root: '/Users/sram/mtg-deckbuilding',
+      root: '/fixtures/mtg-deckbuilding',
       digest: 'a'.repeat(64),
       skillsRoot: 'collection',
       refreshAvailability: 'available', skillCount: 1,

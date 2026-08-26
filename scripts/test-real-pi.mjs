@@ -124,7 +124,7 @@ try {
     `${JSON.stringify({ quietStartup: true, enableInstallTelemetry: false })}\n`
   );
   copyFileSync(
-    join(projectRoot, 'experiments', 'pi-no-launcher-adapter', 'probe-provider.ts'),
+    join(projectRoot, 'scripts', 'fixtures', 'pi-probe-provider.ts'),
     join(agentDirectory, 'extensions', '99-probe-provider.ts')
   );
   mkdirSync(repository, { recursive: true });

@@ -276,7 +276,7 @@ That evidence does not invalidate the bounded composition mechanics. Stage 1 alo
 
 ## Stage 2 evidence and disposition
 
-The reopened Stage 2 proof lives in the source repository under `experiments/provider-neutral-nested-source-unit-composition/stage2-mtg/`; experiments are not included in the npm package. Its sanitized source bytes derive only from Git objects at MTG source commit `55ebbf4104cc0ca80e7e907b503ca4c803107785`, read with `git show`; generated provenance verifies pinned source hashes, exact copied-reference hashes, transformed destination hashes, and exclusions.
+A local Stage 2 proof supplied the evidence summarized here; experiments are not part of the public source repository or npm package. Its sanitized source bytes derive only from Git objects at MTG source commit `55ebbf4104cc0ca80e7e907b503ca4c803107785`, read with `git show`; generated provenance verifies pinned source hashes, exact copied-reference hashes, transformed destination hashes, and exclusions.
 
 Before the mutation window, the provider prepared one grouping root with `card-search` and `deck-analysis`, the Stage 1 resolver established the exact child records, and `npm ci --ignore-scripts` then prepared exact `tsx@4.21.0` from the root lock. Discovery was not rerun after that `node_modules` preparation, so Stage 2 supplies no evidence for pruning `.git` or `node_modules` during discovery. During measurement, both child-local adapters ran offline/no-install from each of two unrelated Git caller CWDs, deliberately changed to their physical child roots, resolved ancestor runtime/shared modules/references, and emitted equal canonical JSON per child. Both consumed the same pure card loader/search code, exact `card-evaluation-framework.md` and `synergy-support-math.md` copies, and synthetic immutable card/deck inputs.
 
@@ -312,12 +312,12 @@ The user approved Tasks 0-3 with these exact experiment-only semantics:
 - Unexpected filesystem I/O errors and concurrent filesystem races are explicit experiment limitations and may reject the resolver promise rather than being normalized into a product guarantee. The fixture and tests do not simulate permission behavior that is unreliable for privileged users.
 - Complete manifests include every root and descendant path without following links, recording relative path, filesystem type, byte size, and SHA-256 content hash for files and link-target bytes. Provider and both destination manifests must compare exactly before and after resolution.
 - After baseline manifests are captured and until their after-manifests are captured, the only writable filesystem root is `<isolated-bazframe-home>/**`. For the later Pi probe, `HOME`, Pi agent/config/cache/session state, XDG state, and `TMPDIR` must all resolve beneath that same isolated home. Provider and destination roots remain immutable.
-- The preparer and structural tests may create and remove their enclosing experiment-local temporary workspace outside the measured mutation window. No experiment runtime artifact may be written outside `experiments/provider-neutral-nested-source-unit-composition/`.
+- The preparer and structural tests may create and remove their enclosing local experiment workspace outside the measured mutation window. No experiment runtime artifact may be written outside that workspace.
 - Stage 2, Pi projection, runtime compatibility, source lifecycle, dependencies, credentials, subsets, packs, and registries remain unapproved and out of Tasks 0-3.
 
 ## Stage 1 task and delegation plan
 
-Stage 1 implementation and runtime artifacts stay entirely under `experiments/provider-neutral-nested-source-unit-composition/`. Evidence-only updates to this note are allowed. The experiment must not change `src/`, `artifacts/pi/bazframe.ts`, production profile state, CLI/TUI/status behavior, the package manifest or executable payload, or [`../design.md`](../design.md); no experiment code enters the package. Existing helpers and runtime patterns may be studied or invoked, but experiment types and behavior do not become production APIs.
+Stage 1 implementation and runtime artifacts stay entirely inside the local experiment workspace. Evidence-only updates to this note are allowed. The experiment must not change `src/`, `artifacts/pi/bazframe.ts`, production profile state, CLI/TUI/status behavior, the package manifest or executable payload, or [`../design.md`](../design.md); no experiment code enters the package. Existing helpers and runtime patterns may be studied or invoked, but experiment types and behavior do not become production APIs.
 
 ### Task 0: approve the executable contract
 
@@ -466,7 +466,6 @@ This approval is not the third historical outcome. It does not commission or imp
 
 - [`../design.md`](../design.md) — current product boundary.
 - [`skill-first-projects-and-external-harnesses.md`](skill-first-projects-and-external-harnesses.md) — earlier bundle/dependency hypothesis and external-harness framing.
-- `experiments/mtg-skill-refactor/REPORT.md` — bounded source-repository MTG harness-refactor evidence; experiments are not included in the npm package.
 - `~/foo/research/BAZFRAME_EXECUTIVE_SUMMARY.md` — strategic reconciliation and staged recommendation.
 - `~/foo/mtg_test/MTG_SKILL_SUITE_DESIGN.md` — canonical external nested-suite proposal.
 - `~/foo/mtg_test/BAZFRAME_SKILL_GROUP_REFACTOR_DESIGN.md` — Bazframe-specific external proposal.

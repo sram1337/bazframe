@@ -5,8 +5,6 @@
 > Product source of truth: [`design.md`](design.md)
 >
 > Accepted runtime behavior: [`pi-adaptive-context-adapter.md`](pi-adaptive-context-adapter.md)
->
-> Executable evidence (source repository only): `experiments/pi-no-launcher-adapter/REPORT.md`
 
 ## 1. Product boundary
 

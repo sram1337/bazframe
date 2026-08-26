@@ -421,4 +421,4 @@ Skill packs, child subsets, and snapshot garbage collection remain deferred.
 
 ## Implementation plan
 
-[`profile-portability-design.md`](profile-portability-design.md) records the approved next-feature contract and staged implementation gates. [`pi-adapter-production-design.md`](pi-adapter-production-design.md) records the implemented Pi production baseline, lifecycle rules, milestones, and acceptance evidence. Executable Pi 0.82 evidence is retained in the source repository at `experiments/pi-no-launcher-adapter/REPORT.md`; experiments are not included in the npm package.
+[`profile-portability-design.md`](profile-portability-design.md) records the approved next-feature contract and staged implementation gates. [`pi-adapter-production-design.md`](pi-adapter-production-design.md) records the implemented Pi production baseline, lifecycle rules, milestones, and acceptance evidence.
