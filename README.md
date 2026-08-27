@@ -1,18 +1,34 @@
 # Bazframe
+_Bring your harness with you._
 
-Bazframe is an open-source Skill management tool for coding-agent harnesses—the applications that run coding-agent sessions, tools, models, and project context. It organizes standard [Agent Skills](https://agentskills.io/) and personal instructions into reusable **profiles**. An Agent Skill is a directory of instructions and supporting files that a compatible agent can load; a Bazframe profile combines optional Skills with personal `AGENTS.md` instructions.
+Bazframe is a Skill management tool for coding-agent harnesses. It allows you to move, package, and distribute [Agent Skills](https://agentskills.io/) and AGENTS.md files between projects and dev environments.
 
-The current release integrates with the [Pi coding agent](https://github.com/earendil-works/pi). Through its Pi adapter, Bazframe adds the active profile as a separate layer after Pi's own context:
-
-```text
-Pi's tools, model, and settings ─┐
-Current project's instructions  ─┼─> Pi session
-Active Bazframe profile ─────────┘
+## Quick Start
+### Install
+```bash
+npm i -g bazframe
 ```
 
-The public beta supports Pi 0.82.0 or newer on macOS and Linux.
+### Setup
+```bash
+bazframe library add /path/to/my-skills-folder   # add your skills to bazframe
 
-## Install
+bazframe profile add my-coding-harness           # create a profile
+bazframe profile edit my-coding-harness          # edit the profile's AGENTS.md
+bazframe profile libraries add my-skills-folder  # add skills to your profile
+bazframe profile use my-coding-harness           # start using your new profile
+
+bazframe adapters install pi                     # connect bazframe to your preferred harness*
+```
+### Running bazframe
+Then start your harness like normal:
+```bash
+pi
+```
+
+You should see all your profiles added skills.
+
+ > * The current beta version supports only Pi 0.82.0 or newer on macOS and Linux.
 
 ### Requirements
 
@@ -20,55 +36,9 @@ The public beta supports Pi 0.82.0 or newer on macOS and Linux.
 - Pi 0.82.0 or newer.
 - macOS or Linux.
 - A model provider supported by Pi; see [Pi's authentication documentation](https://github.com/earendil-works/pi#readme).
-- [Git](https://git-scm.com/) only for Git-worktree project overrides and managed Git resources. Basic profile use does not require Git.
-
-### Install Pi and Bazframe
-
-```bash
-npm install --global --ignore-scripts @earendil-works/pi-coding-agent
-npm install --global bazframe@next
+- (optional) [Git](https://git-scm.com/) only for managed Git resources. Basic profile use does not require Git.
 ```
 
-`next` is Bazframe's explicit beta channel. Verify both installations:
-
-```bash
-pi --version
-bazframe --version
-```
-
-Bazframe reports `Bazframe <installed-version>`. Pi login, updates, and adapter reinstall guidance are in [Getting started](docs/getting-started.md).
-
-## Quick start
-
-### Create your first profile
-
-Before running these commands, `VISUAL` or `EDITOR` must name an editor executable. When the editor opens, add one personal instruction, for example: `Explain unfamiliar code in plain language.`
-
-```bash
-bazframe adapter install pi
-bazframe profile add focused
-bazframe profile edit focused
-bazframe profile use focused
-bazframe status
-```
-
-In the status output, confirm these stable success signals:
-
-- `Pi adapter` is `current`.
-- `Effective behavior` is `enabled`.
-- `Active profile` is `focused`.
-
-### Confirm it in Pi
-
-Start Pi normally:
-
-```bash
-pi
-```
-
-Inside Pi, run `/bazframe info`. `Profile: focused` confirms that Bazframe added the profile to the session. After changing an open session's profile or Skill activation, run `/bazframe reload`.
-
-See [Getting started](docs/getting-started.md) for expanded setup, editor, policy, and troubleshooting guidance.
 
 ## What Bazframe manages
 
