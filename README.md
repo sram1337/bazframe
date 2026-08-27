@@ -10,12 +10,17 @@ npm i -g bazframe
 
 ### Setup
 ```bash
-bazframe libraries add /path/to/my-skills-folder # add your skills to bazframe
-bazframe profile add my-coding-harness           # create a profile
-bazframe profile edit my-coding-harness          # edit the profile's AGENTS.md
-bazframe profile libraries add my-skills-folder  # add skills to your profile
-bazframe profile use my-coding-harness           # start using your new profile
-bazframe adapters install pi                     # connect bazframe to your preferred harness*
+# add your skills to bazframe
+bazframe libraries add /path/to/my-skills-folder
+
+# setup your _local_ bazframe profile
+bazframe profile add my-coding-harness
+bazframe profile edit my-coding-harness
+bazframe profile libraries add my-skills-folder
+bazframe profile use my-coding-harness
+
+# connect bazframe to your preferred harness*
+bazframe adapters install pi                     
 ```
 ### Running bazframe
 Then start your harness like normal:
