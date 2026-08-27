@@ -10,8 +10,7 @@ npm i -g bazframe
 
 ### Setup
 ```bash
-bazframe library add /path/to/my-skills-folder   # add your skills to bazframe
-
+bazframe libraries add /path/to/my-skills-folder # add your skills to bazframe
 bazframe profile add my-coding-harness           # create a profile
 bazframe profile edit my-coding-harness          # edit the profile's AGENTS.md
 bazframe profile libraries add my-skills-folder  # add skills to your profile
