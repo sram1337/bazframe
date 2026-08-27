@@ -15,7 +15,6 @@ bazframe profile add my-coding-harness           # create a profile
 bazframe profile edit my-coding-harness          # edit the profile's AGENTS.md
 bazframe profile libraries add my-skills-folder  # add skills to your profile
 bazframe profile use my-coding-harness           # start using your new profile
-
 bazframe adapters install pi                     # connect bazframe to your preferred harness*
 ```
 ### Running bazframe
