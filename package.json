@@ -1,7 +1,7 @@
 {
   "name": "bazframe",
   "version": "0.1.0-beta.2",
-  "description": "Compose reusable Agent Skills and personal profiles for Pi",
+  "description": "Manage reusable Agent Skills and profiles for coding-agent harnesses",
   "license": "MIT",
   "type": "module",
   "engines": {

@@ -1,6 +1,6 @@
 # Contributing to Bazframe
 
-Bazframe is an open-source companion for [Pi](https://github.com/earendil-works/pi), a terminal coding agent that lets a language model read, edit, and run code. Bazframe adds reusable personal profiles and standard Agent Skills to Pi sessions without replacing a repository's own instructions.
+Bazframe is an open-source Skill management tool for coding-agent harnesses. It organizes standard Agent Skills and personal instructions into reusable profiles, then applies the active profile through a runtime adapter. The current adapter integrates with [Pi](https://github.com/earendil-works/pi), a terminal coding harness that lets a language model read, edit, and run code.
 
 Report bugs and usage problems in [GitHub issues](https://github.com/sram1337/bazframe/issues). Propose significant behavior or design changes in an issue before investing in an implementation so the intended scope can be agreed first. Do not treat existing code as a product decision: [`docs/design.md`](docs/design.md) is the current product source of truth.
 

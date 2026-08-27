@@ -1,8 +1,8 @@
 # Getting started with Bazframe
 
-Bazframe is a companion for the [Pi coding agent](https://github.com/earendil-works/pi). Pi is a terminal coding agent that gives a language model tools to read, edit, and run code. Bazframe adds one active **profile**—personal `AGENTS.md` instructions and optional standard [Agent Skills](https://agentskills.io/)—to Pi's existing context without replacing repository instructions.
+Bazframe is a Skill management tool for coding-agent harnesses. It groups standard [Agent Skills](https://agentskills.io/) and personal `AGENTS.md` instructions into reusable **profiles**. The current release provides an adapter for [Pi](https://github.com/earendil-works/pi), a terminal coding harness that gives a language model tools to read, edit, and run code. The adapter adds one active profile to Pi's existing context while preserving repository instructions.
 
-This guide covers installation, a first profile, policy, and local configuration. For Skill lifecycles, see [Using Skills with Bazframe](skills.md).
+This guide covers installation of the Pi integration, a first profile, policy, and local configuration. For Skill lifecycles, see [Using Skills with Bazframe](skills.md).
 
 ## Prerequisites and Pi authentication
 
