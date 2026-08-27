@@ -16,9 +16,9 @@ describe('CLI color', () => {
   });
 
   it('styles headings only when color is enabled', () => {
-    const help = 'Bazframe 2\n\nUsage: bazframe <resource>\n\nResources:\n';
+    const help = 'Bazframe\n\nUsage: bazframe <resource>\n\nResources:\n';
     const colored = colorizeHelp(help, createCliColors(true));
-    expect(colored).toContain('\u001b[1;36mBazframe 2\u001b[0m');
+    expect(colored).toContain('\u001b[1;36mBazframe\u001b[0m');
     expect(colored).toContain('\u001b[1;36mUsage:\u001b[0m');
     expect(colorizeHelp(help, createCliColors(false))).toBe(help);
   });

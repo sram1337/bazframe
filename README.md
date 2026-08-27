@@ -1,8 +1,8 @@
-# Bazframe 2
+# Bazframe
 
-Bazframe is a profile manager for [Pi](https://github.com/earendil-works/pi), a terminal program that lets a language model read, edit, and run code. It gives developers who use Pi across multiple repositories one place to manage personal instructions and reusable capabilities.
+Bazframe is an open-source companion for the [Pi coding agent](https://github.com/earendil-works/pi). Pi is a terminal coding agent that lets a language model read, edit, and run code. A Bazframe **profile** is a named set of personal `AGENTS.md` instructions with optional reusable Skills. An [Agent Skill](https://agentskills.io/) is a standard directory of instructions and supporting files that a compatible agent can load.
 
-Choose a named profile such as `focused`, `reviewer`, or `documentation`, then start Pi normally:
+Bazframe lets you use reusable personal instructions and standard Agent Skills across projects without replacing repository instructions. It adds the active profile as a separate layer after Pi's own context:
 
 ```text
 Pi's tools, model, and settings ─┐
@@ -10,329 +10,134 @@ Current project's instructions  ─┼─> Pi session
 Active Bazframe profile ─────────┘
 ```
 
-Bazframe's first public beta is available for macOS and Linux. Bazframe supports Pi 0.82.0 or newer.
-
-## Requirements
-
-- [Node.js](https://nodejs.org/) 22.19.0 or newer. Node runs Bazframe and includes the `npm` package manager used below.
-- [Git](https://git-scm.com/), to identify repositories for project-specific settings and acquire Git-hosted Skills, libraries, and packages.
-- A terminal and shell on macOS or Linux.
-- Access to a model provider supported by Pi. Pi can authenticate with selected subscriptions or API keys.
-
-The quick start introduces Pi and Agent Skills as they appear.
+The current release is a public beta for macOS and Linux and requires Pi 0.82.0 or newer.
 
 ## Install
 
-### 1. Install Pi
+### Requirements
 
-Pi is the coding-agent application that hosts the model session, tools, project context, and Bazframe adapter.
+- [Node.js](https://nodejs.org/) 22.19.0 or newer.
+- Pi 0.82.0 or newer.
+- macOS or Linux.
+- A model provider supported by Pi; see [Pi's authentication documentation](https://github.com/earendil-works/pi#readme).
+- [Git](https://git-scm.com/) only for Git-worktree project overrides and managed Git resources. Basic profile use does not require Git.
+
+### Install Pi and Bazframe
 
 ```bash
 npm install --global --ignore-scripts @earendil-works/pi-coding-agent
-pi --version
+npm install --global bazframe@next
 ```
 
-The version must be `0.82.0` or newer. Install a current Pi release so its dependency security fixes are included.
-
-Start Pi once and enter `/login` to choose and authenticate with a model provider. See [Pi’s README](https://github.com/earendil-works/pi#readme) for its provider and interface documentation.
-
-### 2. Install Bazframe
-
-Install the public beta from npm's `next` channel:
+`next` is Bazframe's explicit beta channel. Verify both installations:
 
 ```bash
-npm install --global bazframe@next
+pi --version
 bazframe --version
 ```
 
-The version command should report `Bazframe 2 0.1.0-beta.2`. The first publication remains tagged `latest`; `next` is the explicit beta channel. To update within that channel, run `npm install --global bazframe@next`, then rerun `bazframe adapter install pi` so Pi receives the packaged adapter version.
+Bazframe reports `Bazframe <installed-version>`. Pi login, updates, and adapter reinstall guidance are in [Getting started](docs/getting-started.md).
 
 ## Quick start
 
-Install the Bazframe adapter into Pi, create a profile, and give it one personal instruction:
+### Create your first profile
+
+Before running these commands, `VISUAL` or `EDITOR` must name an editor executable. When the editor opens, add one personal instruction, for example: `Explain unfamiliar code in plain language.`
 
 ```bash
 bazframe adapter install pi
 bazframe profile add focused
-export EDITOR=/path/to/your/editor
 bazframe profile edit focused
 bazframe profile use focused
 bazframe status
 ```
 
-A healthy status includes these lines:
+In the status output, confirm these stable success signals:
 
-```text
-Pi adapter: current
-Global policy: enabled
-Effective behavior: enabled (global-enabled)
-Active profile: focused
-Corrective actions:
-  (none)
-```
+- `Pi adapter` is `current`.
+- `Effective behavior` is `enabled`.
+- `Active profile` is `focused`.
 
-Now open any project and start Pi:
+### Confirm it in Pi
+
+Start Pi normally:
 
 ```bash
-cd /path/to/a/project
 pi
 ```
 
-Enter `/bazframe info` inside Pi. `Profile: focused` confirms that Bazframe added the profile. The profile’s instruction now accompanies Pi’s own project context in that session.
+Inside Pi, run `/bazframe info`. `Profile: focused` confirms that Bazframe added the profile to the session. After changing an open session's profile or Skill activation, run `/bazframe reload`.
 
-Use `/bazframe reload` after changing a profile, library activation, or package activation while Pi is open.
+See [Getting started](docs/getting-started.md) for expanded setup, editor, policy, and troubleshooting guidance.
 
-## Core workflows
+## What Bazframe manages
 
-### Switch between profiles
+### Profiles
 
-Each profile has its own `AGENTS.md` instructions and skill membership. One profile is active across working directories.
+Profiles contain personal `AGENTS.md` instructions and optional Skill memberships or library/package references. One profile is globally active. Bazframe appends that profile as a separate opaque layer; it does not merge, rank, or override repository instructions.
 
-```bash
-bazframe profile add reviewer
-bazframe profile use reviewer
-bazframe profiles
-```
+Use `bazframe profiles` to inspect profiles and `bazframe profile current` for the active profile ID.
 
-Edit any active or inactive profile explicitly, then start a new Pi session or run `/bazframe reload` in an existing one:
+### Agent Skills, libraries, and packages
 
-```bash
-bazframe profile edit reviewer
-```
+Bazframe uses the standard [Agent Skills](https://agentskills.io/) format and defines no alternative Skill format:
 
-Bazframe uses the first nonblank `VISUAL`, then `EDITOR`, as one executable name or path. It does not parse flags, invoke a shell, or choose a fallback editor. If an editor needs fixed flags such as `--wait`, configure an executable wrapper. Bazframe edits the actual profile `AGENTS.md` directly and waits only for that process; a GUI launcher that returns immediately also needs a waiting wrapper.
+- An **added Skill** is one live provider Skill.
+- A **Skill library** is an already-prepared collection; library operations execute no provider code.
+- A **Skill package** is an explicitly buildable provider project.
 
-The manual equivalent is to open `${BAZFRAME_HOME:-$HOME/.bazframe}/profiles/<profile>/AGENTS.md` directly with an editor. Other lifecycle commands include `duplicate`, `rename`, and `remove`:
+Installing the npm package activates neither a profile nor the shipped `bazframe` and `bazify` Skills. See [Using Skills with Bazframe](docs/skills.md) for resource lifecycles, managed Git providers, Bazify, ownership, and troubleshooting.
 
-```bash
-bazframe profile --help
-bazframe profile remove --help
-```
+### Global and project policy
 
-The second command explains the safeguards around profile deletion.
+Profiles apply by default in Git and non-Git directories. A canonical Git worktree can override the global policy; non-Git directories inherit the global policy. See [Getting started](docs/getting-started.md#control-global-and-project-policy) for the commands.
 
-### Add an individual Skill
-
-A **Skill** is a directory conforming to the [Agent Skills specification](https://agentskills.io) and containing a `SKILL.md` file with instructions for a coding agent. A profile's Skills are optional. Bazframe's `(default)` catalog stores absolute links to canonical Skill directories. Absolute-path providers retain their content; managed Git providers use Bazframe's recorded checkout lifecycle. See [Using Skills with Bazframe](docs/skills.md) for the standard format, Bazframe lifecycle choices, validation timing, and troubleshooting.
-
-Create a minimal local skill for this example:
-
-```bash
-SKILL_ROOT="$HOME/example-skills/explain-code"
-mkdir -p "$SKILL_ROOT"
-cat > "$SKILL_ROOT/SKILL.md" <<'EOF'
----
-name: explain-code
-description: Explain unfamiliar code in plain language.
----
-
-# Explain code
-
-Describe the code's purpose, data flow, and important assumptions.
-EOF
-```
-
-Register the external directory, then add the skill to the active profile:
-
-```bash
-bazframe add skill "$SKILL_ROOT"
-bazframe skills
-bazframe profile skills add explain-code
-bazframe profile skills
-```
-
-After `/bazframe reload`, `/bazframe info` should report `Flat direct skills: 1` and list `explain-code`.
-
-Open an added Skill's live provider definition explicitly with the same external-editor contract used for profiles:
-
-```bash
-bazframe skill edit explain-code
-```
-
-The command derives the provider `SKILL.md` from the `(default)` entry rather than trusting a displayed path. A successful editor exit does not claim that content was saved. Skills from libraries and packages come from immutable snapshots and cannot be edited this way; edit provider input, then run `bazframe libraries update <library>` or `bazframe packages build <package>`.
-
-The added Skill and its profile membership are parallel links to the same provider directory. Provider changes are visible after a new Pi session or `/bazframe reload`. A Git-hosted root Skill can be acquired with `bazframe add skill git:<owner>/<repository>` and advanced with `bazframe skill update <skill>`. Remove the profile membership before `bazframe remove skill explain-code`; catalog removal is refused while any profile references it.
-
-Bazframe's npm package ships the optional `bazframe` and `bazify` Skills under `dist/skills/`. Global npm installation does not change the `(default)` catalog or any profile. To activate one explicitly, locate the package root and add it through the normal catalog and profile commands:
-
-```bash
-BAZFRAME_PACKAGE_ROOT="$(npm root --global)/bazframe"
-bazframe add skill "$BAZFRAME_PACKAGE_ROOT/dist/skills/bazframe"
-bazframe profile skills add bazframe
-```
-
-### Add a Skill library or Skill package
-
-Use a **Skill library** for an already-prepared directory of zero or more Skills. Its ID is the canonical root basename and must be 1–64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen:
-
-```bash
-TOOLKIT="$HOME/example-toolkit"
-mkdir -p "$TOOLKIT/review-code"
-cat > "$TOOLKIT/review-code/SKILL.md" <<'SKILL'
----
-name: review-code
-description: Review a change for correctness and maintainability.
----
-# Review code
-SKILL
-bazframe libraries add "$TOOLKIT"                 # initial snapshot and activation
-bazframe profile libraries add example-toolkit      # attach the whole library
-```
-
-Provider changes become active only after `bazframe libraries update example-toolkit`.
-
-Use a **Skill package** for a provider-owned buildable project containing zero or more ordinary Skills. Its ID is the canonical root basename and must be 1–64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen (`my-package` here). Its required `bazframe-package.json` declares literal build argv, an artifact root, and a Skills root:
-
-```json
-{
-  "schemaVersion": 1,
-  "build": ["npm", "run", "build"],
-  "artifactRoot": "dist",
-  "skillsRoot": "skills"
-}
-```
-
-```bash
-bazframe packages add /absolute/path/to/my-package  # initial build and activation
-bazframe profile packages add my-package            # attach the whole package
-
-# After changing package source:
-bazframe packages build my-package                  # build and activate a new snapshot
-```
-
-Both package add and package build are explicit and unsandboxed. Bazframe snapshots the complete artifact root, including shared resources, while discovering Skills only below the Skills root. Profile references never build or select individual children. See [Using Skills with Bazframe](docs/skills.md) for the complete layout, lifecycle, and runnable example.
-
-### Acquire a Git-hosted resource
-
-Each resource-specific add command accepts GitHub shorthand, HTTPS, or `ssh://`:
-
-```bash
-bazframe add skill git:owner/root-skill
-bazframe libraries add git:owner/skill-library
-bazframe packages add git:owner/skill-package
-bazframe profile packages add skill-package
-```
-
-Bazframe places the checkout under `${BAZFRAME_HOME:-$HOME/.bazframe}/providers/git/`, records the credential-free remote, default branch, and full revision, then applies the selected resource's validation contract. Git and GitHub CLI use their existing authentication. A remote package is cloned and its manifest is shown before its declared build runs; interactive confirmation defaults to decline and non-interactive use supplies `--yes`.
-
-Managed updates are explicit:
-
-```bash
-bazframe skill update root-skill
-bazframe libraries update skill-library
-bazframe packages update skill-package
-```
-
-Updates advance the recorded branch by fast-forward. `--accept-rewrite` authorizes a reviewed rewritten branch. Package updates present the build boundary again. Repeating an already-current add verifies the local provider and registration without network access. Managed resource removal applies the existing reference checks, then removes the Bazframe checkout and provenance while leaving the upstream remote available. Acquisition and updates leave profile selection and membership unchanged.
-
-### Bazify Skills
-
-The shipped `bazify` Skill packages one Skill or a collection with provider source under `skills/`, generated artifacts under `dist/skills/`, and a Bazframe package manifest. It extracts Skills from a broader project into a new package, or adapts a dedicated Skill repository in place.
-
-```bash
-# Extract one Skill or every immediate Skill under a source root's skills/ directory.
-node <bazify-skill-root>/scripts/bazify.mjs create /absolute/path/to/source
-
-# Add Bazframe compatibility to a dedicated Skill repository.
-node <bazify-skill-root>/scripts/bazify.mjs adapt /absolute/path/to/skill-repository
-
-node <bazify-skill-root>/scripts/bazify.mjs validate /absolute/path/to/package
-```
-
-New packages default to `~/<name>` and use the source Skill or collection name. Bazify uses disposable validation state and `./bazframe/` for temporary review tracking. A new package can be published to a consent-bound private GitHub repository after preview; an adapted repository continues through its existing Git workflow. See [Using Skills with Bazframe](docs/skills.md#bazify-skills) for the complete workflow.
-
-## Control where the profile applies
-
-The active profile applies by default in Git repositories and other working directories. A Git repository can override the global setting.
-
-```bash
-bazframe global disable   # change the global default
-bazframe project enable   # enable the current Git repository
-bazframe project disable  # disable the current Git repository
-bazframe global enable    # enable the global default
-bazframe projects         # inspect repository settings
-```
-
-## Terminal interface
-
-`bazframe tui` opens a keyboard-driven `Skills`, `Profiles`, `Adapters`, `Settings` interface. Preferred layouts show profile and Skills master-detail panes; compact layouts drill into profile details and plain-text `SKILL.md` previews with Esc/Backspace return. The Profiles list keeps Create first, then the current profile, favorite inactive profiles, and remaining profiles. Press lowercase `f` to toggle a persistent profile favorite and lowercase `x` for guarded profile deletion; lowercase `d` does not delete. Press `e` on an added Skill's live `(default)` preview to open its provider `SKILL.md`; library/package Skills instead show provider-input and refresh guidance. Profile details retain `e` for the selected profile's `AGENTS.md` and `x` for contextual membership removal. The interface preserves explicit inactive-profile membership editing and keeps adapter/settings status read-only.
+### Terminal interface
 
 ```bash
 bazframe tui
 ```
 
-Press `?` for its key guide. In Skills, `o`/`c` expand or collapse groups and `a` can add an already-prepared local library or acquire one from a managed Git source. Local library IDs use the canonical root basename; managed Git IDs use the normalized repository name. Final literal `y` is required and creates no profile reference. Package writes and all profile library/package reference changes remain CLI-only.
-
-## Command map
-
-| Goal | Command |
-|---|---|
-| Inspect profiles | `bazframe profiles` |
-| Select the active profile | `bazframe profile use <profile>` |
-| Add or remove a Skill | `bazframe add skill` / `bazframe remove skill` |
-| Browse added Skills | `bazframe skills` |
-| Manage a profile's Skills | `bazframe profile skills` |
-| Manage Skill libraries | `bazframe libraries` / `bazframe profile libraries` |
-| Manage Skill packages | `bazframe packages` / `bazframe profile packages` |
-| Control the global setting | `bazframe global` |
-| Control the current Git repository | `bazframe project` |
-| Inspect adapter state | `bazframe adapters` |
-| Install the Pi adapter | `bazframe adapter install pi` |
-| Diagnose setup | `bazframe status` |
-| Open the terminal interface | `bazframe tui` |
-
-Run `bazframe help <resource>` or `bazframe <resource> --help` for complete command syntax.
-
-## Files and configuration
-
-Bazframe stores user state in `~/.bazframe` by default:
-
-```text
-~/.bazframe/
-├── active-profile
-├── profile-favorites.json
-├── skills/
-├── profiles/
-├── libraries/
-├── packages/
-├── providers/git/
-├── skill-snapshots/
-├── projects/
-└── adapters/
-```
-
-| Environment variable | Purpose | Default |
-|---|---|---|
-| `BAZFRAME_HOME` | Bazframe profiles, settings, libraries, packages, snapshots, and adapter records | `~/.bazframe` |
-| `PI_CODING_AGENT_DIR` | Pi’s global configuration and extension directory | `~/.pi/agent` |
-
-Each override must be an absolute path. Profile export/import is the next approved feature but is not implemented in this release; installing Bazframe on another machine does not copy or activate the contents of an existing `BAZFRAME_HOME`. The approved design uses a reviewable declaration rather than copying that directory.
+This implemented beta interface has `Skills`, `Profiles`, `Adapters`, and `Settings` views. It can inspect resources, manage profiles and individual Skill memberships, edit live profile or added-Skill text, and add a reviewed Skill library; adapter and settings views are read-only. It is not presented as broadly production-ready. See the [terminal UI design](docs/tui-design.md) for the implemented boundary and remaining gates.
 
 ## Safety
 
-Profiles and skills become trusted input to a coding agent with filesystem and shell tools. Review their instructions and scripts before adding them. Remote package acquisition reports the remote, revision, managed path, and literal build argv before the unsandboxed build is authorized. Review a package's build declaration before running `packages add`, `packages build`, or `packages update`. `bazframe profile remove --force` permanently deletes the named non-active profile directory.
+Profiles and Skills become trusted input to an agent with filesystem and shell authority. Libraries execute no provider code. Package add, build, and update operations execute declared argv without a shell or sandbox and inherit your user authority. Review remote instructions and package build declarations before activation.
 
-`bazframe status` reports adapter ownership, active-profile validity, effective project behavior, library/package health, managed Git provenance and recovery state, and corrective actions.
+See [Using Skills with Bazframe](docs/skills.md#editing-and-ownership) for ownership and [its troubleshooting section](docs/skills.md#troubleshooting) for recovery details.
+
+## Command overview
+
+| Resource | Entry points |
+|---|---|
+| Profiles | `bazframe profiles`, `bazframe profile` |
+| Added Skills | `bazframe skills`, `bazframe add skill`, `bazframe remove skill` |
+| Skill libraries | `bazframe libraries`, `bazframe profile libraries` |
+| Skill packages | `bazframe packages`, `bazframe profile packages` |
+| Global/project policy | `bazframe global`, `bazframe project`, `bazframe projects` |
+| Adapters | `bazframe adapters`, `bazframe adapter` |
+| Setup status | `bazframe status` |
+| Terminal interface | `bazframe tui` |
+
+Run `bazframe help <resource>` or `bazframe <resource> --help` for canonical command syntax.
 
 ## Documentation
 
-- [Product design](docs/design.md) — current behavior and data contracts
-- [Profile portability design](docs/profile-portability-design.md) — approved export/import contract and implementation stages
-- [Pi adapter](docs/pi-adaptive-context-adapter.md) — session context and runtime integration
-- [Terminal interface](docs/tui-design.md) — interaction model and current capabilities
-- [Command help](#command-map) — entry points for built-in reference text
-- [Release process](docs/releasing.md) — exact-artifact validation and trusted publishing
+1. [Getting started](docs/getting-started.md) — installation, first profile, policy, and configuration.
+2. [Using Skills with Bazframe](docs/skills.md) — Skills, libraries, packages, managed Git, and Bazify.
+3. [Terminal UI design](docs/tui-design.md) — implemented TUI boundary and remaining gates.
+4. [Fresh-machine setup recipe](examples/setup-fresh-machine.sh) — bootstrap commands for a new machine.
+5. [Product design](docs/design.md) — product contracts for contributors.
+6. [Release process](docs/releasing.md) — release validation and publication.
+
+## Support
+
+Report bugs and ask usage questions in [GitHub issues](https://github.com/sram1337/bazframe/issues).
 
 ## Contributing
 
-Bazframe contributors should read the relevant section of the [product design](docs/design.md). Run the standard validation gate before submitting a change:
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, validation, safety guidance, and pull request expectations.
 
-```bash
-npm test
-```
+## License
 
-Adapter changes also use the isolated Pi compatibility gate:
-
-```bash
-npm run test:real-pi
-```
+[MIT](LICENSE)

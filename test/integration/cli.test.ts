@@ -64,7 +64,7 @@ describe('experimental CLI vertical slice', () => {
       signal: null,
       stdout: 'PRINT-LIKE-OUTPUT\n'
     });
-    expect(launched.stderr).toContain('Bazframe 2 legacy launcher');
+    expect(launched.stderr).toContain('Bazframe legacy launcher');
     expect(launched.stderr).toContain(`Working directory: ${physicalCwd}`);
     expect(after).toEqual(before);
 

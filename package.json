@@ -16,7 +16,8 @@
     "docs/",
     "!docs/reviews/",
     "examples/",
-    "README.md"
+    "README.md",
+    "CONTRIBUTING.md"
   ],
   "repository": {
     "type": "git",

@@ -34,7 +34,7 @@ export function colorizeHelp(text: string, colors: CliColors): string {
   return text
     .split('\n')
     .map((line) => {
-      if (line === 'Bazframe 2' || /^[A-Z][^:]*:$/u.test(line)) {
+      if (line === 'Bazframe' || /^[A-Z][^:]*:$/u.test(line)) {
         return colors.heading(line);
       }
       if (line.startsWith('Usage:')) {

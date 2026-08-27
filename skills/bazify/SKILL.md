@@ -1,7 +1,7 @@
 ---
 name: bazify
 description: Turns one Agent Skill or a Skill collection into a provider-owned Bazframe-compatible package, validates it, and optionally publishes a new package to a private GitHub repository. Use when the user asks to bazify local Skills.
-compatibility: Requires Bazframe 2 and Node.js 22.19 or newer. Private GitHub publication additionally requires Git and an authenticated GitHub CLI.
+compatibility: Requires Bazframe and Node.js 22.19 or newer. Private GitHub publication additionally requires Git and an authenticated GitHub CLI.
 ---
 
 # Bazify

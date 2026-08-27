@@ -1,7 +1,7 @@
 ---
 name: bazframe
-description: Manages Bazframe profiles, added Skills, Skill libraries, Skill packages, policy, the Pi adapter, status, and the terminal UI. Use when configuring or diagnosing Bazframe 2.
-compatibility: Requires the Bazframe 2 CLI and Pi 0.82.0 or newer.
+description: Manages Bazframe profiles, added Skills, Skill libraries, Skill packages, policy, the Pi adapter, status, and the terminal UI. Use when configuring or diagnosing Bazframe.
+compatibility: Requires the Bazframe CLI and Pi 0.82.0 or newer.
 ---
 
 # Bazframe

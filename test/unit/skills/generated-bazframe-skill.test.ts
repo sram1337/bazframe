@@ -25,6 +25,7 @@ describe('generated Bazframe Skill source', () => {
       'bazframe status',
       'bazframe tui'
     ]) expect(text).toContain(command);
+    expect(text).not.toContain(`Bazframe ${'2'}`);
     expect(text).not.toContain(`Skill${'book'}`);
     expect(text).not.toContain(`SKILL${'BOOK'}_`);
     expect(text).not.toMatch(/bazframe add <skill>|bazframe pi/u);

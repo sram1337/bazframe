@@ -16,7 +16,7 @@ if (
 export const VERSION = packageMetadata.version;
 
 export const ROOT_HELP = [
-  'Bazframe 2',
+  'Bazframe',
   '',
   'Usage: bazframe <resource> [command]',
   '',

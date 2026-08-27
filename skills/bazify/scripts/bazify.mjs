@@ -887,7 +887,7 @@ ${contents}
 
 ## Requirements
 
-The package scaffold requires Node.js 22.19 or newer and Bazframe 2. Each copied \`SKILL.md\` and its supporting files define source-specific runtime and setup requirements.
+The package scaffold requires Node.js 22.19 or newer and Bazframe. Each copied \`SKILL.md\` and its supporting files define source-specific runtime and setup requirements.
 
 ## Build and use
 

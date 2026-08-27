@@ -68,7 +68,9 @@ describe('Bazify Skill', () => {
       description: 'Provider-owned Bazframe-compatible Skill package containing 1 Skill.',
       scripts: { build: 'node scripts/bazify-build.mjs' }
     });
-    expect(await readFile(join(destination, 'README.md'), 'utf8')).toContain('provider-owned Agent Skill package');
+    const generatedReadme = await readFile(join(destination, 'README.md'), 'utf8');
+    expect(generatedReadme).toContain('provider-owned Agent Skill package');
+    expect(generatedReadme).not.toContain(`Bazframe ${'2'}`);
     expect(await readFile(join(destination, 'skills', 'demo-skill', 'reference.txt'), 'utf8')).toBe('reference\n');
     expect(await readFile(join(destination, 'dist', 'skills', 'demo-skill', 'reference.txt'), 'utf8')).toBe('reference\n');
     await expect(lstat(join(destination, 'skills', 'demo-skill', '.git'))).rejects.toMatchObject({ code: 'ENOENT' });

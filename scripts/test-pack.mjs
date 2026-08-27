@@ -78,6 +78,8 @@ try {
   assertMissing(join(packageRoot, 'skills', 'bazify'));
   assertExists(join(packageRoot, 'artifacts', 'pi', 'bazframe.ts'));
   assertExists(join(packageRoot, 'README.md'));
+  assertExists(join(packageRoot, 'CONTRIBUTING.md'));
+  assertExists(join(packageRoot, 'docs', 'getting-started.md'));
   assertExists(join(packageRoot, 'docs', 'prototype.md'));
   assertExists(join(packageRoot, 'docs', 'design.md'));
   assertExists(join(packageRoot, 'docs', 'pi-adaptive-context-adapter.md'));
@@ -146,7 +148,7 @@ try {
   }
 
   const result = spawnSync(executable, ['--version'], { encoding: 'utf8', shell: false });
-  if (result.status !== 0 || result.stdout !== `Bazframe 2 ${manifest.version}\n`) {
+  if (result.status !== 0 || result.stdout !== `Bazframe ${manifest.version}\n`) {
     throw new Error(
       `Installed CLI version check failed (${result.status}).\nstdout: ${result.stdout}\nstderr: ${result.stderr}`
     );
