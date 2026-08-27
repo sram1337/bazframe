@@ -1,6 +1,6 @@
 # Bazframe - _Take your harness with you._
 
-Bazframe is a Skill management tool for coding-agent harnesses. It allows you to move, package, and distribute [Agent Skills](https://agentskills.io/) and AGENTS.md files between projects and dev environments.
+Move, package, and distribute [Agent Skills](https://agentskills.io/) and AGENTS.md files between projects and dev environments.
 
 ## Quick Start
 ### Install
