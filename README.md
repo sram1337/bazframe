@@ -2,6 +2,8 @@
 
 Move, package, and distribute [Agent Skills](https://agentskills.io/) and AGENTS.md files between projects and dev environments.
 
+![bazframe TUI](bazframe_tui.png)
+
 ## Quick Start
 ### Install
 ```bash
@@ -39,7 +41,7 @@ You should see all your profiles added skills.
 - macOS or Linux.
 - A model provider supported by Pi; see [Pi's authentication documentation](https://github.com/earendil-works/pi#readme).
 - (optional) [Git](https://git-scm.com/) only for managed Git resources. Basic profile use does not require Git.
-```
+
 
 ### Terminal interface
 
