@@ -20,7 +20,7 @@ bazframe skill add /absolute/path/to/explain-code
 bazframe profile skill add explain-code
 ```
 
-Absolute-path providers own their live bytes. Managed Git Skills use a stable Bazframe provider path so `(default)` and profile links remain parallel across explicit updates.
+Local sources retain ownership of their live bytes. Skills acquired from remote Git sources use a stable Bazframe-managed checkout path so `(default)` and profile links remain parallel across explicit updates.
 
 ### 2. Skill library
 
@@ -42,21 +42,21 @@ The library ID is its canonical root basename and must be 1–64 lowercase lette
 bazframe library add /absolute/path/to/my-library  # initial snapshot and activation
 bazframe profile library add my-library            # attach the whole library
 
-# After changing the prepared provider tree:
+# After changing the prepared source tree:
 bazframe library update my-library                 # activate a new snapshot
 ```
 
-Library add/update never executes provider code. Bazframe snapshots the complete prepared tree. Provider changes remain invisible until explicit `library update`; an existing Pi session then needs `/bazframe reload`.
+Library add/update never executes source code. Bazframe snapshots the complete prepared tree. Source changes remain invisible until explicit `library update`; an existing Pi session then needs `/bazframe reload`.
 
 ### 3. Skill package
 
-A package is a provider-owned buildable project. Its package ID is the canonical package-root basename and must be 1–64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen, such as `my-package`.
+A package is a source-owned buildable project. Its package ID is the canonical package-root basename and must be 1–64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen, such as `my-package`.
 
 ```text
 my-package/                      ← package root; build cwd
 ├── bazframe-package.json        ← package declaration
 ├── package.json
-├── src/                         ← provider source code
+├── src/                         ← package source code
 └── dist/                        ← artifact root
     ├── shared/                  ← shared artifact resources
     └── skills/                  ← Skills root
@@ -91,9 +91,9 @@ Both `package add` and `package build` execute the literal build argv directly, 
 
 A source checkout includes `scripts/setup-library-package-demo.sh`, a runnable contributor example that creates a package, builds one Skill plus a shared resource, and attaches the package to a profile. Development scripts are not included in the npm package.
 
-## Managed Git providers
+## Remote Git sources
 
-Resource-specific add commands accept `git:<owner>/<repository>`, credential-free HTTPS, and `ssh://` URLs:
+Resource-specific add commands accept these remote Git source forms: `git:<owner>/<repository>`, credential-free HTTPS, and `ssh://` URLs:
 
 ```bash
 bazframe skill add git:owner/root-skill
@@ -101,9 +101,9 @@ bazframe library add https://github.com/owner/skill-library.git
 bazframe package add git:owner/skill-package
 ```
 
-GitHub shorthand uses an authenticated GitHub CLI clone when available and Git HTTPS otherwise. Explicit URLs use Git. Authentication remains in the user's Git credential helper, SSH agent, or GitHub CLI; Bazframe records only the normalized remote, fetch URL, default branch, full revision, resource identity, and canonical managed root.
+GitHub shorthand uses an authenticated GitHub CLI clone when available and Git HTTPS otherwise. Explicit URLs use Git. Authentication remains in the user's Git credential helper, SSH agent, or GitHub CLI; Bazframe records only the normalized remote, fetch URL, default branch, full revision, resource identity, and canonical Bazframe-managed checkout root.
 
-The checkout lives under `<BAZFRAME_HOME>/providers/git/checkouts/<kind>/<id>`. Initial acquisition validates and activates the selected resource while leaving profile membership unchanged. A package clone is inspected before its literal build argv runs with ordinary user authority and no sandbox. Interactive confirmation defaults to decline; scripts use `--yes`.
+Bazframe stores the acquired checkout under `<BAZFRAME_HOME>/providers/git/checkouts/<kind>/<id>`. Initial acquisition validates and activates the selected resource while leaving profile membership unchanged. A package clone is inspected before its literal build argv runs with ordinary user authority and no sandbox. Interactive confirmation defaults to decline; scripts use `--yes`.
 
 ```bash
 bazframe skill update [--accept-rewrite] <skill>
@@ -111,13 +111,13 @@ bazframe library update [--accept-rewrite] <library>
 bazframe package update [--accept-rewrite] [--yes] <package>
 ```
 
-Update acquires the recorded default branch into owned staging, verifies remote identity and a clean checkout, and activates a fast-forward revision transactionally. `--accept-rewrite` authorizes a reviewed non-fast-forward branch change. `package build` rebuilds the recorded managed revision without network access and restores a clean checkout after success or failure. Repeating an already-current add verifies provenance, checkout, and registration locally. Resource removal applies the existing reference checks, then removes the Bazframe-owned checkout and provenance while leaving the upstream remote available. `bazframe status` reports each managed provider's remote, branch, full revision, path, health, and resource-specific update command. Retained recovery records describe the stopped operation and paths. Recovery is inspect-first and fail-closed. Add, update, and build recovery require manual reconciliation to one revision before removing the record and retrying. Removal recovery retains its record while the same remove command verifies and finishes any surviving resource, checkout, and provenance.
+Update acquires the recorded default branch into Bazframe-managed staging, verifies remote identity and a clean checkout, and activates a fast-forward revision transactionally. `--accept-rewrite` authorizes a reviewed non-fast-forward branch change. `package build` rebuilds the recorded remote Git revision without network access and restores a clean checkout after success or failure. Repeating an already-current add verifies provenance, checkout, and registration locally. Resource removal applies the existing reference checks, then removes the Bazframe-managed checkout and provenance while leaving the upstream remote available. `bazframe status` reports each remote Git source's remote, branch, full revision, checkout path, health, and resource-specific update command. Retained recovery records describe the stopped operation and paths. Recovery is inspect-first and fail-closed. Add, update, and build recovery require manual reconciliation to one revision before removing the record and retrying. Removal recovery retains its record while the same remove command verifies and finishes any surviving resource, checkout, and provenance.
 
 ## Bazify Skills
 
 Bazframe ships a `bazify` Agent Skill beside the `bazframe` self-management Skill under `dist/skills/`. Installation activates neither Skill. After a global npm install, locate the package with `BAZFRAME_PACKAGE_ROOT="$(npm root --global)/bazframe"`, then explicitly add `"$BAZFRAME_PACKAGE_ROOT/dist/skills/bazify"` to `(default)` and the desired profile before invoking the Skill or its dependency-free Node script.
 
-Bazify packages one Skill or a collection with provider source under `skills/<name>/`, generated artifacts under `dist/skills/<name>/`, and this exact manifest contract:
+Bazify packages one Skill or a collection with source content under `skills/<name>/`, generated artifacts under `dist/skills/<name>/`, and this exact manifest contract:
 
 ```json
 {"schemaVersion":1,"build":["node","scripts/bazify-build.mjs"],"artifactRoot":"dist","skillsRoot":"skills"}
@@ -171,7 +171,7 @@ A profile Skill wins over a colliding library/package contribution. The complete
 
 ## Editing and ownership
 
-`bazframe skill edit <skill>` opens an individually added absolute-path Skill. Managed Git Skills are edited upstream and activated with `bazframe skill update <skill>`. Library and package previews come from immutable snapshots and cannot be edited. Edit provider input, then run:
+`bazframe skill edit <skill>` opens an individually added local-source Skill. Skills acquired from remote Git sources are edited upstream and activated with `bazframe skill update <skill>`. Library and package previews come from immutable snapshots and cannot be edited. Edit the source, then run:
 
 ```bash
 bazframe library update <library>
@@ -179,11 +179,11 @@ bazframe library update <library>
 bazframe package build <package>
 ```
 
-Bazframe fetches managed Git providers only during their resource-specific add and update commands. Absolute-path providers retain their existing ownership. A package build may change provider-owned output because that change is performed by the explicitly authorized provider build.
+Bazframe fetches remote Git sources only during their resource-specific add and update commands. Local sources retain their existing ownership. A package build may change source-owned output because that change is performed by the explicitly authorized package build.
 
 ## Troubleshooting
 
-- **A provider change is missing:** run the resource's update command for managed Git, or `library update` / `package build` for local provider changes, then `/bazframe reload` in an existing Pi session.
+- **A source change is missing:** run the resource's update command for a remote Git source, or `library update` / `package build` for local source changes, then `/bazframe reload` in an existing Pi session.
 - **`pi-loader` diagnostic:** fix the reported `SKILL.md`; Bazframe preserves the kind, object ID, relative path, and Pi loader message.
 - **Duplicate name:** rename or remove the conflicting Skill/reference. Bazframe does not alias stored-profile duplicates.
 - **Package declaration rejected:** use exactly `schemaVersion`, `build`, `artifactRoot`, and `skillsRoot`; paths must be portable relative paths or `.`.

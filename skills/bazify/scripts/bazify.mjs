@@ -678,7 +678,7 @@ async function inspectSkillTree(root, options) {
       const metadata = await lstat(absolute, { bigint: true });
       if (options.excludePackageState && isRootPackageState(path)) continue;
       if (SKIPPED_SOURCE_NAMES.has(name)) {
-        if (!options.allowProviderMetadata) throw new BazifyError(`Package source contains excluded provider state: ${path}`);
+        if (!options.allowProviderMetadata) throw new BazifyError(`Package source contains excluded source state: ${path}`);
         excluded.push(path);
         continue;
       }
@@ -828,7 +828,7 @@ async function copyPhysicalTree(source, destination, options) {
       const to = join(toDirectory, name);
       const metadata = await lstat(from);
       if (SKIPPED_SOURCE_NAMES.has(name)) {
-        if (!options.allowProviderMetadata) throw new BazifyError(`Package source contains excluded provider state: ${from}`);
+        if (!options.allowProviderMetadata) throw new BazifyError(`Package source contains excluded source state: ${from}`);
         continue;
       }
       if (metadata.isSymbolicLink()) throw new BazifyError(`Skill contains a symbolic link: ${from}`);
@@ -856,7 +856,7 @@ async function writeScaffold(root, packageName, skills, sourceDigest, excluded) 
       name: packageName,
       version: '0.1.0',
       private: true,
-      description: `Provider-owned Bazframe-compatible Skill package containing ${skills.length} Skill${skills.length === 1 ? '' : 's'}.`,
+      description: `Source-owned Bazframe-compatible Skill package containing ${skills.length} Skill${skills.length === 1 ? '' : 's'}.`,
       type: 'module',
       scripts: { build: 'node scripts/bazify-build.mjs' },
       engines: { node: '>=22.19.0' }
@@ -876,14 +876,14 @@ function readmeTemplate(packageName, skillNames, sourceDigest, excluded) {
   const contents = skillNames.map((name) => `- \`skills/${name}/\` → \`dist/skills/${name}/\``).join('\n');
   return `# ${packageName}
 
-A provider-owned Agent Skill package with a Bazframe-compatible build manifest.
+A source-owned Agent Skill package with a Bazframe-compatible build manifest.
 
 ## Skills
 
 ${contents}
 
 - Source digest at conversion: \`sha256:${sourceDigest}\`
-- Excluded provider metadata/dependencies: ${excludedText}
+- Excluded source metadata/dependencies: ${excludedText}
 
 ## Requirements
 
@@ -897,7 +897,7 @@ bazframe package add "$PWD"
 bazframe profile package add ${packageName}
 \`\`\`
 
-Edit provider source under \`skills/\`, rebuild with \`bazframe package build ${packageName}\`, and run \`/bazframe reload\` in an existing Pi session.
+Edit source content under \`skills/\`, rebuild with \`bazframe package build ${packageName}\`, and run \`/bazframe reload\` in an existing Pi session.
 
 Bazframe builds are explicit and unsandboxed. Review \`bazframe-package.json\`, \`scripts/bazify-build.mjs\`, and the copied Skills before activation.
 
@@ -908,14 +908,14 @@ This package was extracted from local Agent Skill source. Its conversion-time di
 }
 
 function agentsTemplate(packageName, skillNames) {
-  return `# ${packageName} provider instructions
+  return `# ${packageName} source instructions
 
-- Treat \`skills/\` as provider-owned source and \`dist/\` as generated output.
+- Treat \`skills/\` as source-owned content and \`dist/\` as generated output.
 - Preserve these Agent Skill names and directory basenames: ${skillNames.map((name) => `\`${name}\``).join(', ')}.
 - Keep \`bazframe-package.json\` and \`scripts/bazify-build.mjs\` synchronized with the selected Skills.
 - After source edits, run \`npm run build\`, then validate through \`bazframe package build ${packageName}\` when registered.
 - Keep requirements, setup, provenance, and license status synchronized with source behavior.
-- Keep secrets, provider \`.git\` state, \`node_modules\`, and generated \`dist/\` out of commits.
+- Keep secrets, source \`.git\` state, \`node_modules\`, and generated \`dist/\` out of commits.
 `;
 }
 
@@ -992,9 +992,9 @@ async function inventoryTree(root, packageRootSkill) {
       if (skipEntry(name, relativePath, packageRootSkill)) continue;
       const path = join(directory, name);
       const metadata = await lstat(path);
-      if (metadata.isSymbolicLink()) throw new Error(\`Provider source contains a symbolic link: \${path}\`);
+      if (metadata.isSymbolicLink()) throw new Error(\`Package source contains a symbolic link: \${path}\`);
       const canonical = await realpath(path);
-      if (canonical !== resolve(path) || !within(root, canonical)) throw new Error(\`Provider source escapes its root: \${path}\`);
+      if (canonical !== resolve(path) || !within(root, canonical)) throw new Error(\`Package source escapes its root: \${path}\`);
       if (metadata.isDirectory()) {
         if (await omitControlOnlyDirectory(path, relativePath, packageRootSkill)) continue;
         entries.push({ path: relativePath, type: 'directory' });
@@ -1007,10 +1007,10 @@ async function inventoryTree(root, packageRootSkill) {
           executable: process.platform !== 'win32' && (file.mode & 0o111) !== 0,
           sha256: createHash('sha256').update(file.bytes).digest('hex')
         });
-      } else throw new Error(\`Provider source contains an unsupported entry: \${path}\`);
+      } else throw new Error(\`Package source contains an unsupported entry: \${path}\`);
     }
     const after = await identity(directory);
-    if (before.device !== after.device || before.inode !== after.inode) throw new Error(\`Provider directory changed during build: \${directory}\`);
+    if (before.device !== after.device || before.inode !== after.inode) throw new Error(\`Package source directory changed during build: \${directory}\`);
   };
   await visit(root, '');
   entries.sort((left, right) => compare(left.path, right.path));
@@ -1035,18 +1035,18 @@ async function copyTree(source, destination, root, relativeDirectory, packageRoo
     if (skipEntry(name, relativePath, packageRootSkill)) continue;
     const from = join(source, name); const to = join(destination, name);
     const metadata = await lstat(from);
-    if (metadata.isSymbolicLink()) throw new Error(\`Provider source contains a symbolic link: \${from}\`);
+    if (metadata.isSymbolicLink()) throw new Error(\`Package source contains a symbolic link: \${from}\`);
     const canonical = await realpath(from);
-    if (canonical !== resolve(from) || !within(root, canonical)) throw new Error(\`Provider source escapes its root: \${from}\`);
+    if (canonical !== resolve(from) || !within(root, canonical)) throw new Error(\`Package source escapes its root: \${from}\`);
     if (metadata.isDirectory()) {
       if (await omitControlOnlyDirectory(from, relativePath, packageRootSkill)) continue;
       await mkdir(to, { mode: 0o755 });
       await copyTree(from, to, root, relativePath, packageRootSkill);
     } else if (metadata.isFile()) await copyStableFile(from, to);
-    else throw new Error(\`Provider source contains an unsupported entry: \${from}\`);
+    else throw new Error(\`Package source contains an unsupported entry: \${from}\`);
   }
   const after = await identity(source);
-  if (before.device !== after.device || before.inode !== after.inode) throw new Error(\`Provider directory changed during build: \${source}\`);
+  if (before.device !== after.device || before.inode !== after.inode) throw new Error(\`Package source directory changed during build: \${source}\`);
 }
 
 async function copyStableFile(source, destination) {
@@ -1068,7 +1068,7 @@ async function readStableSource(source) {
     if (!after.isFile() || current.isSymbolicLink() || !current.isFile()
       || before.dev !== after.dev || before.ino !== after.ino
       || after.dev !== current.dev || after.ino !== current.ino
-      || before.size !== after.size || before.mtimeNs !== after.mtimeNs) throw new Error(\`Provider file changed during build: \${source}\`);
+      || before.size !== after.size || before.mtimeNs !== after.mtimeNs) throw new Error(\`Package source file changed during build: \${source}\`);
     return { bytes, mode: Number(before.mode) };
   } finally {
     await handle?.close().catch(() => undefined);

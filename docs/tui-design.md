@@ -14,7 +14,7 @@ The Skills tab presents one uninterrupted list of collapsible peers under `Skill
 
 There are no category headings or separator rows. The Added Skills parent appears first, followed by current library order and then current package order. Library/package children are informational. Profiles select whole libraries or packages; no child-selection model exists. Healthy zero-Skill objects remain visible with `0 Skills`.
 
-The TUI may add an already-prepared local library or acquire a managed Git library after explicit literal-`y` consent. It does not add a profile reference. Package add/build, library update/remove, package remove, and library/package profile-reference mutations remain CLI-only. Package build output must remain visible in the invoking terminal, so no package build runs in the TUI.
+The TUI may add an already-prepared local library or acquire a library from a remote Git source after explicit literal-`y` consent. It does not add a profile reference. Package add/build, library update/remove, package remove, and library/package profile-reference mutations remain CLI-only. Package build output must remain visible in the invoking terminal, so no package build runs in the TUI.
 
 ## Typed application boundary
 
@@ -43,26 +43,26 @@ createProfile / duplicateProfile / useProfile / toggleProfileFavorite / renamePr
 editProfileInstructions
 editSkillDefinition                 # Added Skills only
 addMembership / removeMembership    # Added Skills only
-inspectLibraryInput                 # physical-directory browsing or managed Git source
+inspectLibraryInput                 # physical-directory browsing or remote Git source
 inspectLibraryCandidate
-addLibrary                          # local snapshot or shared managed Git lifecycle
+addLibrary                          # local snapshot or shared remote Git lifecycle
 ```
 
 Framework objects stop at the presentation boundary. Core profile, Skill, collection, status, and settings modules do not import React, Ink, or terminal types.
 
 ## Skills interaction
 
-The Skills master pane renders selectable `Added Skills`, `Library <id>`, and `Package <id>` parent rows directly beneath the single `Skills` title. Its viewport offset and resize clamping use that rendered peer-and-child row list without category rows. Library/package rows show kind, ID, provider root, activated digest, reference count, health, and Skill count. Object detail shows artifact root, Skills root, and update/build availability, including for a zero-Skill object; compact layouts expose the same fields in a dedicated route.
+The Skills master pane renders selectable `Added Skills`, `Library <id>`, and `Package <id>` parent rows directly beneath the single `Skills` title. Its viewport offset and resize clamping use that rendered peer-and-child row list without category rows. Library/package rows show kind, ID, source root, activated digest, reference count, health, and Skill count. Object detail shows artifact root, Skills root, and update/build availability, including for a zero-Skill object; compact layouts expose the same fields in a dedicated route.
 
 Right/`l` expands any parent or moves to its first Skill, while `o`/`c` explicitly expand/collapse any parent. Enter/`L` opens detail for a selected library/package or previews a selected Skill; Enter on Added Skills retains its collapse toggle. Left/`h` unwinds hierarchy in the browser and returns from detail; `H`, Escape, and Backspace also return. Stable kind-qualified row IDs prevent a library and package with the same ID from collapsing into one row.
 
-Added Skill previews read live provider `SKILL.md`. `e` may launch the external editor only for Added Skills. A library/package preview is immutable and directs the user to edit provider input, then run `bazframe library update <library>` or `bazframe package build <package>`.
+Added Skill previews read live source `SKILL.md`. `e` may launch the external editor only for Added Skills. A library/package preview is immutable and directs the user to edit source input, then run `bazframe library update <library>` or `bazframe package build <package>`.
 
 ### Add Library
 
-The `a` flow accepts an absolute physical directory, exact `~`/`~/` expansion, or the same managed Git source grammar as `bazframe library add`. Local input shows entered and canonical roots plus the canonical-basename library ID. Managed Git input shows the entered source, normalized remote identity, and normalized repository-name ID. Browsing, parsing, and review write nothing. Final literal `y` calls the local or managed Git library lifecycle once; managed acquisition may access the network through configured Git or GitHub authentication.
+The `a` flow accepts an absolute physical directory, exact `~`/`~/` expansion, or the same remote Git source grammar as `bazframe library add`. Local input shows entered and canonical roots plus the canonical-basename library ID. Remote Git source input shows the entered source, normalized remote identity, and normalized repository-name ID. Browsing, parsing, and review write nothing. Final literal `y` calls the appropriate library acquisition lifecycle once; remote acquisition may access the network through configured Git or GitHub authentication.
 
-A local root-level `bazframe-package.json` blocks the flow with `bazframe package add <absolute-root>` guidance. Managed input receives the same library/package distinction after acquisition. Library addition executes no provider code and creates no profile reference.
+A local root-level `bazframe-package.json` blocks the flow with `bazframe package add <absolute-root>` guidance. Remote Git source input receives the same library/package distinction after acquisition. Library addition executes no source code and creates no profile reference.
 
 ## Profiles interaction
 
@@ -89,7 +89,7 @@ Color is supplementary. `NO_COLOR` and accessibility output retain text markers,
 
 ## Safety invariants
 
-- Local provider roots are never edited, deleted, fetched, or implicitly prepared. Managed Git acquisition occurs only after literal-`y` authorization and uses the shared transactional provider lifecycle.
+- Local source roots are never edited, deleted, fetched, or implicitly prepared. Remote Git acquisition occurs only after literal-`y` authorization and uses the shared transactional source lifecycle.
 - Package processes run only from explicit CLI package add/build.
 - Snapshot previews are immutable.
 - Library/package references are whole-object and read-only in this TUI slice.
@@ -101,6 +101,6 @@ Color is supplementary. `NO_COLOR` and accessibility output retain text markers,
 
 ## Verification and residual gates
 
-Deterministic reducer/component/service tests cover stable reconciliation, nested navigation, compact and preferred layouts, local and managed-Git library consent, package-manifest refusal, profile references, immutable editor guidance, no-color/accessibility output, scrolling, resize, and error recovery.
+Deterministic reducer/component/service tests cover stable reconciliation, nested navigation, compact and preferred layouts, local and remote-Git library consent, package-manifest refusal, profile references, immutable editor guidance, no-color/accessibility output, scrolling, resize, and error recovery.
 
 PTY gates cover alternate-screen entry/restoration, Ctrl+C, resize, editor handoff, handled/fatal errors, cleanup, and bounded Unicode/ANSI cell widths on the recorded macOS and Linux environments. Windows Terminal, representative remote SSH, terminal/font/locale ambiguous-width differences, and manual assistive-technology evidence remain open before claiming broad production readiness.

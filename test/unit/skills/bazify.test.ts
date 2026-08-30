@@ -65,11 +65,11 @@ describe('Bazify Skill', () => {
     expect(JSON.parse(await readFile(join(destination, 'package.json'), 'utf8'))).toMatchObject({
       name: 'demo-skill',
       private: true,
-      description: 'Provider-owned Bazframe-compatible Skill package containing 1 Skill.',
+      description: 'Source-owned Bazframe-compatible Skill package containing 1 Skill.',
       scripts: { build: 'node scripts/bazify-build.mjs' }
     });
     const generatedReadme = await readFile(join(destination, 'README.md'), 'utf8');
-    expect(generatedReadme).toContain('provider-owned Agent Skill package');
+    expect(generatedReadme).toContain('source-owned Agent Skill package');
     expect(generatedReadme).not.toContain(`Bazframe ${'2'}`);
     expect(await readFile(join(destination, 'skills', 'demo-skill', 'reference.txt'), 'utf8')).toBe('reference\n');
     expect(await readFile(join(destination, 'dist', 'skills', 'demo-skill', 'reference.txt'), 'utf8')).toBe('reference\n');

@@ -1,6 +1,6 @@
 # Releasing Bazframe to npm
 
-Bazframe's CLI/runtime is distributed through npm. Skills, libraries, and packages remain provider-owned Git resources, and `~/.bazframe` remains local profile and configuration state.
+Bazframe's CLI/runtime is distributed through npm. Skills, libraries, and packages retain their source ownership, and `~/.bazframe` remains local profile and configuration state.
 
 ## Release requirements
 

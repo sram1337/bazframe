@@ -40,7 +40,7 @@ bazframe profile edit focused
 bazframe profile use focused
 ```
 
-`profile add` creates the empty physical profile shape without selecting it. `profile edit` opens its actual `AGENTS.md` with the first nonblank executable-only `VISUAL`, then `EDITOR`; `skill edit` applies the same process contract to an authoritative live `(default)` provider `SKILL.md`, while managed snapshots remain immutable. Fixed flags require a wrapper executable. `profile use` validates and selects it; top-level `use` is rejected with migration guidance. Every working directory that inherits enabled global policy uses that profile.
+`profile add` creates the empty physical profile shape without selecting it. `profile edit` opens its actual `AGENTS.md` with the first nonblank executable-only `VISUAL`, then `EDITOR`; `skill edit` applies the same process contract to an authoritative live `(default)` source `SKILL.md`, while managed snapshots remain immutable. Fixed flags require a wrapper executable. `profile use` validates and selects it; top-level `use` is rejected with migration guidance. Every working directory that inherits enabled global policy uses that profile.
 
 ### 2.3 Run and reload
 
@@ -161,7 +161,7 @@ $PI_CODING_AGENT_DIR/extensions/
 
 Ownership categories:
 
-- **User-owned:** profile content and instructions, live added-Skill provider roots, prepared library roots, and package projects; `profile remove --force` explicitly authorizes deletion of the named non-active physical profile content.
+- **User-owned:** profile content and instructions, live added-Skill source roots, prepared library roots, and package projects; `profile remove --force` explicitly authorizes deletion of the named non-active physical profile content.
 - **Bazframe-managed:** profile lifecycle operations, direct membership links, selection state, exceptional project overrides, adapter manifest, installed artifact, locks, and alias cache.
 - **Repository-owned:** the Git worktree and its project instructions.
 - **Pi-owned:** runtime settings, trust, tools, models, packages, extensions, prompts, themes, system prompts, and native skills.
@@ -201,7 +201,7 @@ Bazframe-managed writes follow one shared policy:
 
 A lock records PID, creation time, command, and target. A live lock produces an actionable busy result. A stale lock whose PID is absent can be replaced by the next owning command after reporting the recovery.
 
-Bazframe-managed state, including `active-profile`, rejects symlinks. Profile lifecycle requires a physical profile root, while runtime validation follows user-owned `AGENTS.md`, `skills/`, and immediate skill-entry symlinks as trusted profile content and applies the existing file and skill checks to resolved targets. Duplicate and rename intentionally validate only the source physical root so broken provider references do not prevent copying or preserving profile content. Duplication preserves symlinks verbatim, stages the full copy under the physical profiles directory, cleans failed staging, and publishes with a final rename.
+Bazframe-managed state, including `active-profile`, rejects symlinks. Profile lifecycle requires a physical profile root, while runtime validation follows user-owned `AGENTS.md`, `skills/`, and immediate skill-entry symlinks as trusted profile content and applies the existing file and skill checks to resolved targets. Duplicate and rename intentionally validate only the source physical root so broken source references do not prevent copying or preserving profile content. Duplication preserves symlinks verbatim, stages the full copy under the physical profiles directory, cleans failed staging, and publishes with a final rename.
 
 The CLI performs state mutations. Profile add/duplicate/remove/rename/select share the global state lock; membership takes it before a profile-specific lock. `profile edit` is a direct user-owned external write: after physical-root/final-file revalidation it launches without a lock, temporary copy, or rollback and waits for the shell-free inherited child. Actual create, duplicate, remove, and identity-changing rename clear affected alias cache, while idempotent add and same-ID rename preserve it. Runtime cache materialization uses atomic writes to deterministic profile/alias paths. Old alias files are inert because `resources_discover` returns only aliases selected for the current load. Adapter uninstall clears the full Pi alias cache.
 
@@ -258,10 +258,10 @@ Lifecycle behavior:
 - `profile add` creates zero-byte physical `AGENTS.md` and an empty physical `skills/` directory without selecting it; an existing runtime-valid physical-root profile is `current`;
 - `profile list` reports runtime-valid physical-root profiles and warns on invalid neighbors without contaminating stdout;
 - `profile edit <profile>` targets active or inactive profiles explicitly, preserves active selection, does not pre-read instruction bytes, and returns the configured editor's exit or signal status;
-- `skill edit <skill>` targets only a structurally authorized live `(default)` provider definition, does not parse its bytes before launch, and returns the same editor status without granting managed-snapshot or Bazframe artifact-lifecycle authority;
+- `skill edit <skill>` targets only a structurally authorized live `(default)` source definition, does not parse its bytes before launch, and returns the same editor status without granting managed-snapshot or Bazframe artifact-lifecycle authority;
 - `profile list` renders the rich profile overview and `profile current` remains focused; bare and plural resources are migration errors;
-- duplicate copies all child content without resolving provider targets, preserves symlinks verbatim, refuses replacement and profile-root symlinks, publishes only after a complete staged copy, and leaves active selection unchanged;
-- rename preserves all child content without resolving provider targets, refuses replacement and profile-root symlinks, and updates active selection with rollback on pre-commit write failure;
+- duplicate copies all child content without resolving source targets, preserves symlinks verbatim, refuses replacement and profile-root symlinks, publishes only after a complete staged copy, and leaves active selection unchanged;
+- rename preserves all child content without resolving source targets, refuses replacement and profile-root symlinks, and updates active selection with rollback on pre-commit write failure;
 - remove always refuses the selected ID, including a selected-but-missing profile; without `--force` it accepts only the exact generated-empty shape, and force-removal unlinks symlink entries without following targets.
 
 Instruction requirements:
@@ -273,7 +273,7 @@ Instruction requirements:
 
 Skill requirements:
 
-- `skill list` lists valid live registrations from `<BAZFRAME_HOME>/skills`, warns about invalid neighbors, and does not claim provider lifecycle ownership;
+- `skill list` lists valid live registrations from `<BAZFRAME_HOME>/skills`, warns about invalid neighbors, and does not claim source lifecycle ownership;
 - missing add targets use bounded edit-distance matching to suggest valid available skills;
 - immediate children of profile `skills/` are loaded in lexical directory-name order;
 - Pi's public Agent Skills loader parses each skill;
@@ -284,7 +284,7 @@ Skill requirements:
 - aliases direct Pi to the original skill file and base directory;
 - a generated alias collision is a profile error.
 
-Profile instructions and Skills are trusted user content. Added-Skill, library, and package lifecycles stay independent from the adapter implementation so providers can interoperate with the same profile contract.
+Profile instructions and Skills are trusted user content. Added-Skill, library, and package lifecycles stay independent from the adapter implementation so sources can interoperate with the same profile contract.
 
 ## 11. Diagnostics and failure behavior
 
@@ -312,7 +312,7 @@ The runtime command reports:
 - `Profile: <effective-id>` or `Profile: (none)`;
 - effective context entries in Pi order, each labeled `(pi)` or `(bazframe)`, or `Context: (none)`;
 - flat directly added Skills with paths;
-- kind-qualified library/package references with provider root, health, refresh availability, digest, and Skills root;
+- kind-qualified library/package references with source root, health, refresh availability, digest, and Skills root;
 - derived effective Skills with kind-qualified provenance;
 - kind-qualified library/package failures and exact `library update` / `package build` corrective commands;
 - `Skills:` followed by deduplicated, lexically sorted names from Pi's effective `skill:` commands, or `(none)`;
@@ -349,7 +349,7 @@ A production-ready slice proves:
 7. skill collisions produce deterministic `-x-bazframe` aliases and diagnostics;
 8. global disable, enabled-project override, disabled-project override, and non-Git global inheritance follow precedence;
 9. broken project state, profile, cache, adapter, and lock states produce corrective diagnostics;
-10. profile lifecycle tests cover guarded deletion, force preservation of symlink targets, staged duplication with verbatim symlinks and unchanged selection, active rename/rollback, provider-independent rename, selection, listing, cache cleanup/no-op preservation, and state symlink rejection;
+10. profile lifecycle tests cover guarded deletion, force preservation of symlink targets, staged duplication with verbatim symlinks and unchanged selection, active rename/rollback, source-independent rename, selection, listing, cache cleanup/no-op preservation, and state symlink rejection;
 11. packed-package tests exercise the installed CLI and executable mode plus a supported Pi executable in isolated user state.
 
 ## 14. Implementation milestones
@@ -416,9 +416,9 @@ Gate: install/build/typecheck/lint/unit/integration/pack/real-Pi checks pass fro
 | External state and codecs | Unit coverage for paths, symlinks, atomic replacement, locks, manifests, exact global policy, legacy inherit, disabled/enabled project state, hashing, and adapter ownership. |
 | Adapter lifecycle | Unit and packed-package checks cover install, idempotence, managed update, adoption, drift preservation, manifest-gated repair, occupied destinations, uninstall, and cache cleanup. |
 | Policy and status | Unit and fake-CLI integration cover global/project precedence, file-free defaults, enabled/disabled overrides, legacy compatibility, read-only status, malformed-state preservation, and stable worktrees. |
-| Profile and membership lifecycle | Unit and built-CLI integration cover create/duplicate/list/current/use/rename/remove, force guards, active and missing-active refusal, selection rollback, staged-copy cleanup, parallel catalog/profile link policy, broken provider references, alias-cache cleanup/no-op preservation, provider preservation, and strict CLI parsing. |
+| Profile and membership lifecycle | Unit and built-CLI integration cover create/duplicate/list/current/use/rename/remove, force guards, active and missing-active refusal, selection rollback, staged-copy cleanup, parallel catalog/profile link policy, broken source references, alias-cache cleanup/no-op preservation, source preservation, and strict CLI parsing. |
 | Runtime adapter | Packed Pi 0.82 probes cover context modes, profile skills, global disable, project enable/disable precedence, and stable repositories. Deterministic current-artifact tests cover the exact compact `/bazframe info` projection, context restoration reporting, effective skills and collisions, command registration, strict argument dispatch, awaited reload, and fail-closed behavior. The packed real-Pi gate does not claim live slash-command coverage. |
-| Packed real-Pi flow | `npm run test:real-pi` proves file-free defaults, global disable, project-enabled override, project-disabled override, both Pi context modes, provider preservation, and stable Git status. |
+| Packed real-Pi flow | `npm run test:real-pi` proves file-free defaults, global disable, project-enabled override, project-disabled override, both Pi context modes, source preservation, and stable Git status. |
 
 The repeatable production gates are:
 

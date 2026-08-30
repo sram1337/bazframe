@@ -40,7 +40,7 @@ You should see all your profiles added skills.
 - Pi 0.82.0 or newer.
 - macOS or Linux.
 - A model provider supported by Pi; see [Pi's authentication documentation](https://github.com/earendil-works/pi#readme).
-- (optional) [Git](https://git-scm.com/) only for managed Git resources. Basic profile use does not require Git.
+- (optional) [Git](https://git-scm.com/) only for remote Git sources. Basic profile use does not require Git.
 
 
 ### Terminal interface
@@ -51,14 +51,14 @@ bazframe tui
 
 ## Safety
 
-Profiles and Skills become trusted input to an agent with filesystem and shell authority. Libraries execute no provider code. Package add, build, and update operations execute declared argv without a shell or sandbox and inherit your user authority. Review remote instructions and package build declarations before activation.
+Profiles and Skills become trusted input to an agent with filesystem and shell authority. Libraries execute no source code. Package add, build, and update operations execute declared argv without a shell or sandbox and inherit your user authority. Review remote instructions and package build declarations before activation.
 
 See [Using Skills with Bazframe](docs/skills.md#editing-and-ownership) for ownership and [its troubleshooting section](docs/skills.md#troubleshooting) for recovery details.
 
 ## Documentation
 
 1. [Getting started](docs/getting-started.md) — installation, first profile, policy, and configuration.
-2. [Using Skills with Bazframe](docs/skills.md) — Skills, libraries, packages, managed Git, and Bazify.
+2. [Using Skills with Bazframe](docs/skills.md) — Skills, libraries, packages, remote Git sources, and Bazify.
 3. [Terminal UI design](docs/tui-design.md) — implemented TUI boundary and remaining gates.
 4. [Fresh-machine setup recipe](examples/setup-fresh-machine.sh) — bootstrap commands for a new machine.
 5. [Product design](docs/design.md) — product contracts for contributors.

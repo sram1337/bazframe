@@ -21,7 +21,7 @@ bazframe profile use personal
 # bazframe skill add "$BAZFRAME_PACKAGE_ROOT/dist/skills/bazframe"
 # bazframe profile skill add bazframe
 
-# Provider-owned resources remain explicit. Replace the examples before use:
+# Remote Git sources remain explicit. Replace the examples before use:
 # bazframe skill add git:owner/root-skill
 # bazframe profile skill add root-skill
 # bazframe library add git:owner/skill-library

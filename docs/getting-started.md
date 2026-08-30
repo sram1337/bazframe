@@ -13,7 +13,7 @@ You need:
 - macOS or Linux.
 - Access to a Pi-supported model provider.
 
-Git is not required for basic profile use. It is required when Bazframe identifies a Git worktree for a project override or acquires a managed Git Skill, library, or package.
+Git is not required for basic profile use. It is required when Bazframe identifies a Git worktree for a project override or acquires a Skill, library, or package from a remote Git source.
 
 After installing Pi, start it and enter `/login` to choose and authenticate with a model provider. Pi supports selected subscriptions and API keys; see [Pi's provider and authentication documentation](https://github.com/earendil-works/pi#readme).
 
@@ -126,7 +126,7 @@ bazframe profile --help
 bazframe profile remove --help
 ```
 
-Profile Skills are optional. An added Skill is a live provider Skill, a Skill library is an already-prepared collection, and a Skill package is an explicitly buildable provider project. Their setup and activation belong in [Using Skills with Bazframe](skills.md).
+Profile Skills are optional. An added Skill is live from its source, a Skill library is an already-prepared collection, and a Skill package is an explicitly buildable source project. Their setup and activation belong in [Using Skills with Bazframe](skills.md).
 
 ## Control global and project policy
 
@@ -175,11 +175,11 @@ Run:
 bazframe status
 ```
 
-The report covers adapter ownership and version, global and effective policy, the active profile, effective Skills, library/package health, managed Git state, and corrective actions. A nonzero status means the report lists an action to take. Common checks are:
+The report covers adapter ownership and version, global and effective policy, the active profile, effective Skills, library/package health, remote Git source state, and corrective actions. A nonzero status means the report lists an action to take. Common checks are:
 
 - If the adapter is missing or outdated, run `bazframe adapter install pi`.
 - If no profile is active, create one if needed and run `bazframe profile use <profile>`.
 - If effective behavior is disabled, inspect `bazframe global show` and, in a Git worktree, `bazframe project list`.
-- If a provider change is absent from an open Pi session, follow the resource update/build guidance in [Using Skills with Bazframe](skills.md#troubleshooting), then run `/bazframe reload`.
+- If a source change is absent from an open Pi session, follow the resource update/build guidance in [Using Skills with Bazframe](skills.md#troubleshooting), then run `/bazframe reload`.
 
 For complete command syntax, use `bazframe help <resource>` or `bazframe <resource> --help`.
