@@ -15,21 +15,23 @@ describe('default catalog and profile skill CLI', () => {
     if (process.platform === 'win32') return;
     const fixture = await setup();
     const before = await snapshotFilesystem(fixture.provider);
-    expect(await run(['add', 'skill', fixture.source], fixture)).toMatchObject({ status: 0, stderr: '' });
+    expect(await run(['skill', 'add', fixture.source], fixture)).toMatchObject({ status: 0, stderr: '' });
     expect(await readlink(fixture.registration)).toBe(fixture.source);
-    const listed = await run(['skills'], fixture);
+    const listed = await run(['skill', 'list'], fixture);
     expect(listed.stdout).toContain('Added Skills: (default)');
     expect(listed.stdout).toContain(`demo-skill -> ${fixture.source}`);
-    expect((await run(['skill'], fixture)).stdout).toBe(listed.stdout);
+    const bare = await run(['skill'], fixture);
+    expect(bare.status).toBe(2);
+    expect(bare.stderr).toContain('bazframe skill list');
 
     await run(['profile', 'use', 'focused'], fixture);
-    const added = await run(['profile', 'skills', 'add', 'demo-skill'], fixture);
+    const added = await run(['profile', 'skill', 'add', 'demo-skill'], fixture);
     expect(added).toMatchObject({ status: 0, stderr: '' });
     expect(await readlink(fixture.membership)).toBe(fixture.source);
     expect(await readlink(fixture.registration)).toBe(fixture.source);
-    await expect(run(['remove', 'skill', 'demo-skill'], fixture)).resolves.toMatchObject({ status: 1 });
-    await expect(run(['profile', 'skills', 'remove', 'demo-skill'], fixture)).resolves.toMatchObject({ status: 0 });
-    await expect(run(['remove', 'skill', 'demo-skill'], fixture)).resolves.toMatchObject({ status: 0 });
+    await expect(run(['skill', 'remove', 'demo-skill'], fixture)).resolves.toMatchObject({ status: 1 });
+    await expect(run(['profile', 'skill', 'remove', 'demo-skill'], fixture)).resolves.toMatchObject({ status: 0 });
+    await expect(run(['skill', 'remove', 'demo-skill'], fixture)).resolves.toMatchObject({ status: 0 });
     await expect(lstat(fixture.registration)).rejects.toMatchObject({ code: 'ENOENT' });
     expect(await snapshotFilesystem(fixture.provider)).toEqual(before);
   });
@@ -37,17 +39,17 @@ describe('default catalog and profile skill CLI', () => {
   it('is same-target idempotent and rejects occupied, malformed, and obsolete grammar', async () => {
     if (process.platform === 'win32') return;
     const fixture = await setup();
-    await expect(run(['add', 'skill', fixture.source], fixture)).resolves.toMatchObject({ status: 0 });
-    const current = await run(['add', 'skill', fixture.source], fixture);
+    await expect(run(['skill', 'add', fixture.source], fixture)).resolves.toMatchObject({ status: 0 });
+    const current = await run(['skill', 'add', fixture.source], fixture);
     expect(current.stdout).toContain('Default skill registration: current');
     for (const argv of [
-      ['add', 'demo-skill'], ['remove', 'demo-skill'], ['skill', 'add', fixture.source],
-      ['skills', 'add', fixture.source], ['add', 'skills', fixture.source], ['add', 'skill', 'relative']
+      ['add', 'demo-skill'], ['remove', 'demo-skill'], ['add', 'skill', fixture.source],
+      ['skills', 'add', fixture.source], ['add', 'skills', fixture.source], ['skill', 'add', 'relative']
     ]) expect((await run(argv, fixture)).status).toBe(2);
 
     await rm(fixture.registration);
     await fixture.directory.mkdir('home/skills/demo-skill');
-    const occupied = await run(['add', 'skill', fixture.source], fixture);
+    const occupied = await run(['skill', 'add', fixture.source], fixture);
     expect(occupied.status).toBe(1);
     expect(occupied.stderr).toContain('occupied');
   });
@@ -55,27 +57,27 @@ describe('default catalog and profile skill CLI', () => {
   it('targets inactive profiles and rejects foreign membership links', async () => {
     if (process.platform === 'win32') return;
     const fixture = await setup();
-    await run(['add', 'skill', fixture.source], fixture);
+    await run(['skill', 'add', fixture.source], fixture);
     await run(['profile', 'use', 'focused'], fixture);
-    await expect(run(['profile', 'skills', 'add', 'demo-skill', '--profile', 'reviewer'], fixture)).resolves.toMatchObject({ status: 0 });
+    await expect(run(['profile', 'skill', 'add', 'demo-skill', '--profile', 'reviewer'], fixture)).resolves.toMatchObject({ status: 0 });
     expect(await readlink(fixture.reviewerMembership)).toBe(fixture.source);
     expect((await run(['profile', 'current'], fixture)).stdout).toBe('focused\n');
     await rm(fixture.reviewerMembership);
     const foreign = await fixture.directory.mkdir('foreign/demo-skill');
     await symlink(foreign, fixture.reviewerMembership);
-    const refused = await run(['profile', 'skills', 'remove', 'demo-skill', '--profile', 'reviewer'], fixture);
+    const refused = await run(['profile', 'skill', 'remove', 'demo-skill', '--profile', 'reviewer'], fixture);
     expect(refused.status).toBe(1);
     expect(refused.stderr).toContain('targets');
   });
 
   it('suggests close registered IDs and reports missing active selection', async () => {
     const fixture = await setup();
-    await run(['add', 'skill', fixture.source], fixture);
-    const missing = await run(['profile', 'skills', 'add', 'demo-skill'], fixture);
+    await run(['skill', 'add', fixture.source], fixture);
+    const missing = await run(['profile', 'skill', 'add', 'demo-skill'], fixture);
     expect(missing.status).toBe(1);
     expect(missing.stderr).toContain('No active profile');
     await run(['profile', 'use', 'focused'], fixture);
-    const typo = await run(['profile', 'skills', 'add', 'demo-skil'], fixture);
+    const typo = await run(['profile', 'skill', 'add', 'demo-skil'], fixture);
     expect(typo.status).toBe(1);
     expect(typo.stderr).toContain('Did you mean "demo-skill"?');
   });

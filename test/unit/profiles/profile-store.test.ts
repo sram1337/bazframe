@@ -91,7 +91,7 @@ describe('profile store', () => {
   it('rejects missing, malformed, and symlinked active state', async () => {
     const directory = await temporary();
     const home = directory.path('home');
-    await expect(readActiveProfile(home)).rejects.toThrow(/bazframe use/u);
+    await expect(readActiveProfile(home)).rejects.toThrow(/bazframe profile use/u);
     await directory.write('home/active-profile', '../escape\n');
     await expect(readActiveProfile(home)).rejects.toThrow(/Invalid profile ID/u);
     await directory.write('home/active-profile', Uint8Array.from([0xff]));

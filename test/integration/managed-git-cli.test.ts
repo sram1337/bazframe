@@ -20,7 +20,7 @@ describe('managed Git CLI', () => {
     const remote = await directory.mkdir('remote/personal-agent-network');
     await directory.write('remote/personal-agent-network/skills/personal-agent-network/SKILL.md', skill('personal-agent-network'));
     await directory.write('remote/personal-agent-network/skills/personal-agent-network-setup/SKILL.md', skill('personal-agent-network-setup'));
-    await directory.write('remote/personal-agent-network/build.mjs', "import{cp,rm,writeFile}from'node:fs/promises';if(process.env.TEST_MANAGED_BUILD_FAIL==='1'){await writeFile('failed-output','dirty');process.exit(9)}await rm('dist',{recursive:true,force:true});await cp('skills','dist/skills',{recursive:true});\n");
+    await directory.write('remote/personal-agent-network/build.mjs', "import{cp,readFile,rm,writeFile}from'node:fs/promises';if(process.env.TEST_LOCK_CAPTURE)await writeFile(process.env.TEST_LOCK_CAPTURE,await readFile(process.env.BAZFRAME_HOME+'/locks/state.lock','utf8'));if(process.env.TEST_MANAGED_NOISE){console.log('managed-stdout');console.error('managed-stderr')}if(process.env.TEST_MANAGED_BUILD_FAIL==='1'){await writeFile('failed-output','dirty');process.exit(9)}await rm('dist',{recursive:true,force:true});await cp('skills','dist/skills',{recursive:true});\n");
     await directory.write('remote/personal-agent-network/.gitignore', 'dist/\nignored/\n');
     const c1BuildArgument = `${String.fromCharCode(0x9b)}31m`;
     const bidiBuildArgument = '\u202e';
@@ -33,11 +33,11 @@ describe('managed Git CLI', () => {
     await run(['profile', 'use', 'focused'], cwd, environment);
 
     const source = 'https://example.test/sram1337/personal-agent-network.git';
-    const declined = await run(['packages', 'add', source], cwd, environment);
+    const declined = await run(['package', 'add', source], cwd, environment);
     expect(declined.status).toBe(1);
     expect(declined.stdout, JSON.stringify(declined)).toContain('Remote package build authorization');
     expect(declined.stderr).toContain('requires --yes');
-    const added = await run(['packages', 'add', source, '--yes'], cwd, environment);
+    const added = await run(['package', 'add', source, '--yes'], cwd, environment);
     expect(added).toMatchObject({ status: 0, stderr: '' });
     expect(added.stdout).toContain('Remote package build authorization');
     expect(added.stdout).toContain('without a shell or sandbox with ordinary user authority');
@@ -47,72 +47,75 @@ describe('managed Git CLI', () => {
     expect(added.stdout).not.toContain(bidiBuildArgument);
     expect(added.stdout).toContain('Managed Git package: added');
     expect(await readFile(directory.path('home/providers/git/checkouts/package/personal-agent-network/skills/personal-agent-network-setup/SKILL.md'), 'utf8')).toContain('name: personal-agent-network-setup');
-    expect((await run(['profile', 'packages'], cwd, environment)).stdout).toContain('Referenced packages:\n  (none)');
+    expect((await run(['profile', 'package', 'list'], cwd, environment)).stdout).toContain('Referenced packages:\n  (none)');
 
     const managedRoot = directory.path('home/providers/git/checkouts/package/personal-agent-network');
     await directory.write('home/providers/git/checkouts/package/personal-agent-network/local.txt', 'dirty\n');
-    expect((await run(['packages', 'add', source, '--yes'], cwd, environment)).stderr).toContain('local changes');
+    expect((await run(['package', 'add', source, '--yes'], cwd, environment)).stderr).toContain('local changes');
     git(['clean', '-fd'], managedRoot);
     git(['remote', 'set-url', 'origin', 'https://example.test/other/personal-agent-network.git'], managedRoot);
-    expect((await run(['packages', 'add', source, '--yes'], cwd, environment)).stderr).toContain('origin changed');
+    expect((await run(['package', 'add', source, '--yes'], cwd, environment)).stderr).toContain('origin changed');
     git(['remote', 'set-url', 'origin', source], managedRoot);
     await directory.write('home/providers/git/checkouts/package/personal-agent-network/ignored/private.txt', 'ignored dirty state\n');
-    expect((await run(['packages', 'add', source, '--yes'], cwd, environment)).stderr).toContain('ignored additions');
+    expect((await run(['package', 'add', source, '--yes'], cwd, environment)).stderr).toContain('ignored additions');
     await rm(directory.path('home/providers/git/checkouts/package/personal-agent-network/ignored'), { recursive: true });
     git(['config', 'core.fsmonitor', '/tmp/hostile-monitor'], managedRoot);
-    expect((await run(['packages', 'add', source, '--yes'], cwd, environment)).stderr).toContain('unsupported key');
+    expect((await run(['package', 'add', source, '--yes'], cwd, environment)).stderr).toContain('unsupported key');
     git(['config', '--unset', 'core.fsmonitor'], managedRoot);
     git(['config', 'filter.evil.smudge', '/tmp/hostile-filter'], managedRoot);
-    expect((await run(['packages', 'add', source, '--yes'], cwd, environment)).stderr).toContain('unsupported key');
+    expect((await run(['package', 'add', source, '--yes'], cwd, environment)).stderr).toContain('unsupported key');
     git(['config', '--unset', 'filter.evil.smudge'], managedRoot);
-    const repeated = await run(['packages', 'add', source, '--yes'], cwd, { ...environment, TEST_FAIL_CLONE: '1' });
+    const repeated = await run(['package', 'add', source, '--yes'], cwd, { ...environment, TEST_FAIL_CLONE: '1' });
     expect(repeated).toMatchObject({ status: 0, stderr: '' });
     expect(repeated.stdout).toContain('Managed Git package: current');
     expect(repeated.stdout).not.toContain('build authorization');
 
     await directory.write('remote/personal-agent-network/skills/personal-agent-network/note.txt', 'updated\n');
     git(['add', '.'], remote); git(['commit', '-m', 'update'], remote);
-    const updated = await run(['packages', 'update', 'personal-agent-network', '--yes'], cwd, environment);
+    const lockCapture=directory.path('update-lock.json');
+    const updated = await run(['package', 'update', 'personal-agent-network', '--yes'], cwd, {...environment,TEST_LOCK_CAPTURE:lockCapture});
     expect(updated).toMatchObject({ status: 0, stderr: '' });
+    expect(JSON.parse(await readFile(lockCapture,'utf8'))).toMatchObject({command:'bazframe package update'});
     expect(updated.stdout).toContain('Managed Git package: updated');
     const fastForwardRevision = git(['rev-parse', 'HEAD'], remote).trim();
     await directory.write('remote/personal-agent-network/build.mjs', 'process.exit(9);\n');
     git(['add', '.'], remote); git(['commit', '-m', 'failing build'], remote);
-    const failedUpdate = await run(['packages', 'update', 'personal-agent-network', '--yes'], cwd, environment);
+    const failedUpdate = await run(['package', 'update', 'personal-agent-network', '--yes'], cwd, environment);
     expect(failedUpdate.status).toBe(1);
     expect(JSON.parse(await readFile(directory.path('home/providers/git/records/package/personal-agent-network.json'), 'utf8'))).toMatchObject({ revision: fastForwardRevision });
     expect(git(['rev-parse', 'HEAD'], directory.path('home/providers/git/checkouts/package/personal-agent-network')).trim()).toBe(fastForwardRevision);
     git(['checkout', fastForwardRevision, '--', 'build.mjs'], remote); git(['add', '.'], remote); git(['commit', '-m', 'restore build'], remote);
-    expect((await run(['packages', 'update', 'personal-agent-network', '--yes'], cwd, environment)).status).toBe(0);
+    expect((await run(['package', 'update', 'personal-agent-network', '--yes'], cwd, environment)).status).toBe(0);
     const beforeRewriteRevision = git(['rev-parse', 'HEAD'], remote).trim();
     git(['reset', '--hard', initialRevision], remote);
     await directory.write('remote/personal-agent-network/rewrite.txt', 'reviewed rewrite\n');
     git(['add', '.'], remote); git(['commit', '-m', 'rewritten branch'], remote);
-    const refusedRewrite = await run(['packages', 'update', 'personal-agent-network', '--yes'], cwd, environment);
+    const refusedRewrite = await run(['package', 'update', 'personal-agent-network', '--yes'], cwd, environment);
     expect(refusedRewrite.status).toBe(1);
     expect(refusedRewrite.stderr).toContain('--accept-rewrite');
     expect(JSON.parse(await readFile(directory.path('home/providers/git/records/package/personal-agent-network.json'), 'utf8'))).toMatchObject({ revision: beforeRewriteRevision });
-    expect((await run(['packages', 'update', 'personal-agent-network', '--accept-rewrite', '--yes'], cwd, environment)).status).toBe(0);
+    expect((await run(['package', 'update', 'personal-agent-network', '--accept-rewrite', '--yes'], cwd, environment)).status).toBe(0);
 
-    const failedBuild = await run(['packages', 'build', 'personal-agent-network'], cwd, { ...environment, TEST_MANAGED_BUILD_FAIL: '1' });
+    const failedBuild = await run(['package', 'build', 'personal-agent-network'], cwd, { ...environment, TEST_MANAGED_BUILD_FAIL: '1' });
     expect(failedBuild.status).toBe(1);
     expect(git(['status', '--porcelain=v1', '--untracked-files=all', '--ignored'], managedRoot)).toBe('');
-    expect((await run(['packages', 'build', 'personal-agent-network'], cwd, environment)).status).toBe(0);
+    expect((await run(['package', 'build', 'personal-agent-network'], cwd, environment)).status).toBe(0);
+    const noisyJson=await run(['package','build','--json','personal-agent-network'],cwd,{...environment,TEST_MANAGED_NOISE:'1'});expect(noisyJson.status).toBe(0);expect(noisyJson.stderr).toContain('managed-stdout');expect(noisyJson.stderr).toContain('managed-stderr');expect(noisyJson.stdout.trim().split('\n')).toHaveLength(1);expect(JSON.parse(noisyJson.stdout)).toMatchObject({schemaVersion:1,ok:true,command:'package.build',result:{providerKind:'managed-git'}});
 
     const status = await run(['status'], cwd, environment);
     expect(status.stdout).toContain('Managed Git providers:');
     expect(status.stdout).toContain('package personal-agent-network: ready; example.test/sram1337/personal-agent-network; branch:main; revision:');
-    expect(status.stdout).toContain('bazframe packages update personal-agent-network');
+    expect(status.stdout).toContain('bazframe package update personal-agent-network');
     const provenance = JSON.parse(await readFile(directory.path('home/providers/git/records/package/personal-agent-network.json'), 'utf8')) as { revision: string; remote: string };
     expect(provenance.remote).toBe('example.test/sram1337/personal-agent-network');
     expect(provenance.revision).toBe(git(['rev-parse', 'HEAD'], remote).trim());
-    expect((await run(['profile', 'packages'], cwd, environment)).stdout).toContain('Referenced packages:\n  (none)');
-    await run(['profile', 'packages', 'add', 'personal-agent-network'], cwd, environment);
-    expect((await run(['packages', 'remove', 'personal-agent-network'], cwd, environment)).status).toBe(1);
-    await run(['profile', 'packages', 'remove', 'personal-agent-network'], cwd, environment);
-    expect((await run(['packages', 'remove', 'personal-agent-network'], cwd, environment)).status).toBe(0);
+    expect((await run(['profile', 'package', 'list'], cwd, environment)).stdout).toContain('Referenced packages:\n  (none)');
+    await run(['profile', 'package', 'add', 'personal-agent-network'], cwd, environment);
+    expect((await run(['package', 'remove', 'personal-agent-network'], cwd, environment)).status).toBe(1);
+    await run(['profile', 'package', 'remove', 'personal-agent-network'], cwd, environment);
+    expect((await run(['package', 'remove', 'personal-agent-network'], cwd, environment)).status).toBe(0);
     await expect(readFile(directory.path('home/providers/git/records/package/personal-agent-network.json'))).rejects.toMatchObject({ code: 'ENOENT' });
-    expect((await run(['packages', 'add', source, '--yes'], cwd, environment)).status).toBe(0);
+    expect((await run(['package', 'add', source, '--yes'], cwd, environment)).status).toBe(0);
     await directory.write('home/providers/git/recovery/package-personal-agent-network.json', '{"schemaVersion":1}\n');
     const recoveryStatus = await run(['status'], cwd, environment);
     expect(recoveryStatus.status).toBe(3);
@@ -131,13 +134,13 @@ describe('managed Git CLI', () => {
     const initialRevision = git(['rev-parse', 'HEAD'], remote).trim();
     const environment = await managedEnvironment(directory, remote, 'hostile-backup-git-wrapper.mjs');
     const source = 'https://example.test/team/hostile-package.git';
-    expect((await run(['packages', 'add', source, '--yes'], cwd, environment)).status).toBe(0);
+    expect((await run(['package', 'add', source, '--yes'], cwd, environment)).status).toBe(0);
     await directory.write('remote/hostile-package/build.mjs', `import{mkdir,readFile,rm,writeFile}from'node:fs/promises';
 const journal=JSON.parse(await readFile(process.env.BAZFRAME_HOME+'/providers/git/recovery/package-hostile-package.json','utf8'));
 await rm(journal.backup,{recursive:true,force:true});await mkdir(journal.backup,{recursive:true});await writeFile(journal.backup+'/hostile.txt','replacement');process.exit(9);
 `);
     git(['add', '.'], remote); git(['commit', '-m', 'replace backup during build'], remote);
-    const failed = await run(['packages', 'update', 'hostile-package', '--yes'], cwd, environment);
+    const failed = await run(['package', 'update', 'hostile-package', '--yes'], cwd, environment);
     expect(failed.status).toBe(1);
     expect(failed.stderr).toContain('could not prove complete recovery');
     const journalPath = directory.path('home/providers/git/recovery/package-hostile-package.json');
@@ -154,11 +157,11 @@ await rm(journal.backup,{recursive:true,force:true});await mkdir(journal.backup,
     const local = await directory.mkdir('local/occupied-package');
     await directory.write('local/occupied-package/bazframe-package.json', JSON.stringify({ schemaVersion: 1, build: [process.execPath, '-e', "require('fs').mkdirSync('dist/skills',{recursive:true})"], artifactRoot: 'dist', skillsRoot: 'skills' }));
     const environment = { ...process.env, BAZFRAME_HOME: directory.path('home'), PI_CODING_AGENT_DIR: directory.path('pi-agent'), NO_COLOR: '1' };
-    expect((await run(['packages', 'add', local], cwd, environment)).status).toBe(0);
+    expect((await run(['package', 'add', local], cwd, environment)).status).toBe(0);
     const remote = await directory.mkdir('remote/occupied-package');
     git(['init', '-b', 'main'], remote); git(['config', 'user.name', 'Test'], remote); git(['config', 'user.email', 'test@example.com'], remote); git(['commit', '--allow-empty', '-m', 'initial'], remote);
     const managed = await managedEnvironment(directory, remote, 'collision-git-wrapper.mjs');
-    const collision = await run(['packages', 'add', 'https://example.test/team/occupied-package.git', '--yes'], cwd, { ...managed, TEST_FAIL_CLONE: '1' });
+    const collision = await run(['package', 'add', 'https://example.test/team/occupied-package.git', '--yes'], cwd, { ...managed, TEST_FAIL_CLONE: '1' });
     expect(collision.status).toBe(1);
     expect(collision.stderr).toContain('already registered');
     expect(collision.stderr).not.toContain('Git clone failed');
@@ -175,8 +178,8 @@ await rm(journal.backup,{recursive:true,force:true});await mkdir(journal.backup,
     const racingEnvironment = { ...environment, TEST_CLONE_BARRIER: directory.path('clone-barrier') };
     const source = 'https://example.test/team/racing-library.git';
     const results = await Promise.all([
-      run(['libraries', 'add', source], cwd, racingEnvironment),
-      run(['libraries', 'add', source], cwd, racingEnvironment)
+      run(['library', 'add', source], cwd, racingEnvironment),
+      run(['library', 'add', source], cwd, racingEnvironment)
     ]);
     expect(results.map((result) => result.status).sort()).toEqual([0, 1]);
     expect(results.find((result) => result.status === 1)?.stderr).toMatch(/became occupied|state is busy/u);
@@ -191,12 +194,12 @@ await rm(journal.backup,{recursive:true,force:true});await mkdir(journal.backup,
     git(['init', '-b', 'main'], remote); git(['config', 'user.name', 'Test'], remote); git(['config', 'user.email', 'test@example.com'], remote); git(['add', '.'], remote); git(['commit', '-m', 'initial'], remote);
     const environment = await managedEnvironment(directory, remote, 'current-lock-git-wrapper.mjs');
     const source = 'https://example.test/team/current-library.git';
-    expect((await run(['libraries', 'add', source], cwd, environment)).status).toBe(0);
+    expect((await run(['library', 'add', source], cwd, environment)).status).toBe(0);
 
-    for (const command of [['libraries', 'add', source], ['libraries', 'update', 'current-library']] as const) {
+    for (const command of [['library', 'add', source], ['library', 'update', 'current-library']] as const) {
       await directory.write('home/locks/state.lock', `${JSON.stringify({
         schemaVersion: 1, pid: process.pid, createdAt: new Date().toISOString(),
-        command: 'bazframe libraries remove', target: 'current-library', token: `test-${command[1]}`
+        command: 'bazframe library remove', target: 'current-library', token: `test-${command[1]}`
       })}\n`);
       const current = await run(command, cwd, environment);
       expect(current.status, JSON.stringify(current)).toBe(1);
@@ -205,7 +208,7 @@ await rm(journal.backup,{recursive:true,force:true});await mkdir(journal.backup,
       expect(await readdir(directory.path('home/providers/git/staging'))).toEqual([]);
       expect(await run(command, cwd, environment)).toMatchObject({ status: 0, stderr: '' });
     }
-    expect((await run(['libraries'], cwd, environment)).stdout).toContain('current-library');
+    expect((await run(['library', 'list'], cwd, environment)).stdout).toContain('current-library');
   }, 30_000);
 
   it('resumes identity-verified forward removal after resource deletion', async () => {
@@ -215,7 +218,7 @@ await rm(journal.backup,{recursive:true,force:true});await mkdir(journal.backup,
     await directory.write('remote/recovery-library/alpha/SKILL.md', skill('alpha'));
     git(['init', '-b', 'main'], remote); git(['config', 'user.name', 'Test'], remote); git(['config', 'user.email', 'test@example.com'], remote); git(['add', '.'], remote); git(['commit', '-m', 'initial'], remote);
     const environment = await managedEnvironment(directory, remote, 'remove-recovery-git-wrapper.mjs');
-    expect((await run(['libraries', 'add', 'https://example.test/team/recovery-library.git'], cwd, environment)).status).toBe(0);
+    expect((await run(['library', 'add', 'https://example.test/team/recovery-library.git'], cwd, environment)).status).toBe(0);
     const managedRoot = directory.path('home/providers/git/checkouts/library/recovery-library');
     const displacedRoot = directory.path('displaced-recovery-library');
     await expect(removeManagedGitLibrary({
@@ -231,7 +234,7 @@ await rm(journal.backup,{recursive:true,force:true});await mkdir(journal.backup,
     await expect(readFile(directory.path('home/providers/git/records/library/recovery-library.json'))).rejects.toMatchObject({ code: 'ENOENT' });
     await rm(managedRoot, { recursive: true });
     await rename(displacedRoot, managedRoot);
-    const resumed = await run(['libraries', 'remove', 'recovery-library'], cwd, environment);
+    const resumed = await run(['library', 'remove', 'recovery-library'], cwd, environment);
     expect(resumed).toMatchObject({ status: 0, stderr: '' });
     expect(resumed.stdout).toContain('Managed Git library: removed');
     await expect(readFile(journalPath)).rejects.toMatchObject({ code: 'ENOENT' });
@@ -253,7 +256,7 @@ await rm(journal.backup,{recursive:true,force:true});await mkdir(journal.backup,
       branch: 'main', previousRevision: revision, nextRevision: revision, root: outside, staging: null, backup: null,
       resourceStateSha256: 'd'.repeat(64)
     }));
-    const refused = await run(['libraries', 'remove', 'outside-library'], cwd, { ...process.env, BAZFRAME_HOME: home, PI_CODING_AGENT_DIR: directory.path('pi-agent'), NO_COLOR: '1' });
+    const refused = await run(['library', 'remove', 'outside-library'], cwd, { ...process.env, BAZFRAME_HOME: home, PI_CODING_AGENT_DIR: directory.path('pi-agent'), NO_COLOR: '1' });
     expect(refused.status).toBe(1);
     expect(refused.stderr).toContain('deterministic managed provider path');
     expect(await readFile(directory.path('outside-library/alpha/SKILL.md'), 'utf8')).toContain('name: alpha');
@@ -273,7 +276,7 @@ await rm(journal.backup,{recursive:true,force:true});await mkdir(journal.backup,
       resourceStateSha256: 'd'.repeat(64)
     }));
     await symlink(externalProviders, directory.path('home/providers'));
-    const refused = await run(['libraries', 'remove', 'linked-library'], cwd, { ...process.env, BAZFRAME_HOME: home, PI_CODING_AGENT_DIR: directory.path('pi-agent'), NO_COLOR: '1' });
+    const refused = await run(['library', 'remove', 'linked-library'], cwd, { ...process.env, BAZFRAME_HOME: home, PI_CODING_AGENT_DIR: directory.path('pi-agent'), NO_COLOR: '1' });
     expect(refused.status).toBe(1);
     expect(refused.stderr).toContain('namespace must be physical');
     expect(await readFile(directory.path('external-providers/git/checkouts/library/linked-library/sentinel.txt'), 'utf8')).toBe('outside\n');
@@ -291,7 +294,7 @@ await rm(journal.backup,{recursive:true,force:true});await mkdir(journal.backup,
 import{mkdirSync}from'node:fs';const args=process.argv.slice(2);if(args[0]==='auth')process.exit(0);const destination=args[3];if(destination)mkdirSync(destination,{recursive:true});process.exit(19);
 `);
     await chmod(gh, 0o755);
-    const result = await run(['libraries', 'add', 'git:Example/Fallback-Library'], cwd, { ...environment, BAZFRAME_GH_COMMAND: gh, GIT_SSH_COMMAND: '/tmp/hostile-routing' });
+    const result = await run(['library', 'add', 'git:Example/Fallback-Library'], cwd, { ...environment, BAZFRAME_GH_COMMAND: gh, GIT_SSH_COMMAND: '/tmp/hostile-routing' });
     expect(result).toMatchObject({ status: 0, stderr: '' });
     expect(result.stdout).toContain('Managed Git library: added');
   });
@@ -312,13 +315,13 @@ const changed=spawnSync(process.env.REAL_GIT,['-C',args[3],'remote','set-url','o
 `);
     await chmod(gh, 0o755);
     const githubEnvironment = { ...environment, BAZFRAME_GH_COMMAND: gh };
-    const added = await run(['libraries', 'add', 'git:Example/Private-Library'], cwd, githubEnvironment);
+    const added = await run(['library', 'add', 'git:Example/Private-Library'], cwd, githubEnvironment);
     expect(added).toMatchObject({ status: 0, stderr: '' });
     expect(JSON.parse(await readFile(directory.path('home/providers/git/records/library/private-library.json'), 'utf8'))).toMatchObject({ transport: 'gh', remote: 'github.com/example/private-library' });
     await directory.write('remote/private-library/beta/SKILL.md', skill('beta'));
     git(['add', '.'], remote); git(['commit', '-m', 'update'], remote);
-    expect((await run(['libraries', 'update', 'private-library'], cwd, githubEnvironment)).status).toBe(0);
-    expect((await run(['libraries'], cwd, githubEnvironment)).stdout).toContain('beta');
+    expect((await run(['library', 'update', 'private-library'], cwd, githubEnvironment)).status).toBe(0);
+    expect((await run(['library', 'list'], cwd, githubEnvironment)).stdout).toContain('beta');
   });
 
   it('updates managed Skills through stable profile links and acquires managed libraries through the shared lifecycle', async () => {
@@ -331,40 +334,40 @@ const changed=spawnSync(process.env.REAL_GIT,['-C',args[3],'remote','set-url','o
     await directory.write('skill-remote/demo-skill/SKILL.md', skill('demo-skill'));
     git(['init', '-b', 'main'], skillRemote); git(['config', 'user.name', 'Test'], skillRemote); git(['config', 'user.email', 'test@example.com'], skillRemote); git(['add', '.'], skillRemote); git(['commit', '-m', 'initial'], skillRemote);
     let environment = await managedEnvironment(directory, skillRemote, 'skill-git-wrapper.mjs');
-    const addedSkill = await run(['add', 'skill', 'https://example.test/team/demo-skill.git'], cwd, environment);
+    const addedSkill = await run(['skill', 'add', 'https://example.test/team/demo-skill.git'], cwd, environment);
     expect(addedSkill.status, JSON.stringify(addedSkill)).toBe(0);
-    expect(await run(['profile', 'skills', 'add', 'demo-skill'], cwd, environment)).toMatchObject({ status: 0, stderr: '' });
+    expect(await run(['profile', 'skill', 'add', 'demo-skill'], cwd, environment)).toMatchObject({ status: 0, stderr: '' });
     const membership = directory.path('home/profiles/focused/skills/demo-skill/SKILL.md');
     await directory.write('skill-remote/demo-skill/SKILL.md', `${skill('demo-skill')}\nUpdated.\n`);
     git(['add', '.'], skillRemote); git(['commit', '-m', 'update'], skillRemote);
     expect((await run(['skill', 'update', 'demo-skill'], cwd, environment)).status).toBe(0);
     expect(await readFile(membership, 'utf8')).toContain('Updated.');
-    expect((await run(['remove', 'skill', 'demo-skill'], cwd, environment)).status).toBe(1);
-    await run(['profile', 'skills', 'remove', 'demo-skill'], cwd, environment);
-    expect((await run(['remove', 'skill', 'demo-skill'], cwd, environment)).status).toBe(0);
-    expect((await run(['add', 'skill', 'https://example.test/team/demo-skill.git'], cwd, environment)).status).toBe(0);
+    expect((await run(['skill', 'remove', 'demo-skill'], cwd, environment)).status).toBe(1);
+    await run(['profile', 'skill', 'remove', 'demo-skill'], cwd, environment);
+    expect((await run(['skill', 'remove', 'demo-skill'], cwd, environment)).status).toBe(0);
+    expect((await run(['skill', 'add', 'https://example.test/team/demo-skill.git'], cwd, environment)).status).toBe(0);
 
     const libraryRemote = await directory.mkdir('library-remote/toolkit');
     await directory.write('library-remote/toolkit/alpha/SKILL.md', skill('alpha'));
     git(['init', '-b', 'main'], libraryRemote); git(['config', 'user.name', 'Test'], libraryRemote); git(['config', 'user.email', 'test@example.com'], libraryRemote); git(['add', '.'], libraryRemote); git(['commit', '-m', 'initial'], libraryRemote);
     environment = await managedEnvironment(directory, libraryRemote, 'library-git-wrapper.mjs');
-    expect((await run(['libraries', 'add', 'ssh://git@example.test/team/toolkit.git'], cwd, environment)).status).toBe(0);
+    expect((await run(['library', 'add', 'ssh://git@example.test/team/toolkit.git'], cwd, environment)).status).toBe(0);
     await directory.write('library-remote/toolkit/beta/SKILL.md', skill('beta'));
     git(['add', '.'], libraryRemote); git(['commit', '-m', 'update'], libraryRemote);
-    expect((await run(['libraries', 'update', 'toolkit'], cwd, environment)).status).toBe(0);
-    expect((await run(['libraries'], cwd, environment)).stdout).toContain('beta');
-    await run(['profile', 'libraries', 'add', 'toolkit'], cwd, environment);
-    expect((await run(['libraries', 'remove', 'toolkit'], cwd, environment)).status).toBe(1);
-    await run(['profile', 'libraries', 'remove', 'toolkit'], cwd, environment);
-    expect((await run(['libraries', 'remove', 'toolkit'], cwd, environment)).status).toBe(0);
-    expect((await run(['libraries', 'add', 'ssh://git@example.test/team/toolkit.git'], cwd, environment)).status).toBe(0);
+    expect((await run(['library', 'update', 'toolkit'], cwd, environment)).status).toBe(0);
+    expect((await run(['library', 'list'], cwd, environment)).stdout).toContain('beta');
+    await run(['profile', 'library', 'add', 'toolkit'], cwd, environment);
+    expect((await run(['library', 'remove', 'toolkit'], cwd, environment)).status).toBe(1);
+    await run(['profile', 'library', 'remove', 'toolkit'], cwd, environment);
+    expect((await run(['library', 'remove', 'toolkit'], cwd, environment)).status).toBe(0);
+    expect((await run(['library', 'add', 'ssh://git@example.test/team/toolkit.git'], cwd, environment)).status).toBe(0);
 
     const linkedRemote = await directory.mkdir('skill-remote/linked-skill');
     await directory.write('skill-remote/linked-skill/definition.md', skill('linked-skill'));
     await symlink('definition.md', directory.path('skill-remote/linked-skill/SKILL.md'));
     git(['init', '-b', 'main'], linkedRemote); git(['config', 'user.name', 'Test'], linkedRemote); git(['config', 'user.email', 'test@example.com'], linkedRemote); git(['add', '.'], linkedRemote); git(['commit', '-m', 'linked'], linkedRemote);
     const linkedEnvironment = await managedEnvironment(directory, linkedRemote, 'linked-git-wrapper.mjs');
-    const linked = await run(['add', 'skill', 'https://example.test/team/linked-skill.git'], cwd, linkedEnvironment);
+    const linked = await run(['skill', 'add', 'https://example.test/team/linked-skill.git'], cwd, linkedEnvironment);
     expect(linked.status).toBe(1);
     expect(linked.stderr).toContain('physical regular file');
   });

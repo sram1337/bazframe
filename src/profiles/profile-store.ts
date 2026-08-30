@@ -121,7 +121,7 @@ export async function readActiveProfile(bazframeHome: string): Promise<string> {
     if (errorCode(error) === 'ENOENT') {
       throw new BazframeError(
         'NO_ACTIVE_PROFILE',
-        'No active profile. Run `bazframe profile use <profile>` (or `bazframe use <profile>`) first.'
+        'No active profile. Run `bazframe profile use <profile>` first.'
       );
     }
     throw stateReadError(statePath, error);

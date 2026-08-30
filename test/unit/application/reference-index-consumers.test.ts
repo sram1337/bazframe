@@ -22,7 +22,7 @@ describe('typed bulk reference-index overview consumers', () => {
   it('CLI captures once and derives unknown count, failed health, and kind-qualified diagnostics from that capture', async () => {
     const fixture = await setup(); mocks.capture.mockReset();
     mocks.capture.mockResolvedValue(capturedIndex(true)); let stdout = '';
-    const status = await runCli(['libraries'], {
+    const status = await runCli(['library', 'list'], {
       cwd: () => fixture.directory.root, environment: fixture.environment,
       writeStdout: (text) => { stdout += text; }, writeStderr: () => undefined
     });

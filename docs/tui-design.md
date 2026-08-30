@@ -56,13 +56,13 @@ The Skills master pane renders selectable `Added Skills`, `Library <id>`, and `P
 
 Right/`l` expands any parent or moves to its first Skill, while `o`/`c` explicitly expand/collapse any parent. Enter/`L` opens detail for a selected library/package or previews a selected Skill; Enter on Added Skills retains its collapse toggle. Left/`h` unwinds hierarchy in the browser and returns from detail; `H`, Escape, and Backspace also return. Stable kind-qualified row IDs prevent a library and package with the same ID from collapsing into one row.
 
-Added Skill previews read live provider `SKILL.md`. `e` may launch the external editor only for Added Skills. A library/package preview is immutable and directs the user to edit provider input, then run `bazframe libraries update <library>` or `bazframe packages build <package>`.
+Added Skill previews read live provider `SKILL.md`. `e` may launch the external editor only for Added Skills. A library/package preview is immutable and directs the user to edit provider input, then run `bazframe library update <library>` or `bazframe package build <package>`.
 
 ### Add Library
 
-The `a` flow accepts an absolute physical directory, exact `~`/`~/` expansion, or the same managed Git source grammar as `bazframe libraries add`. Local input shows entered and canonical roots plus the canonical-basename library ID. Managed Git input shows the entered source, normalized remote identity, and normalized repository-name ID. Browsing, parsing, and review write nothing. Final literal `y` calls the local or managed Git library lifecycle once; managed acquisition may access the network through configured Git or GitHub authentication.
+The `a` flow accepts an absolute physical directory, exact `~`/`~/` expansion, or the same managed Git source grammar as `bazframe library add`. Local input shows entered and canonical roots plus the canonical-basename library ID. Managed Git input shows the entered source, normalized remote identity, and normalized repository-name ID. Browsing, parsing, and review write nothing. Final literal `y` calls the local or managed Git library lifecycle once; managed acquisition may access the network through configured Git or GitHub authentication.
 
-A local root-level `bazframe-package.json` blocks the flow with `bazframe packages add <absolute-root>` guidance. Managed input receives the same library/package distinction after acquisition. Library addition executes no provider code and creates no profile reference.
+A local root-level `bazframe-package.json` blocks the flow with `bazframe package add <absolute-root>` guidance. Managed input receives the same library/package distinction after acquisition. Library addition executes no provider code and creates no profile reference.
 
 ## Profiles interaction
 

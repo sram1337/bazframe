@@ -77,7 +77,7 @@ profiles/<id>/
 
 The profile-local `AGENTS.md` contains personal coding-agent instructions. Each of a profile's materialized Skills is a standard Skill directory, including any supporting files used by its `SKILL.md`. Each library/package reference contains one exact typed identity. The matching global record owns the provider root and activated snapshot; effective Skills are derived from immutable bytes rather than mutable input.
 
-The first slice has one global active profile selected by `bazframe profile use <profile>`; `bazframe use <profile>` remains a compatibility alias. `profile add` creates a physical profile directory containing a zero-byte physical `AGENTS.md` and an empty physical `skills/` directory without activating it. `profile list` prints valid physical profile IDs and `profile current` prints only the selected ID for scripts. Bare `bazframe profile` and `bazframe profiles` instead render the human profile overview: valid profiles in lexical order, an explicit active marker, current-selection state, and the available profile commands. CLI list order is unaffected by TUI favorites.
+The first slice has one global active profile selected by `bazframe profile use <profile>`. `profile add` creates a physical profile directory containing a zero-byte physical `AGENTS.md` and an empty physical `skills/` directory without activating it. `profile list` is the single rich overview: valid profiles in lexical order, active flags, selected/unselected/missing active state, and available profile commands. `profile current` remains the focused selected-ID query. Bare resources, top-level `use`, plurals, verb-first Skill lifecycle, and plural nested profile resources are rejected with exact migration guidance rather than dispatched. CLI list order is unaffected by TUI favorites.
 
 TUI profile favorites are global preference state in the separate physical `<BAZFRAME_HOME>/profile-favorites.json` file, encoded canonically as exact schema v1 with unique lexically sorted safe profile IDs. Missing state means no favorites. Reads require a bounded physical regular file and fatal UTF-8 decoding; writes use the shared state lock and atomic state-file conventions. Malformed state is diagnosed while the dashboard projects no favorites, and favorite mutation fails without replacing it. Stored IDs for profiles that no longer physically exist are retained and diagnosed but not displayed as favorites. A valid favorite follows rename and is cleared by remove, including absent removal; duplicate does not inherit it. Malformed optional favorite state is preserved and does not block those otherwise unrelated lifecycle operations.
 
@@ -87,7 +87,7 @@ TUI profile favorites are global preference state in the separate physical `<BAZ
 
 `profile duplicate <source> <new>` copies all content from a physical source profile without resolving children or provider targets, preserves symlinks verbatim, refuses profile-root symlinks and occupied destinations, leaves the active selection unchanged, and publishes the new profile only after a complete staged copy. `profile rename <old> <new>` preserves profile content without resolving its children or provider targets, refuses symlink roots and replacement, and updates the active selection when renaming the active profile. `profile remove <id>` always refuses the active profile, even when its directory is missing. Without `--force`, removal accepts only the exact generated-empty shape; `--force` is explicit authorization to recursively delete a non-active physical profile. Recursive deletion unlinks membership symlinks without following or mutating provider targets. Actual profile creation, duplication, removal, and identity-changing rename clear disposable alias cache for affected new or existing IDs; idempotent add and same-ID rename preserve live cache. Lifecycle mutations use the global state lock before any profile-specific lock and apply to Pi on the next startup or `/reload`.
 
-A profile's Skills are managed canonically with `bazframe profile skills add <skill> [--profile <profile>]` and `bazframe profile skills remove <skill> [--profile <profile>]`. Omission targets the active profile; an explicit target changes that profile without changing or requiring the active selection. There are no top-level membership aliases. Bare `bazframe profile skills` lists the active profile's immediate Skills and shows membership commands; Pi remains authoritative for full runtime validation. Packs are outside the current scope.
+A profile's Skills are managed canonically with `bazframe profile skill add [--profile <profile>] <skill>` and `bazframe profile skill remove [--profile <profile>] <skill>`. Omission targets the active profile; an explicit target changes that profile without changing or requiring the active selection. Mutations always report the resolved profile ID and whether it came from active selection or an explicit option. `bazframe profile skill list` is active-profile-only; it does not accept `--profile`. Pi remains authoritative for full runtime validation. Packs are outside the current scope.
 
 ### Profile portability
 
@@ -176,17 +176,17 @@ For the first production slice, Bazframe discovers profile membership from the p
 
 Bazframe's built-in added Skill catalog is `(default)`, rooted at `<BAZFRAME_HOME>/skills`. Each entry `<skill>` is an absolute symlink to one canonical physical Skill root. The canonical target basename and declared frontmatter `name` must exactly equal the safe skill ID. Absolute-path targets remain provider-owned; managed Git targets use an exact recorded root under `<BAZFRAME_HOME>/providers/git/checkouts/skill/`. Provider changes are live on the next Pi startup or `/bazframe reload`.
 
-`bazframe add skill <absolute-root-or-git-source>` adds one structurally validated Skill to `(default)`. An absolute path retains the existing external-provider contract. A Git source acquires a root Skill at its stable managed path and records exact provenance before catalog publication. The same verified target is idempotently current; occupied, broken, malformed, dirty, or mismatched state is rejected. Paths inside `BAZFRAME_HOME` are accepted only when exact managed Git Skill provenance proves their identity. `bazframe remove skill <skill>` removes only the catalog link, is absent-idempotent, and refuses every valid profile dependency or unverifiable reference index. A broken absolute registration remains removable only after all literal-target profile memberships are gone. These lifecycles hold the global state lock, revalidate immediately before publication or unlink, and retain the documented final-syscall race against non-cooperating writers.
+`bazframe skill add <absolute-root-or-git-source>` adds one structurally validated Skill to `(default)`. An absolute path retains the existing external-provider contract. A Git source acquires a root Skill at its stable managed path and records exact provenance before catalog publication. The same verified target is idempotently current; occupied, broken, malformed, dirty, or mismatched state is rejected. Paths inside `BAZFRAME_HOME` are accepted only when exact managed Git Skill provenance proves their identity. `bazframe skill remove <skill>` removes only the catalog link, is absent-idempotent, and refuses every valid profile dependency or unverifiable reference index. A broken absolute registration remains removable only after all literal-target profile memberships are gone. These lifecycles hold the global state lock, revalidate immediately before publication or unlink, and retain the documented final-syscall race against non-cooperating writers.
 
-`bazframe skills` and its singular alias list only valid added Skills in lexical order with their external targets and diagnostics. Skills from libraries/packages and Pi-native Skills are not part of this catalog.
+`bazframe skill list` lists only valid added Skills in lexical order with their external targets and diagnostics. Skills from libraries/packages and Pi-native Skills are not part of this catalog.
 
-`bazframe profile skills add <skill> [--profile <profile>]` resolves the named added Skill and creates a parallel absolute symlink under `profiles/<id>/skills/` directly to the same canonical provider target—never a link chain. Removal accepts only an exact parallel link matching the current `(default)` entry. Both operations are idempotent, preserve provider content, and take the state lock before the profile membership lock. Bazframe refuses physical, relative, foreign, mismatched, or non-added entries. A missing add target offers bounded suggestions from valid added Skills.
+`bazframe profile skill add [--profile <profile>] <skill>` resolves the named added Skill and creates a parallel absolute symlink under `profiles/<id>/skills/` directly to the same canonical provider target—never a link chain. Removal accepts only an exact parallel link matching the current `(default)` entry. Both operations are idempotent, preserve provider content, and take the state lock before the profile membership lock. Bazframe refuses physical, relative, foreign, mismatched, or non-added entries. A missing add target offers bounded suggestions from valid added Skills.
 
 Existing physical profile Skill directories and foreign links remain runtime-readable but are not managed by the membership commands. Managed Skill updates preserve the stable target path, so catalog and profile links continue to agree. Managed Skill editing is performed upstream and activated with `skill update`. There is no provider-specific environment reader, release migration, copy fallback, or Windows link fallback. Libraries and packages remain separate immutable-snapshot objects with whole-object profile references.
 
-Bazframe ships two product-owned Agent Skills from tracked source to generated npm artifacts: the `bazframe` self-management documentation Skill at `dist/skills/bazframe/` and the `bazify` provider helper at `dist/skills/bazify/`. The npm package carries only the generated copies. A global installation root can be resolved as `$(npm root --global)/bazframe`; either Skill can then be added explicitly through `bazframe add skill <package-root>/dist/skills/<skill>`. Build and installation perform no acquisition or membership changes.
+Bazframe ships two product-owned Agent Skills from tracked source to generated npm artifacts: the `bazframe` self-management documentation Skill at `dist/skills/bazframe/` and the `bazify` provider helper at `dist/skills/bazify/`. The npm package carries only the generated copies. A global installation root can be resolved as `$(npm root --global)/bazframe`; either Skill can then be added explicitly through `bazframe skill add <package-root>/dist/skills/<skill>`. Build and installation perform no acquisition or membership changes.
 
-`bazify` packages one selected local physical Skill or Skill collection with provider source under `skills/`, a generated `dist/skills/` artifact, and exact build argv `node scripts/bazify-build.mjs`. `create` accepts explicit Skill roots or one root Skill/immediate `skills/` collection, extracts only the selected Skill trees into a new package, defaults singleton IDs to the Skill name and collection IDs to the source-root name, defaults the destination to `~/<id>`, and requires `--name` for several explicit roots. `adapt` adds the manifest, build script, and ignore entries to a dedicated root-Skill or immediate-collection repository; Git repositories must be clean top-levels, existing provider and Git bytes remain provider-owned, exact generated state is current, and failed adaptation restores the previous files and artifact. Both routes reject overlap, duplicate names, links, special entries, basename/frontmatter mismatch, source drift, and obvious credential material; the generated multi-Skill build uses stable no-follow reads and transactional artifact replacement. Validation calls `packages add` under a disposable `BAZFRAME_HOME`. Semantic requirements, provenance, licensing, privacy, and publication review use the local task convention under `./bazframe/` or a cleaned-up temporary checklist. Private publication applies to new non-Git packages, binds approval to `github.com`, account, repository, canonical path, and publishable bytes, verifies the final Git index, and uses fixed shell-free `git`/`gh` argv. Adapted repositories continue through their provider Git workflow. Bazify does not mutate Bazframe catalog/profile state.
+`bazify` packages one selected local physical Skill or Skill collection with provider source under `skills/`, a generated `dist/skills/` artifact, and exact build argv `node scripts/bazify-build.mjs`. `create` accepts explicit Skill roots or one root Skill/immediate `skills/` collection, extracts only the selected Skill trees into a new package, defaults singleton IDs to the Skill name and collection IDs to the source-root name, defaults the destination to `~/<id>`, and requires `--name` for several explicit roots. `adapt` adds the manifest, build script, and ignore entries to a dedicated root-Skill or immediate-collection repository; Git repositories must be clean top-levels, existing provider and Git bytes remain provider-owned, exact generated state is current, and failed adaptation restores the previous files and artifact. Both routes reject overlap, duplicate names, links, special entries, basename/frontmatter mismatch, source drift, and obvious credential material; the generated multi-Skill build uses stable no-follow reads and transactional artifact replacement. Validation calls `package add` under a disposable `BAZFRAME_HOME`. Semantic requirements, provenance, licensing, privacy, and publication review use the local task convention under `./bazframe/` or a cleaned-up temporary checklist. Private publication applies to new non-Git packages, binds approval to `github.com`, account, repository, canonical path, and publishable bytes, verifies the final Git index, and uses fixed shell-free `git`/`gh` argv. Adapted repositories continue through their provider Git workflow. Bazify does not mutate Bazframe catalog/profile state.
 
 Profile skills enter Pi through `resources_discover`.
 
@@ -242,9 +242,9 @@ Exact references are `{"schemaVersion":1,"library":"toolkit"}` and `{"schemaVers
 The resource-specific add forms accept a canonical absolute path or a managed Git source:
 
 ```text
-bazframe add skill <absolute-root-or-git-source>
-bazframe libraries add <absolute-root-or-git-source>
-bazframe packages add <absolute-root-or-git-source> [--yes]
+bazframe skill add <absolute-root-or-git-source>
+bazframe library add <absolute-root-or-git-source>
+bazframe package add [--yes] <absolute-root-or-git-source>
 ```
 
 `git:<owner>/<repository>` identifies GitHub. Credential-free HTTPS and `ssh://` URLs identify explicit remotes. Parsing rejects embedded secrets, query/fragment data, local/file and SCP-like forms, option-shaped values, and unsafe repository IDs. GitHub shorthand uses authenticated `gh repo clone` when available and Git HTTPS otherwise; explicit URLs use Git. Child processes receive literal argv without a shell. Authentication remains in Git/GitHub CLI and is absent from persisted provenance and diagnostics.
@@ -256,12 +256,12 @@ Remote package manifest inspection precedes build authorization. Bazframe report
 Managed updates are resource-specific:
 
 ```text
-bazframe skill update <skill> [--accept-rewrite]
-bazframe libraries update <library> [--accept-rewrite]
-bazframe packages update <package> [--accept-rewrite] [--yes]
+bazframe skill update [--accept-rewrite] <skill>
+bazframe library update [--accept-rewrite] <library>
+bazframe package update [--accept-rewrite] [--yes] <package>
 ```
 
-An update clones the recorded branch into owned staging and requires the previous revision to be its ancestor. `--accept-rewrite` authorizes a reviewed non-fast-forward change. Skill links retain their stable target path. Library/package activation reuses complete candidate and dependent-profile validation; `packages update` authorizes and builds the candidate, while `packages build` rebuilds the recorded managed revision without network access. Profile selection and references remain separate operations.
+An update clones the recorded branch into owned staging and requires the previous revision to be its ancestor. `--accept-rewrite` authorizes a reviewed non-fast-forward change. Skill links retain their stable target path. Library/package activation reuses complete candidate and dependent-profile validation; `package update` authorizes and builds the candidate, while `package build` rebuilds the recorded managed revision without network access. Profile selection and references remain separate operations.
 
 The global state lock serializes provider publication, provenance, resource activation, update, build cleanup, and managed removal. Journals record the operation phase, credential-free remote, branch, revisions, stable root, staging, and backup paths before multi-file changes. A caught pre-activation failure restores the prior provider, provenance, snapshot record, and registration; cleanup removes only identity-proven owned files and directories. Interrupted or unprovable cleanup remains under the named recovery path. `bazframe status` reports the retained record, stopped operation, and operation-specific retry guidance. Recovery is inspect-first and fail-closed. For add, update, and build, inspect the recorded root, staging, backup, provenance, and active resource; restore them to one consistent revision; then remove the recovery record before retrying. A stopped managed removal retains the exact provider revision, transport, and pre-removal resource-state hash; after inspection, retry the listed remove command with the recovery record present so Bazframe can verify any surviving resource, checkout, and provenance before completing forward cleanup.
 
@@ -284,35 +284,35 @@ A package root requires a physical regular non-link `bazframe-package.json` with
 
 `build` is a nonempty literal argv array. Bazframe executes it directly with `shell: false`, inherited environment and stdio, and the package root as cwd. `artifactRoot` is relative to the package root; `skillsRoot` is relative to the artifact root. The complete artifact root is snapshotted, preserving shared resources, while discovery begins only at the Skills root. Missing, malformed, symlinked, or changed declarations fail activation. Package builds are unsandboxed and may modify provider-owned output.
 
-A library has no declaration and uses its root as both artifact root and Skills root. `libraries add` and `libraries update` execute nothing. A library root containing `bazframe-package.json` is rejected with package guidance.
+A library has no declaration and uses its root as both artifact root and Skills root. `library add` and `library update` execute nothing. A library root containing `bazframe-package.json` is rejected with package guidance.
 
 ### Commands and transactions
 
 ```text
-bazframe libraries
-bazframe libraries add <absolute-root-or-git-source>
-bazframe libraries update <library> [--accept-rewrite]
-bazframe libraries remove <library>
-bazframe packages
-bazframe packages add <absolute-root-or-git-source> [--yes]
-bazframe packages build <package>
-bazframe packages update <package> [--accept-rewrite] [--yes]
-bazframe packages remove <package>
-bazframe profile libraries
-bazframe profile libraries add <library> [--profile <profile>]
-bazframe profile libraries remove <library> [--profile <profile>]
-bazframe profile packages
-bazframe profile packages add <package> [--profile <profile>]
-bazframe profile packages remove <package> [--profile <profile>]
+bazframe library list
+bazframe library add <absolute-root-or-git-source>
+bazframe library update [--accept-rewrite] <library>
+bazframe library remove <library>
+bazframe package list
+bazframe package add [--yes] <absolute-root-or-git-source>
+bazframe package build <package>
+bazframe package update [--accept-rewrite] [--yes] <package>
+bazframe package remove <package>
+bazframe profile library list
+bazframe profile library add [--profile <profile>] <library>
+bazframe profile library remove [--profile <profile>] <library>
+bazframe profile package list
+bazframe profile package add [--profile <profile>] <package>
+bazframe profile package remove [--profile <profile>] <package>
 ```
 
-There are no singular aliases and no `sources` commands. Library add performs the initial snapshot and activation; library update activates a later local tree or acquires a managed Git revision. Package add performs the initial declared build and activation; package build rebuilds the current provider revision; package update acquires, builds, and activates a managed Git revision. Profile reference changes never update a library, build a package, or select child Skills. Removal is refused while referenced.
+These singular forms are canonical; plural resources and `sources` commands do not dispatch. Library add performs the initial snapshot and activation; library update activates a later local tree or acquires a managed Git revision. Package add performs the initial declared build and activation; package build rebuilds the current provider revision; package update acquires, builds, and activates a managed Git revision. Profile reference changes never update a library, build a package, or select child Skills. Removal is refused while referenced.
 
 Candidate activation validates the complete object and every referencing profile before atomically replacing its record. Any failure preserves the previous digest for all profiles. Reference-index uncertainty fails closed. Valid zero-Skill libraries and packages remain healthy and visible.
 
 Discovery retains lexical bounded traversal, no-follow containment, physical entries, `.git`/`node_modules` discovery skips, root-versus-descendant exclusion, and authoritative loading through Pi's public Agent Skills loader. Duplicate names within one object reject activation. A profile Skill wins over a colliding referenced object and the complete conflicting object contribution is withheld. Library/package collisions withhold every involved object contribution while unrelated Skills remain effective. Stored collisions never receive aliases.
 
-The TUI presents `Added Skills`, `Library <id>`, and `Package <id>` as collapsible peers in one Skills list without category sections. It can add an already-prepared local library or acquire a managed Git library after explicit consent; package add/build remains CLI-only. Library/package Skill previews are immutable and direct the user to edit provider input, then run `libraries update` or `packages build`.
+The TUI presents `Added Skills`, `Library <id>`, and `Package <id>` as collapsible peers in one Skills list without category sections. It can add an already-prepared local library or acquire a managed Git library after explicit consent; package add/build remains CLI-only. Library/package Skill previews are immutable and direct the user to edit provider input, then run `library update` or `package build`.
 
 
 ## Ownership
@@ -329,52 +329,24 @@ This ownership model lets Bazframe freeze selected library/package artifacts bef
 
 ## Commands
 
-The canonical first production command surface is resource-oriented:
+The canonical first production command surface uses singular noun-verb namespaces and explicit queries:
 
 ```text
-bazframe profile | profiles
-bazframe profile add <profile>
-bazframe profile duplicate <source> <new>
-bazframe profile remove <profile> [--force]
-bazframe profile rename <old> <new>
-bazframe profile use <profile>
-bazframe profile edit <profile>
-bazframe profile list
-bazframe profile current
-bazframe add skill <absolute-root-or-git-source>
-bazframe remove skill <skill>
-bazframe skill edit <skill>
-bazframe profile skills
-bazframe profile skills add <skill> [--profile <profile>]
-bazframe profile skills remove <skill> [--profile <profile>]
-bazframe skill update <skill> [--accept-rewrite]
-bazframe libraries
-bazframe libraries add <absolute-root-or-git-source>
-bazframe libraries update <library> [--accept-rewrite]
-bazframe libraries remove <library>
-bazframe packages
-bazframe packages add <absolute-root-or-git-source> [--yes]
-bazframe packages build <package>
-bazframe packages update <package> [--accept-rewrite] [--yes]
-bazframe packages remove <package>
-bazframe profile libraries add <library> [--profile <profile>]
-bazframe profile libraries remove <library> [--profile <profile>]
-bazframe profile packages add <package> [--profile <profile>]
-bazframe profile packages remove <package> [--profile <profile>]
-
-bazframe tui
-bazframe skill | skills
-bazframe global
-bazframe global enable
-bazframe global disable
-bazframe project | projects
-bazframe project enable
-bazframe project disable
-bazframe adapter | adapters
-bazframe adapter install pi [--force]
-bazframe adapter uninstall pi
+bazframe profile list | current | add | duplicate | remove | rename | use | edit
+bazframe skill list | add | remove | update | edit
+bazframe library list | add | update | remove
+bazframe package list | add | build | update | remove
+bazframe profile skill list | add | remove
+bazframe profile library list | add | remove
+bazframe profile package list | add | remove
+bazframe project list | enable | disable
+bazframe global show | enable | disable
+bazframe adapter list | install pi | uninstall pi
 bazframe status
+bazframe tui
 ```
+
+Canonical help places options before operands, for example `profile remove [--force] <profile>`, `profile skill add [--profile <profile>] <skill>`, and `package update [--accept-rewrite] [--yes] <package>`. Known options parse before or after operands, and `--profile=<profile>` is accepted.
 
 The approved, not-yet-implemented portability grammar is:
 
@@ -384,11 +356,13 @@ bazframe profile import <directory> [--as <profile>] [--map <kind>:<id>=<absolut
 bazframe profile import <directory> --dry-run [--as <profile>] [--map <kind>:<id>=<absolute-source-directory>]...
 ```
 
-Bare singular and plural resources produce human overviews. Scoped verbs mutate the named resource. Concise `profile list` and `profile current` outputs remain available for scripts. Top-level `use` remains a compatibility alias; top-level `add skill` and `remove skill` exclusively manage `(default)` catalog registrations. Old `init`/`uninit` forms fail with migration guidance to `project enable`/`disable`, while `bazframe pi` remains only as the documented deprecated launcher. Root help stays intentionally small and points to `bazframe help <resource>` or `<resource> --help` for the detailed grammar.
+Bare singular resources, old plurals, verb-first Skill lifecycle, top-level `use`, and plural nested profile resources fail with `CLI_MIGRATION_REQUIRED` and a complete terminal-safe replacement; they are not aliases. Unknown or malformed input uses `CLI_USAGE`. `bazframe pi` remains only as the deprecated launcher. Root help stays intentionally small and points to singular help topics.
 
-CLI color is presentation-only: it is enabled automatically for terminal streams, disabled for pipes and redirects, disabled when `NO_COLOR` is present, and explicitly enabled by nonzero `FORCE_COLOR` only when `NO_COLOR` is absent. Headings, active/current state, warnings, errors, and command hints retain text and symbols that remain understandable without color.
+One exact `--json` before Pi's literal `--` selects the CLI-only schema-v1 protocol for supported queries, mutations, and errors. Success is `{schemaVersion:1,ok:true,command,result,diagnostics}`; error is `{schemaVersion:1,ok:false,command,error,diagnostics}`. Exactly one newline-terminated JSON document is written to stdout. Diagnostics are structured; operational errors preserve stable Bazframe codes; unexpected failures use `INTERNAL_ERROR` without stack, cause, class, terminal escapes, or credentials. Status attention remains `ok:true` with health `attention` and exit 3. Help, version, TUI, external editors, and deprecated Pi reject JSON with `CLI_JSON_UNSUPPORTED` before side effects. JSON package provider stdout and stderr both route to parent stderr while stdin remains inherited. Managed package add/update requires `--yes` before acquisition, prompting, or build. The DTO transport is internal CLI surface and adds no public JavaScript export.
 
-Adapter installation is explicit and orthogonal to global/project policy. Global and project disable operations require neither adapter nor profile. Global enable validates runtime setup before removing disabled state. Project enable validates runtime setup because it makes the current worktree effective-enabled, including when it overrides global disable. Profile Skill add/remove mutate only that profile's Skills. Library add/update and package add/build explicitly activate snapshots; profile library/package add/remove changes references only. These resources have no singular CLI aliases. The TUI exposes only consent-bound local or managed-Git library add; package builds and every other collection/reference mutation remain CLI-only.
+CLI color is presentation-only and never affects JSON.
+
+Adapter installation is explicit and orthogonal to global/project policy. Global and project disable operations require neither adapter nor profile. Global enable validates runtime setup before removing disabled state. Project enable validates runtime setup because it makes the current worktree effective-enabled, including when it overrides global disable. Profile Skill add/remove mutate only that profile's Skills. Library add/update and package add/build explicitly activate snapshots; profile library/package add/remove changes references only. These resources use only the singular CLI namespaces. The TUI exposes only consent-bound local or managed-Git library add; package builds and every other collection/reference mutation remain CLI-only.
 
 For adapter installation, `--force` repairs a drifted artifact only when a valid Bazframe ownership manifest identifies the destination. For `profile remove`, `--force` separately authorizes deletion of all content under the named non-active physical profile; it never extends authority to symlink targets.
 

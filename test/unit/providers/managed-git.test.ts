@@ -143,10 +143,10 @@ describe('managed Git source and provenance', () => {
     for (const recovery of recoveries) await writeFile(join(home, `providers/git/recovery/${recovery.kind}-${recovery.id}.json`), encodeManagedGitJournal(recovery));
     const recoveryDiagnostics = (await scanManagedGitRecords(home)).diagnostics;
     expect(recoveryDiagnostics).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: 'root-skill', message: expect.stringContaining('remove this recovery record before retrying bazframe add skill https://example.test/team/root-skill.git') }),
-      expect.objectContaining({ id: 'toolkit', message: expect.stringContaining('remove this recovery record before retrying bazframe libraries update toolkit') }),
-      expect.objectContaining({ id: 'old-package', message: expect.stringContaining('retry bazframe packages remove old-package with this recovery record retained') }),
-      expect.objectContaining({ id: 'built-package', message: expect.stringContaining('remove this recovery record before retrying bazframe packages build built-package') })
+      expect.objectContaining({ id: 'root-skill', message: expect.stringContaining('remove this recovery record before retrying bazframe skill add https://example.test/team/root-skill.git') }),
+      expect.objectContaining({ id: 'toolkit', message: expect.stringContaining('remove this recovery record before retrying bazframe library update toolkit') }),
+      expect.objectContaining({ id: 'old-package', message: expect.stringContaining('retry bazframe package remove old-package with this recovery record retained') }),
+      expect.objectContaining({ id: 'built-package', message: expect.stringContaining('remove this recovery record before retrying bazframe package build built-package') })
     ]));
     const linkedHome = await mkdtemp(join(tmpdir(), 'bazframe-managed-git-linked-record-')); roots.push(linkedHome);
     await mkdir(join(linkedHome, 'providers/git/records/package'), { recursive: true });

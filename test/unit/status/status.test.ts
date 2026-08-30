@@ -259,7 +259,7 @@ describe('Bazframe status', () => {
     await directory.write('bazframe-home/profiles/focused/libraries/library.json', encodeProfileCollectionReference({ schemaVersion: 1, library: 'library' }));
     const status = await buildStatus(options);
     expect(status.exitStatus).toBe(3); expect(status.text).toContain('library library: failed; refresh available;');
-    expect(status.text).toContain('Refresh the affected libraries/packages with: `bazframe libraries update library`.');
+    expect(status.text).toContain('Refresh the affected libraries/packages with: `bazframe library update library`.');
   });
 
   it('uses kind-specific wording for an invalid library record', async () => {
@@ -282,7 +282,7 @@ describe('Bazframe status', () => {
     expect(statusExitStatus(inspection)).toBe(3);
     const text = formatStatus(inspection);
     expect(text).toContain('Library/package failures:\n  - library library:. broken-snapshot\n  - package package:. broken-snapshot');
-    expect(text).toContain('`bazframe libraries update library`, `bazframe packages build package`');
+    expect(text).toContain('`bazframe library update library`, `bazframe package build package`');
   });
 
   it('reports incomplete globally enabled setup outside Git', async () => {
@@ -368,7 +368,7 @@ describe('Bazframe status', () => {
         'Launch:',
         '  Complete the corrective actions below.',
         'Corrective actions:',
-        '  - Review the changed artifact, then restore it with `bazframe adapter install pi --force`.',
+        '  - Review the changed artifact, then restore it with `bazframe adapter install --force pi`.',
         ''
       ].join('\n')
     });
@@ -468,7 +468,7 @@ describe('Bazframe status', () => {
     expect(text).toContain('recovery\\u009b\\u202e');
     expect(text).not.toContain(String.fromCharCode(0x9b));
     expect(text).not.toContain('\u202e');
-    expect(text).toContain('update:bazframe packages update personal-agent-network');
+    expect(text).toContain('update:bazframe package update personal-agent-network');
   });
 });
 

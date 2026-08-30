@@ -412,8 +412,8 @@ describe('packaged Pi adapter command', () => {
     const failed = (await runCommand(required(reloaded.commands, 'bazframe'), 'info', [])).message;
     expect(failed).toContain('library broken:. broken-snapshot');
     expect(failed).toContain('package broken:. broken-snapshot');
-    expect(failed).toContain('bazframe libraries update broken');
-    expect(failed).toContain('bazframe packages build broken');
+    expect(failed).toContain('bazframe library update broken');
+    expect(failed).toContain('bazframe package build broken');
   });
 
   it('does not fall back to legacy nested or provider-shaped global source state', async () => {
@@ -580,7 +580,7 @@ describe('packaged Pi adapter command', () => {
       expect(message).toContain('provider-root ->');
       expect(message).toContain('(failed; refresh:available;');
       expect(message).toContain('provider-root:. broken-snapshot');
-      expect(message).toContain('bazframe libraries update provider-root');
+      expect(message).toContain('bazframe library update provider-root');
     }
   });
 

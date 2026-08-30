@@ -1,6 +1,6 @@
 import { lstat, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
-import { spawnInheritedChild } from '../core/child-process.js';
+import { spawnInheritedChild, type ChildOutputPolicy } from '../core/child-process.js';
 import { BazframeError, errorCode } from '../core/errors.js';
 import { PACKAGE_MANIFEST, readPackageManifest, samePackageManifestSnapshot, type PackageManifestSnapshot } from '../packages/package-manifest.js';
 import { publishSkillSnapshot, resolvePhysicalRelativeDirectory, type PublishedSnapshot, type SkillSnapshotDependencies } from './skill-snapshot.js';
@@ -23,7 +23,7 @@ export async function prepareLibrary(
   const manifestPath = join(libraryRoot, PACKAGE_MANIFEST);
   try {
     await lstat(manifestPath);
-    throw new BazframeError('LIBRARY_IS_PACKAGE', `Library root contains ${PACKAGE_MANIFEST}. Use \`bazframe packages add <absolute-root>\`.`);
+    throw new BazframeError('LIBRARY_IS_PACKAGE', `Library root contains ${PACKAGE_MANIFEST}. Use \`bazframe package add <absolute-root>\`.`);
   } catch (error) {
     if (error instanceof BazframeError) throw error;
     if (errorCode(error) !== 'ENOENT') throw new BazframeError('LIBRARY_ROOT_INVALID', `Could not inspect library root: ${libraryRoot}`, { cause: error });
@@ -39,14 +39,15 @@ export async function preparePackage(
   packageRoot: string,
   environment: NodeJS.ProcessEnv = process.env,
   afterSnapshot?: () => Promise<void>,
-  expectedManifest?: PackageManifestSnapshot
+  expectedManifest?: PackageManifestSnapshot,
+  childOutputPolicy: ChildOutputPolicy = 'inherit'
 ): Promise<PreparedPackage> {
   const rootIdentity = await physicalRootIdentity(packageRoot);
   const initial = await readPackageManifest(packageRoot);
   if (expectedManifest !== undefined && !samePackageManifestSnapshot(expectedManifest, initial)) {
     throw new BazframeError('PACKAGE_MANIFEST_CHANGED', 'Package manifest changed after build authorization.');
   }
-  await executeBuild(initial.manifest.build, packageRoot, environment);
+  await executeBuild(initial.manifest.build, packageRoot, environment, childOutputPolicy);
   await assertPhysicalRootIdentity(packageRoot, rootIdentity);
   const revalidated = await readPackageManifest(packageRoot);
   if (!samePackageManifestSnapshot(initial, revalidated)) throw new BazframeError('PACKAGE_MANIFEST_CHANGED', 'Package manifest changed during build.');
@@ -82,7 +83,7 @@ async function assertLibraryManifestAbsent(libraryRoot: string): Promise<void> {
   const manifestPath = join(libraryRoot, PACKAGE_MANIFEST);
   try {
     await lstat(manifestPath);
-    throw new BazframeError('LIBRARY_IS_PACKAGE', `Library root contains ${PACKAGE_MANIFEST}. Use \`bazframe packages add <absolute-root>\`.`);
+    throw new BazframeError('LIBRARY_IS_PACKAGE', `Library root contains ${PACKAGE_MANIFEST}. Use \`bazframe package add <absolute-root>\`.`);
   } catch (error) {
     if (error instanceof BazframeError) throw error;
     if (errorCode(error) !== 'ENOENT') {
@@ -106,10 +107,14 @@ async function assertPhysicalRootIdentity(root: string, expected: RootIdentity):
   }
 }
 
-async function executeBuild(argv: readonly string[], cwd: string, environment: NodeJS.ProcessEnv): Promise<void> {
+async function executeBuild(argv: readonly string[], cwd: string, environment: NodeJS.ProcessEnv, outputPolicy: ChildOutputPolicy): Promise<void> {
   let result;
   try {
-    result = await spawnInheritedChild(argv[0]!, argv.slice(1), { cwd, environment });
+    result = await spawnInheritedChild(argv[0]!, argv.slice(1), {
+      cwd,
+      environment,
+      ...(outputPolicy === 'inherit' ? {} : { outputPolicy })
+    });
   } catch (error) {
     throw new BazframeError('PACKAGE_BUILD_FAILED', `Could not start package build: ${argv[0]}`, { cause: error });
   }

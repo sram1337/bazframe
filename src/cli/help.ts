@@ -1,315 +1,45 @@
 import { readFileSync } from 'node:fs';
-
-const packageMetadata: unknown = JSON.parse(
-  readFileSync(new URL('../../package.json', import.meta.url), 'utf8')
-);
-if (
-  packageMetadata === null
-  || typeof packageMetadata !== 'object'
-  || !('version' in packageMetadata)
-  || typeof packageMetadata.version !== 'string'
-  || packageMetadata.version.length === 0
-) {
-  throw new Error('Bazframe package metadata has no valid version.');
-}
-
-export const VERSION = packageMetadata.version;
-
-export const ROOT_HELP = [
-  'Bazframe',
-  '',
-  'Usage: bazframe <resource> [command]',
-  '',
-  'Resources:',
-  '  profiles   Manage profiles and the active selection',
-  '  libraries  Manage prepared Skill libraries',
-  '  packages   Manage buildable Skill packages',
-  '  skills     Browse added Skills in the default catalog',
-  '  projects   Manage per-project Bazframe policy overrides',
-  '  global     Manage the global Bazframe policy',
-  '  adapters   Manage coding-agent adapters',
-  '  status     Check setup health and corrective actions',
-  '  tui        Open the interactive management interface',
-  '',
-  'Suggestions:',
-  '  bazframe add skill <absolute-root-or-git-source>',
-  '  bazframe profiles',
-  '  bazframe libraries',
-  '  bazframe packages',
-  '  bazframe skills',
-  '  bazframe skill edit <skill>',
-  '  bazframe status',
-  '  bazframe tui',
-  '',
-  'Learn more:',
-  '  bazframe help <resource>',
-  '  bazframe <resource> --help',
-  '',
-  'Options:',
-  '  -h, --help       Show this help',
-  '  -v, --version    Show the version',
-  ''
-].join('\n');
-
-export const ADAPTER_HELP = [
-  'Usage:',
-  '  bazframe adapter',
-  '  bazframe adapters',
-  '  bazframe adapter install pi [--force]',
-  '  bazframe adapter uninstall pi',
-  '',
-  'With no command, show supported adapters, current state, and available commands.',
-  'Install copies Bazframe\'s extension into Pi\'s configured global agent directory.',
-  '--force repairs a changed artifact covered by a valid Bazframe ownership manifest.',
-  'Uninstall preserves changed or independently owned destination files.',
-  ''
-].join('\n');
-
-export const GLOBAL_HELP = [
-  'Usage:',
-  '  bazframe global',
-  '  bazframe global enable',
-  '  bazframe global disable',
-  '',
-  'With no command, show the global policy and available commands.',
-  'Enabled is the file-free default. Disable writes external global policy state.',
-  'An explicit project override takes precedence over the global policy.',
-  ''
-].join('\n');
-
-export const PROJECT_HELP = [
-  'Usage:',
-  '  bazframe project',
-  '  bazframe projects',
-  '  bazframe project enable',
-  '  bazframe project disable',
-  '',
-  'With no command, list stored overrides and show the current worktree behavior.',
-  'Project overrides take precedence over the global policy and live outside the repository.',
-  'When the requested behavior matches the global policy, no project file is needed.',
-  ''
-].join('\n');
-
-export const STATUS_HELP = [
-  'Usage: bazframe status',
-  '',
-  'Read adapter, current project behavior, active-profile, library/package reference health, effective Skills, and alias-cache state.',
-  'Exit status 3 means the setup needs an action listed in the report.',
-  ''
-].join('\n');
-
-export const TUI_HELP = [
-  'Usage: bazframe tui',
-  '',
-  'Open the keyboard-first profile and skill management interface.',
-  'Use arrows or h/j/k/l to move; in the profile editor, J/K jumps panes.',
-  'Press ? in the TUI for complete contextual keyboard help.',
-  'Both standard input and standard output must be interactive terminals.',
-  ''
-].join('\n');
-
-export const USE_HELP = [
-  'Usage: bazframe use <profile>',
-  '',
-  'Compatibility alias for `bazframe profile use <profile>`.',
-  ''
-].join('\n');
-
-export const PROFILE_HELP = [
-  'Usage:',
-  '  bazframe profile',
-  '  bazframe profiles',
-  '  bazframe profile skills',
-  '  bazframe profile skills add <skill> [--profile <profile>]',
-  '  bazframe profile skills remove <skill> [--profile <profile>]',
-  '  bazframe profile libraries',
-  '  bazframe profile libraries add <library> [--profile <profile>]',
-  '  bazframe profile libraries remove <library> [--profile <profile>]',
-  '  bazframe profile packages',
-  '  bazframe profile packages add <package> [--profile <profile>]',
-  '  bazframe profile packages remove <package> [--profile <profile>]',
-  '  bazframe profile add <profile>',
-  '  bazframe profile duplicate <source> <new>',
-  '  bazframe profile remove <profile> [--force]',
-  '  bazframe profile rename <old> <new>',
-  '  bazframe profile use <profile>',
-  '  bazframe profile edit <profile>',
-  '  bazframe profile list',
-  '  bazframe profile current',
-  '',
-  'With no command, list profiles, mark the active profile, and show profile commands.',
-  '`profile list` and `profile current` keep concise output for scripts.',
-  ''
-].join('\n');
-
-export const PROFILE_ADD_HELP = [
-  'Usage: bazframe profile add <profile>',
-  '',
-  'Create a physical profile with an empty AGENTS.md and empty skills directory.',
-  'Creation does not change the active profile.',
-  ''
-].join('\n');
-
-export const PROFILE_DUPLICATE_HELP = [
-  'Usage: bazframe profile duplicate <source> <new>',
-  '',
-  'Copy all content from a physical source profile without following symlinks.',
-  'Duplication refuses an occupied destination and does not change the active profile.',
-  ''
-].join('\n');
-
-export const PROFILE_REMOVE_HELP = [
-  'Usage: bazframe profile remove <profile> [--force]',
-  '',
-  'Remove a non-active profile. Without --force, only a generated-empty profile is removed.',
-  '--force permanently removes all physical profile content but never follows skill symlink targets.',
-  'The active profile cannot be removed, even with --force.',
-  ''
-].join('\n');
-
-export const PROFILE_RENAME_HELP = [
-  'Usage: bazframe profile rename <old> <new>',
-  '',
-  'Rename a physical profile without replacing an existing destination.',
-  'Renaming the active profile updates the global selection.',
-  ''
-].join('\n');
-
-export const PROFILE_USE_HELP = [
-  'Usage: bazframe profile use <profile>',
-  '',
-  'Validate and atomically select an existing profile.',
-  ''
-].join('\n');
-
-export const PROFILE_EDIT_HELP = [
-  'Usage: bazframe profile edit <profile>',
-  '',
-  'Open the named profile\'s actual AGENTS.md with the first nonblank VISUAL, then EDITOR.',
-  'The configured value is one executable name or path: Bazframe does not parse flags, use a shell, or choose a fallback.',
-  'Use a wrapper executable when the editor needs fixed flags such as a wait option.',
-  'The editor inherits the environment and terminal, runs in the profile directory, and receives AGENTS.md as its sole argument.',
-  'Bazframe waits and returns the editor process exit or signal status. Run `/bazframe reload` in an existing Pi session after editing.',
-  ''
-].join('\n');
-
-export const PROFILE_LIST_HELP = [
-  'Usage: bazframe profile list',
-  '',
-  'Print valid physical profile IDs in lexical order, one per line.',
-  'Use `bazframe profiles` for the human-readable overview.',
-  ''
-].join('\n');
-
-export const PROFILE_CURRENT_HELP = [
-  'Usage: bazframe profile current',
-  '',
-  'Print only the selected profile ID without performing a profile health check.',
-  ''
-].join('\n');
-
-export const SKILLS_HELP = [
-  'Usage:',
-  '  bazframe skill',
-  '  bazframe skills',
-  '  bazframe skill edit <skill>',
-  '  bazframe skill update <skill> [--accept-rewrite]',
-  '',
-  'List valid added Skills in Bazframe\'s `(default)` catalog.',
-  '`skill edit` opens only an added Skill\'s live provider definition; library and package snapshots remain immutable.',
-  'This does not list Pi-native Skills or Skills from libraries and packages.',
-  'Use `bazframe profile skills` to inspect the active profile\'s Skills.',
-  ''
-].join('\n');
-
-export const SKILL_UPDATE_HELP = [
-  'Usage: bazframe skill update <skill> [--accept-rewrite]',
-  '',
-  'Acquire and activate the recorded branch for a managed Git Skill.',
-  'The current revision is reported without changing profile membership.',
-  '--accept-rewrite authorizes a reviewed non-fast-forward branch change.',
-  ''
-].join('\n');
-
-export const SKILL_EDIT_HELP = [
-  'Usage: bazframe skill edit <skill>',
-  '',
-  'Open the named added Skill provider\'s actual SKILL.md with the first nonblank VISUAL, then EDITOR.',
-  'The configured value is one executable name or path: Bazframe does not parse flags, use a shell, or choose a fallback.',
-  'Use a wrapper executable when the editor needs fixed flags such as a wait option.',
-  'The editor inherits the environment and terminal, runs in the provider directory, and receives resolved SKILL.md as its sole argument.',
-  'Bazframe waits and returns the editor process exit or signal status; success does not claim that content was saved.',
-  'Existing Pi sessions observe provider changes after `/bazframe reload`; for a Skill from a library or package, edit provider input and then run `bazframe libraries update <library>` or `bazframe packages build <package>`.',
-  ''
-].join('\n');
-
-export const PROFILE_SKILLS_HELP = [
-  'Usage:',
-  '  bazframe profile skills',
-  '  bazframe profile skills add <skill> [--profile <profile>]',
-  '  bazframe profile skills remove <skill> [--profile <profile>]',
-  '',
-  'With no command, list the active profile\'s immediate Skills.',
-  'Add and remove manage only verified memberships backed by added Skills in `(default)`.',
-  'Use --profile to target a profile without changing the active selection.',
-  ''
-].join('\n');
-
-export const PROFILE_SKILLS_ADD_HELP = [
-  'Usage: bazframe profile skills add <skill> [--profile <profile>]',
-  '',
-  'Include an added Skill from `(default)` in the active or explicitly targeted profile as a parallel absolute link to its external target.',
-  'Bazframe checks skill identity; Pi validates the full Agent Skills schema at runtime.',
-  'Provider content is preserved.',
-  ''
-].join('\n');
-
-export const PROFILE_SKILLS_REMOVE_HELP = [
-  'Usage: bazframe profile skills remove <skill> [--profile <profile>]',
-  '',
-  'Remove only a profile Skill matching the current added Skill in `(default)`.',
-  'Physical and foreign profile entries and provider content are preserved.',
-  ''
-].join('\n');
-
-export const LIBRARIES_HELP = ['Usage:', '  bazframe libraries', '  bazframe libraries add <absolute-root-or-git-source>', '  bazframe libraries update <library> [--accept-rewrite]', '  bazframe libraries remove <library>', '', 'Manage prepared Skill libraries through immutable snapshots. Library operations never execute a build.', 'Remove is refused while any profile references the library.', ''].join('\n');
-export const LIBRARIES_ADD_HELP = ['Usage: bazframe libraries add <absolute-root-or-git-source>', '', 'Snapshot, validate, and activate an already-prepared Skill library. Git sources are acquired under Bazframe-managed provider storage. A package manifest is rejected.', ''].join('\n');
-export const LIBRARIES_UPDATE_HELP = ['Usage: bazframe libraries update <library> [--accept-rewrite]', '', 'Activate a new immutable snapshot. Managed Git libraries first acquire their recorded branch; --accept-rewrite authorizes a reviewed non-fast-forward change.', ''].join('\n');
-export const LIBRARIES_REMOVE_HELP = ['Usage: bazframe libraries remove <library>', '', 'Remove an unreferenced library record. Absolute-path provider input is preserved; a managed Git checkout and its provenance are removed while the upstream remote remains available.', ''].join('\n');
-export const PACKAGES_HELP = ['Usage:', '  bazframe packages', '  bazframe packages add <absolute-root-or-git-source> [--yes]', '  bazframe packages build <package>', '  bazframe packages update <package> [--accept-rewrite] [--yes]', '  bazframe packages remove <package>', '', 'Manage buildable Skill packages. Add and build explicitly execute bazframe-package.json without a shell or sandbox.', 'Inspection and profile-reference changes never build.', ''].join('\n');
-export const PACKAGES_ADD_HELP = ['Usage: bazframe packages add <absolute-root-or-git-source> [--yes]', '', 'Build, validate, snapshot, and activate a package. Git packages are cloned and inspected before the declared unsandboxed build is authorized; --yes supplies authorization in non-interactive use.', ''].join('\n');
-export const PACKAGES_BUILD_HELP = ['Usage: bazframe packages build <package>', '', 'Rebuild the current provider revision. Activation is rejected if any referencing profile would become invalid.', ''].join('\n');
-export const PACKAGES_UPDATE_HELP = ['Usage: bazframe packages update <package> [--accept-rewrite] [--yes]', '', 'Acquire the recorded branch, authorize its declared unsandboxed build, and atomically activate a managed Git package revision. --accept-rewrite authorizes a reviewed non-fast-forward change.', ''].join('\n');
-export const PACKAGES_REMOVE_HELP = ['Usage: bazframe packages remove <package>', '', 'Remove an unreferenced package record. Absolute-path provider input is preserved; a managed Git checkout and its provenance are removed while the upstream remote remains available.', ''].join('\n');
-export const PROFILE_LIBRARIES_HELP = ['Usage:', '  bazframe profile libraries', '  bazframe profile libraries add <library> [--profile <profile>]', '  bazframe profile libraries remove <library> [--profile <profile>]', '', 'Inspect or change whole-library profile references. Reference changes never update a library.', ''].join('\n');
-export const PROFILE_LIBRARIES_ADD_HELP = ['Usage: bazframe profile libraries add <library> [--profile <profile>]', '', 'Add a validated reference to an existing library.', ''].join('\n');
-export const PROFILE_LIBRARIES_REMOVE_HELP = ['Usage: bazframe profile libraries remove <library> [--profile <profile>]', '', 'Remove only the profile-owned reference.', ''].join('\n');
-export const PROFILE_PACKAGES_HELP = ['Usage:', '  bazframe profile packages', '  bazframe profile packages add <package> [--profile <profile>]', '  bazframe profile packages remove <package> [--profile <profile>]', '', 'Inspect or change whole-package profile references. Reference changes never build a package.', ''].join('\n');
-export const PROFILE_PACKAGES_ADD_HELP = ['Usage: bazframe profile packages add <package> [--profile <profile>]', '', 'Add a validated reference to an existing package.', ''].join('\n');
-export const PROFILE_PACKAGES_REMOVE_HELP = ['Usage: bazframe profile packages remove <package> [--profile <profile>]', '', 'Remove only the profile-owned reference.', ''].join('\n');
-
-export const ADD_HELP = [
-  'Usage: bazframe add skill <absolute-root-or-git-source>',
-  '',
-  'Add one canonical Skill root to Bazframe\'s `(default)` catalog. Git sources are acquired under Bazframe-managed provider storage.',
-  'Profile membership remains a separate command.',
-  ''
-].join('\n');
-
-export const REMOVE_HELP = [
-  'Usage: bazframe remove skill <skill>',
-  '',
-  'Remove an added Skill that no profile includes.',
-  'Absolute-path provider content is preserved. Managed Git checkout/provenance are removed while the upstream remote remains available.',
-  ''
-].join('\n');
-
-export const PI_HELP = [
-  'Usage: bazframe pi [--dry-run] [-- <pi args>]',
-  '',
-  'Deprecated: install the Pi adapter, select a profile, then invoke `pi` or `pi -nc` directly.',
-  'Launch Pi in the exact caller cwd with an effective harness composed for its Git worktree.',
-  '--dry-run prints effective instruction inputs, Skills, and conceptual argv.',
-  'For a real launch Bazframe diagnostics use stderr so Pi owns stdout.',
-  ''
-].join('\n');
+const metadata: unknown = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
+if (metadata === null || typeof metadata !== 'object' || !('version' in metadata) || typeof metadata.version !== 'string') throw new Error('Bazframe package metadata has no valid version.');
+export const VERSION = metadata.version;
+const json = 'With --json, write exactly one newline-terminated schema-v1 JSON document to stdout.';
+const help = (...lines:string[]):string => [...lines, ''].join('\n');
+export const ROOT_HELP=help('Bazframe','','Usage: bazframe [--json] <resource> <command>','','Resources:','  profile   Manage profiles and profile attachments','  skill     Manage added Skills','  library   Manage prepared Skill libraries','  package   Manage buildable Skill packages','  project   Manage per-project policy overrides','  global    Manage global policy','  adapter   Manage coding-agent adapters','  status    Check setup health','  tui       Open the interactive interface','','Queries:','  bazframe profile list','  bazframe skill list','  bazframe library list','  bazframe package list','  bazframe project list','  bazframe global show','  bazframe adapter list','  bazframe status --json','','Options:','  --json          Emit the CLI-only schema-v1 JSON protocol','  -h, --help      Show help','  -v, --version   Show version');
+export const PROFILE_HELP=help('Usage:','  bazframe profile list [--json]','  bazframe profile current [--json]','  bazframe profile add [--json] <profile>','  bazframe profile duplicate [--json] <source> <new>','  bazframe profile remove [--force] [--json] <profile>','  bazframe profile rename [--json] <old> <new>','  bazframe profile use [--json] <profile>','  bazframe profile edit <profile>','  bazframe profile skill list [--json]','  bazframe profile library list [--json]','  bazframe profile package list [--json]',json);
+export const PROFILE_ADD_HELP=help('Usage: bazframe profile add [--json] <profile>','Create an inactive physical profile.');
+export const PROFILE_DUPLICATE_HELP=help('Usage: bazframe profile duplicate [--json] <source> <new>','Copy a physical profile without following symlinks.');
+export const PROFILE_REMOVE_HELP=help('Usage: bazframe profile remove [--force] [--json] <profile>','The active profile cannot be removed.');
+export const PROFILE_RENAME_HELP=help('Usage: bazframe profile rename [--json] <old> <new>');
+export const PROFILE_USE_HELP=help('Usage: bazframe profile use [--json] <profile>');
+export const PROFILE_EDIT_HELP=help('Usage: bazframe profile edit <profile>','Open AGENTS.md with the first nonblank VISUAL, then EDITOR. Use a wrapper executable when fixed editor flags are required. JSON is not supported.');
+export const PROFILE_LIST_HELP=help('Usage: bazframe profile list [--json]','List profiles, active flags, and selected/unselected/missing active state.',json);
+export const PROFILE_CURRENT_HELP=help('Usage: bazframe profile current [--json]','Print the selected profile ID.',json);
+export const SKILLS_HELP=help('Usage:','  bazframe skill list [--json]','  bazframe skill add [--json] <absolute-root-or-git-source>','  bazframe skill remove [--json] <skill>','  bazframe skill update [--accept-rewrite] [--json] <skill>','  bazframe skill edit <skill>','','Acquisition is separate from profile attachment.',json);
+export const ADD_HELP=help('Usage: bazframe skill add [--json] <absolute-root-or-git-source>','Acquire/register one Skill. Profile membership is unchanged.');
+export const REMOVE_HELP=help('Usage: bazframe skill remove [--json] <skill>');
+export const SKILL_UPDATE_HELP=help('Usage: bazframe skill update [--accept-rewrite] [--json] <skill>');
+export const SKILL_EDIT_HELP=help('Usage: bazframe skill edit <skill>','Open a live added Skill definition with the first nonblank VISUAL, then EDITOR. For snapshots, edit provider input and run `bazframe library update <library>` or `bazframe package build <package>`. JSON is not supported.');
+export const PROFILE_SKILLS_HELP=help('Usage:','  bazframe profile skill list [--json]','  bazframe profile skill add [--profile <profile>] [--json] <skill>','  bazframe profile skill remove [--profile <profile>] [--json] <skill>','','Lists are active-profile-only. Mutations report the resolved profile target.',json);
+export const PROFILE_SKILLS_ADD_HELP=help('Usage: bazframe profile skill add [--profile <profile>] [--json] <skill>','Attach an already-added Skill; this does not acquire it.');
+export const PROFILE_SKILLS_REMOVE_HELP=help('Usage: bazframe profile skill remove [--profile <profile>] [--json] <skill>');
+export const LIBRARIES_HELP=help('Usage:','  bazframe library list [--json]','  bazframe library add [--json] <absolute-root-or-git-source>','  bazframe library update [--accept-rewrite] [--json] <library>','  bazframe library remove [--json] <library>','','Library operations never execute a build.',json);
+export const LIBRARIES_ADD_HELP=help('Usage: bazframe library add [--json] <absolute-root-or-git-source>');
+export const LIBRARIES_UPDATE_HELP=help('Usage: bazframe library update [--accept-rewrite] [--json] <library>');
+export const LIBRARIES_REMOVE_HELP=help('Usage: bazframe library remove [--json] <library>');
+export const PACKAGES_HELP=help('Usage:','  bazframe package list [--json]','  bazframe package add [--yes] [--json] <absolute-root-or-git-source>','  bazframe package build [--json] <package>','  bazframe package update [--accept-rewrite] [--yes] [--json] <package>','  bazframe package remove [--json] <package>','','Managed add/update in JSON mode requires --yes before acquisition or build.',json);
+export const PACKAGES_ADD_HELP=help('Usage: bazframe package add [--yes] [--json] <absolute-root-or-git-source>');
+export const PACKAGES_BUILD_HELP=help('Usage: bazframe package build [--json] <package>');
+export const PACKAGES_UPDATE_HELP=help('Usage: bazframe package update [--accept-rewrite] [--yes] [--json] <package>');
+export const PACKAGES_REMOVE_HELP=help('Usage: bazframe package remove [--json] <package>');
+export const PROFILE_LIBRARIES_HELP=help('Usage:','  bazframe profile library list [--json]','  bazframe profile library add [--profile <profile>] [--json] <library>','  bazframe profile library remove [--profile <profile>] [--json] <library>','','Attachment never acquires or updates a library.',json);
+export const PROFILE_LIBRARIES_ADD_HELP=help('Usage: bazframe profile library add [--profile <profile>] [--json] <library>');
+export const PROFILE_LIBRARIES_REMOVE_HELP=help('Usage: bazframe profile library remove [--profile <profile>] [--json] <library>');
+export const PROFILE_PACKAGES_HELP=help('Usage:','  bazframe profile package list [--json]','  bazframe profile package add [--profile <profile>] [--json] <package>','  bazframe profile package remove [--profile <profile>] [--json] <package>','','Attachment never acquires or builds a package.',json);
+export const PROFILE_PACKAGES_ADD_HELP=help('Usage: bazframe profile package add [--profile <profile>] [--json] <package>');
+export const PROFILE_PACKAGES_REMOVE_HELP=help('Usage: bazframe profile package remove [--profile <profile>] [--json] <package>');
+export const PROJECT_HELP=help('Usage:','  bazframe project list [--json]','  bazframe project enable [--json]','  bazframe project disable [--json]',json);
+export const GLOBAL_HELP=help('Usage:','  bazframe global show [--json]','  bazframe global enable [--json]','  bazframe global disable [--json]',json);
+export const ADAPTER_HELP=help('Usage:','  bazframe adapter list [--json]','  bazframe adapter install [--force] [--json] pi','  bazframe adapter uninstall [--json] pi',json);
+export const STATUS_HELP=help('Usage: bazframe status [--json]','Exit status 3 means attention is required; JSON still reports ok:true.',json);
+export const TUI_HELP=help('Usage: bazframe tui','Open the interactive management interface. JSON is not supported.');
+export const PI_HELP=help('Usage: bazframe pi [--dry-run] [-- <pi args>]','Deprecated launcher. JSON is not supported.');

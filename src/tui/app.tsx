@@ -584,7 +584,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
         if (libraryCandidateBlocked(libraryCandidate)) {
           setMessage({
             tone: 'error',
-            text: 'Directories with a package manifest must be added with `bazframe packages add`.'
+            text: 'Directories with a package manifest must be added with `bazframe package add`.'
           });
           return;
         }
@@ -1046,7 +1046,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
           const collection = currentSnapshot.collections?.find((item) => item.key === selectedGroupId);
           setMessage(collection === undefined
             ? { tone: 'info', text: 'This group is browse-only in the TUI.' }
-            : { tone: 'info', text: `Attach the whole ${collection.kind} with \`bazframe profile ${collection.kind === 'library' ? 'libraries' : 'packages'} add ${collection.id} --profile ${currentSelectedProfile.id}\`.` });
+            : { tone: 'info', text: `Attach the whole ${collection.kind} with \`bazframe profile ${collection.kind} add --profile ${currentSelectedProfile.id} ${collection.id}\`.` });
           return;
         }
         if (!currentSelectedProfile.membershipWritable) {
@@ -1115,7 +1115,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
             );
           } else if (selectedSkill.originId.startsWith('library:') || selectedSkill.originId.startsWith('package:')) {
             const [kind, id] = selectedSkill.originId.split(':');
-            setMessage({ tone: 'info', text: `Edit provider input, then run \`bazframe ${kind === 'library' ? 'libraries update' : 'packages build'} ${id}\`. This Skill is from an immutable snapshot.` });
+            setMessage({ tone: 'info', text: `Edit provider input, then run \`bazframe ${kind} ${kind === 'library' ? 'update' : 'build'} ${id}\`. This Skill is from an immutable snapshot.` });
           }
           return;
         }
@@ -1450,7 +1450,7 @@ function BelowMinimumView({
                   : `Canonical: ${modal.canonicalRoot ?? '(unavailable)'}`}
               </Text>
               <Text color={blocked ? 'red' : 'yellow'} wrap="truncate-end">
-                {blocked ? 'Package manifest present; use `bazframe packages add`.' : 'Resize to authorize; y is disabled here.'}
+                {blocked ? 'Package manifest present; use `bazframe package add`.' : 'Resize to authorize; y is disabled here.'}
               </Text>
               <Text bold>n/Esc/Backspace back</Text>
             </>
@@ -2373,7 +2373,7 @@ function Modal({
         <Text wrap="truncate-end">No provider code runs; package builds remain CLI-only.</Text>
         {blocked
           ? <>
-              <Text color="red" wrap="truncate-end">Blocked: package manifest present. Use `bazframe packages add {modal.enteredRoot ?? modal.root}`.</Text>
+              <Text color="red" wrap="truncate-end">Blocked: package manifest present. Use `bazframe package add {modal.enteredRoot ?? modal.root}`.</Text>
               <Text bold>n/Esc/Backspace back  y/Enter cannot confirm</Text>
             </>
           : <Text bold>{busy ? 'Working...' : 'y add library  n/Esc/Backspace back  Enter does not confirm'}</Text>}

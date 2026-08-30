@@ -12,15 +12,15 @@ describe('generated Bazframe Skill source', () => {
     expect(loadFlatSkillIdentities([skillRoot])).toEqual([{ name: 'bazframe', definitionPath: resolve(skillRoot, 'SKILL.md') }]);
     const text = await readFile(resolve(skillRoot, 'SKILL.md'), 'utf8');
     for (const command of [
-      'bazframe add skill /absolute/path/to/skill',
-      'bazframe remove skill <skill>',
-      'bazframe profile skills add <skill>',
+      'bazframe skill add /absolute/path/to/skill',
+      'bazframe skill remove <skill>',
+      'bazframe profile skill add [--profile <profile>] <skill>',
       'bazframe profile edit <profile>',
       'bazframe skill edit <skill>',
-      'bazframe libraries add /absolute/path/to/library',
-      'bazframe profile libraries add <library>',
-      'bazframe packages add /absolute/path/to/package',
-      'bazframe profile packages add <package>',
+      'bazframe library add /absolute/path/to/library',
+      'bazframe profile library add [--profile <profile>] <library>',
+      'bazframe package add /absolute/path/to/package',
+      'bazframe profile package add [--profile <profile>] <package>',
       'bazframe adapter install pi',
       'bazframe status',
       'bazframe tui'

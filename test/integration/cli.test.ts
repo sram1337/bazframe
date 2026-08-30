@@ -43,7 +43,7 @@ afterEach(async () => {
 describe('experimental CLI vertical slice', () => {
   it('selects a profile and launches fake Pi with exact cwd, deliberate additive skills, and uncontaminated stdout', async () => {
     const fixture = await createFixture(true);
-    const selected = await runCli(['use', 'focused'], fixture.directory.root, fixture.environment);
+    const selected = await runCli(['profile', 'use', 'focused'], fixture.directory.root, fixture.environment);
     expect(selected).toMatchObject({ status: 0, stderr: '' });
     expect(selected.stdout).toContain(`Profile directory: ${fixture.home}/profiles/focused`);
 
@@ -106,7 +106,7 @@ describe('experimental CLI vertical slice', () => {
     const fixture = await createFixture(true);
     const before = await snapshotFilesystem(fixture.repository);
 
-    expect((await runCli(['use', 'focused'], fixture.cwd, fixture.environment)).status).toBe(0);
+    expect((await runCli(['profile', 'use', 'focused'], fixture.cwd, fixture.environment)).status).toBe(0);
     const installed = await runCli(
       ['adapter', 'install', 'pi'],
       fixture.cwd,
@@ -114,7 +114,7 @@ describe('experimental CLI vertical slice', () => {
     );
     expect(installed).toMatchObject({ status: 0, stderr: '' });
     expect(installed.stdout).toContain('Pi adapter: installed');
-    const adapters = await runCli(['adapters'], fixture.cwd, fixture.environment);
+    const adapters = await runCli(['adapter', 'list'], fixture.cwd, fixture.environment);
     expect(adapters).toMatchObject({ status: 0, stderr: '' });
     expect(adapters.stdout).toContain('  - pi (current)');
     expect(adapters.stdout).toContain('bazframe adapter uninstall pi');
@@ -142,7 +142,7 @@ describe('experimental CLI vertical slice', () => {
     expect(nonGitProjectOverride.status).toBe(1);
     expect(nonGitProjectOverride.stderr).toContain('not inside a Git worktree');
 
-    const projectsDefault = await runCli(['projects'], fixture.cwd, fixture.environment);
+    const projectsDefault = await runCli(['project', 'list'], fixture.cwd, fixture.environment);
     expect(projectsDefault).toMatchObject({ status: 0, stderr: '' });
     expect(projectsDefault.stdout).toContain('Project overrides\nGlobal policy: enabled\n  (none)');
     expect(projectsDefault.stdout).toContain('(enabled; global-enabled)');
@@ -188,14 +188,14 @@ describe('experimental CLI vertical slice', () => {
     const enableWithoutSetup = await runCli(['project', 'enable'], fixture.cwd, fixture.environment);
     expect(enableWithoutSetup.status).toBe(1);
     expect(enableWithoutSetup.stderr).toContain('adapter install pi');
-    const projects = await runCli(['projects'], fixture.cwd, fixture.environment);
+    const projects = await runCli(['project', 'list'], fixture.cwd, fixture.environment);
     expect(projects.stdout).toContain('(disabled override)');
     expect(await snapshotFilesystem(fixture.repository)).toEqual(before);
   });
 
   it('lets an enabled project override global disable and minimizes matching state', async () => {
     const fixture = await createFixture(true);
-    expect((await runCli(['use', 'focused'], fixture.cwd, fixture.environment)).status).toBe(0);
+    expect((await runCli(['profile', 'use', 'focused'], fixture.cwd, fixture.environment)).status).toBe(0);
     expect((await runCli(['adapter', 'install', 'pi'], fixture.cwd, fixture.environment)).status)
       .toBe(0);
 
@@ -244,7 +244,7 @@ describe('experimental CLI vertical slice', () => {
 
   it('propagates the child exit code and still cleans the effective file', async () => {
     const fixture = await createFixture(true);
-    await runCli(['use', 'focused'], fixture.directory.root, fixture.environment);
+    await runCli(['profile', 'use', 'focused'], fixture.directory.root, fixture.environment);
     const result = await runCli(['pi'], fixture.cwd, {
       ...fixture.environment,
       FAKE_PI_EXIT: '27'
@@ -257,7 +257,7 @@ describe('experimental CLI vertical slice', () => {
 
   it('dry-runs without spawning or writing into a repository and allows missing root AGENTS.md', async () => {
     const fixture = await createFixture(false);
-    await runCli(['use', 'focused'], fixture.directory.root, fixture.environment);
+    await runCli(['profile', 'use', 'focused'], fixture.directory.root, fixture.environment);
     const before = await snapshotFilesystem(fixture.repository);
     const result = await runCli(
       ['pi', '--dry-run', '--', '-p', 'do not run'],
@@ -282,9 +282,9 @@ describe('experimental CLI vertical slice', () => {
     const fixture = await createFixture(true);
     const before = await snapshotFilesystem(fixture.repository);
 
-    await runCli(['use', 'focused'], fixture.directory.root, fixture.environment);
+    await runCli(['profile', 'use', 'focused'], fixture.directory.root, fixture.environment);
     const focused = await runCli(['pi', '--dry-run'], fixture.cwd, fixture.environment);
-    await runCli(['use', 'reviewer'], fixture.directory.root, fixture.environment);
+    await runCli(['profile', 'use', 'reviewer'], fixture.directory.root, fixture.environment);
     const reviewer = await runCli(['pi', '--dry-run'], fixture.cwd, fixture.environment);
 
     const focusedEffective = extractEffectiveInstructions(focused.stdout);
@@ -304,7 +304,7 @@ describe('experimental CLI vertical slice', () => {
 
   it('rejects cross-repository session arguments before spawning', async () => {
     const fixture = await createFixture(true);
-    await runCli(['use', 'focused'], fixture.directory.root, fixture.environment);
+    await runCli(['profile', 'use', 'focused'], fixture.directory.root, fixture.environment);
     const result = await runCli(
       ['pi', '--', '--session-id=elsewhere'],
       fixture.cwd,
@@ -319,16 +319,16 @@ describe('experimental CLI vertical slice', () => {
   it('does not replace a valid active selection when a new profile is invalid', async () => {
     const fixture = await createFixture(true);
     await fixture.directory.mkdir('home with spaces/profiles/broken');
-    expect((await runCli(['use', 'focused'], fixture.directory.root, fixture.environment)).status)
+    expect((await runCli(['profile', 'use', 'focused'], fixture.directory.root, fixture.environment)).status)
       .toBe(0);
-    const invalid = await runCli(['use', 'broken'], fixture.directory.root, fixture.environment);
+    const invalid = await runCli(['profile', 'use', 'broken'], fixture.directory.root, fixture.environment);
     expect(invalid.status).toBe(1);
     expect(await fixture.directory.readText('home with spaces/active-profile')).toBe('focused\n');
   });
 
   it('fails outside a Git worktree without spawning Pi', async () => {
     const fixture = await createFixture(true);
-    await runCli(['use', 'focused'], fixture.directory.root, fixture.environment);
+    await runCli(['profile', 'use', 'focused'], fixture.directory.root, fixture.environment);
     const outside = await fixture.directory.mkdir('outside repository');
     const result = await runCli(['pi'], outside, fixture.environment);
     expect(result.status).toBe(1);

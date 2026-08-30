@@ -7,22 +7,22 @@ Move, package, and distribute [Agent Skills](https://agentskills.io/) and AGENTS
 ## Quick Start
 ### Install
 ```bash
-npm i -g bazframe
+npm i -g bazframe@next
 ```
 
 ### Setup
 ```bash
 # add your skills to bazframe
-bazframe libraries add /path/to/my-skills-folder
+bazframe library add /path/to/my-skills-folder
 
 # setup your _local_ bazframe profile
 bazframe profile add my-coding-harness
 bazframe profile edit my-coding-harness
-bazframe profile libraries add my-skills-folder
+bazframe profile library add my-skills-folder
 bazframe profile use my-coding-harness
 
 # connect bazframe to your preferred harness*
-bazframe adapters install pi                     
+bazframe adapter install pi
 ```
 ### Running bazframe
 Then start your harness like normal:

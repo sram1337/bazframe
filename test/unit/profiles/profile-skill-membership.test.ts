@@ -258,7 +258,7 @@ describe('profile skill membership', () => {
     const noSelection = await createFixture();
     await rm(noSelection.directory.path('home/active-profile'));
     await expect(addActiveProfileSkill(noSelection.options, 'demo-skill'))
-      .rejects.toThrow(/bazframe use/u);
+      .rejects.toThrow(/bazframe profile use/u);
 
     const fixture = await createFixture();
     await fixture.directory.write('home/profiles/reviewer/AGENTS.md', 'reviewer\n');

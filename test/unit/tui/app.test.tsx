@@ -569,7 +569,7 @@ describe('TuiApp', () => {
       if (dimensions.columns === 60) view.stdin.write('\r');
       await vi.waitFor(() => expect(view.lastFrame()).toContain('Skills / managed-skill'));
       view.stdin.write('e');
-      await vi.waitFor(() => expect(view.lastFrame()).toContain('bazframe libraries'));
+      await vi.waitFor(() => expect(view.lastFrame()).toContain('bazframe library up'));
       expect(service.editSkillDefinition).not.toHaveBeenCalled();
       expect(service.loadDashboard).toHaveBeenCalledTimes(1);
       view.unmount();
@@ -1045,7 +1045,7 @@ describe('TuiApp', () => {
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Add library'));
     expect(view.lastFrame()).toContain('Entered: /tmp');
     expect(view.lastFrame()).toContain('Canonical: /physical/tmp');
-    expect(view.lastFrame()).toContain('Package manifest present; use `bazframe packages add`.');
+    expect(view.lastFrame()).toContain('Package manifest present; use `bazframe package add`.');
     expect(view.lastFrame()).toContain('Final library authorization is disabled');
     view.stdin.write('y');
     expect(service.addLibrary).not.toHaveBeenCalled();
@@ -1283,7 +1283,7 @@ describe('TuiApp', () => {
     await vi.waitFor(() => expect(view.lastFrame()).toContain('deck-building'));
     view.stdin.write('a');
     await vi.waitFor(() => expect(view.lastFrame()).toContain(
-      'Attach the whole library with `bazframe profile libraries add mtg-deckbuilding --profile focused`.'
+      'Attach the whole library with `bazframe profile library add --profile focused mtg-deckbuilding`.'
     ));
     expect(service.addMembership).not.toHaveBeenCalled();
 

@@ -6,9 +6,12 @@ export interface ChildResult {
   signal: NodeJS.Signals | null;
 }
 
+export type ChildOutputPolicy = 'inherit' | 'stdout-and-stderr-to-parent-stderr';
+
 export interface InheritedChildOptions {
   cwd: string;
   environment: NodeJS.ProcessEnv;
+  outputPolicy?: ChildOutputPolicy;
   forwardSignals?: readonly Extract<NodeJS.Signals, 'SIGINT' | 'SIGTERM'>[];
   ignoreParentSignals?: readonly NodeJS.Signals[];
   spawnProcess?: typeof spawn;
@@ -26,7 +29,9 @@ export async function spawnInheritedChild(
       child = (options.spawnProcess ?? spawn)(executable, [...args], {
         cwd: options.cwd,
         env: options.environment,
-        stdio: 'inherit',
+        stdio: options.outputPolicy === 'stdout-and-stderr-to-parent-stderr'
+          ? ['inherit', process.stderr, process.stderr]
+          : 'inherit',
         shell: false
       });
     } catch (error) {

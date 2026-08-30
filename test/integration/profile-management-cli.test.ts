@@ -37,20 +37,20 @@ describe('profile management CLI', () => {
     expect((await lstat(directory.path('home/profiles/focused'))).isDirectory()).toBe(true);
     expect((await run(['profile', 'add', 'focused'])).stdout)
       .toContain('Profile lifecycle: current');
-    expect((await run(['profile', 'list'])).stdout).toBe('focused\n');
+    expect((await run(['profile', 'list'])).stdout).toContain('  - focused');
 
     expect((await run(['profile', 'use', 'focused'])).stdout)
       .toContain('Active profile: focused');
-    const profileOverview = await run(['profile']);
+    const profileOverview = await run(['profile', 'list']);
     expect(profileOverview.stdout).toContain('  * focused (active)');
-    expect(profileOverview.stdout).toContain('bazframe profile skills');
+    expect(profileOverview.stdout).toContain('bazframe profile skill list');
     expect(profileOverview.stdout).toContain('bazframe profile current');
-    expect((await run(['profiles'])).stdout).toBe(profileOverview.stdout);
+    expect((await run(['profile', 'list'])).stdout).toBe(profileOverview.stdout);
     expect((await run(['profile', 'current'])).stdout).toBe('focused\n');
     const providerSkill = await realpath(directory.path('provider/demo-skill'));
-    expect((await run(['add', 'skill', providerSkill])).stdout)
+    expect((await run(['skill', 'add', providerSkill])).stdout)
       .toContain('Default skill registration: added');
-    expect((await run(['profile', 'skills', 'add', 'demo-skill'])).stdout)
+    expect((await run(['profile', 'skill', 'add', 'demo-skill'])).stdout)
       .toContain('Profile skill membership: added');
     await directory.write('home/profiles/focused/AGENTS.md', 'focused instructions');
     await directory.write('home/profiles/focused/notes/detail.txt', 'detail');
@@ -65,7 +65,7 @@ describe('profile management CLI', () => {
     expect(await snapshotFilesystem(directory.path('home/profiles/focused-copy')))
       .toEqual(sourceBefore);
     expect((await run(['profile', 'current'])).stdout).toBe('focused\n');
-    expect((await run(['profile', 'list'])).stdout).toBe('focused\nfocused-copy\n');
+    expect((await run(['profile', 'list'])).stdout).toContain('  - focused-copy');
     const duplicateAgain = await run(['profile', 'duplicate', 'focused', 'focused-copy']);
     expect(duplicateAgain.status).toBe(1);
     expect(duplicateAgain.stderr).toContain('occupied');
@@ -73,8 +73,8 @@ describe('profile management CLI', () => {
     const renamed = await run(['profile', 'rename', 'focused', 'reviewer']);
     expect(renamed).toMatchObject({ status: 0, stderr: '' });
     expect(renamed.stdout).toContain('Active selection updated: yes');
-    expect((await run(['profile'])).stdout).toContain('  * reviewer (active)');
-    expect((await run(['profile', 'list'])).stdout).toBe('focused-copy\nreviewer\n');
+    expect((await run(['profile', 'list'])).stdout).toContain('  * reviewer (active)');
+    expect((await run(['profile', 'list'])).stdout).toContain('  - focused-copy');
 
     const activeRemoval = await run(['profile', 'remove', 'reviewer', '--force']);
     expect(activeRemoval.status).toBe(1);
@@ -163,7 +163,7 @@ describe('profile management CLI', () => {
 
     const listed = await runCli(['profile', 'list'], cwd, environment);
     expect(listed.status).toBe(0);
-    expect(listed.stdout).toBe('valid\n');
+    expect(listed.stdout).toContain('  - valid');
     expect(listed.stderr).toContain('warning:');
     expect(listed.stderr).toContain('broken');
     expect(listed.stderr).toContain('linked');
@@ -175,7 +175,7 @@ describe('profile management CLI', () => {
     const cwd = await directory.mkdir('outside');
     const environment = { ...process.env, BAZFRAME_HOME: directory.path('home') };
 
-    const overview = await runCli(['profiles'], cwd, environment);
+    const overview = await runCli(['profile', 'list'], cwd, environment);
     expect(overview).toMatchObject({ status: 0, stderr: '' });
     expect(overview.stdout).toContain('Profiles\n  (none)');
     expect(overview.stdout).toContain('Active profile: (none)');
@@ -189,26 +189,26 @@ describe('profile management CLI', () => {
     const rootHelp = await runCli(['--help'], cwd, environment);
     expect(rootHelp).toMatchObject({ status: 0, stderr: '' });
     expect(rootHelp.stdout).toContain('Resources:');
-    expect(rootHelp.stdout).toContain('Suggestions:');
-    expect(rootHelp.stdout).toContain('bazframe help <resource>');
-    expect(rootHelp.stdout).not.toContain('bazframe profile add <profile>');
+    expect(rootHelp.stdout).toContain('Queries:');
+    expect(rootHelp.stdout).toContain('bazframe profile list');
+    expect(rootHelp.stdout).not.toContain('bazframe profile add [--json] <profile>');
 
     const help = await runCli(['profile', '--help'], cwd, environment);
     expect(help).toMatchObject({ status: 0, stderr: '' });
-    expect(help.stdout).toContain('bazframe profile add <profile>');
-    expect(help.stdout).toContain('bazframe profile duplicate <source> <new>');
+    expect(help.stdout).toContain('bazframe profile add [--json] <profile>');
+    expect(help.stdout).toContain('bazframe profile duplicate [--json] <source> <new>');
     expect(help.stdout).toContain('bazframe profile edit <profile>');
-    expect((await runCli(['help', 'profiles'], cwd, environment)).stdout).toBe(help.stdout);
+    expect((await runCli(['help', 'profiles'], cwd, environment)).status).toBe(2);
     const duplicateHelp = await runCli(
       ['profile', 'duplicate', '--help'],
       cwd,
       environment
     );
     expect(duplicateHelp).toMatchObject({ status: 0, stderr: '' });
-    expect(duplicateHelp.stdout).toContain('bazframe profile duplicate <source> <new>');
-    expect(duplicateHelp.stdout).toContain('does not change the active profile');
+    expect(duplicateHelp.stdout).toContain('bazframe profile duplicate [--json] <source> <new>');
+    expect(duplicateHelp.stdout).toContain('without following symlinks');
     const usage = await runCli(
-      ['profile', 'remove', '--force', 'focused'],
+      ['profile', 'remove', '--force', '--force', 'focused'],
       cwd,
       environment
     );

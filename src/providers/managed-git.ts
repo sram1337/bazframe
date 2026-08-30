@@ -4,6 +4,7 @@ import { constants } from 'node:fs';
 import { lstat, mkdtemp, open, realpath, rename, rm, unlink, type FileHandle } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { BazframeError, errorCode } from '../core/errors.js';
+import type { ChildOutputPolicy } from '../core/child-process.js';
 import { replaceUnsafeDisplayCharacters } from '../core/safe-text.js';
 import { readPackageManifest, samePackageManifestSnapshot, type PackageManifestSnapshot } from '../packages/package-manifest.js';
 import {
@@ -45,12 +46,13 @@ export interface ManagedGitBuildAuthorization {
 export interface ManagedGitOptions {
   bazframeHome: string;
   environment?: NodeJS.ProcessEnv;
+  childOutputPolicy?: ChildOutputPolicy;
   yes?: boolean;
   acceptRewrite?: boolean;
   reportPackageBuild?: (details: ManagedGitBuildAuthorization) => void | Promise<void>;
   confirmPackageBuild?: (details: ManagedGitBuildAuthorization) => boolean | Promise<boolean>;
   /** Internal deterministic fault-injection seams used only by lifecycle tests. */
-  testHooks?: { afterRemoveResource?: () => void | Promise<void> };
+  testHooks?: { afterRemoveResource?: () => void | Promise<void>; afterStateLockAcquired?: () => void | Promise<void> };
 }
 export interface ManagedGitLifecycleResult {
   action: 'added' | 'current' | 'updated' | 'removed' | 'built';
@@ -172,7 +174,7 @@ export async function buildManagedGitPackage(options: ManagedGitOptions, id: str
   try {
     result = await withStateLock(
       join(home, 'locks', 'state.lock'),
-      { command: 'bazframe packages build', target: managedGitCheckoutRoot(home, 'package', id) },
+      { command: 'bazframe package build', target: managedGitCheckoutRoot(home, 'package', id) },
       async () => {
         const snapshot = await readManagedGitRecord(home, 'package', id);
         const record = snapshot.record;
@@ -182,7 +184,7 @@ export async function buildManagedGitPackage(options: ManagedGitOptions, id: str
         transaction.journalState = await createJournal(home, journalFor(record, 'build', 'building', record.revision, record.revision));
         try {
           const built = await buildPackage(
-            { bazframeHome: home, environment: options.environment },
+            { bazframeHome: home, environment: options.environment, childOutputPolicy: options.childOutputPolicy },
             id,
             {
               stateLockHeld: true,
@@ -232,7 +234,7 @@ async function addManaged(options: ManagedGitOptions, kind: ManagedGitResourceKi
   if (existing !== undefined) {
     return await withStateLock(
       join(home, 'locks', 'state.lock'),
-      { command: `bazframe ${kind === 'skill' ? 'add skill' : kind === 'library' ? 'libraries add' : 'packages add'}`, target: expectedRoot },
+      { command: `bazframe ${kind} add`, target: expectedRoot },
       async () => {
         const current = await readManagedGitRecord(home, kind, source.id);
         if (!sameRecordSnapshot(existing, current)) throw new BazframeError('MANAGED_GIT_CHANGED', `Managed Git provenance changed while verifying current ${kind} ${source.id}.`);
@@ -261,7 +263,7 @@ async function addManaged(options: ManagedGitOptions, kind: ManagedGitResourceKi
   try {
     result = await withStateLock(
       join(home, 'locks', 'state.lock'),
-      { command: `bazframe ${kind === 'skill' ? 'add skill' : kind === 'library' ? 'libraries add' : 'packages add'}`, target: expectedRoot },
+      { command: `bazframe ${kind} add`, target: expectedRoot },
       () => commitAdd(options, home, kind, source, acquired, authorizedManifest, transaction),
       { managedRoot: home }
     );
@@ -307,7 +309,7 @@ async function commitAdd(
     if (kind === 'skill') await addDefaultSkill(home, expectedRoot, { stateLockHeld: true });
     else if (kind === 'library') collection = await addLibrary({ bazframeHome: home, environment: options.environment }, expectedRoot, { stateLockHeld: true });
     else collection = await addPackage(
-      { bazframeHome: home, environment: options.environment }, expectedRoot,
+      { bazframeHome: home, environment: options.environment, childOutputPolicy: options.childOutputPolicy }, expectedRoot,
       {
         stateLockHeld: true,
         expectedPackageManifest: authorizedManifest,
@@ -364,8 +366,8 @@ async function updateManaged(options: ManagedGitOptions, kind: ManagedGitResourc
   try {
     result = await withStateLock(
       join(home, 'locks', 'state.lock'),
-      { command: `bazframe ${kind === 'skill' ? 'skill' : kind === 'library' ? 'libraries' : 'packages'} update`, target: initial.record.root },
-      () => commitUpdate(options, initial, acquired, authorizedManifest, transaction),
+      { command: `bazframe ${kind} update`, target: initial.record.root },
+      async () => { await options.testHooks?.afterStateLockAcquired?.(); return commitUpdate(options, initial, acquired, authorizedManifest, transaction); },
       { managedRoot: home }
     );
   } catch (error) {
@@ -387,8 +389,9 @@ async function verifyCurrentUpdate(
 ): Promise<ManagedGitLifecycleResult> {
   return await withStateLock(
     join(home, 'locks', 'state.lock'),
-    { command: `bazframe ${initial.record.kind === 'skill' ? 'skill' : initial.record.kind === 'library' ? 'libraries' : 'packages'} update`, target: initial.record.root },
+    { command: `bazframe ${initial.record.kind} update`, target: initial.record.root },
     async () => {
+      await options.testHooks?.afterStateLockAcquired?.();
       const current = await readManagedGitRecord(home, initial.record.kind, initial.record.id);
       if (!sameRecordSnapshot(initial, current)) throw new BazframeError('MANAGED_GIT_CHANGED', `Managed Git provenance changed while verifying current ${initial.record.kind} ${initial.record.id}.`);
       await assertNoRecovery(home, initial.record.kind, initial.record.id);
@@ -441,7 +444,7 @@ async function commitUpdate(
       if (registration.target !== initial.root) throw new BazframeError('MANAGED_GIT_REGISTRATION_MISMATCH', `Added Skill registration changed during update: ${initial.id}`);
     } else if (initial.kind === 'library') resourceAction = (await updateLibrary({ bazframeHome: home, environment }, initial.id, { stateLockHeld: true })).action;
     else resourceAction = (await buildPackage(
-      { bazframeHome: home, environment }, initial.id,
+      { bazframeHome: home, environment, childOutputPolicy: options.childOutputPolicy }, initial.id,
       { stateLockHeld: true, expectedPackageManifest: authorizedManifest, afterPackageSnapshot: () => cleanManagedCheckout(next, environment, acquired.identity) }
     )).action;
     transaction.resourceCommitted = true;
@@ -488,7 +491,7 @@ async function removeManaged(options: ManagedGitOptions, kind: ManagedGitResourc
   try {
     result = await withStateLock(
       join(home, 'locks', 'state.lock'),
-      { command: `bazframe ${kind === 'skill' ? 'remove skill' : kind === 'library' ? 'libraries remove' : 'packages remove'}`, target: initial.record.root },
+      { command: `bazframe ${kind} remove`, target: initial.record.root },
       async () => {
         const current = await readManagedGitRecord(home, kind, id);
         if (!sameRecordSnapshot(initial, current)) throw new BazframeError('MANAGED_GIT_CHANGED', `Managed Git provenance changed during removal for ${kind} ${id}.`);
@@ -533,7 +536,7 @@ async function resumeManagedRemoval(options: ManagedGitOptions, home: string, in
   try {
     result = await withStateLock(
       join(home, 'locks', 'state.lock'),
-      { command: `bazframe ${record.kind === 'skill' ? 'remove skill' : record.kind === 'library' ? 'libraries remove' : 'packages remove'}`, target: record.root },
+      { command: `bazframe ${record.kind} remove`, target: record.root },
       async () => {
         const currentJournal = await readManagedGitJournal(home, record.kind, record.id);
         if (!sameJournalSnapshot(initialJournal, currentJournal)) throw new BazframeError('MANAGED_GIT_CHANGED', `Managed Git recovery record changed during removal for ${record.kind} ${record.id}.`);
@@ -642,7 +645,7 @@ async function validateCandidate(kind: ManagedGitResourceKind, root: string, id:
     return;
   }
   if (kind === 'package') { await readPackageManifest(root); return; }
-  try { await lstat(join(root, 'bazframe-package.json')); throw new BazframeError('LIBRARY_IS_PACKAGE', 'Managed library contains bazframe-package.json; use `bazframe packages add` for this repository.'); }
+  try { await lstat(join(root, 'bazframe-package.json')); throw new BazframeError('LIBRARY_IS_PACKAGE', 'Managed library contains bazframe-package.json; use `bazframe package add` for this repository.'); }
   catch (error) { if (error instanceof BazframeError) throw error; if (errorCode(error) !== 'ENOENT') throw error; }
 }
 

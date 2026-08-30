@@ -10,7 +10,7 @@ The production path uses direct Pi invocation through the global adapter:
 
 ```bash
 bazframe adapter install pi
-bazframe use <profile>
+bazframe profile use <profile>
 cd <worktree>
 bazframe status
 pi       # native context + profile
@@ -23,14 +23,14 @@ Use `bazframe global enable|disable` for global policy and `bazframe project ena
 
 ## Implemented launcher contract
 
-- Scope is only `bazframe use <profile>` and `bazframe pi [--dry-run] [-- <pi args>]` for Pi.
+- Historical scope was only `bazframe use <profile>` and `bazframe pi [--dry-run] [-- <pi args>]` for Pi. The top-level `use` form is no longer executable; current users must run `bazframe profile use <profile>`.
 - Profiles are trusted, pre-existing directories under `BAZFRAME_HOME/profiles`. Selection is one global plain-text `active-profile` file.
 - A launch requires a Git worktree. Git discovery ignores inherited repository-selection variables, canonicalizes the root and cwd, and requires the cwd to be contained by that root.
 - Instructions are the selected profile's required `AGENTS.md`, followed textually by optional root `AGENTS.md`, with visible source headings. This profile-first ordering is an experiment, not a conflict or precedence policy.
 - Instruction files are opened once with read-only, nonblocking filesystem flags, inspected through that handle as regular files, and read with a 1 MiB bound before UTF-8 and NUL validation.
 - The effective prompt is a mode-`0600` temporary file outside the repository. Bazframe passes it with `--no-context-files --append-system-prompt`; it does not create a repository `.baz.agents.md`.
 - Immediate profile skill directories containing `SKILL.md` are passed with explicit `--skill` arguments. **Pi's native skill discovery deliberately remains enabled**, so profile skills are additive rather than exclusive in this prototype.
-- Pi is spawned without a shell in the caller's cwd. On real launches Bazframe diagnostics go to stderr and Pi owns stdout byte-for-byte. Help, version, `use`, and dry-run retain their documented stdout output.
+- Pi is spawned without a shell in the caller's cwd. On real launches Bazframe diagnostics go to stderr and Pi owns stdout byte-for-byte. Help, version, the historical top-level `use`, and dry-run retained their documented stdout output in this prototype.
 - After Pi exits, Bazframe attempts to remove the temporary effective file. Cleanup failure is Bazframe failure status `1`, superseding Pi's status because sensitive generated content remains on disk.
 - Startup session options are rejected. `--mode rpc` and `--mode=rpc` are also rejected because RPC can switch sessions without repository-aware recomposition.
 

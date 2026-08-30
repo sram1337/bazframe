@@ -38,6 +38,20 @@ describe('inherited child process', () => {
     );
   });
 
+  it('can preserve stdin while routing both provider output streams to parent stderr', async () => {
+    const child = new FakeChild();
+    const spawnProcess = vi.fn(() => child) as unknown as typeof spawn;
+    const resultPromise = spawnInheritedChild('builder', [], {
+      cwd: '/tmp', environment: {}, spawnProcess,
+      outputPolicy: 'stdout-and-stderr-to-parent-stderr'
+    });
+    child.emit('close', 0, null);
+    await resultPromise;
+    expect(spawnProcess).toHaveBeenCalledWith('builder', [], expect.objectContaining({
+      stdio: ['inherit', process.stderr, process.stderr], shell: false
+    }));
+  });
+
   it('settles once and removes ignored-signal handlers when an error is followed by close', async () => {
     const child = new FakeChild();
     const spawnProcess = vi.fn(() => child) as unknown as typeof spawn;

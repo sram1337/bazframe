@@ -210,11 +210,11 @@ export async function inspectStatus(options: StatusOptions): Promise<StatusInspe
         if (collections.diagnostics.length > 0) {
           const buildRequired = collections.directCollections
             .filter((item) => item.preparationState === 'failed' && item.rebuildAvailability === 'available')
-            .map((item) => item.collectionKind === 'library' ? `bazframe libraries update ${item.collectionId}` : `bazframe packages build ${item.collectionId}`);
+            .map((item) => item.collectionKind === 'library' ? `bazframe library update ${item.collectionId}` : `bazframe package build ${item.collectionId}`);
           corrections.set('collections', {
             id: 'collections',
             message: buildRequired.length === 0
-              ? 'Inspect library and package failures with `bazframe profile libraries` and `bazframe profile packages`.'
+              ? 'Inspect library and package failures with `bazframe profile library list` and `bazframe profile package list`.'
               : `Refresh the affected libraries/packages with: ${buildRequired.map((command) => `\`${command}\``).join(', ')}.`
           });
         }
@@ -366,8 +366,8 @@ export function formatStatus(status: StatusInspection): string {
                 const command = record.kind === 'skill'
                   ? `bazframe skill update ${record.id}`
                   : record.kind === 'library'
-                    ? `bazframe libraries update ${record.id}`
-                    : `bazframe packages update ${record.id}`;
+                    ? `bazframe library update ${record.id}`
+                    : `bazframe package update ${record.id}`;
                 return escapeUnsafeDisplayCharacters(`  - ${record.kind} ${record.id}: ${health}; ${record.remote}; branch:${record.branch}; revision:${record.revision}; provider:${record.root}; update:${command}`);
               })),
           'Managed Git failures:',
@@ -413,7 +413,7 @@ function adapterCorrection(state: PiAdapterInstallState, targetPath: string): st
     case 'managed-missing':
       return 'Install or update the adapter with `bazframe adapter install pi`.';
     case 'drifted':
-      return 'Review the changed artifact, then restore it with `bazframe adapter install pi --force`.';
+      return 'Review the changed artifact, then restore it with `bazframe adapter install --force pi`.';
     case 'occupied':
       return `Resolve the independently owned destination at ${targetPath}, then run \`bazframe adapter install pi\`.`;
     case 'manifest-path-mismatch':

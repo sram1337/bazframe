@@ -41,15 +41,15 @@ EOF
 cli=(node "$repository_root/dist/cli.js")
 "${cli[@]}" profile add demo
 "${cli[@]}" profile use demo
-"${cli[@]}" libraries add "$LIBRARY_ROOT"
-"${cli[@]}" packages add "$PACKAGE_ROOT"
-"${cli[@]}" profile libraries add demo-library
-"${cli[@]}" profile packages add demo-package
+"${cli[@]}" library add "$LIBRARY_ROOT"
+"${cli[@]}" package add "$PACKAGE_ROOT"
+"${cli[@]}" profile library add demo-library
+"${cli[@]}" profile package add demo-package
 "${cli[@]}" adapter install pi
 
 printf '\n--- Library and package composition ---\n'
-"${cli[@]}" profile libraries
-"${cli[@]}" profile packages
+"${cli[@]}" profile library list
+"${cli[@]}" profile package list
 printf '\n--- Bazframe status ---\n'
 "${cli[@]}" status
 

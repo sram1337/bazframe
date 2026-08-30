@@ -20,13 +20,13 @@ Bazframe composes a personal profile with coding-agent runtime and repository co
 ## Added Skills
 
 ```bash
-bazframe add skill /absolute/path/to/skill
-bazframe add skill git:<owner>/<repository>
-bazframe skill update <skill> [--accept-rewrite]
-bazframe skills
-bazframe profile skills add <skill> [--profile <profile>]
-bazframe profile skills remove <skill> [--profile <profile>]
-bazframe remove skill <skill>
+bazframe skill add /absolute/path/to/skill
+bazframe skill add git:<owner>/<repository>
+bazframe skill update [--accept-rewrite] <skill>
+bazframe skill list
+bazframe profile skill add [--profile <profile>] <skill>
+bazframe profile skill remove [--profile <profile>] <skill>
+bazframe skill remove <skill>
 ```
 
 Catalog and profile links point to the same canonical provider directory. Provider changes become visible on the next Pi startup or `/bazframe reload`. `bazframe skill edit <skill>` opens an externally owned added Skill through executable-only `VISUAL`, then `EDITOR`; managed Git Skills update from their recorded branch.
@@ -34,16 +34,16 @@ Catalog and profile links point to the same canonical provider directory. Provid
 ## Skill libraries
 
 ```bash
-bazframe libraries
-bazframe libraries add /absolute/path/to/library
-bazframe libraries add git:<owner>/<repository>
-bazframe profile libraries add <library> [--profile <profile>]
-bazframe libraries update <library> [--accept-rewrite]
-bazframe profile libraries remove <library> [--profile <profile>]
-bazframe libraries remove <library>
+bazframe library list
+bazframe library add /absolute/path/to/library
+bazframe library add git:<owner>/<repository>
+bazframe profile library add [--profile <profile>] <library>
+bazframe library update [--accept-rewrite] <library>
+bazframe profile library remove [--profile <profile>] <library>
+bazframe library remove <library>
 ```
 
-A library ID is its canonical root basename and must be 1–64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen. `libraries add` performs the initial snapshot and activation; `libraries update` activates provider changes. Profile references attach the complete library and never prepare it. Removal is refused while referenced.
+A library ID is its canonical root basename and must be 1–64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen. `library add` performs the initial snapshot and activation; `library update` activates provider changes. Profile references attach the complete library and never prepare it. Removal is refused while referenced.
 
 ## Skill packages
 
@@ -56,32 +56,32 @@ A package root must contain a physical regular `bazframe-package.json` with exac
 A package ID is its canonical root basename and must be 1–64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen. `build` is a nonempty literal argv array. Both roots are portable relative paths (`.` is allowed). Bazframe runs `build` directly with no shell, snapshots the complete artifact root (including shared resources), and discovers Skills only below the Skills root.
 
 ```bash
-bazframe packages
-bazframe packages add /absolute/path/to/package
-bazframe packages add git:<owner>/<repository> [--yes]
-bazframe profile packages add <package> [--profile <profile>]
-bazframe packages build <package>
-bazframe packages update <package> [--accept-rewrite] [--yes]
-bazframe profile packages remove <package> [--profile <profile>]
-bazframe packages remove <package>
+bazframe package list
+bazframe package add /absolute/path/to/package
+bazframe package add [--yes] git:<owner>/<repository>
+bazframe profile package add [--profile <profile>] <package>
+bazframe package build <package>
+bazframe package update [--accept-rewrite] [--yes] <package>
+bazframe profile package remove [--profile <profile>] <package>
+bazframe package remove <package>
 ```
 
-`packages add` performs the initial build and activation; `packages build` rebuilds the current provider revision; `packages update` acquires and activates a managed Git revision. Profile reference changes never build. Removal is refused while referenced. Removing a managed resource removes its Bazframe checkout and provenance while leaving the upstream remote available. A failed library update or package build leaves the previous activated snapshot in use. Libraries and packages have typed, separate namespaces, so both may have the same ID. A healthy library or package may contain `0 Skills`; profiles always reference the complete object, never selected children.
+`package add` performs the initial build and activation; `package build` rebuilds the current provider revision; `package update` acquires and activates a managed Git revision. Profile reference changes never build. Removal is refused while referenced. Removing a managed resource removes its Bazframe checkout and provenance while leaving the upstream remote available. A failed library update or package build leaves the previous activated snapshot in use. Libraries and packages have typed, separate namespaces, so both may have the same ID. A healthy library or package may contain `0 Skills`; profiles always reference the complete object, never selected children.
 
 ## Bundled Skills
 
-The npm package ships generated `bazframe` and `bazify` Skills under `dist/skills/`. Installation registers neither one. Add a desired generated directory explicitly with `bazframe add skill <installed-package>/dist/skills/<skill>`, then add its membership to a profile. `bazify` uses `./bazframe/` for review tracking, extracts one Skill or a collection into a provider-owned package at `~/<name>`, adapts dedicated Skill repositories in place, and publishes new packages only to a private GitHub repository after explicit consent.
+The npm package ships generated `bazframe` and `bazify` Skills under `dist/skills/`. Installation registers neither one. Add a desired generated directory explicitly with `bazframe skill add <installed-package>/dist/skills/<skill>`, then add its membership to a profile. `bazify` uses `./bazframe/` for review tracking, extracts one Skill or a collection into a provider-owned package at `~/<name>`, adapts dedicated Skill repositories in place, and publishes new packages only to a private GitHub repository after explicit consent.
 
 ## Profiles and policy
 
 ```bash
-bazframe profiles
+bazframe profile list
 bazframe profile add <profile>
 bazframe profile edit <profile>
 bazframe profile use <profile>
 bazframe profile current
-bazframe global
-bazframe project
+bazframe global show
+bazframe project list
 ```
 
 `profile edit` opens the named profile's `AGENTS.md` without changing selection. Use an executable wrapper for editor flags or GUI wait behavior, and run `/bazframe reload` in an existing Pi session afterward.
@@ -89,7 +89,7 @@ bazframe project
 ## Pi adapter and diagnosis
 
 ```bash
-bazframe adapters
+bazframe adapter list
 bazframe adapter install pi
 bazframe status
 bazframe tui

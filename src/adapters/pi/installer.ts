@@ -66,7 +66,7 @@ export async function installPiAdapter(
 
   return withStateLock(
     join(options.bazframeHome, 'locks', 'adapter-pi.lock'),
-    { command: force ? 'bazframe adapter install pi --force' : 'bazframe adapter install pi', target: targetPath },
+    { command: force ? 'bazframe adapter install --force pi' : 'bazframe adapter install pi', target: targetPath },
     async () => {
       const inspection = await inspectWithDesired(options, desired);
       if (inspection.state === 'current') {
@@ -87,7 +87,7 @@ export async function installPiAdapter(
       if (inspection.state === 'drifted' && !force) {
         throw new BazframeError(
           'ADAPTER_DRIFTED',
-          `The installed Pi adapter has changed: ${inspection.targetPath}. Run \`bazframe adapter install pi --force\` to restore Bazframe's artifact.`
+          `The installed Pi adapter has changed: ${inspection.targetPath}. Run \`bazframe adapter install --force pi\` to restore Bazframe's artifact.`
         );
       }
 

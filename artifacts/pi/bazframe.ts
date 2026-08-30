@@ -1326,9 +1326,9 @@ function collectionCorrectiveActions(profile: ProfileState | undefined): string[
 	if (profile === undefined) return ["  (none)"];
 	const actions = profile.directCollections
 		.filter((collection) => collection.preparationState === "failed" && collection.rebuildAvailability === "available")
-		.map((collection) => `  - bazframe ${collection.collectionKind === "library" ? "libraries update" : "packages build"} ${collection.collectionId}`);
+		.map((collection) => `  - bazframe ${collection.collectionKind} ${collection.collectionKind === "library" ? "update" : "build"} ${collection.collectionId}`);
 	if (actions.length > 0) return actions;
-	return profile.collectionDiagnostics.length > 0 ? ["  - Inspect failures with `bazframe profile libraries` and `bazframe profile packages`."] : ["  (none)"];
+	return profile.collectionDiagnostics.length > 0 ? ["  - Inspect failures with `bazframe profile library list` and `bazframe profile package list`."] : ["  (none)"];
 }
 
 function info(state: AdapterState, pi: ExtensionAPI, ctx: ExtensionCommandContext): string {

@@ -50,7 +50,7 @@ export async function addProfileSkill(options: ProfileSkillMembershipOptions, pr
   return addProfileSkillFor(options, profileId, skillId);
 }
 async function addProfileSkillFor(options: ProfileSkillMembershipOptions, profileId: string | undefined, skillId: string): Promise<ProfileSkillMembershipResult> {
-  return withProfileMembershipLock(options, profileId, skillId, 'bazframe profile skills add', async (paths) => {
+  return withProfileMembershipLock(options, profileId, skillId, 'bazframe profile skill add', async (paths) => {
     const registration = await resolveRegistration(options.bazframeHome, skillId);
     const existing = await inspectMembership(paths.membershipPath, registration.target);
     if (existing === 'current') return result(paths, registration.target, skillId, 'current');
@@ -82,7 +82,7 @@ export async function removeProfileSkill(options: ProfileSkillMembershipOptions,
   return removeProfileSkillFor(options, profileId, skillId);
 }
 async function removeProfileSkillFor(options: ProfileSkillMembershipOptions, profileId: string | undefined, skillId: string): Promise<ProfileSkillMembershipResult> {
-  return withProfileMembershipLock(options, profileId, skillId, 'bazframe profile skills remove', async (paths) => {
+  return withProfileMembershipLock(options, profileId, skillId, 'bazframe profile skill remove', async (paths) => {
     const registration = await readDefaultSkillRegistrationLink(options.bazframeHome, skillId);
     const existing = await inspectMembership(paths.membershipPath, registration.target);
     if (existing === 'absent') return result(paths, registration.target, skillId, 'absent');
@@ -140,7 +140,7 @@ async function resolveRegistration(home: string, skillId: string) {
       const available = await inspectDefaultSkillCatalog(home);
       const suggestions = suggestSkillIds(skillId, available.skillIds);
       const suggestion = suggestions.length === 0
-        ? ' Run `bazframe skills` to list registered skills or `bazframe add skill <absolute-root>`.'
+        ? ' Run `bazframe skill list` to list registered skills or `bazframe skill add <absolute-root>`.'
         : suggestions.length === 1 ? ` Did you mean ${JSON.stringify(suggestions[0])}?`
           : ` Did you mean one of ${suggestions.map((item) => JSON.stringify(item)).join(', ')}?`;
       throw new BazframeError('SKILL_NOT_FOUND', `Default skill ${JSON.stringify(skillId)} is not registered.${suggestion}`, { cause: error });

@@ -40,7 +40,7 @@ bazframe profile edit focused
 bazframe profile use focused
 ```
 
-`profile add` creates the empty physical profile shape without selecting it. `profile edit` opens its actual `AGENTS.md` with the first nonblank executable-only `VISUAL`, then `EDITOR`; `skill edit` applies the same process contract to an authoritative live `(default)` provider `SKILL.md`, while managed snapshots remain immutable. Fixed flags require a wrapper executable. `profile use` validates and selects it; top-level `bazframe use focused` remains a supported alias. Every working directory that inherits enabled global policy uses that profile.
+`profile add` creates the empty physical profile shape without selecting it. `profile edit` opens its actual `AGENTS.md` with the first nonblank executable-only `VISUAL`, then `EDITOR`; `skill edit` applies the same process contract to an authoritative live `(default)` provider `SKILL.md`, while managed snapshots remain immutable. Fixed flags require a wrapper executable. `profile use` validates and selects it; top-level `use` is rejected with migration guidance. Every working directory that inherits enabled global policy uses that profile.
 
 ### 2.3 Run and reload
 
@@ -80,36 +80,35 @@ Within Git worktrees, project override wins over global policy. Project commands
 
 | Command | Responsibility |
 |---|---|
-| `bazframe adapter` / `adapters` | Show supported adapters, current state, and commands. |
-| `bazframe adapter install pi [--force]` | Install, update, or explicitly repair the global Pi extension. |
+| `bazframe adapter list` | Show supported adapters, current state, and commands. |
+| `bazframe adapter install [--force] pi` | Install, update, or explicitly repair the global Pi extension. |
 | `bazframe adapter uninstall pi` | Remove the verified Bazframe-owned Pi extension. |
-| `bazframe global` | Show global policy and state. |
+| `bazframe global show` | Show global policy and state. |
 | `bazframe global enable` / `disable` | Remove disabled global state or write it atomically. |
-| `bazframe project` / `projects` | List overrides and show project-over-global effective behavior. |
+| `bazframe project list` | List overrides and show project-over-global effective behavior. |
 | `bazframe project enable` / `disable` | In a Git worktree, set effective project behavior using an override only when it differs from global policy. |
-| `bazframe profile` / `profiles` | List profiles, mark the active selection, and show commands. |
+| `bazframe profile list` | List profiles, mark the active selection, and show commands. |
 | `bazframe profile add <profile>` | Create an empty physical profile without selecting it. |
 | `bazframe profile duplicate <source> <new>` | Copy all physical profile content without following symlinks or changing selection. |
-| `bazframe profile remove <profile> [--force]` | Remove a non-active generated-empty profile, or explicitly delete its physical contents with `--force`. |
+| `bazframe profile remove [--force] <profile>` | Remove a non-active generated-empty profile, or explicitly delete its physical contents with `--force`. |
 | `bazframe profile rename <old> <new>` | Rename a physical profile and update matching active selection. |
 | `bazframe profile use <profile>` | Atomically validate and select the global active profile. |
-| `bazframe profile list` | Print runtime-valid physical profile IDs in lexical order for scripts. |
 | `bazframe profile current` | Print only the selected profile ID for scripts. |
-| `bazframe skill` / `skills` | List valid registrations in the `(default)` catalog. |
-| `bazframe add skill <absolute-root>` / `remove skill <skill>` | Register or remove an unreferenced live external skill link. |
-| `bazframe profile skills` | List immediate skill entries discovered in the active profile; Pi performs full runtime validation. |
-| `bazframe profile skills add <skill>` | Add a registered `(default)` skill link to the active profile. |
-| `bazframe profile skills remove <skill>` | Remove only the verified active-profile membership link. |
+| `bazframe skill list` | List valid registrations in the `(default)` catalog. |
+| `bazframe skill add <absolute-root>` / `bazframe skill remove <skill>` | Register or remove an unreferenced live external skill link. |
+| `bazframe profile skill list` | List immediate skill entries discovered in the active profile; Pi performs full runtime validation. |
+| `bazframe profile skill add <skill>` | Add a registered `(default)` skill link to the active profile. |
+| `bazframe profile skill remove <skill>` | Remove only the verified active-profile membership link. |
 | `bazframe status` | Report adapter, effective project behavior, required profile state, and actionable problems. |
 
-Top-level `use`, `add`, and `remove` remain compatibility aliases. Old `init`/`uninit` forms return migration guidance. Bare resource overviews are human-readable; `profile list` and `profile current` retain concise scripting output.
+Top-level `use`, verb-first Skill lifecycle, plural resources, and bare resources are rejected with migration guidance. Old `init`/`uninit` forms also return migration guidance. `profile list` is the rich overview and `profile current` remains the focused query.
 
 Decisions:
 
 - Adapter installation is a separate explicit command.
 - A Git-worktree project override wins over global policy; absent global state is enabled everywhere, absent Git project state inherits, and non-Git directories inherit without project state.
 - Plain `pi` is the additive-context mode; `pi -nc` is instruction-context replacement.
-- `adapter install pi --force` repairs a drifted destination only when a valid ownership manifest identifies that destination.
+- `adapter install --force pi` repairs a drifted destination only when a valid ownership manifest identifies that destination.
 - Pi is invoked directly by the user.
 - CLI color is terminal-aware presentation only: pipes remain plain, `NO_COLOR` disables it, and nonzero `FORCE_COLOR` explicitly enables it when `NO_COLOR` is absent.
 
@@ -260,7 +259,7 @@ Lifecycle behavior:
 - `profile list` reports runtime-valid physical-root profiles and warns on invalid neighbors without contaminating stdout;
 - `profile edit <profile>` targets active or inactive profiles explicitly, preserves active selection, does not pre-read instruction bytes, and returns the configured editor's exit or signal status;
 - `skill edit <skill>` targets only a structurally authorized live `(default)` provider definition, does not parse its bytes before launch, and returns the same editor status without granting managed-snapshot or Bazframe artifact-lifecycle authority;
-- bare `profile` and `profiles` render the human profile overview, while `profile list` and `profile current` remain concise scripting commands;
+- `profile list` renders the rich profile overview and `profile current` remains focused; bare and plural resources are migration errors;
 - duplicate copies all child content without resolving provider targets, preserves symlinks verbatim, refuses replacement and profile-root symlinks, publishes only after a complete staged copy, and leaves active selection unchanged;
 - rename preserves all child content without resolving provider targets, refuses replacement and profile-root symlinks, and updates active selection with rollback on pre-commit write failure;
 - remove always refuses the selected ID, including a selected-but-missing profile; without `--force` it accepts only the exact generated-empty shape, and force-removal unlinks symlink entries without following targets.
@@ -274,7 +273,7 @@ Instruction requirements:
 
 Skill requirements:
 
-- bare `skills` lists valid live registrations from `<BAZFRAME_HOME>/skills`, warns about invalid neighbors, and does not claim provider lifecycle ownership;
+- `skill list` lists valid live registrations from `<BAZFRAME_HOME>/skills`, warns about invalid neighbors, and does not claim provider lifecycle ownership;
 - missing add targets use bounded edit-distance matching to suggest valid available skills;
 - immediate children of profile `skills/` are loaded in lexical directory-name order;
 - Pi's public Agent Skills loader parses each skill;
@@ -315,7 +314,7 @@ The runtime command reports:
 - flat directly added Skills with paths;
 - kind-qualified library/package references with provider root, health, refresh availability, digest, and Skills root;
 - derived effective Skills with kind-qualified provenance;
-- kind-qualified library/package failures and exact `libraries update` / `packages build` corrective commands;
+- kind-qualified library/package failures and exact `library update` / `package build` corrective commands;
 - `Skills:` followed by deduplicated, lexically sorted names from Pi's effective `skill:` commands, or `(none)`;
 - a deterministic comma-separated `Aliases: original -> alias` line only when aliases exist.
 

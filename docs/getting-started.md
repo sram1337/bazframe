@@ -107,7 +107,7 @@ When a Pi session is already open, run `/bazframe reload` after changing the act
 One profile is globally active. Inspect available profiles and the current selection:
 
 ```bash
-bazframe profiles
+bazframe profile list
 bazframe profile current
 ```
 
@@ -135,7 +135,7 @@ The global policy is enabled by default, so the active profile applies in Git an
 ```bash
 bazframe global disable
 bazframe global enable
-bazframe global
+bazframe global show
 ```
 
 A project override applies to the canonical root of the current Git worktree and takes precedence over global policy:
@@ -144,7 +144,7 @@ A project override applies to the canonical root of the current Git worktree and
 cd /path/to/a/git-worktree
 bazframe project enable
 bazframe project disable
-bazframe projects
+bazframe project list
 ```
 
 `project enable` and `project disable` require a Git worktree. Bazframe stores the override outside the repository. Non-Git directories cannot have project overrides and inherit global policy.
@@ -179,7 +179,7 @@ The report covers adapter ownership and version, global and effective policy, th
 
 - If the adapter is missing or outdated, run `bazframe adapter install pi`.
 - If no profile is active, create one if needed and run `bazframe profile use <profile>`.
-- If effective behavior is disabled, inspect `bazframe global` and, in a Git worktree, `bazframe project`.
+- If effective behavior is disabled, inspect `bazframe global show` and, in a Git worktree, `bazframe project list`.
 - If a provider change is absent from an open Pi session, follow the resource update/build guidance in [Using Skills with Bazframe](skills.md#troubleshooting), then run `/bazframe reload`.
 
 For complete command syntax, use `bazframe help <resource>` or `bazframe <resource> --help`.

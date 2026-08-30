@@ -336,17 +336,17 @@ function decodeBranch(value: unknown): string { if (typeof value !== 'string' ||
 function forbiddenRefCharacter(character: string): boolean { const code = character.charCodeAt(0); return code <= 0x20 || code === 0x7f || '~^:?*[\\'.includes(character); }
 function parseJson(bytes: Uint8Array, path: string, code: string): unknown { try { const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); return JSON.parse(text); } catch (error) { throw new BazframeError(code, `Invalid managed Git JSON: ${path}`, { cause: error }); } }
 function recoveryRetryCommand(journal: ManagedGitJournal): string {
-  if (journal.operation === 'build') return `bazframe packages build ${journal.id}`;
+  if (journal.operation === 'build') return `bazframe package build ${journal.id}`;
   if (journal.operation === 'add') {
-    if (journal.kind === 'skill') return `bazframe add skill ${journal.fetchUrl}`;
-    return `bazframe ${journal.kind === 'library' ? 'libraries' : 'packages'} add ${journal.fetchUrl}`;
+    if (journal.kind === 'skill') return `bazframe skill add ${journal.fetchUrl}`;
+    return `bazframe ${journal.kind} add ${journal.fetchUrl}`;
   }
   if (journal.operation === 'remove') {
-    if (journal.kind === 'skill') return `bazframe remove skill ${journal.id}`;
-    return `bazframe ${journal.kind === 'library' ? 'libraries' : 'packages'} remove ${journal.id}`;
+    if (journal.kind === 'skill') return `bazframe skill remove ${journal.id}`;
+    return `bazframe ${journal.kind} remove ${journal.id}`;
   }
   if (journal.kind === 'skill') return `bazframe skill update ${journal.id}`;
-  return `bazframe ${journal.kind === 'library' ? 'libraries' : 'packages'} update ${journal.id}`;
+  return `bazframe ${journal.kind} update ${journal.id}`;
 }
 function safeName(value: string): string { return replaceUnsafeDisplayCharacters(value, '?').slice(0, 200); }
 function safeMessage(error: unknown): string { return replaceUnsafeDisplayCharacters(error instanceof Error ? error.message : String(error), ' ').slice(0, 1000); }

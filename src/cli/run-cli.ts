@@ -83,7 +83,7 @@ import {
 import { captureProfileCollectionReferenceBulkIndex } from '../profiles/profile-skill-collection-reference.js';
 import { addLibrary, addPackage, buildPackage, removeLibrary, removePackage, updateLibrary, type SkillCollectionLifecycleResult } from '../skill-collections/skill-collection-lifecycle.js';
 import { collectionKey, idForRecord, kindForRecord, skillsRootForRecord, type SkillCollectionKind } from '../skill-collections/skill-collection-store.js';
-import { buildStatus } from '../status/status.js';
+import { buildStatus, inspectStatus, statusExitStatus } from '../status/status.js';
 import {
   addManagedGitLibrary, addManagedGitPackage, addManagedGitSkill, buildManagedGitPackage,
   isManagedGitResource, isManagedGitSource, removeManagedGitLibrary, removeManagedGitPackage,
@@ -126,10 +126,11 @@ import {
   SKILLS_HELP,
   STATUS_HELP,
   TUI_HELP,
-  USE_HELP,
   VERSION
 } from './help.js';
 import { parseArgv, type Command, type HelpTopic } from './parse-argv.js';
+import { globalCollectionsResult, profileCollectionsResult, profileListResult, projectListResult, statusResult, type ProtocolDiagnostic } from './command-results.js';
+import { cliError, commandId, errorDocument, inferredCommandId, serializeJsonDocument, successDocument } from './json-protocol.js';
 
 export interface CliDependencies {
   cwd?: () => string;
@@ -146,6 +147,10 @@ export interface CliDependencies {
   terminateProcess?: (status: number) => void;
   editorChildRunner?: InheritedChildRunner;
   confirmManagedGitPackageBuild?: (details: ManagedGitBuildAuthorization) => boolean | Promise<boolean>;
+  /** Internal transport seams; callers select these through argv --json. */
+  jsonMode?: boolean;
+  captureResult?: (result: Record<string, unknown>) => void;
+  captureDiagnostic?: (diagnostic: ProtocolDiagnostic) => void;
   launchTui?: (options: {
     bazframeHome: string;
     bazframeVersion: string;
@@ -176,6 +181,7 @@ export async function runCli(
     dependencies.stderrIsTty ?? process.stderr.isTTY === true
   ));
   const parsed = parseArgv(argv);
+  const jsonMode = 'json' in parsed && parsed.json === true;
 
   if (parsed.kind === 'help') {
     writeStdout(colorizeHelp(helpFor(parsed.topic), stdoutColors));
@@ -186,21 +192,64 @@ export async function runCli(
     return EXIT_STATUS.success;
   }
   if (parsed.kind === 'usage-error') {
-    writeStderr(
-      `${stderrColors.error('error:')} ${parsed.message}\n\n${colorizeHelp(helpFor(parsed.topic), stderrColors)}`
-    );
+    if (jsonMode) {
+      writeStdout(serializeJsonDocument(errorDocument(
+        inferredCommandId(argv),
+        cliError(parsed.code ?? 'CLI_USAGE', parsed.message, parsed.topic)
+      )));
+    } else {
+      writeStderr(
+        `${stderrColors.error('error:')} ${parsed.message}\n\n${colorizeHelp(helpFor(parsed.topic), stderrColors)}`
+      );
+    }
     return EXIT_STATUS.usage;
   }
 
+  if (jsonMode) {
+    const id = commandId(parsed.command);
+    let result: Record<string, unknown> | undefined;
+    const diagnostics: ProtocolDiagnostic[] = [];
+    try {
+      if (parsed.command.name === 'packages-add' && isManagedGitSource(parsed.command.root) && !parsed.command.yes) {
+        throw new BazframeError('MANAGED_GIT_BUILD_CONFIRMATION_REQUIRED', 'JSON managed package acquisition requires --yes.');
+      }
+      if (parsed.command.name === 'packages-update' && !parsed.command.yes) {
+        throw new BazframeError('MANAGED_GIT_BUILD_CONFIRMATION_REQUIRED', 'JSON managed package update requires --yes.');
+      }
+      if (parsed.command.name === 'status') {
+        const bazframeHome = resolveBazframeHome(environment, dependencies.userHome);
+        const inspection = await inspectStatus({
+          bazframeHome, bazframeVersion: VERSION, environment,
+          cwd: (dependencies.cwd ?? process.cwd)(),
+          ...(dependencies.userHome === undefined ? {} : { userHome: dependencies.userHome }),
+          ...(dependencies.adapterArtifactUrl === undefined ? {} : { artifactUrl: dependencies.adapterArtifactUrl })
+        });
+        const exitStatus = statusExitStatus(inspection);
+        writeStdout(serializeJsonDocument(successDocument(id, statusResult(
+          inspection,
+          exitStatus === EXIT_STATUS.success ? 'ready' : 'attention'
+        ))));
+        return exitStatus;
+      }
+      const status = await runCommand(
+        parsed.command,
+        { ...dependencies, jsonMode: true, captureResult: (value) => { result = value; }, captureDiagnostic: (value) => { diagnostics.push(value); } },
+        () => undefined,
+        () => undefined,
+        createCliColors(false),
+        createCliColors(false)
+      );
+      if (result === undefined) throw new BazframeError('CLI_RESULT_MISSING', `No structured result was produced for ${id}.`);
+      writeStdout(serializeJsonDocument(successDocument(id, result, diagnostics)));
+      return status;
+    } catch (error) {
+      writeStdout(serializeJsonDocument(errorDocument(id, error, diagnostics)));
+      return EXIT_STATUS.failure;
+    }
+  }
+
   try {
-    return await runCommand(
-      parsed.command,
-      dependencies,
-      writeStdout,
-      writeStderr,
-      stdoutColors,
-      stderrColors
-    );
+    return await runCommand(parsed.command, dependencies, writeStdout, writeStderr, stdoutColors, stderrColors);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     writeStderr(`${stderrColors.error('error:')} ${message}\n`);
@@ -222,7 +271,7 @@ async function runCommand(
     const stdoutIsTty = dependencies.stdoutIsTty ?? process.stdout.isTTY === true;
     if (!stdinIsTty || !stdoutIsTty) {
       writeStderr(
-        'error: `bazframe tui` requires interactive stdin and stdout. Use `bazframe profiles` and `bazframe skills` in non-interactive environments.\n'
+        'error: `bazframe tui` requires interactive stdin and stdout. Use `bazframe profile list` and `bazframe skill list` in non-interactive environments.\n'
       );
       return EXIT_STATUS.failure;
     }
@@ -257,6 +306,7 @@ async function runCommand(
         ? {}
         : { artifactUrl: dependencies.adapterArtifactUrl })
     });
+    captureResult(dependencies,{adapters:[{id:'pi',state:adapter.state,targetPath:adapter.targetPath}]});
     writeStdout(formatAdaptersOverview(adapter.state, adapter.targetPath, stdoutColors));
     return EXIT_STATUS.success;
   }
@@ -270,6 +320,7 @@ async function runCommand(
         ? {}
         : { artifactUrl: dependencies.adapterArtifactUrl })
     }, command.force);
+    captureResult(dependencies,{action:result.action,adapterId:'pi',targetPath:result.targetPath,manifestPath:result.manifestPath});
     writeStdout([
       `Pi adapter: ${result.action}`,
       `Extension: ${result.targetPath}`,
@@ -288,6 +339,7 @@ async function runCommand(
         ? {}
         : { artifactUrl: dependencies.adapterArtifactUrl })
     });
+    captureResult(dependencies,{action:result.action,adapterId:'pi',targetPath:result.targetPath});
     writeStdout([
       `Pi adapter: ${result.action}`,
       `Extension: ${result.targetPath}`,
@@ -303,28 +355,24 @@ async function runCommand(
     } catch (error) {
       if (!(error instanceof BazframeError && error.code === 'NO_ACTIVE_PROFILE')) throw error;
     }
+    captureResult(dependencies,profileListResult(result.profileIds,activeProfile));
     writeStdout(formatProfilesOverview(result.profileIds, activeProfile, stdoutColors));
-    for (const diagnostic of result.diagnostics) {
-      writeStderr(`${stderrColors.warning('warning:')} ${diagnostic}\n`);
-    }
+    for (const diagnostic of result.diagnostics) reportWarning(dependencies,writeStderr,stderrColors,'PROFILE_ENTRY_INVALID',diagnostic);
     return EXIT_STATUS.success;
   }
   if (command.name === 'skills-overview') {
     const result = await inspectDefaultSkillCatalog(bazframeHome);
+    captureResult(dependencies,{catalogRoot:result.root,registrations:result.registrations.map((item)=>({id:item.id,target:item.target}))});
     writeStdout(formatSkillsOverview(result.root, result.registrations, stdoutColors));
-    for (const diagnostic of result.diagnostics) {
-      writeStderr(`${stderrColors.warning('warning:')} ${diagnostic}\n`);
-    }
+    for (const diagnostic of result.diagnostics) reportWarning(dependencies,writeStderr,stderrColors,'SKILL_REGISTRATION_INVALID',diagnostic);
     return EXIT_STATUS.success;
   }
   if (command.name === 'profile-skills-overview') {
     const profileId = await readActiveProfile(bazframeHome);
     const profile = await loadProfile(bazframeHome, profileId);
-    writeStdout(formatProfileSkillsOverview(
-      profileId,
-      profile.skillDirectories.map((directory) => basename(directory)),
-      stdoutColors
-    ));
+    const skillIds=profile.skillDirectories.map((directory) => basename(directory));
+    captureResult(dependencies,{profileId,skills:skillIds.map((id)=>({id}))});
+    writeStdout(formatProfileSkillsOverview(profileId,skillIds,stdoutColors));
     return EXIT_STATUS.success;
   }
   if (command.name === 'libraries-overview' || command.name === 'packages-overview') {
@@ -336,6 +384,7 @@ async function runCommand(
       const key = collectionKey(kindForRecord(item.record), idForRecord(item.record));
       referenceCounts.set(key, referenceIndex.diagnostics.length > 0 ? 'unknown' : (referenceIndex.profileIdsByCollection.get(key)?.length ?? 0));
     }
+    captureResult(dependencies,globalCollectionsResult(kind,inspection,referenceCounts,referenceIndex.diagnostics));
     writeStdout(formatCollectionsOverview(kind, inspection, referenceCounts, referenceIndex.diagnostics, stdoutColors));
     return EXIT_STATUS.success;
   }
@@ -344,11 +393,13 @@ async function runCommand(
     const profileId = await readActiveProfile(bazframeHome);
     const profile = await loadProfile(bazframeHome, profileId);
     const composition = await resolveProfileSkillCollections(profile.directory, loadFlatSkillIdentities(profile.skillDirectories));
+    captureResult(dependencies,profileCollectionsResult(profileId,kind,composition));
     writeStdout(formatProfileCollectionsOverview(profileId, kind, composition, stdoutColors));
     return EXIT_STATUS.success;
   }
-  if (command.name === 'use' || command.name === 'profile-use') {
+  if (command.name === 'profile-use') {
     const profile = await selectProfile(bazframeHome, command.profileId);
+    captureResult(dependencies,{action:'selected',profileId:profile.id,directory:profile.directory});
     writeStdout([
       `Active profile: ${profile.id}`,
       `Profile directory: ${profile.directory}`,
@@ -384,85 +435,78 @@ async function runCommand(
       environment,
       acceptRewrite: command.acceptRewrite
     }, command.skillId);
+    captureResult(dependencies,managedGitResult(result));
     writeStdout(formatManagedGitLifecycleResult(result));
     return EXIT_STATUS.success;
   }
   if (command.name === 'profile-add') {
-    writeStdout(formatProfileLifecycle(await addProfile(bazframeHome, command.profileId)));
-    return EXIT_STATUS.success;
+    const result=await addProfile(bazframeHome,command.profileId);captureResult(dependencies,{action:result.action,profileId:result.profileId,directory:result.directory});writeStdout(formatProfileLifecycle(result));return EXIT_STATUS.success;
   }
   if (command.name === 'profile-duplicate') {
-    writeStdout(formatProfileDuplicate(await duplicateProfile(
-      bazframeHome,
-      command.sourceProfileId,
-      command.profileId
-    )));
-    return EXIT_STATUS.success;
+    const result=await duplicateProfile(bazframeHome,command.sourceProfileId,command.profileId);captureResult(dependencies,{action:result.action,sourceProfileId:result.sourceProfileId,profileId:result.profileId,directory:result.directory,activeSelectionUpdated:false});writeStdout(formatProfileDuplicate(result));return EXIT_STATUS.success;
   }
   if (command.name === 'profile-remove') {
-    writeStdout(formatProfileLifecycle(
-      await removeProfile(bazframeHome, command.profileId, command.force)
-    ));
-    return EXIT_STATUS.success;
+    const result=await removeProfile(bazframeHome,command.profileId,command.force);captureResult(dependencies,{action:result.action,profileId:result.profileId,directory:result.directory});writeStdout(formatProfileLifecycle(result));return EXIT_STATUS.success;
   }
   if (command.name === 'profile-rename') {
-    writeStdout(formatProfileRename(await renameProfile(
-      bazframeHome,
-      command.previousProfileId,
-      command.profileId
-    )));
-    return EXIT_STATUS.success;
+    const result=await renameProfile(bazframeHome,command.previousProfileId,command.profileId);captureResult(dependencies,{action:result.action,previousProfileId:result.previousProfileId,profileId:result.profileId,directory:result.directory,activeSelectionUpdated:result.activeSelectionUpdated});writeStdout(formatProfileRename(result));return EXIT_STATUS.success;
   }
   if (command.name === 'profile-list') {
     const result = await listProfiles(bazframeHome);
-    if (result.profileIds.length > 0) writeStdout(`${result.profileIds.join('\n')}\n`);
-    for (const diagnostic of result.diagnostics) {
-      writeStderr(`${stderrColors.warning('warning:')} ${diagnostic}\n`);
-    }
+    let activeProfile: string | undefined;
+    try { activeProfile = await currentProfile(bazframeHome); }
+    catch (error) { if (!(error instanceof BazframeError && error.code === 'NO_ACTIVE_PROFILE')) throw error; }
+    captureResult(dependencies,profileListResult(result.profileIds,activeProfile));
+    writeStdout(formatProfilesOverview(result.profileIds, activeProfile, stdoutColors));
+    for (const diagnostic of result.diagnostics) reportWarning(dependencies,writeStderr,stderrColors,'PROFILE_ENTRY_INVALID',diagnostic);
     return EXIT_STATUS.success;
   }
   if (command.name === 'profile-current') {
-    writeStdout(`${await currentProfile(bazframeHome)}\n`);
+    const profileId=await currentProfile(bazframeHome);captureResult(dependencies,{profileId});
+    writeStdout(`${profileId}\n`);
     return EXIT_STATUS.success;
   }
   if (command.name === 'libraries-add' || command.name === 'libraries-update' || command.name === 'libraries-remove' || command.name === 'packages-add' || command.name === 'packages-build' || command.name === 'packages-update' || command.name === 'packages-remove') {
-    const options = { bazframeHome, environment };
+    const options = {
+      bazframeHome,
+      environment,
+      ...(dependencies.jsonMode === true ? { childOutputPolicy: 'stdout-and-stderr-to-parent-stderr' as const } : {})
+    };
     if (command.name === 'libraries-add' && isManagedGitSource(command.root)) {
-      writeStdout(formatManagedGitLifecycleResult(await addManagedGitLibrary(options, command.root)));
-      return EXIT_STATUS.success;
+      const result=await addManagedGitLibrary(options,command.root);captureResult(dependencies,managedGitResult(result));writeStdout(formatManagedGitLifecycleResult(result));return EXIT_STATUS.success;
     }
     if (command.name === 'packages-add' && isManagedGitSource(command.root)) {
-      writeStdout(formatManagedGitLifecycleResult(await addManagedGitPackage({
+      const result=await addManagedGitPackage({
         ...options,
         yes: command.yes,
-        reportPackageBuild: (details) => writeStdout(formatManagedPackageBuildAuthorization(details)),
-        confirmPackageBuild: dependencies.confirmManagedGitPackageBuild ?? (() => confirmManagedPackageBuild(dependencies))
-      }, command.root)));
-      return EXIT_STATUS.success;
+        ...(dependencies.jsonMode === true ? {} : {
+          reportPackageBuild: (details: ManagedGitBuildAuthorization) => writeStdout(formatManagedPackageBuildAuthorization(details)),
+          confirmPackageBuild: dependencies.confirmManagedGitPackageBuild ?? (() => confirmManagedPackageBuild(dependencies))
+        })
+      }, command.root);captureResult(dependencies,managedGitResult(result));writeStdout(formatManagedGitLifecycleResult(result));return EXIT_STATUS.success;
     }
     if (command.name === 'libraries-update' && await isManagedGitResource({ bazframeHome }, 'library', command.id)) {
-      writeStdout(formatManagedGitLifecycleResult(await updateManagedGitLibrary({ ...options, acceptRewrite: command.acceptRewrite }, command.id)));
-      return EXIT_STATUS.success;
+      const result=await updateManagedGitLibrary({...options,acceptRewrite:command.acceptRewrite},command.id);captureResult(dependencies,managedGitResult(result));writeStdout(formatManagedGitLifecycleResult(result));return EXIT_STATUS.success;
     }
     if (command.name === 'packages-update') {
-      writeStdout(formatManagedGitLifecycleResult(await updateManagedGitPackage({
+      const result=await updateManagedGitPackage({
         ...options,
         acceptRewrite: command.acceptRewrite,
         yes: command.yes,
-        reportPackageBuild: (details) => writeStdout(formatManagedPackageBuildAuthorization(details)),
-        confirmPackageBuild: dependencies.confirmManagedGitPackageBuild ?? (() => confirmManagedPackageBuild(dependencies))
-      }, command.id)));
-      return EXIT_STATUS.success;
+        ...(dependencies.jsonMode === true ? {} : {
+          reportPackageBuild: (details: ManagedGitBuildAuthorization) => writeStdout(formatManagedPackageBuildAuthorization(details)),
+          confirmPackageBuild: dependencies.confirmManagedGitPackageBuild ?? (() => confirmManagedPackageBuild(dependencies))
+        })
+      }, command.id);captureResult(dependencies,managedGitResult(result));writeStdout(formatManagedGitLifecycleResult(result));return EXIT_STATUS.success;
     }
     if (command.name === 'libraries-remove' && await isManagedGitResource({ bazframeHome }, 'library', command.id)) {
-      writeStdout(formatManagedGitLifecycleResult(await removeManagedGitLibrary(options, command.id)));
-      return EXIT_STATUS.success;
+      const result=await removeManagedGitLibrary(options,command.id);captureResult(dependencies,managedGitResult(result));writeStdout(formatManagedGitLifecycleResult(result));return EXIT_STATUS.success;
     }
     if (command.name === 'packages-remove' && await isManagedGitResource({ bazframeHome }, 'package', command.id)) {
-      writeStdout(formatManagedGitLifecycleResult(await removeManagedGitPackage(options, command.id)));
-      return EXIT_STATUS.success;
+      const result=await removeManagedGitPackage(options,command.id);captureResult(dependencies,managedGitResult(result));writeStdout(formatManagedGitLifecycleResult(result));return EXIT_STATUS.success;
     }
     let result: SkillCollectionLifecycleResult;
+    let managedProvider=false;
     switch (command.name) {
       case 'libraries-add': result = await addLibrary(options, command.root); break;
       case 'libraries-update':
@@ -471,13 +515,13 @@ async function runCommand(
       case 'libraries-remove': result = await removeLibrary(options, command.id); break;
       case 'packages-add': result = await addPackage(options, command.root); break;
       case 'packages-build':
-        result = await isManagedGitResource({ bazframeHome }, 'package', command.id)
-          ? await buildManagedGitPackage(options, command.id)
-          : await buildPackage(options, command.id);
+        managedProvider=await isManagedGitResource({bazframeHome},'package',command.id);
+        result=managedProvider?await buildManagedGitPackage(options,command.id):await buildPackage(options,command.id);
         break;
       case 'packages-remove': result = await removePackage(options, command.id); break;
       default: throw new Error('unreachable package update dispatch');
     }
+    captureResult(dependencies,{...collectionLifecycleResult(result),providerKind:managedProvider?'managed-git':'local'});
     writeStdout(formatCollectionLifecycleResult(result));
     return EXIT_STATUS.success;
   }
@@ -489,22 +533,19 @@ async function runCommand(
     else if (command.name === 'profile-libraries-remove') result = explicit ? await removeProfileLibraryReference(options, command.profileId!, command.id) : await removeActiveProfileLibraryReference(options, command.id);
     else if (command.name === 'profile-packages-add') result = explicit ? await addProfilePackageReference(options, command.profileId!, command.id) : await addActiveProfilePackageReference(options, command.id);
     else result = explicit ? await removeProfilePackageReference(options, command.profileId!, command.id) : await removeActiveProfilePackageReference(options, command.id);
+    captureResult(dependencies,collectionReferenceResult(result,explicit));
     writeStdout(formatCollectionReferenceResult(result, explicit));
     return EXIT_STATUS.success;
   }
   if (command.name === 'default-skill-add' || command.name === 'default-skill-remove') {
     if (command.name === 'default-skill-add' && isManagedGitSource(command.skillRoot)) {
-      writeStdout(formatManagedGitLifecycleResult(await addManagedGitSkill({ bazframeHome, environment }, command.skillRoot)));
-      return EXIT_STATUS.success;
+      const result=await addManagedGitSkill({bazframeHome,environment},command.skillRoot);captureResult(dependencies,managedGitResult(result));writeStdout(formatManagedGitLifecycleResult(result));return EXIT_STATUS.success;
     }
     if (command.name === 'default-skill-remove' && await isManagedGitResource({ bazframeHome }, 'skill', command.skillId)) {
-      writeStdout(formatManagedGitLifecycleResult(await removeManagedGitSkill({ bazframeHome, environment }, command.skillId)));
-      return EXIT_STATUS.success;
+      const result=await removeManagedGitSkill({bazframeHome,environment},command.skillId);captureResult(dependencies,managedGitResult(result));writeStdout(formatManagedGitLifecycleResult(result));return EXIT_STATUS.success;
     }
-    const result = command.name === 'default-skill-add'
-      ? await addDefaultSkill(bazframeHome, command.skillRoot)
-      : await removeDefaultSkill(bazframeHome, command.skillId);
-    writeStdout(formatDefaultSkillResult(result));
+    const result = command.name === 'default-skill-add' ? await addDefaultSkill(bazframeHome,command.skillRoot) : await removeDefaultSkill(bazframeHome,command.skillId);
+    captureResult(dependencies,{action:result.action,skillId:result.id,registrationPath:result.registrationPath,target:result.target.length===0?null:result.target,profileMembershipChanged:false});writeStdout(formatDefaultSkillResult(result));
     return EXIT_STATUS.success;
   }
   if (command.name === 'profile-skill-add' || command.name === 'profile-skill-remove') {
@@ -516,16 +557,17 @@ async function runCommand(
       : command.name === 'profile-skill-add'
         ? await addProfileSkill(options, command.profileId, command.skillId)
         : await removeProfileSkill(options, command.profileId, command.skillId);
+    captureResult(dependencies,{action:result.action,profileTarget:{id:result.profileId,source:command.profileId===undefined?'active-selection':'explicit'},skillId:result.skillId,sourceDirectory:result.sourceDirectory,membershipPath:result.membershipPath});
     writeStdout(formatMembershipResult(result, command.profileId !== undefined));
     return EXIT_STATUS.success;
   }
   if (command.name === 'global-overview') {
-    const policy = await readGlobalPolicy(bazframeHome);
+    const policy = await readGlobalPolicy(bazframeHome);captureResult(dependencies,{policy,statePath:policy==='enabled'?null:globalPolicyPath(bazframeHome)});
     writeStdout(formatGlobalOverview(policy, globalPolicyPath(bazframeHome), stdoutColors));
     return EXIT_STATUS.success;
   }
   if (command.name === 'global-disable') {
-    const action = await disableGlobally(bazframeHome);
+    const action = await disableGlobally(bazframeHome);captureResult(dependencies,{action,policy:'disabled',statePath:globalPolicyPath(bazframeHome)});
     writeStdout([
       `Global policy: disabled`,
       `Policy state: ${action}`,
@@ -537,7 +579,7 @@ async function runCommand(
   }
   if (command.name === 'global-enable') {
     await validateRuntimeReady(bazframeHome, environment, dependencies);
-    const action = await enableGlobally(bazframeHome);
+    const action = await enableGlobally(bazframeHome);captureResult(dependencies,{action,policy:'enabled',statePath:null});
     writeStdout([
       'Global policy: enabled',
       `Policy state: ${action}`,
@@ -559,16 +601,9 @@ async function runCommand(
     } catch (error) {
       if (!(error instanceof BazframeError && error.code === 'NOT_GIT_WORKTREE')) throw error;
     }
-    writeStdout(formatProjectsOverview(
-      result.projectStates,
-      currentWorktree,
-      currentProjectState,
-      globalPolicy,
-      stdoutColors
-    ));
-    for (const diagnostic of result.diagnostics) {
-      writeStderr(`${stderrColors.warning('warning:')} ${diagnostic}\n`);
-    }
+    captureResult(dependencies,projectListResult(result.projectStates,currentWorktree,currentProjectState,globalPolicy));
+    writeStdout(formatProjectsOverview(result.projectStates,currentWorktree,currentProjectState,globalPolicy,stdoutColors));
+    for (const diagnostic of result.diagnostics) reportWarning(dependencies,writeStderr,stderrColors,'PROJECT_STATE_INVALID',diagnostic);
     return EXIT_STATUS.success;
   }
   if (command.name === 'status') {
@@ -587,7 +622,7 @@ async function runCommand(
   }
   if (command.name === 'project-disable') {
     const repositoryRoot = await findGitRoot(cwd, environment);
-    const result = await disableRepository(bazframeHome, repositoryRoot);
+    const result = await disableRepository(bazframeHome, repositoryRoot);captureResult(dependencies,{action:result.action,policy:'disabled',repository:repositoryRoot,globalPolicy:result.globalPolicy,precedence:result.globalPolicy==='disabled'?'inherits-global-disabled':'disabled-project-override'});
     writeStdout([
       'Project policy: disabled',
       `Project state: ${result.action}`,
@@ -601,7 +636,7 @@ async function runCommand(
   if (command.name === 'project-enable') {
     const repositoryRoot = await findGitRoot(cwd, environment);
     const profileId = await validateRuntimeReady(bazframeHome, environment, dependencies);
-    const result = await enableRepository(bazframeHome, repositoryRoot);
+    const result = await enableRepository(bazframeHome, repositoryRoot);captureResult(dependencies,{action:result.action,policy:'enabled',repository:repositoryRoot,globalPolicy:result.globalPolicy,precedence:result.globalPolicy==='disabled'?'enabled-project-override':'inherits-global-enabled',profileId});
     writeStdout([
       'Project policy: enabled',
       `Project state: ${result.action}`,
@@ -615,6 +650,8 @@ async function runCommand(
     ].join('\n'));
     return EXIT_STATUS.success;
   }
+
+  if (command.name !== 'pi') throw new Error(`Unimplemented command dispatch: ${command.name}`);
 
   const repositoryRoot = await findGitRoot(cwd, environment);
   const globalPolicy = await readGlobalPolicy(bazframeHome);
@@ -711,14 +748,18 @@ async function validateRuntimeReady(
       : { artifactUrl: dependencies.adapterArtifactUrl })
   });
   if (adapter.state !== 'current') {
-    throw new Error(
-      `Pi adapter state is ${adapter.state}. Run \`bazframe adapter install pi\`, then retry.`
-    );
+    throw new BazframeError('PI_ADAPTER_NOT_READY',`Pi adapter state is ${adapter.state}. Run \`bazframe adapter install pi\`, then retry.`);
   }
   const profileId = await readActiveProfile(bazframeHome);
   await loadProfile(bazframeHome, profileId);
   return profileId;
 }
+
+function captureResult(dependencies:CliDependencies,result:Record<string,unknown>):void{dependencies.captureResult?.(result);}
+function reportWarning(dependencies:CliDependencies,writeStderr:(text:string)=>void,colors:CliColors,code:string,message:string):void{if(dependencies.captureDiagnostic!==undefined)dependencies.captureDiagnostic({level:'warning',code,message});else writeStderr(`${colors.warning('warning:')} ${message}\n`);}
+function managedGitResult(result:ManagedGitLifecycleResult):Record<string,unknown>{return{action:result.action,kind:result.kind,id:result.id,remote:result.remote,branch:result.branch,revision:result.revision,root:result.root,providerKind:'managed-git',resourceAction:result.resourceAction??null,profileMembershipChanged:false};}
+function collectionLifecycleResult(result:SkillCollectionLifecycleResult):Record<string,unknown>{const kind=kindForRecord(result);return{action:result.action,kind,id:idForRecord(result),root:result.root,digest:result.digest,skillsRoot:skillsRootForRecord(result),...('package'in result?{artifactRoot:result.artifactRoot}:{}),recordPath:result.path,providerKind:'local',profileMembershipChanged:false};}
+function collectionReferenceResult(result:ProfileCollectionReferenceResult,explicit:boolean):Record<string,unknown>{return'library'in result?{action:result.action,kind:'library',id:result.library,referencePath:result.path,profileTarget:{id:result.profileId,source:explicit?'explicit':'active-selection'}}:{action:result.action,kind:'package',id:result.package,referencePath:result.path,profileTarget:{id:result.profileId,source:explicit?'explicit':'active-selection'}};}
 
 function formatGlobalOverview(
   policy: GlobalPolicy,
@@ -764,10 +805,10 @@ function formatProfilesOverview(
     colors.command('  bazframe profile use <profile>'),
     colors.command('  bazframe profile edit <profile>'),
     colors.command('  bazframe profile rename <old> <new>'),
-    colors.command('  bazframe profile remove <profile> [--force]'),
-    colors.command('  bazframe profile skills'),
-    colors.command('  bazframe profile libraries'),
-    colors.command('  bazframe profile packages'),
+    colors.command('  bazframe profile remove [--force] <profile>'),
+    colors.command('  bazframe profile skill list'),
+    colors.command('  bazframe profile library list'),
+    colors.command('  bazframe profile package list'),
     colors.command('  bazframe profile list'),
     colors.command('  bazframe profile current'),
     ''
@@ -788,12 +829,12 @@ function formatSkillsOverview(
       : registrations.map((registration) => `  - ${registration.id} -> ${registration.target}`)),
     '',
     colors.heading('Commands:'),
-    colors.command('  bazframe add skill <absolute-root>'),
-    colors.command('  bazframe remove skill <skill>'),
+    colors.command('  bazframe skill add <absolute-root>'),
+    colors.command('  bazframe skill remove <skill>'),
     colors.command('  bazframe skill edit <skill>'),
-    colors.command('  bazframe profile skills'),
-    colors.command('  bazframe profile skills add <skill> [--profile <profile>]'),
-    colors.command('  bazframe profile skills remove <skill> [--profile <profile>]'),
+    colors.command('  bazframe profile skill list'),
+    colors.command('  bazframe profile skill add [--profile <profile>] <skill>'),
+    colors.command('  bazframe profile skill remove [--profile <profile>] <skill>'),
     ''
   ].join('\n');
 }
@@ -811,8 +852,8 @@ function formatProfileSkillsOverview(
       : skillIds.map((skillId) => `  - ${skillId}`)),
     '',
     colors.heading('Commands:'),
-    colors.command('  bazframe profile skills add <skill> [--profile <profile>]'),
-    colors.command('  bazframe profile skills remove <skill> [--profile <profile>]'),
+    colors.command('  bazframe profile skill add [--profile <profile>] <skill>'),
+    colors.command('  bazframe profile skill remove [--profile <profile>] <skill>'),
     ''
   ].join('\n');
 }
@@ -837,13 +878,13 @@ function formatCollectionsOverview(
     })),
     ...(diagnostics.length === 0 ? [] : [colors.heading(`${kind === 'library' ? 'Library' : 'Package'} failures:`), ...diagnostics.map((diagnostic) => colors.warning(`  - ${formatSkillCollectionDiagnostic(diagnostic)}`))]),
     ...(referenceDiagnostics.length === 0 ? [] : [colors.heading('Reference index failures:'), ...referenceDiagnostics.filter((item) => item.diagnostic.key.kind === kind).map((item) => colors.warning(`  - ${item.profileId}:${item.diagnostic.key.kind}:${item.diagnostic.path} invalid-reference (${item.diagnostic.key.id})`))]),
-    '', colors.heading('Commands:'), colors.command(`  bazframe ${plural} add <absolute-root>`), colors.command(`  bazframe ${plural} ${kind === 'library' ? 'update' : 'build'} <${kind}>`), colors.command(`  bazframe ${plural} remove <${kind}>`), ''
+    '', colors.heading('Commands:'), colors.command(`  bazframe ${kind} add <absolute-root>`), colors.command(`  bazframe ${kind} ${kind === 'library' ? 'update' : 'build'} <${kind}>`), colors.command(`  bazframe ${kind} remove <${kind}>`), ''
   ].join('\n');
 }
 
 function formatProfileCollectionsOverview(profileId:string,kind:SkillCollectionKind,composition:ProfileSkillCollectionComposition,colors:CliColors):string{
   const direct=composition.directCollections.filter((item)=>item.collectionKind===kind);const skills=composition.derivedSkills.filter((item)=>item.collectionKind===kind);const diagnostics=composition.diagnostics.filter((item)=>item.collectionKind===kind);const plural=kind==='library'?'libraries':'packages';
-  return [colors.heading(`Profile ${plural}`),colors.success(`Active profile: ${profileId}`),colors.heading(`Referenced ${plural}:`),...(direct.length===0?[colors.muted('  (none)')]:direct.map((item)=>item.snapshotDigest===undefined?`  - ${item.collectionId} (target unavailable)`:`  - ${item.collectionId} (sha256:${item.snapshotDigest}; Skills root:${item.skillsRoot})`)),colors.heading('Effective Skills:'),...(skills.length===0?[colors.muted('  (none)')]:skills.map((skill)=>`  - ${skill.name} (${skill.collectionId}:${skill.relativePath})`)),colors.heading(`${kind==='library'?'Library':'Package'} failures:`),...(diagnostics.length===0?[colors.muted('  (none)')]:diagnostics.map((item)=>colors.warning(`  - ${formatSkillCollectionDiagnostic(item)}`))),'',colors.heading('Commands:'),colors.command(`  bazframe profile ${plural} add <${kind}> [--profile <profile>]`),colors.command(`  bazframe profile ${plural} remove <${kind}> [--profile <profile>]`),''].join('\n');
+  return [colors.heading(`Profile ${plural}`),colors.success(`Active profile: ${profileId}`),colors.heading(`Referenced ${plural}:`),...(direct.length===0?[colors.muted('  (none)')]:direct.map((item)=>item.snapshotDigest===undefined?`  - ${item.collectionId} (target unavailable)`:`  - ${item.collectionId} (sha256:${item.snapshotDigest}; Skills root:${item.skillsRoot})`)),colors.heading('Effective Skills:'),...(skills.length===0?[colors.muted('  (none)')]:skills.map((skill)=>`  - ${skill.name} (${skill.collectionId}:${skill.relativePath})`)),colors.heading(`${kind==='library'?'Library':'Package'} failures:`),...(diagnostics.length===0?[colors.muted('  (none)')]:diagnostics.map((item)=>colors.warning(`  - ${formatSkillCollectionDiagnostic(item)}`))),'',colors.heading('Commands:'),colors.command(`  bazframe profile ${kind} add [--profile <profile>] <${kind}>`),colors.command(`  bazframe profile ${kind} remove [--profile <profile>] <${kind}>`),''].join('\n');
 }
 
 function formatProjectsOverview(
@@ -900,7 +941,7 @@ function formatAdaptersOverview(
     `Extension: ${targetPath}`,
     '',
     colors.heading('Commands:'),
-    colors.command('  bazframe adapter install pi [--force]'),
+    colors.command('  bazframe adapter install [--force] pi'),
     colors.command('  bazframe adapter uninstall pi'),
     ''
   ].join('\n');
@@ -953,7 +994,8 @@ function formatMembershipResult(
 ): string {
   return [
     `Profile skill membership: ${result.action}`,
-    `${explicitlyTargeted ? 'Profile' : 'Active profile'}: ${result.profileId}`,
+    `Profile: ${result.profileId}`,
+    `Profile target: ${explicitlyTargeted ? 'explicit' : 'active-selection'}`,
     `Skill: ${result.skillId}`,
     `Provider root: ${result.sourceDirectory}`,
     `Membership: ${result.membershipPath}`,
@@ -998,7 +1040,7 @@ function formatManagedGitLifecycleResult(result: ManagedGitLifecycleResult): str
 }
 
 function formatCollectionLifecycleResult(result:SkillCollectionLifecycleResult):string{const kind=kindForRecord(result);const id=idForRecord(result);return[`Global ${kind}: ${result.action}`,`${kind==='library'?'Library':'Package'}: ${id}`,`${kind==='library'?'Library':'Package'} root: ${result.root}`,`Snapshot: ${result.digest}`,`Skills root: ${skillsRootForRecord(result)}`,`Record: ${result.path}`,''].join('\n');}
-function formatCollectionReferenceResult(result:ProfileCollectionReferenceResult,explicit:boolean):string{if('library'in result)return[`Profile library reference: ${result.action}`,`${explicit?'Profile':'Active profile'}: ${result.profileId}`,`Library: ${result.library}`,`Reference: ${result.path}`,''].join('\n');return[`Profile package reference: ${result.action}`,`${explicit?'Profile':'Active profile'}: ${result.profileId}`,`Package: ${result.package}`,`Reference: ${result.path}`,''].join('\n');}
+function formatCollectionReferenceResult(result:ProfileCollectionReferenceResult,explicit:boolean):string{if('library'in result)return[`Profile library reference: ${result.action}`,`Profile: ${result.profileId}`,`Profile target: ${explicit?'explicit':'active-selection'}`,`Library: ${result.library}`,`Reference: ${result.path}`,''].join('\n');return[`Profile package reference: ${result.action}`,`Profile: ${result.profileId}`,`Profile target: ${explicit?'explicit':'active-selection'}`,`Package: ${result.package}`,`Reference: ${result.path}`,''].join('\n');}
 
 function formatHarnessSummary(
   dryRun: boolean,
@@ -1031,7 +1073,6 @@ function helpFor(topic: HelpTopic): string {
     case 'global': return GLOBAL_HELP;
     case 'status': return STATUS_HELP;
     case 'tui': return TUI_HELP;
-    case 'use': return USE_HELP;
     case 'add-skill': return ADD_HELP;
     case 'remove-skill': return REMOVE_HELP;
     case 'profile': return PROFILE_HELP;

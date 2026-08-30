@@ -136,7 +136,7 @@ try {
     ? join(temporaryRoot, 'node_modules', '.bin', 'bazframe.cmd')
     : join(temporaryRoot, 'node_modules', '.bin', 'bazframe');
   const packedCatalogHome = join(temporaryRoot, 'packed-catalog-home');
-  const registeredSkill = spawnSync(executable, ['add', 'skill', packagedSkill.replace(/\/SKILL\.md$/u, '')], {
+  const registeredSkill = spawnSync(executable, ['skill', 'add', packagedSkill.replace(/\/SKILL\.md$/u, '')], {
     encoding: 'utf8', shell: false, env: { ...process.env, BAZFRAME_HOME: packedCatalogHome }
   });
   if (registeredSkill.status !== 0 || !registeredSkill.stdout.includes('Default skill registration: added')) {
@@ -154,16 +154,16 @@ try {
     );
   }
 
-  const managedPackageHelp = spawnSync(executable, ['help', 'packages', 'update'], { encoding: 'utf8', shell: false });
+  const managedPackageHelp = spawnSync(executable, ['help', 'package', 'update'], { encoding: 'utf8', shell: false });
   if (managedPackageHelp.status !== 0
-    || !managedPackageHelp.stdout.includes('bazframe packages update <package>')
+    || !managedPackageHelp.stdout.includes('bazframe package update [--accept-rewrite] [--yes] [--json] <package>')
     || !managedPackageHelp.stdout.includes('--accept-rewrite')
     || !managedPackageHelp.stdout.includes('--yes')) {
     throw new Error(`Installed managed package help failed (${managedPackageHelp.status}).\nstdout: ${managedPackageHelp.stdout}\nstderr: ${managedPackageHelp.stderr}`);
   }
 
   const packedManagedHome = join(temporaryRoot, 'packed-managed-home');
-  const managedMissing = spawnSync(executable, ['packages', 'update', 'missing', '--yes'], {
+  const managedMissing = spawnSync(executable, ['package', 'update', 'missing', '--yes'], {
     encoding: 'utf8', shell: false, env: { ...process.env, BAZFRAME_HOME: packedManagedHome, NO_COLOR: '1' }
   });
   if (managedMissing.status !== 1 || !managedMissing.stderr.includes('is not a managed Git provider')) {
@@ -187,8 +187,8 @@ import{spawnSync}from'node:child_process';const args=process.argv.slice(2);let o
 `);
   chmodSync(packedGitWrapper, 0o755);
   const packedManagedEnvironment = { ...process.env, BAZFRAME_HOME: packedManagedHome, NO_COLOR: '1', BAZFRAME_GIT_COMMAND: packedGitWrapper, BAZFRAME_GH_COMMAND: join(temporaryRoot, 'missing-gh'), TEST_REMOTE: packedRemote };
-  runInstalled(executable, ['packages', 'add', 'https://example.test/team/packed-managed-package.git', '--yes'], packedManagedEnvironment, 'Managed Git package: added');
-  runInstalled(executable, ['packages', 'add', 'https://example.test/team/packed-managed-package.git', '--yes'], { ...packedManagedEnvironment, TEST_FAIL_CLONE: '1' }, 'Managed Git package: current');
+  runInstalled(executable, ['package', 'add', 'https://example.test/team/packed-managed-package.git', '--yes'], packedManagedEnvironment, 'Managed Git package: added');
+  runInstalled(executable, ['package', 'add', 'https://example.test/team/packed-managed-package.git', '--yes'], { ...packedManagedEnvironment, TEST_FAIL_CLONE: '1' }, 'Managed Git package: current');
   const packedManagedStatus = spawnSync(executable, ['status'], { encoding: 'utf8', shell: false, env: packedManagedEnvironment });
   if (![0, 3].includes(packedManagedStatus.status ?? -1)
     || !packedManagedStatus.stdout.includes('package packed-managed-package: ready; example.test/team/packed-managed-package')) {
@@ -255,17 +255,17 @@ import{spawnSync}from'node:child_process';const args=process.argv.slice(2);let o
   const libraryRoot = join(temporaryRoot, 'packed-library');
   mkdirSync(join(libraryRoot, 'library-skill'), { recursive: true });
   writeFileSync(join(libraryRoot, 'library-skill', 'SKILL.md'), '---\nname: library-skill\ndescription: Packed library Skill.\n---\n# Library\n');
-  runInstalled(executable, ['libraries', 'add', libraryRoot], collectionEnvironment, 'Global library: added');
-  runInstalled(executable, ['profile', 'libraries', 'add', 'packed-library'], collectionEnvironment, 'Profile library reference: added');
+  runInstalled(executable, ['library', 'add', libraryRoot], collectionEnvironment, 'Global library: added');
+  runInstalled(executable, ['profile', 'library', 'add', 'packed-library'], collectionEnvironment, 'Profile library reference: added');
   writeFileSync(join(libraryRoot, 'provider-update.txt'), 'updated\n');
-  runInstalled(executable, ['libraries', 'update', 'packed-library'], collectionEnvironment, 'Global library: updated');
+  runInstalled(executable, ['library', 'update', 'packed-library'], collectionEnvironment, 'Global library: updated');
   const fixturePackageRoot = join(temporaryRoot, 'packed-package');
   mkdirSync(fixturePackageRoot, { recursive: true });
   writeFileSync(join(fixturePackageRoot, 'build.mjs'), "import{mkdir,writeFile}from'node:fs/promises';await mkdir('dist/skills/package-skill',{recursive:true});await writeFile('dist/skills/package-skill/SKILL.md','---\\nname: package-skill\\ndescription: Packed package Skill.\\n---\\n# Package\\n');\n");
   writeFileSync(join(fixturePackageRoot, 'bazframe-package.json'), JSON.stringify({ schemaVersion: 1, build: [process.execPath, 'build.mjs'], artifactRoot: 'dist', skillsRoot: 'skills' }));
-  runInstalled(executable, ['packages', 'add', fixturePackageRoot], collectionEnvironment, 'Global package: added');
-  runInstalled(executable, ['profile', 'packages', 'add', 'packed-package'], collectionEnvironment, 'Profile package reference: added');
-  runInstalled(executable, ['packages', 'build', 'packed-package'], collectionEnvironment, 'Global package: built');
+  runInstalled(executable, ['package', 'add', fixturePackageRoot], collectionEnvironment, 'Global package: added');
+  runInstalled(executable, ['profile', 'package', 'add', 'packed-package'], collectionEnvironment, 'Profile package reference: added');
+  runInstalled(executable, ['package', 'build', 'packed-package'], collectionEnvironment, 'Global package: built');
   const obsolete = spawnSync(executable, ['sources'], { encoding: 'utf8', shell: false, env: collectionEnvironment });
   if (obsolete.status !== 2 || existsSync(join(collectionHome, 'sources'))) throw new Error(`Obsolete sources command was not inert.\nstdout: ${obsolete.stdout}\nstderr: ${obsolete.stderr}`);
 
@@ -289,8 +289,8 @@ import{spawnSync}from'node:child_process';const args=process.argv.slice(2);let o
     skillEditorHelp.status !== 0
     || !skillEditorHelp.stdout.includes('bazframe skill edit <skill>')
     || !skillEditorHelp.stdout.includes('edit provider input')
-    || !skillEditorHelp.stdout.includes('bazframe libraries update <library>')
-    || !skillEditorHelp.stdout.includes('bazframe packages build <package>')
+    || !skillEditorHelp.stdout.includes('bazframe library update <library>')
+    || !skillEditorHelp.stdout.includes('bazframe package build <package>')
   ) {
     throw new Error(
       `Packed skill editor help failed (${skillEditorHelp.status}).\nstdout: ${skillEditorHelp.stdout}\nstderr: ${skillEditorHelp.stderr}`

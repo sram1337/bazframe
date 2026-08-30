@@ -456,7 +456,7 @@ async function validatePackage(packagePath, bazframeCommand, environment) {
   try {
     const result = runProcess(
       bazframeCommand,
-      ['packages', 'add', inspected.packageRoot],
+      ['package', 'add', inspected.packageRoot],
       {
         environment: {
           ...environment,
@@ -893,11 +893,11 @@ The package scaffold requires Node.js 22.19 or newer and Bazframe. Each copied \
 
 \`\`\`bash
 npm run build
-bazframe packages add "$PWD"
-bazframe profile packages add ${packageName}
+bazframe package add "$PWD"
+bazframe profile package add ${packageName}
 \`\`\`
 
-Edit provider source under \`skills/\`, rebuild with \`bazframe packages build ${packageName}\`, and run \`/bazframe reload\` in an existing Pi session.
+Edit provider source under \`skills/\`, rebuild with \`bazframe package build ${packageName}\`, and run \`/bazframe reload\` in an existing Pi session.
 
 Bazframe builds are explicit and unsandboxed. Review \`bazframe-package.json\`, \`scripts/bazify-build.mjs\`, and the copied Skills before activation.
 
@@ -913,7 +913,7 @@ function agentsTemplate(packageName, skillNames) {
 - Treat \`skills/\` as provider-owned source and \`dist/\` as generated output.
 - Preserve these Agent Skill names and directory basenames: ${skillNames.map((name) => `\`${name}\``).join(', ')}.
 - Keep \`bazframe-package.json\` and \`scripts/bazify-build.mjs\` synchronized with the selected Skills.
-- After source edits, run \`npm run build\`, then validate through \`bazframe packages build ${packageName}\` when registered.
+- After source edits, run \`npm run build\`, then validate through \`bazframe package build ${packageName}\` when registered.
 - Keep requirements, setup, provenance, and license status synchronized with source behavior.
 - Keep secrets, provider \`.git\` state, \`node_modules\`, and generated \`dist/\` out of commits.
 `;

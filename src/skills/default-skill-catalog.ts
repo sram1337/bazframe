@@ -201,7 +201,7 @@ export async function addDefaultSkill(
   const registrationPath = join(defaultSkillCatalogRoot(bazframeHome), id);
   return withCatalogLock(
     bazframeHome,
-    'bazframe add skill',
+    'bazframe skill add',
     registrationPath,
     testHooks.stateLockHeld === true,
     async () => {
@@ -248,7 +248,7 @@ export async function removeDefaultSkill(
   const registrationPath = join(defaultSkillCatalogRoot(bazframeHome), skillId);
   return withCatalogLock(
     bazframeHome,
-    'bazframe remove skill',
+    'bazframe skill remove',
     registrationPath,
     testHooks.stateLockHeld === true,
     async () => {
@@ -403,7 +403,7 @@ async function assertDirectoryStable(directory: OpenDirectory): Promise<void> {
 function identity(metadata: { dev: bigint; ino: bigint }): DirectoryIdentity { return { device: metadata.dev, inode: metadata.ino }; }
 function sameIdentity(left: DirectoryIdentity, right: DirectoryIdentity): boolean { return left.device === right.device && left.inode === right.inode; }
 function invalidCatalog(path: string): BazframeError { return new BazframeError('DEFAULT_SKILL_CATALOG_INVALID', `Default skill catalog must be a physical directory: ${path}`); }
-function notFound(skillId: string): BazframeError { return new BazframeError('DEFAULT_SKILL_NOT_FOUND', `Default skill ${JSON.stringify(skillId)} is not registered. Run \`bazframe add skill <absolute-root>\`.`); }
+function notFound(skillId: string): BazframeError { return new BazframeError('DEFAULT_SKILL_NOT_FOUND', `Default skill ${JSON.stringify(skillId)} is not registered. Run \`bazframe skill add <absolute-root>\`.`); }
 function occupiedRegistration(path: string, raw: RawRegistration | undefined): BazframeError {
   const detail = raw?.kind === 'link' ? `targets ${JSON.stringify(raw.target)}` : 'is a physical or unreadable entry';
   return new BazframeError('DEFAULT_SKILL_OCCUPIED', `Default skill registration is occupied: ${path} ${detail}.`);

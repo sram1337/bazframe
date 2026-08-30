@@ -18,16 +18,16 @@ bazframe profile use personal
 # Bundled Skills are optional and are never activated by npm installation.
 # To add Bazframe's management Skill explicitly, uncomment these lines:
 # BAZFRAME_PACKAGE_ROOT="$(npm root --global)/bazframe"
-# bazframe add skill "$BAZFRAME_PACKAGE_ROOT/dist/skills/bazframe"
-# bazframe profile skills add bazframe
+# bazframe skill add "$BAZFRAME_PACKAGE_ROOT/dist/skills/bazframe"
+# bazframe profile skill add bazframe
 
 # Provider-owned resources remain explicit. Replace the examples before use:
-# bazframe add skill git:owner/root-skill
-# bazframe profile skills add root-skill
-# bazframe libraries add git:owner/skill-library
-# bazframe profile libraries add skill-library
-# bazframe packages add git:owner/skill-package
-# bazframe profile packages add skill-package
+# bazframe skill add git:owner/root-skill
+# bazframe profile skill add root-skill
+# bazframe library add git:owner/skill-library
+# bazframe profile library add skill-library
+# bazframe package add git:owner/skill-package
+# bazframe profile package add skill-package
 
 # Verify the local setup, then start Pi with: pi
 bazframe status

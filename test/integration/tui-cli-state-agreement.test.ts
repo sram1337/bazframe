@@ -51,11 +51,8 @@ describe('CLI and TUI service state agreement', () => {
     const providerBefore = await snapshotFilesystem(provider);
 
     await service.createProfile('focused');
-    expect(await cli(['profile', 'list'])).toMatchObject({
-      status: 0,
-      stdout: 'focused\n',
-      stderr: ''
-    });
+    expect(await cli(['profile', 'list'])).toMatchObject({ status: 0, stderr: '' });
+    expect((await cli(['profile', 'list'])).stdout).toContain('  - focused');
 
     expect(await cli(['profile', 'duplicate', 'focused', 'focused-copy']))
       .toMatchObject({ status: 0, stderr: '' });
@@ -83,16 +80,15 @@ describe('CLI and TUI service state agreement', () => {
     expect(await cli(['profile', 'use', 'spare']))
       .toMatchObject({ status: 0, stderr: '' });
     await service.removeProfile('reviewer', { kind: 'generated-empty' });
-    expect(await cli(['profile', 'list'])).toMatchObject({
-      status: 0,
-      stdout: 'focused\nspare\n',
-      stderr: ''
-    });
+    const profiles = await cli(['profile', 'list']);
+    expect(profiles).toMatchObject({ status: 0, stderr: '' });
+    expect(profiles.stdout).toContain('  - focused');
+    expect(profiles.stdout).toContain('  * spare (active)');
 
     const providerSkill = await realpath(directory.path('provider/demo-skill'));
-    expect(await cli(['add', 'skill', providerSkill])).toMatchObject({ status: 0, stderr: '' });
+    expect(await cli(['skill', 'add', providerSkill])).toMatchObject({ status: 0, stderr: '' });
     expect(await cli([
-      'profile', 'skills', 'add', 'demo-skill', '--profile', 'focused'
+      'profile', 'skill', 'add', 'demo-skill', '--profile', 'focused'
     ])).toMatchObject({ status: 0, stderr: '' });
     let dashboard = await service.loadDashboard();
     expect(dashboard.activeProfileId).toBe('spare');
@@ -111,7 +107,7 @@ describe('CLI and TUI service state agreement', () => {
       skillId: cliMembership!.skillId
     });
     expect(await cli([
-      'profile', 'skills', 'remove', 'demo-skill', '--profile', 'focused'
+      'profile', 'skill', 'remove', 'demo-skill', '--profile', 'focused'
     ])).toMatchObject({ status: 0, stdout: expect.stringContaining('absent'), stderr: '' });
 
     await service.addMembership('focused', {
@@ -119,7 +115,7 @@ describe('CLI and TUI service state agreement', () => {
       skillId: 'demo-skill'
     });
     expect(await cli([
-      'profile', 'skills', 'add', 'demo-skill', '--profile', 'focused'
+      'profile', 'skill', 'add', 'demo-skill', '--profile', 'focused'
     ])).toMatchObject({ status: 0, stdout: expect.stringContaining('current'), stderr: '' });
     expect(await cli(['profile', 'current'])).toMatchObject({
       status: 0,
@@ -128,7 +124,7 @@ describe('CLI and TUI service state agreement', () => {
     });
 
     expect(await cli([
-      'profile', 'skills', 'remove', 'demo-skill', '--profile', 'focused'
+      'profile', 'skill', 'remove', 'demo-skill', '--profile', 'focused'
     ])).toMatchObject({ status: 0, stdout: expect.stringContaining('removed'), stderr: '' });
     dashboard = await service.loadDashboard();
     expect(dashboard.activeProfileId).toBe('spare');
@@ -224,7 +220,7 @@ describe('CLI and TUI service state agreement', () => {
     const added = await service.addLibrary({ source: provider });
     expect(added).toMatchObject({ action: 'added', library: 'downloaded' });
 
-    const overview = await cli(['libraries']);
+    const overview = await cli(['library', 'list']);
     expect(overview).toMatchObject({ status: 0, stderr: '' });
     expect(overview.stdout).toContain('downloaded');
     const dashboard = await service.loadDashboard();
