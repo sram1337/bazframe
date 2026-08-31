@@ -24,12 +24,17 @@ export function profileImportPlanResult(plan: ProfileImportPlan): Record<string,
   omittedLocalSkills:[...plan.omittedLocalSkills],
   libraries:[...plan.libraries],
   packages:[...plan.packages],
-  resources:plan.resources.map((resource)=>({
+  resources:plan.resources.map((resource)=>resource.source.type==='remoteGit'?{
    kind:resource.kind,id:resource.id,sourceType:'remoteGit',remote:resource.source.remote,
    fetchUrl:resource.source.fetchUrl,branch:resource.source.branch,revision:resource.source.revision,
    action:resource.action,networkRequired:resource.networkRequired,buildRequired:resource.buildRequired,
    ...(resource.reason===undefined?{}:{reason:resource.reason})
-  })),
+  }:{
+   kind:resource.kind,id:resource.id,sourceType:'localMapping',
+   ...(resource.source.root===undefined?{}:{root:resource.source.root}),
+   action:resource.action,networkRequired:false,buildRequired:false,
+   ...(resource.reason===undefined?{}:{reason:resource.reason})
+  }),
   activeSelection:{...plan.activeSelection},
   composition:{...plan.composition,deferredLibraries:[...plan.composition.deferredLibraries],knownCollectionSkillPreview:[...plan.composition.knownCollectionSkillPreview]},
   exclusions:{...plan.exclusions},
@@ -70,7 +75,9 @@ export function profileExportResult(result: ProfileExportResult): Record<string,
   omittedLocalSkills:[...result.omittedLocalSkills],
   libraries:[...result.libraries],
   packages:[...result.packages],
-  resources:result.resources.map(({kind,id,source})=>({kind,id,sourceType:'remoteGit',remote:source.remote,fetchUrl:source.fetchUrl,branch:source.branch,revision:source.revision}))
+  resources:result.resources.map(({kind,id,source})=>source.type==='remoteGit'
+   ?{kind,id,sourceType:'remoteGit',remote:source.remote,fetchUrl:source.fetchUrl,branch:source.branch,revision:source.revision}
+   :{kind,id,sourceType:'localMapping'})
  };
 }
 

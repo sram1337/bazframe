@@ -463,6 +463,7 @@ async function runCommand(
         bazframeHome,
         artifactDirectory: command.artifactDirectory,
         ...(command.destinationProfileId === undefined ? {} : { destinationProfileId: command.destinationProfileId }),
+        mappings: command.mappings.map((mapping) => ({ ...mapping })),
         environment
       });
       captureResult(dependencies, profileImportDryRunResult(planning.plan));
@@ -473,6 +474,7 @@ async function runCommand(
       bazframeHome,
       artifactDirectory: command.artifactDirectory,
       ...(command.destinationProfileId === undefined ? {} : { destinationProfileId: command.destinationProfileId }),
+      mappings: command.mappings.map((mapping) => ({ ...mapping })),
       environment,
       ...(dependencies.jsonMode === true ? { childOutputPolicy: 'stdout-and-stderr-to-parent-stderr' as const } : {}),
       reportPlan: async (plan) => {
@@ -1047,15 +1049,25 @@ function formatProfileImportPlan(plan: ProfileImportPlan, mode: 'dry-run' | 'exe
     ? ['  (none)']
     : plan.resources.map((resource) => [
         `  - ${resource.kind}:${boundedTextForDisplay(resource.id)} — ${resource.action}`,
-        `    remote: ${boundedTextForDisplay(resource.source.remote)}`,
-        `    fetch URL: ${boundedTextForDisplay(resource.source.fetchUrl)}`,
-        `    branch/revision: ${boundedTextForDisplay(resource.source.branch)} @ ${boundedTextForDisplay(resource.source.revision)}`,
+        ...(resource.source.type === 'remoteGit' ? [
+          `    remote: ${boundedTextForDisplay(resource.source.remote)}`,
+          `    fetch URL: ${boundedTextForDisplay(resource.source.fetchUrl)}`,
+          `    branch/revision: ${boundedTextForDisplay(resource.source.branch)} @ ${boundedTextForDisplay(resource.source.revision)}`
+        ] : [
+          `    local mapping: ${resource.source.root === undefined ? '(required)' : boundedPathForDisplay(resource.source.root)}`
+        ]),
         `    network required: ${resource.networkRequired ? 'yes' : 'no'}; build required: no`,
         ...(resource.reason === undefined ? [] : [`    reason: ${boundedTextForDisplay(resource.reason)}`])
       ].join('\n'));
   const blockers = plan.blockers.length === 0
     ? ['  (none)']
     : plan.blockers.map((blocker) => `  - ${boundedTextForDisplay(blocker.code)} [${boundedTextForDisplay(blocker.key)}]: ${boundedTextForDisplay(blocker.message)}`);
+  const remoteLibraries = plan.resources
+    .filter((resource) => resource.kind === 'library' && resource.source.type === 'remoteGit')
+    .map((resource) => resource.id);
+  const localLibraries = plan.resources
+    .filter((resource) => resource.kind === 'library' && resource.source.type === 'localMapping')
+    .map((resource) => resource.id);
   return [
     `Profile import plan (${mode === 'dry-run' ? 'dry-run inspection only' : 'execution inspection'}):`,
     `Artifact: ${boundedPathForDisplay(plan.artifactPath)}`,
@@ -1065,8 +1077,9 @@ function formatProfileImportPlan(plan: ProfileImportPlan, mode: 'dry-run' | 'exe
     `Instructions: ${boundedTextForDisplay(plan.instructions.path)} (sha256:${boundedTextForDisplay(plan.instructions.sha256)})`,
     ...list('Direct remote Git Skills:', plan.skills),
     ...list('Omitted local Skills:', plan.omittedLocalSkills),
-    ...list('Remote Git libraries:', plan.libraries),
-    'Packages: absent (Stage 1)',
+    ...list('Remote Git libraries:', remoteLibraries),
+    ...list('Local-mapping libraries:', localLibraries),
+    'Packages: absent (Stage 2)',
     'Resources:',
     ...resources,
     `Active selection: ${plan.activeSelection.state}${plan.activeSelection.profileId === undefined ? '' : ` (${boundedTextForDisplay(plan.activeSelection.profileId)})`}; will change: no`,
@@ -1186,15 +1199,22 @@ function formatProfileExport(result: ProfileExportResult): string {
       ? ['  (none)']
       : values.map((value) => `  - ${boundedTextForDisplay(value)}`))
   ];
+  const remoteLibraries = result.resources
+    .filter((resource) => resource.kind === 'library' && resource.source.type === 'remoteGit')
+    .map((resource) => resource.id);
+  const localLibraries = result.resources
+    .filter((resource) => resource.kind === 'library' && resource.source.type === 'localMapping')
+    .map((resource) => resource.id);
   return [
     `Profile export: ${result.action}`,
     `Profile: ${escapeUnsafeDisplayCharacters(result.exportedProfileId)}`,
     `Output: ${boundedPathForDisplay(result.outputPath)}`,
     `Instructions: ${escapeUnsafeDisplayCharacters(result.instructions.path)} (sha256:${escapeUnsafeDisplayCharacters(result.instructions.sha256)})`,
     ...itemLines('Remote Git Skills:', result.skills),
-    ...itemLines('Remote Git libraries:', result.libraries),
+    ...itemLines('Remote Git libraries:', remoteLibraries),
+    ...itemLines('Local-mapping libraries:', localLibraries),
     ...itemLines('Omitted local Skills:', result.omittedLocalSkills),
-    'Packages: absent (Stage 1)',
+    'Packages: absent (Stage 2)',
     ''
   ].join('\n');
 }

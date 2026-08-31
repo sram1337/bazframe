@@ -52,6 +52,10 @@ export type SkillSnapshotHandleTarget =
 export interface SkillSnapshotDependencies {
   beforePublish?: (stagingRoot: string) => Promise<void>;
   duringArtifactVerification?: (artifactPath: string) => Promise<void>;
+  /** Internal exact source precondition for a caller that already inspected the physical root. */
+  expectedInputRootIdentity?: { canonicalPath: string; device: bigint; inode: bigint };
+  /** Internal deterministic substitution seam immediately before snapshot input capture. */
+  beforeInputRootIdentityCapture?: () => Promise<void>;
   /** Deterministic source-mutation seam used only by lifecycle tests. */
   duringSourceFileCopy?: (sourcePath: string) => void | Promise<void>;
   /** Deterministic artifact-mutation seam used only by verification tests. */
@@ -175,6 +179,10 @@ export async function publishSkillSnapshot(
 ): Promise<PublishedSnapshot> {
   const policy = copyLimitPolicy(dependencies.limitPolicy);
   const canonicalInput = await physicalDirectory(inputArtifactRoot, 'Artifact root');
+  if (dependencies.expectedInputRootIdentity !== undefined
+    && canonicalInput !== dependencies.expectedInputRootIdentity.canonicalPath) {
+    throw new BazframeError('SKILL_COLLECTION_ROOT_CHANGED', `Snapshot input root does not match the caller's expected canonical path: ${canonicalInput}`);
+  }
   const store = snapshotStoreRoot(bazframeHome);
   await ensureManagedDirectory(bazframeHome, store);
   const canonicalStore = await realpath(store);
@@ -191,7 +199,19 @@ export async function publishSkillSnapshot(
     await createOwnedStagingDirectory(staging, '.', owned);
     await createOwnedStagingDirectory(stagedArtifact, 'artifact', owned);
     const budget: TraversalBudget = { entries: 1, aggregateFileBytes: 0 };
-    await copyTree(canonicalInput, stagedArtifact, '.', entries, canonicalInput, policy, budget, dependencies, owned);
+    await dependencies.beforeInputRootIdentityCapture?.();
+    await copyTree(
+      canonicalInput,
+      stagedArtifact,
+      '.',
+      entries,
+      canonicalInput,
+      policy,
+      budget,
+      dependencies,
+      owned,
+      dependencies.expectedInputRootIdentity
+    );
     entries.sort((a, b) => compare(a.path, b.path));
     const manifest: SnapshotManifest = { schemaVersion: 1, entries };
     const manifestBytes = encodeSnapshotManifest(manifest, policy);
@@ -337,9 +357,16 @@ async function copyTree(
   policy: SkillSnapshotLimitPolicy,
   budget: TraversalBudget,
   dependencies: SkillSnapshotDependencies,
-  owned: OwnedStagingTree
+  owned: OwnedStagingTree,
+  expectedRootIdentity?: { canonicalPath: string; device: bigint; inode: bigint }
 ): Promise<void> {
   const identity = await physicalDirectoryIdentity(source, 'snapshot input directory', invalidEntry);
+  if (relativePath === '.' && expectedRootIdentity !== undefined
+    && (source !== expectedRootIdentity.canonicalPath
+      || identity.device !== expectedRootIdentity.device
+      || identity.inode !== expectedRootIdentity.inode)) {
+    throw new BazframeError('SKILL_COLLECTION_ROOT_CHANGED', `Snapshot input root does not match the caller's expected physical identity: ${source}`);
+  }
   const directory = await opendir(source);
   let operationError: unknown;
   try {

@@ -5,7 +5,14 @@ import {
   executeProfileImport,
   type ProfileImportExecutionDependencies
 } from '../../../src/profile-portability/profile-import.js';
-import type { ProfileImportPlanningResult } from '../../../src/profile-portability/profile-import-plan.js';
+import type {
+  ProfileImportPlanningResult,
+  ProfileImportResourceSnapshot
+} from '../../../src/profile-portability/profile-import-plan.js';
+import type {
+  LocalLibraryHealthSnapshot,
+  LocalLibraryImportOutcomeClassification
+} from '../../../src/profile-portability/profile-import-local-library.js';
 import {
   ProfileImportPublicationError,
   type ProfileImportPublicationOptions
@@ -100,6 +107,7 @@ function planning(options: PlanningOptions = {}): ProfileImportPlanningResult {
     ? resources.map((resource, index) => ({
         kind: resource.kind,
         id: resource.id,
+        sourceType: 'remoteGit' as const,
         health: health(resource.kind, resource.id, (options.healthInode ?? 30n) + BigInt(index * 10))
       }))
     : [];
@@ -120,6 +128,7 @@ function planning(options: PlanningOptions = {}): ProfileImportPlanningResult {
       }
     },
     resourceSnapshots: snapshots,
+    mappingSnapshots: [],
     plan: {
       artifactPath,
       schemaVersion: 1,
@@ -154,6 +163,114 @@ function planning(options: PlanningOptions = {}): ProfileImportPlanningResult {
       blockers: options.blockers ?? []
     }
   };
+}
+
+function localPlanning(action: 'create' | 'reuse', root = '/tmp/sources/toolkit'): ProfileImportPlanningResult {
+  const base = planning({
+    resourceAction: action,
+    composition: action === 'create' ? 'deferred' : 'ready'
+  });
+  const mapping = { kind: 'library' as const, id: 'toolkit', root, device: 9n, inode: 90n };
+  const localHealth: LocalLibraryHealthSnapshot = {
+    mapping,
+    collectionSnapshot: {
+      record: { schemaVersion: 1, library: 'toolkit', root, digest: 'd'.repeat(64) },
+      path: `${home}/libraries/toolkit.json`,
+      device: 8n,
+      inode: 80n,
+      contentSha256: 'c'.repeat(64)
+    }
+  };
+  base.artifactSnapshot.artifact.profile.skills = [];
+  base.artifactSnapshot.artifact.resources = [{ kind: 'library', id: 'toolkit', source: { type: 'localMapping' } }];
+  base.plan.skills = [];
+  base.plan.resources = [{
+    kind: 'library', id: 'toolkit', source: { type: 'localMapping', root }, action,
+    networkRequired: false, buildRequired: false
+  }];
+  base.plan.composition = {
+    status: action === 'create' ? 'deferred' : 'ready',
+    deferredLibraries: action === 'create' ? ['toolkit'] : [],
+    knownCollectionSkillCount: action === 'reuse' ? 1 : 0,
+    knownCollectionSkillPreview: action === 'reuse' ? ['child'] : []
+  };
+  base.mappingSnapshots = [mapping];
+  base.resourceSnapshots = action === 'reuse' ? [{ kind: 'library', id: 'toolkit', sourceType: 'localMapping', health: localHealth }] : [];
+  return base;
+}
+
+function mixedPlanning(action: 'create' | 'reuse'): ProfileImportPlanningResult {
+  const base = planning({ resourceAction: action, composition: action === 'create' ? 'deferred' : 'ready' });
+  const mapping = { kind: 'library' as const, id: 'middle', root: '/tmp/sources/middle', device: 9n, inode: 90n };
+  const localHealth: LocalLibraryHealthSnapshot = {
+    mapping,
+    collectionSnapshot: {
+      record: { schemaVersion: 1, library: 'middle', root: mapping.root, digest: 'd'.repeat(64) },
+      path: `${home}/libraries/middle.json`, device: 8n, inode: 80n, contentSha256: 'c'.repeat(64)
+    }
+  };
+  const resources: Array<
+    | { kind: 'skill'; id: string; source: ReturnType<typeof source> }
+    | { kind: 'library'; id: string; source: ReturnType<typeof source> }
+    | { kind: 'library'; id: string; source: { type: 'localMapping' } }
+  > = [
+    { kind: 'skill', id: 'alpha', source: source('alpha') },
+    { kind: 'skill', id: 'zeta', source: source('zeta') },
+    { kind: 'library', id: 'alpha-lib', source: source('alpha-lib') },
+    { kind: 'library', id: 'middle', source: { type: 'localMapping' } },
+    { kind: 'library', id: 'zeta-lib', source: source('zeta-lib') }
+  ];
+  base.artifactSnapshot.artifact.profile.libraries = ['alpha-lib', 'middle', 'zeta-lib'];
+  base.artifactSnapshot.artifact.resources = resources;
+  base.plan.libraries = ['alpha-lib', 'middle', 'zeta-lib'];
+  base.plan.resources = resources.map((resource): ProfileImportPlanningResult['plan']['resources'][number] => {
+    if (resource.source.type === 'localMapping') {
+      return {
+        kind: 'library', id: resource.id, source: { type: 'localMapping', root: mapping.root }, action,
+        networkRequired: false, buildRequired: false
+      };
+    }
+    if (resource.kind === 'skill') {
+      return {
+        kind: 'skill', id: resource.id, source: { ...resource.source }, action,
+        networkRequired: action === 'create', buildRequired: false
+      };
+    }
+    return {
+      kind: 'library', id: resource.id, source: { ...resource.source }, action,
+      networkRequired: action === 'create', buildRequired: false
+    };
+  });
+  base.plan.composition = {
+    status: action === 'create' ? 'deferred' : 'ready',
+    deferredLibraries: action === 'create' ? ['alpha-lib', 'middle', 'zeta-lib'] : [],
+    knownCollectionSkillCount: action === 'reuse' ? 3 : 0,
+    knownCollectionSkillPreview: action === 'reuse' ? ['alpha-child', 'middle-child', 'zeta-child'] : []
+  };
+  base.mappingSnapshots = [mapping];
+  base.resourceSnapshots = action === 'reuse' ? [
+    { kind: 'skill', id: 'alpha', sourceType: 'remoteGit' as const, health: health('skill', 'alpha', 30n) },
+    { kind: 'skill', id: 'zeta', sourceType: 'remoteGit' as const, health: health('skill', 'zeta', 40n) },
+    { kind: 'library', id: 'alpha-lib', sourceType: 'remoteGit' as const, health: health('library', 'alpha-lib', 50n) },
+    { kind: 'library', id: 'middle', sourceType: 'localMapping' as const, health: localHealth },
+    { kind: 'library', id: 'zeta-lib', sourceType: 'remoteGit' as const, health: health('library', 'zeta-lib', 60n) }
+  ] : [];
+  return base;
+}
+
+function driftLocalPlanning(field: 'root' | 'device' | 'inode'): ProfileImportPlanningResult {
+  const result = localPlanning('reuse');
+  const mapping = result.mappingSnapshots[0]!;
+  if (field === 'root') mapping.root = '/tmp/changed/toolkit';
+  else if (field === 'device') mapping.device += 1n;
+  else mapping.inode += 1n;
+  const resource = result.plan.resources[0]!;
+  if (resource.source.type === 'localMapping') resource.source.root = mapping.root;
+  const snapshot = result.resourceSnapshots[0]!;
+  if (snapshot.sourceType !== 'localMapping') throw new Error('Expected local drift fixture health.');
+  snapshot.health.mapping = { ...mapping };
+  snapshot.health.collectionSnapshot.record.root = mapping.root;
+  return result;
 }
 
 function baseDependencies(plans: ProfileImportPlanningResult[], events: string[] = []): ProfileImportExecutionDependencies {
@@ -214,7 +331,8 @@ describe('unexposed profile-import execution', () => {
     const deps = baseDependencies([blocked], events);
     await expect(executeProfileImport(runOptions((plan) => {
       events.push('report');
-      plan.resources[0]!.source.branch = 'changed';
+      const source = plan.resources[0]!.source;
+      if (source.type === 'remoteGit') source.branch = 'changed';
       plan.skills.length = 0;
       plan.blockers.length = 0;
     }), deps)).rejects.toBeInstanceOf(ProfileImportBlockedError);
@@ -263,7 +381,8 @@ describe('unexposed profile-import execution', () => {
     entered = {
       ...runOptions((plan) => {
         events.push('report');
-        plan.resources[0]!.source.branch = 'mutated';
+        const source = plan.resources[0]!.source;
+        if (source.type === 'remoteGit') source.branch = 'mutated';
         plan.skills.splice(0);
         entered.environment.TEST = 'mutated';
         entered.acquisitionLimits.maxCheckoutEntries = 1;
@@ -295,6 +414,200 @@ describe('unexposed profile-import execution', () => {
       environment: { TEST: 'stable' },
       acquisitionLimits: { maxCheckoutEntries: 100 }
     });
+  });
+
+  it('orders interleaved remote and mapped libraries lexically after all direct Skills', async () => {
+    const events: string[] = [];
+    const create = mixedPlanning('create');
+    const exact = mixedPlanning('reuse');
+    const deps = baseDependencies([create, create, exact, exact], events);
+    deps.assertLocalMapping = vi.fn(async (mapping) => mapping);
+    deps.classifyLocalLibraryOutcome = vi.fn(async () => ({ state: 'absent' as const }));
+    deps.addLocalLibrary = vi.fn(async (_options, root) => {
+      events.push(`local-add:${root}`);
+      return {
+        schemaVersion: 1 as const, library: 'middle', root, digest: 'd'.repeat(64),
+        action: 'added' as const, path: `${home}/libraries/middle.json`
+      };
+    });
+    const result = await executeProfileImport({
+      ...runOptions(() => { events.push('report'); }),
+      mappings: [{ kind: 'library', id: 'middle', root: '/tmp/sources/middle' }]
+    }, deps);
+    const lifecycleEvents = events.filter((event) => event.startsWith('skill:')
+      || event.startsWith('library:') || event.startsWith('local-add:'));
+    expect(lifecycleEvents).toEqual([
+      `skill:alpha:${revision}`,
+      `skill:zeta:${revision}`,
+      `library:alpha-lib:${revision}`,
+      'local-add:/tmp/sources/middle',
+      `library:zeta-lib:${revision}`
+    ]);
+    expect(events.indexOf(`library:zeta-lib:${revision}`)).toBeLessThan(events.indexOf('publish-input:alpha,zeta:alpha-lib,middle,zeta-lib'));
+    expect(events.indexOf('publish-input:alpha,zeta:alpha-lib,middle,zeta-lib')).toBeLessThan(events.indexOf('rename'));
+    expect(result.resources).toEqual([
+      { kind: 'skill', id: 'alpha', outcome: 'created' },
+      { kind: 'skill', id: 'zeta', outcome: 'created' },
+      { kind: 'library', id: 'alpha-lib', outcome: 'created' },
+      { kind: 'library', id: 'middle', outcome: 'created' },
+      { kind: 'library', id: 'zeta-lib', outcome: 'created' }
+    ]);
+    expect(deps.addLocalLibrary).toHaveBeenCalledWith(
+      expect.any(Object), '/tmp/sources/middle',
+      { stateLockHeld: true, expectedRootIdentity: { root: '/tmp/sources/middle', device: 9n, inode: 90n } }
+    );
+    expect((deps.publishProfile as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({
+      skills: [{ id: 'alpha' }, { id: 'zeta' }],
+      libraryIds: ['alpha-lib', 'middle', 'zeta-lib']
+    });
+  });
+
+  it('creates a mapped local library through the ordinary lifecycle and revalidates it before publication', async () => {
+    const events: string[] = [];
+    const create = localPlanning('create');
+    const exact = localPlanning('reuse');
+    const deps = baseDependencies([create, create, exact, exact], events);
+    deps.assertLocalMapping = vi.fn(async (mapping) => { events.push(`mapping:${mapping.id}`); return mapping; });
+    deps.addLocalLibrary = vi.fn(async (_options, root) => {
+      events.push(`local-add:${root}`);
+      return { schemaVersion: 1 as const, library: 'toolkit', root, digest: 'd'.repeat(64), action: 'added' as const, path: `${home}/libraries/toolkit.json` };
+    });
+    const exactSnapshot = exact.resourceSnapshots[0]!;
+    if (exactSnapshot.sourceType !== 'localMapping') throw new Error('Expected local fixture health.');
+    deps.classifyLocalLibraryOutcome = vi.fn()
+      .mockResolvedValueOnce({ state: 'absent' })
+      .mockResolvedValue({ state: 'exact', health: exactSnapshot.health });
+    const result = await executeProfileImport({
+      ...runOptions(() => { events.push('report'); }),
+      mappings: [{ kind: 'library', id: 'toolkit', root: '/tmp/sources/toolkit' }]
+    }, deps);
+    expect(result.resources).toEqual([{ kind: 'library', id: 'toolkit', outcome: 'created' }]);
+    expect(deps.addLocalLibrary).toHaveBeenCalledWith(
+      expect.objectContaining({ bazframeHome: home }),
+      '/tmp/sources/toolkit',
+      {
+        stateLockHeld: true,
+        expectedRootIdentity: { root: '/tmp/sources/toolkit', device: 9n, inode: 90n }
+      }
+    );
+    expect(deps.addSkillAtRevision).not.toHaveBeenCalled();
+    expect(deps.addLibraryAtRevision).not.toHaveBeenCalled();
+    expect(events.indexOf('report')).toBeLessThan(events.indexOf('local-add:/tmp/sources/toolkit'));
+    expect(events.filter((event) => event.startsWith('plan:')).length).toBe(4);
+  });
+
+  it.each(['root', 'device', 'inode'] as const)('blocks mapped %s drift at the post-acquisition authoritative replan', async (field) => {
+    const events: string[] = [];
+    const create = localPlanning('create');
+    const changed = driftLocalPlanning(field);
+    const exact = localPlanning('reuse');
+    const deps = baseDependencies([create, create, changed], events);
+    deps.assertLocalMapping = vi.fn(async (mapping) => mapping);
+    deps.addLocalLibrary = vi.fn(async (_options, root) => ({
+      schemaVersion: 1 as const, library: 'toolkit', root, digest: 'd'.repeat(64),
+      action: 'added' as const, path: `${home}/libraries/toolkit.json`
+    }));
+    const exactSnapshot = exact.resourceSnapshots[0]!;
+    if (exactSnapshot.sourceType !== 'localMapping') throw new Error('Expected exact local fixture health.');
+    deps.classifyLocalLibraryOutcome = vi.fn()
+      .mockResolvedValueOnce({ state: 'absent' })
+      .mockResolvedValue({ state: 'exact', health: exactSnapshot.health });
+    const error = await executionError(executeProfileImport({
+      ...runOptions(), mappings: [{ kind: 'library', id: 'toolkit', root: '/tmp/sources/toolkit' }]
+    }, deps));
+    expect(error.result).toMatchObject({
+      resources: [{ kind: 'library', id: 'toolkit', outcome: 'created' }],
+      profileOutcome: 'not-published'
+    });
+    expect(deps.publishProfile).not.toHaveBeenCalled();
+    expect(events).not.toContain('rename');
+  });
+
+  it.each(['root', 'device', 'inode'] as const)('blocks mapped %s drift at the final lock-held replan', async (field) => {
+    const events: string[] = [];
+    const create = localPlanning('create');
+    const exact = localPlanning('reuse');
+    const changed = driftLocalPlanning(field);
+    const deps = baseDependencies([create, create, exact, changed], events);
+    deps.assertLocalMapping = vi.fn(async (mapping) => mapping);
+    deps.addLocalLibrary = vi.fn(async (_options, root) => ({
+      schemaVersion: 1 as const, library: 'toolkit', root, digest: 'd'.repeat(64),
+      action: 'added' as const, path: `${home}/libraries/toolkit.json`
+    }));
+    const exactSnapshot = exact.resourceSnapshots[0]!;
+    if (exactSnapshot.sourceType !== 'localMapping') throw new Error('Expected exact local fixture health.');
+    deps.classifyLocalLibraryOutcome = vi.fn()
+      .mockResolvedValueOnce({ state: 'absent' })
+      .mockResolvedValue({ state: 'exact', health: exactSnapshot.health });
+    const error = await executionError(executeProfileImport({
+      ...runOptions(), mappings: [{ kind: 'library', id: 'toolkit', root: '/tmp/sources/toolkit' }]
+    }, deps));
+    expect(error.result).toMatchObject({
+      resources: [{ kind: 'library', id: 'toolkit', outcome: 'created' }],
+      profileOutcome: 'not-published'
+    });
+    expect(deps.publishProfile).toHaveBeenCalledOnce();
+    expect(events).not.toContain('rename');
+    const finalPlanIndex = events.lastIndexOf('plan:3');
+    expect(events.lastIndexOf('lock')).toBeLessThan(finalPlanIndex);
+  });
+
+  it('refuses provider occupancy introduced at the locked local-create boundary', async () => {
+    const events: string[] = [];
+    const create = localPlanning('create');
+    const deps = baseDependencies([create, create], events);
+    deps.assertLocalMapping = vi.fn(async (mapping) => mapping);
+    deps.addLocalLibrary = vi.fn();
+    deps.classifyLocalLibraryOutcome = vi.fn(async () => {
+      events.push('provider-occupancy');
+      return { state: 'ambiguous' as const, reason: 'provider occupancy appeared' };
+    });
+    const error = await executionError(executeProfileImport({
+      ...runOptions(), mappings: [{ kind: 'library', id: 'toolkit', root: '/tmp/sources/toolkit' }]
+    }, deps));
+    expect(error.result.resources).toEqual([{ kind: 'library', id: 'toolkit', outcome: 'commit-ambiguous' }]);
+    expect(deps.addLocalLibrary).not.toHaveBeenCalled();
+    expect(events.indexOf('lock')).toBeLessThan(events.indexOf('provider-occupancy'));
+    expect(deps.stateLock).toHaveBeenCalledWith(
+      expect.stringContaining('state.lock'),
+      expect.objectContaining({ command: 'bazframe profile import local library' }),
+      expect.any(Function),
+      expect.objectContaining({ managedRoot: home })
+    );
+  });
+
+  it('refuses mapped-root identity substitution at the importer-to-lifecycle boundary', async () => {
+    const create = localPlanning('create');
+    const deps = baseDependencies([create, create]);
+    deps.assertLocalMapping = vi.fn(async (mapping) => ({ ...mapping, inode: mapping.inode + 1n }));
+    deps.addLocalLibrary = vi.fn();
+    deps.classifyLocalLibraryOutcome = vi.fn(async () => ({ state: 'absent' as const }));
+    const error = await executionError(executeProfileImport({
+      ...runOptions(), mappings: [{ kind: 'library', id: 'toolkit', root: '/tmp/sources/toolkit' }]
+    }, deps));
+    expect(error.result.resources).toEqual([{ kind: 'library', id: 'toolkit', outcome: 'not-created' }]);
+    expect(deps.addLocalLibrary).not.toHaveBeenCalled();
+  });
+
+  it('reuses an exact mapped local library without invoking its lifecycle', async () => {
+    const exact = localPlanning('reuse');
+    const deps = baseDependencies([exact, exact, exact, exact]);
+    deps.assertLocalMapping = vi.fn(async (mapping) => mapping);
+    deps.addLocalLibrary = vi.fn();
+    const exactSnapshot = exact.resourceSnapshots[0]!;
+    if (exactSnapshot.sourceType !== 'localMapping') throw new Error('Expected local fixture health.');
+    // @ts-expect-error Internal planning evidence cannot pair local health with a remote Git source.
+    const impossible: ProfileImportResourceSnapshot = { kind: 'library', id: 'toolkit', sourceType: 'remoteGit', health: exactSnapshot.health };
+    expect(impossible.sourceType).toBe('remoteGit');
+    deps.classifyLocalLibraryOutcome = vi.fn(async (): Promise<LocalLibraryImportOutcomeClassification> => ({
+      state: 'exact', health: exactSnapshot.health
+    }));
+    const result = await executeProfileImport({
+      ...runOptions(), mappings: [{ kind: 'library', id: 'toolkit', root: '/tmp/sources/toolkit' }]
+    }, deps);
+    expect(result.resources).toEqual([{ kind: 'library', id: 'toolkit', outcome: 'reused' }]);
+    expect(deps.addLocalLibrary).not.toHaveBeenCalled();
+    expect(deps.classifyLocalLibraryOutcome).toHaveBeenCalled();
   });
 
   it('rejects artifact or retained exact-dependency drift in the post-acquisition inspection', async () => {
@@ -390,6 +703,56 @@ describe('unexposed profile-import execution', () => {
     }));
     const error = await executionError(executeProfileImport(runOptions(), deps));
     expect(error.result.resources[0]).toEqual({ kind: 'skill', id: 'alpha', outcome: 'commit-ambiguous' });
+  });
+
+  it('classifies exact local state after a thrown create as commit-ambiguous', async () => {
+    const create = localPlanning('create');
+    const exact = localPlanning('reuse');
+    const deps = baseDependencies([create, create]);
+    deps.assertLocalMapping = vi.fn(async (mapping) => mapping);
+    deps.addLocalLibrary = vi.fn(async () => { throw new Error('local add reporting failed at /private/source/toolkit and /private/home'); });
+    const exactSnapshot = exact.resourceSnapshots[0]!;
+    if (exactSnapshot.sourceType !== 'localMapping') throw new Error('Expected local fixture health.');
+    deps.classifyLocalLibraryOutcome = vi.fn()
+      .mockResolvedValueOnce({ state: 'absent' })
+      .mockResolvedValue({ state: 'exact', health: exactSnapshot.health });
+    const error = await executionError(executeProfileImport({
+      ...runOptions(), mappings: [{ kind: 'library', id: 'toolkit', root: '/tmp/sources/toolkit' }]
+    }, deps));
+    expect(error.result.resources).toEqual([{ kind: 'library', id: 'toolkit', outcome: 'commit-ambiguous' }]);
+    expect(error.cause).toMatchObject({
+      code: 'PROFILE_IMPORT_LOCAL_LIBRARY_FAILED',
+      message: 'Mapped local library toolkit creation did not complete safely.'
+    });
+    expect((error.cause as Error).message).not.toContain('/private');
+  });
+
+  it('keeps a committed local create ambiguous when global-lock release fails', async () => {
+    const create = localPlanning('create');
+    const exact = localPlanning('reuse');
+    const deps = baseDependencies([create, create]);
+    deps.assertLocalMapping = vi.fn(async (mapping) => mapping);
+    deps.addLocalLibrary = vi.fn(async (_options, root) => ({
+      schemaVersion: 1 as const,
+      library: 'toolkit',
+      root,
+      digest: 'd'.repeat(64),
+      action: 'added' as const,
+      path: `${home}/libraries/toolkit.json`
+    }));
+    const exactSnapshot = exact.resourceSnapshots[0]!;
+    if (exactSnapshot.sourceType !== 'localMapping') throw new Error('Expected local fixture health.');
+    deps.classifyLocalLibraryOutcome = vi.fn()
+      .mockResolvedValueOnce({ state: 'absent' })
+      .mockResolvedValue({ state: 'exact', health: exactSnapshot.health });
+    (deps.stateLock as ReturnType<typeof vi.fn>).mockImplementation(async (_path, _details, operation) => {
+      await operation();
+      throw new Error('release failed after local commit');
+    });
+    const error = await executionError(executeProfileImport({
+      ...runOptions(), mappings: [{ kind: 'library', id: 'toolkit', root: '/tmp/sources/toolkit' }]
+    }, deps));
+    expect(error.result.resources).toEqual([{ kind: 'library', id: 'toolkit', outcome: 'commit-ambiguous' }]);
   });
 
   it('preserves proven reuse across lock-release failure', async () => {

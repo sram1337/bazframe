@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   assertStage1ProfileArtifactCapabilities,
+  assertStage2ProfileArtifactCapabilities,
   decodeProfileArtifactBytes,
   decodeProfileArtifactObject,
   encodeProfileArtifact,
   type ProfileArtifact,
-  type ProfileArtifactLimitPolicy
+  type ProfileArtifactLimitPolicy,
+  type ProfileArtifactResource
 } from '../../../src/profile-portability/profile-artifact.js';
 
 function remoteGitSource(id: string) {
@@ -16,6 +18,14 @@ function remoteGitSource(id: string) {
     branch: 'main',
     revision: 'a'.repeat(40)
   };
+}
+
+function packageResource(
+  source: ReturnType<typeof remoteGitSource> | { type: 'localMapping' }
+): ProfileArtifactResource {
+  return source.type === 'remoteGit'
+    ? { kind: 'package', id: 'automation', source }
+    : { kind: 'package', id: 'automation', source };
 }
 
 function remoteGitFixture(): ProfileArtifact {
@@ -241,15 +251,19 @@ describe('profile artifact object codec', () => {
     for (const packageSource of [remoteGitSource('automation'), { type: 'localMapping' as const }]) {
       const withPackage = remoteGitFixture();
       withPackage.profile.packages = ['automation'];
-      withPackage.resources.push({ kind: 'package', id: 'automation', source: packageSource });
+      withPackage.resources.push(packageResource(packageSource));
       expect(decode(withPackage).resources[2]!.source).toEqual(packageSource);
     }
   });
 
-  it('universally rejects local direct-Skill resources', () => {
+  it('universally rejects local direct-Skill resources and makes them unrepresentable', () => {
     const fixture = remoteGitFixture();
     fixture.resources[0]!.source = { type: 'localMapping' };
     expect(() => decode(fixture)).toThrow(/not portable/u);
+
+    // @ts-expect-error Local direct Skills are excluded from the compile-time artifact resource union.
+    const impossible: ProfileArtifactResource = { kind: 'skill', id: 'alpha', source: { type: 'localMapping' } };
+    expect(impossible.source.type).toBe('localMapping');
   });
 
   it('refuses local libraries and every package variant at the Stage 1 capability guard', () => {
@@ -260,9 +274,20 @@ describe('profile artifact object codec', () => {
     for (const packageSource of [remoteGitSource('automation'), { type: 'localMapping' as const }]) {
       const withPackage = remoteGitFixture();
       withPackage.profile.packages = ['automation'];
-      withPackage.resources.push({ kind: 'package', id: 'automation', source: packageSource });
+      withPackage.resources.push(packageResource(packageSource));
       expect(() => assertStage1ProfileArtifactCapabilities(decode(withPackage))).toThrow(/packages/u);
     }
+  });
+
+  it('permits local libraries but refuses every package at the Stage 2 capability guard', () => {
+    const localLibrary = clone(remoteGitFixture());
+    localLibrary.resources[1]!.source = { type: 'localMapping' };
+    expect(() => assertStage2ProfileArtifactCapabilities(decode(localLibrary))).not.toThrow();
+
+    const withPackage = clone(remoteGitFixture());
+    withPackage.profile.packages = ['automation'];
+    withPackage.resources.push({ kind: 'package', id: 'automation', source: remoteGitSource('automation') });
+    expect(() => assertStage2ProfileArtifactCapabilities(decode(withPackage))).toThrow(/packages/u);
   });
 
   it('enforces fixture-derived below, at, and above canonical manifest byte ceilings', () => {

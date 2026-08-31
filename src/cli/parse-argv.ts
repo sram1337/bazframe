@@ -19,11 +19,17 @@ export type HelpTopic =
 type NoArgumentCommandName = 'profiles-overview' | 'profile-list' | 'profile-current' | 'skills-overview' | 'profile-skills-overview' | 'libraries-overview' | 'packages-overview' | 'profile-libraries-overview' | 'profile-packages-overview' | 'projects-overview' | 'global-overview' | 'adapters-overview' | 'global-enable' | 'global-disable' | 'project-enable' | 'project-disable' | 'status' | 'tui';
 type NoArgumentCommand = { [Name in NoArgumentCommandName]: { name: Name } }[NoArgumentCommandName];
 
+export interface ProfileImportCliMapping {
+  kind: 'library';
+  id: string;
+  root: string;
+}
+
 export type Command =
   | NoArgumentCommand
   | { name: 'profile-add' | 'profile-use' | 'profile-edit'; profileId: string }
   | { name: 'profile-export'; profileId: string; outputDirectory: string }
-  | { name: 'profile-import'; artifactDirectory: string; destinationProfileId?: string; dryRun: boolean }
+  | { name: 'profile-import'; artifactDirectory: string; destinationProfileId?: string; mappings: ProfileImportCliMapping[]; dryRun: boolean }
   | { name: 'profile-duplicate'; sourceProfileId: string; profileId: string }
   | { name: 'profile-remove'; profileId: string; force: boolean }
   | { name: 'profile-rename'; previousProfileId: string; profileId: string }
@@ -50,6 +56,7 @@ export type ParseResult =
 
 const HELP_FLAGS = new Set(['-h', '--help']);
 const VERSION_FLAGS = new Set(['-v', '--version']);
+const VALUE_OPTIONS = new Set(['--as', '--map', '--output', '--profile']);
 
 export function parseArgv(input: readonly string[]): ParseResult {
   const extracted = extractJson(input);
@@ -74,6 +81,10 @@ function extractJson(input: readonly string[]): { argv: string[]; json: boolean;
     if (afterDelimiter) { argv.push(value); continue; }
     if (value === '--') { afterDelimiter = true; argv.push(value); continue; }
     if (value === '--json') {
+      if (VALUE_OPTIONS.has(argv.at(-1) ?? '')) {
+        argv.push(value);
+        continue;
+      }
       if (json) return { argv, json: true, error: 'Option --json may be specified only once.' };
       json = true;
     } else argv.push(value);
@@ -161,20 +172,7 @@ function parseProfile(args: readonly string[]): ParseResult {
     if (outputDirectory === undefined || outputDirectory.includes('\0')) return usage('profile export requires one nonempty --output <directory> value without NUL bytes.', topic);
     return command({ name:'profile-export', profileId:parsed.operands[0]!, outputDirectory });
   }
-  if (verb === 'import') {
-    const parsed = options(rest, ['dry-run'], ['as'], topic); if ('kind' in parsed) return parsed;
-    if (parsed.operands.length !== 1 || parsed.operands[0]!.length === 0 || parsed.operands[0]!.includes('\0')) {
-      return usage('profile import requires one nonempty <directory> value without NUL bytes.', topic);
-    }
-    const destinationProfileId = parsed.values.get('as');
-    if (destinationProfileId !== undefined && !isSafeProfileId(destinationProfileId)) return invalidProfile(topic);
-    return command({
-      name: 'profile-import',
-      artifactDirectory: parsed.operands[0]!,
-      ...(destinationProfileId === undefined ? {} : { destinationProfileId }),
-      dryRun: parsed.booleans.has('dry-run')
-    });
-  }
+  if (verb === 'import') return parseProfileImport(rest, topic);
   if (verb === 'add' || verb === 'use' || verb === 'edit') {
     const operands = noOptions(rest, topic); if (!Array.isArray(operands)) return operands;
     if (operands.length !== 1) return usage(`profile ${verb} requires exactly one <profile> argument.`, topic);
@@ -182,6 +180,71 @@ function parseProfile(args: readonly string[]): ParseResult {
     return command({ name:`profile-${verb}` as 'profile-add'|'profile-use'|'profile-edit', profileId:operands[0]! });
   }
   return usage('profile requires `list`, `current`, `export`, `import`, a lifecycle verb, or singular `skill`, `library`, or `package`.', 'profile');
+}
+
+function parseProfileImport(args: readonly string[], topic: HelpTopic): ParseResult {
+  const operands: string[] = [];
+  const mappings: ProfileImportCliMapping[] = [];
+  const mappingKeys = new Set<string>();
+  let destinationProfileId: string | undefined;
+  let dryRun = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (!arg.startsWith('-')) { operands.push(arg); continue; }
+    if (arg === '--') return usage('The `--` operand delimiter is not supported for this command.', topic);
+    const match = /^--([^=]+)(?:=(.*))?$/.exec(arg);
+    if (match === null) return usage(`Unknown option: ${arg}`, topic);
+    const name = match[1]!;
+    const inline = match[2];
+    if (name === 'dry-run') {
+      if (inline !== undefined) return usage('Option --dry-run does not accept a value.', topic);
+      if (dryRun) return usage('Option --dry-run may be specified only once.', topic);
+      dryRun = true;
+      continue;
+    }
+    if (name === 'as') {
+      if (destinationProfileId !== undefined) return usage('Option --as may be specified only once.', topic);
+      const value = inline !== undefined ? inline : args[++index];
+      if (value === undefined || value.length === 0 || value.startsWith('-')) return usage('Option --as requires a value.', topic);
+      if (!isSafeProfileId(value)) return invalidProfile(topic);
+      destinationProfileId = value;
+      continue;
+    }
+    if (name === 'map') {
+      const value = inline !== undefined ? inline : args[++index];
+      if (value === undefined || value.length === 0 || value.startsWith('-')) return usage('Option --map requires a value.', topic);
+      const mapping = parseProfileImportMapping(value, topic);
+      if ('kind' in mapping) return mapping;
+      const key = `${mapping.mapping.kind}:${mapping.mapping.id}`;
+      if (mappingKeys.has(key)) return usage(`Mapping ${key} may be specified only once.`, topic);
+      mappingKeys.add(key);
+      mappings.push(mapping.mapping);
+      continue;
+    }
+    return usage(`Unknown option: ${arg}`, topic);
+  }
+  if (operands.length !== 1 || operands[0]!.length === 0 || operands[0]!.includes('\0')) {
+    return usage('profile import requires one nonempty <directory> value without NUL bytes.', topic);
+  }
+  return command({
+    name: 'profile-import',
+    artifactDirectory: operands[0]!,
+    ...(destinationProfileId === undefined ? {} : { destinationProfileId }),
+    mappings,
+    dryRun
+  });
+}
+
+function parseProfileImportMapping(value: string, topic: HelpTopic): { mapping: ProfileImportCliMapping } | ParseResult {
+  const match = /^([^:=]+):([^=]+)=(.*)$/u.exec(value);
+  if (match === null) return usage('Option --map requires library:<id>=<absolute-source-directory>.', topic);
+  const [, kind, id, root] = match;
+  if (kind !== 'library') return usage('Stage 2 profile import supports --map only for library resources.', topic);
+  if (id === undefined || !isSafeSkillId(id)) return invalidCollection('library', topic);
+  if (root === undefined || root.length === 0 || root.includes('\0') || !isAbsolute(root)) {
+    return usage('Mapped library roots must be nonempty absolute paths without NUL bytes.', topic);
+  }
+  return { mapping: { kind: 'library', id, root } };
 }
 
 function parseSkill(args: readonly string[]): ParseResult {

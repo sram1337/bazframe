@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdir, readFile, realpath, readdir, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, realpath, readdir, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { containsUnsafeDisplayCharacters } from '../../src/core/safe-text.js';
@@ -53,7 +53,7 @@ describe.skipIf(process.platform === 'win32')('profile export CLI', () => {
     expect(exported.status, JSON.stringify(exported)).toBe(0);
     expect(exported.stdout).toContain('Profile export: published');
     expect(exported.stdout).toContain(`Output: ${output}`);
-    expect(exported.stdout).toContain('Packages: absent (Stage 1)');
+    expect(exported.stdout).toContain('Packages: absent (Stage 2)');
     expect(exported.stderr).toBe(`warning: Review ${output}/profile/AGENTS.md before sharing the export.\n`);
     expect(await readFile(`${output}/profile/AGENTS.md`)).toEqual(bytes);
     expect(await readdir(output)).toEqual(['bazframe-profile.json', 'profile']);
@@ -205,7 +205,7 @@ describe.skipIf(process.platform === 'win32')('profile export CLI', () => {
     await expect(readFile(`${f.home}/export/bazframe-profile.json`)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it('blocks local libraries and all packages in Stage 1', async () => {
+  it('exports local libraries path-free in Stage 2 while packages remain blocked', async () => {
     const f = await fixture();
     const library = `${f.root}/local-library`;
     await mkdir(`${library}/library-skill`, { recursive: true });
@@ -213,9 +213,41 @@ describe.skipIf(process.platform === 'win32')('profile export CLI', () => {
     expect(run(['library', 'add', library], f.cwd, f.environment).status).toBe(0);
     expect(run(['profile', 'library', 'add', '--profile', 'portable', 'local-library'], f.cwd, f.environment).status).toBe(0);
     await mkdir(`${f.root}/exports`);
-    const blockedLibrary = run(['profile', 'export', 'portable', '--output', `${f.root}/exports/library`], f.cwd, f.environment);
-    expect(blockedLibrary.status).toBe(1);
-    expect(blockedLibrary.stderr).toContain('does not support local library');
+
+    const proseOutput = `${f.root}/exports/library-prose`;
+    const exported = run(['profile', 'export', 'portable', '--output', proseOutput], f.cwd, f.environment);
+    expect(exported.status, JSON.stringify(exported)).toBe(0);
+    expect(exported.stdout).toContain('Local-mapping libraries:\n  - local-library');
+    expect(exported.stdout).toContain('Packages: absent (Stage 2)');
+    const manifestText = await readFile(`${proseOutput}/bazframe-profile.json`, 'utf8');
+    const manifest = JSON.parse(manifestText);
+    expect(manifest.resources).toEqual([{ kind: 'library', id: 'local-library', source: { type: 'localMapping' } }]);
+    expect(manifestText).not.toContain(library);
+    expect(manifestText).not.toContain('"root"');
+    expect(manifestText).not.toContain('"digest"');
+
+    const jsonOutput = `${f.root}/exports/library-json`;
+    const jsonExported = run(['--json', 'profile', 'export', 'portable', '--output', jsonOutput], f.cwd, f.environment);
+    expect(jsonExported.status, JSON.stringify(jsonExported)).toBe(0);
+    expect(jsonExported.stderr).toBe('');
+    expect(jsonExported.stdout.trim().split('\n')).toHaveLength(1);
+    const jsonDocument = JSON.parse(jsonExported.stdout);
+    expect(jsonDocument).toMatchObject({
+      ok: true,
+      command: 'profile.export',
+      result: { libraries: ['local-library'] }
+    });
+    expect(jsonDocument.result.resources).toEqual([
+      { kind: 'library', id: 'local-library', sourceType: 'localMapping' }
+    ]);
+    const documentJson = JSON.stringify(jsonDocument);
+    expect(documentJson).not.toContain(library);
+    for (const forbidden of ['device', 'inode', 'snapshot']) {
+      expect(documentJson).not.toContain(`"${forbidden}"`);
+    }
+    const resourceJson = JSON.stringify(jsonDocument.result.resources);
+    expect(resourceJson).not.toContain('"root"');
+    expect(resourceJson).not.toContain('"digest"');
 
     expect(run(['profile', 'library', 'remove', '--profile', 'portable', 'local-library'], f.cwd, f.environment).status).toBe(0);
     const packageRoot = `${f.root}/local-package`;
@@ -224,8 +256,25 @@ describe.skipIf(process.platform === 'win32')('profile export CLI', () => {
     await writeFile(`${packageRoot}/bazframe-package.json`, JSON.stringify({ schemaVersion: 1, build: [process.execPath, 'build.mjs'], artifactRoot: 'dist', skillsRoot: 'skills' }));
     expect(run(['package', 'add', packageRoot], f.cwd, f.environment).status).toBe(0);
     expect(run(['profile', 'package', 'add', '--profile', 'portable', 'local-package'], f.cwd, f.environment).status).toBe(0);
-    const blockedPackage = run(['profile', 'export', 'portable', '--output', `${f.root}/exports/package`], f.cwd, f.environment);
+
+    const blockedPackageOutput = `${f.root}/exports/package`;
+    const blockedPackage = run(['profile', 'export', 'portable', '--output', blockedPackageOutput], f.cwd, f.environment);
     expect(blockedPackage.status).toBe(1);
-    expect(blockedPackage.stderr).toContain('does not support package references');
+    expect(blockedPackage.stdout).toBe('');
+    expect(blockedPackage.stderr).toContain('Stage 2 profile export does not support package references.');
+    await expect(lstat(blockedPackageOutput)).rejects.toMatchObject({ code: 'ENOENT' });
+    const blockedJsonOutput = `${f.root}/exports/package-json`;
+    const blockedJson = run(['profile', 'export', 'portable', '--output', blockedJsonOutput, '--json'], f.cwd, f.environment);
+    expect(blockedJson.status).toBe(1);
+    expect(blockedJson.stderr).toBe('');
+    expect(JSON.parse(blockedJson.stdout)).toMatchObject({
+      ok: false,
+      command: 'profile.export',
+      error: {
+        code: 'PROFILE_EXPORT_STAGE2_UNSUPPORTED',
+        message: 'Stage 2 profile export does not support package references.'
+      }
+    });
+    await expect(lstat(blockedJsonOutput)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });

@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
@@ -8,14 +8,18 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BazframeError } from '../../../src/core/errors.js';
 import { errorDocument, successDocument } from '../../../src/cli/json-protocol.js';
 import { runCli } from '../../../src/cli/run-cli.js';
+import { encodeProfileArtifact, type ProfileArtifact } from '../../../src/profile-portability/profile-artifact.js';
 import { ProfileExportError, type ProfileExportCommitState } from '../../../src/profile-portability/profile-export.js';
 import type { ProfileImportPlan, ProfileImportPlanningResult } from '../../../src/profile-portability/profile-import-plan.js';
+import { profileArtifactLimitPolicy } from '../../../src/profile-portability/profile-portability-policy.js';
 import {
   ProfileImportBlockedError,
   ProfileImportExecutionError,
   type ExecuteProfileImportOptions,
   type ProfileImportResult
 } from '../../../src/profile-portability/profile-import.js';
+import { addLibrary } from '../../../src/skill-collections/skill-collection-lifecycle.js';
+import { readLibrary } from '../../../src/skill-collections/skill-collection-store.js';
 
 const roots:string[]=[];const execFileAsync=promisify(execFile);
 const importPlan:ProfileImportPlan={
@@ -26,6 +30,11 @@ const importPlan:ProfileImportPlan={
 };
 const planning=(plan:ProfileImportPlan):ProfileImportPlanningResult=>({plan} as ProfileImportPlanningResult);
 const imported=(plan:ProfileImportPlan=importPlan):ProfileImportResult=>({plan,resources:[],profileOutcome:'published',destinationPath:'/home/profiles/portable',activeSelectionChanged:false});
+async function localArtifact(root:string,id='toolkit'){
+ const artifact=join(root,'artifact');const instructions=Buffer.from('local mapping fixture\n','utf8');await mkdir(join(artifact,'profile'),{recursive:true});await writeFile(join(artifact,'profile','AGENTS.md'),instructions);
+ const manifest:ProfileArtifact={schemaVersion:1,kind:'bazframe-profile-export',profile:{id:'portable',instructions:{path:'profile/AGENTS.md',sha256:createHash('sha256').update(instructions).digest('hex')},skills:[],omittedLocalSkills:[],libraries:[id],packages:[]},resources:[{kind:'library',id,source:{type:'localMapping'}}]};
+ await writeFile(join(artifact,'bazframe-profile.json'),encodeProfileArtifact(manifest,profileArtifactLimitPolicy()));return artifact;
+}
 afterEach(async()=>{await Promise.all(roots.splice(0).map((root)=>rm(root,{recursive:true,force:true})));});
 async function invoke(argv:string[], overrides:Record<string,unknown>={}){const root=await realpath(await mkdtemp(join(tmpdir(),'bazframe-json-')));roots.push(root);return invokeAt(root,argv,overrides);}
 async function invokeAt(root:string,argv:string[],overrides:Record<string,unknown>={}){
@@ -73,6 +82,74 @@ describe('CLI JSON protocol',()=>{
   });
   const text=JSON.stringify(result.document);
   for(const forbidden of ['checkout','staging','snapshot','transport','locks','environment','evidence','warnings'])expect(text).not.toContain(forbidden);
+ });
+ it('passes ordered defensive mapping copies to dry-run and execution without CLI path inspection',async()=>{
+  const argv=['profile','import','artifact','--map','library:alpha=/entered/alpha=one','--map=library:beta=/entered/beta'];
+  const expected=[{kind:'library' as const,id:'alpha',root:'/entered/alpha=one'},{kind:'library' as const,id:'beta',root:'/entered/beta'}];
+  const received:Array<readonly {kind:'library';id:string;root:string}[]>=[];
+  const planProfileImport=vi.fn(async(options:{mappings?:readonly {kind:'library';id:string;root:string}[]})=>{
+    expect(options.mappings).toEqual(expected);received.push(options.mappings!);
+    (options.mappings![0] as {root:string}).root='/mutated';
+    return planning(importPlan);
+  });
+  await invoke([...argv,'--dry-run','--json'],{planProfileImport});
+  const executeProfileImport=vi.fn(async(options:ExecuteProfileImportOptions)=>{
+    expect(options.mappings).toEqual(expected);received.push(options.mappings!);
+    return imported();
+  });
+  await invoke([...argv,'--json'],{executeProfileImport});
+  expect(received).toHaveLength(2);
+  expect(received[0]).not.toBe(received[1]);
+  expect(received[0]![0]).not.toBe(received[1]![0]);
+  expect(received[1]).toEqual(expected);
+ });
+ it('rejects malformed mappings before services or Bazframe-home creation',async()=>{
+  const planProfileImport=vi.fn();const executeProfileImport=vi.fn();
+  const result=await invoke(['profile','import','artifact','--map','package:x=/tmp/x','--json'],{planProfileImport,executeProfileImport});
+  expect(result).toMatchObject({status:2,stderr:'',document:{ok:false,command:'profile.import',error:{code:'CLI_USAGE'}}});
+  expect(planProfileImport).not.toHaveBeenCalled();expect(executeProfileImport).not.toHaveBeenCalled();
+  await expect(stat(join(result.root,'home'))).rejects.toMatchObject({code:'ENOENT'});
+ });
+ it.each([
+  ['map',['--map','--json','library:x=/tmp/x']],
+  ['as',['--as','--json','review']]
+ ] as const)('does not let global --json satisfy a missing %s value',async(_label,tokens)=>{
+  const planProfileImport=vi.fn();const executeProfileImport=vi.fn();
+  const result=await invoke(['--json','profile','import','artifact',...tokens],{planProfileImport,executeProfileImport});
+  expect(result).toMatchObject({status:2,stderr:'',document:{ok:false,command:'profile.import',error:{code:'CLI_USAGE'}}});
+  expect(planProfileImport).not.toHaveBeenCalled();expect(executeProfileImport).not.toHaveBeenCalled();
+  await expect(stat(join(result.root,'home'))).rejects.toMatchObject({code:'ENOENT'});
+ });
+ it('keeps invalid physical mapping paths out of JSON errors',async()=>{
+  const root=await realpath(await mkdtemp(join(tmpdir(),'bazframe-json-mapping-invalid-')));roots.push(root);const artifact=await localArtifact(root);
+  const entered=join(root,'private-entered','toolkit');const home=join(root,'home');
+  const result=await invokeAt(root,['profile','import',artifact,'--map',`library:toolkit=${entered}`,'--dry-run','--json']);
+  expect(result).toMatchObject({status:1,stderr:'',document:{ok:false,command:'profile.import',error:{code:'PROFILE_IMPORT_MAPPING_INVALID'}}});
+  const serialized=JSON.stringify(result.document);expect(serialized).not.toContain(entered);expect(serialized).not.toContain(home);
+  for(const forbidden of ['device','inode','snapshot','evidence'])expect(serialized).not.toContain(forbidden);
+ });
+ it.each(['malformed-record','broken-snapshot'] as const)('uses path-free blocker reasons for %s local-library state',async(variant)=>{
+  const root=await realpath(await mkdtemp(join(tmpdir(),'bazframe-json-mapping-blocked-')));roots.push(root);const artifact=await localArtifact(root);const home=join(root,'home');
+  const source=join(root,'sources','toolkit');await mkdir(source,{recursive:true});await writeFile(join(source,'SKILL.md'),'---\nname: toolkit\ndescription: JSON blocker fixture.\n---\n# toolkit\n');
+  await addLibrary({bazframeHome:home},source);const record=await readLibrary(home,'toolkit');const snapshotRoot=join(home,'skill-snapshots','sha256',record.digest);const snapshotArtifact=join(snapshotRoot,'artifact');
+  if(variant==='malformed-record')await writeFile(join(home,'libraries','toolkit.json'),'{}\n');
+  else {await chmod(snapshotRoot,0o700);await chmod(snapshotArtifact,0o700);await rm(snapshotArtifact,{recursive:true});}
+  const entered=`${join(root,'sources')}/../sources/toolkit`;const result=await invokeAt(root,['profile','import',artifact,'--map',`library:toolkit=${entered}`,'--dry-run','--json']);
+  await chmod(snapshotRoot,0o700);await chmod(snapshotArtifact,0o700).catch(()=>undefined);
+  expect(result).toMatchObject({status:0,stderr:'',document:{ok:true,result:{mode:'dry-run',plan:{resources:[{kind:'library',id:'toolkit',sourceType:'localMapping',root:source,action:'blocked',reason:'Local library toolkit state could not be verified safely.'}]}}}});
+  const serialized=JSON.stringify(result.document);expect(serialized).not.toContain(entered);expect(serialized).not.toContain(home);expect(serialized).not.toContain(record.digest);
+  for(const forbidden of ['device','inode','snapshot','evidence'])expect(serialized).not.toContain(forbidden);
+ });
+ it('emits only the planner-validated canonical root for local mappings',async()=>{
+  const localPlan:ProfileImportPlan={...importPlan,libraries:['toolkit'],resources:[{
+   kind:'library',id:'toolkit',source:{type:'localMapping',root:'/canonical/toolkit'},action:'create',networkRequired:false,buildRequired:false
+  }]};
+  const planProfileImport=vi.fn(async()=>planning(localPlan));
+  const result=await invoke(['profile','import','artifact','--map','library:toolkit=/entered/toolkit','--dry-run','--json'],{planProfileImport});
+  expect(result.document).toMatchObject({ok:true,result:{mode:'dry-run',plan:{resources:[{kind:'library',id:'toolkit',sourceType:'localMapping',root:'/canonical/toolkit'}]}}});
+  const serialized=JSON.stringify(result.document);
+  expect(serialized).not.toContain('/entered/toolkit');
+  for(const forbidden of ['device','inode','snapshot','evidence'])expect(serialized).not.toContain(forbidden);
  });
  it('returns blocked dry-run plans as one successful document without streaming the plan',async()=>{
   const blocked:ProfileImportPlan={...importPlan,profileAction:'blocked',composition:{...importPlan.composition,status:'blocked'},blockers:[{code:'DESTINATION_OCCUPIED',key:'profile:portable',message:'destination is occupied'}]};
@@ -122,6 +199,16 @@ describe('CLI JSON protocol',()=>{
   const executeProfileImport=async(options:ExecuteProfileImportOptions):Promise<ProfileImportResult>=>{await options.reportPlan(importPlan);planObserved=stdout.includes('Profile import plan (execution inspection)');return imported();};
   const status=await runCli(['profile','import','artifact'],{environment:{...process.env,BAZFRAME_HOME:join(root,'home'),NO_COLOR:'1'},userHome:root,writeStdout:(text)=>{stdout+=text;},writeStderr:(text)=>{stderr+=text;},executeProfileImport});
   expect(status).toBe(0);expect(stderr).toBe('');expect(planObserved).toBe(true);expect(stdout.indexOf('Profile import plan')).toBeLessThan(stdout.indexOf('Profile import: completed'));
+ });
+ it('renders Stage 2 local-library mapping plans with bounded canonical paths',async()=>{
+  const root=await realpath(await mkdtemp(join(tmpdir(),'bazframe-import-local-prose-')));roots.push(root);let stdout='',stderr='';
+  const localPlan:ProfileImportPlan={...importPlan,libraries:['toolkit'],resources:[{
+   kind:'library',id:'toolkit',source:{type:'localMapping',root:'/canonical/toolkit'},action:'reuse',networkRequired:false,buildRequired:false
+  }]};
+  const executeProfileImport=async(options:ExecuteProfileImportOptions):Promise<ProfileImportResult>=>{await options.reportPlan(localPlan);return imported(localPlan);};
+  const status=await runCli(['profile','import','artifact','--map','library:toolkit=/entered/toolkit'],{environment:{...process.env,BAZFRAME_HOME:join(root,'home'),NO_COLOR:'1'},userHome:root,writeStdout:(text)=>{stdout+=text;},writeStderr:(text)=>{stderr+=text;},executeProfileImport});
+  expect(status).toBe(0);expect(stderr).toBe('');
+  expect(stdout).toContain('Local-mapping libraries:\n  - toolkit');expect(stdout).toContain('local mapping: /canonical/toolkit');expect(stdout).toContain('Packages: absent (Stage 2)');
  });
  it('reports published import truth when post-execution result capture fails',async()=>{
   const root=await realpath(await mkdtemp(join(tmpdir(),'bazframe-import-reporting-')));roots.push(root);let stdout='',stderr='';

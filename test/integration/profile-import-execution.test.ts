@@ -27,7 +27,7 @@ interface PortableFixture {
   revisions: { skill: string; library: string };
 }
 
-describe('unexposed profile-import execution integration', () => {
+describe('profile-import execution integration', () => {
   it('imports historical exact resources, publishes an inactive profile, and reuses them for retry and --as', async () => {
     const fixture = await portableFixture('normal');
     await addProfile(fixture.home, 'existing');

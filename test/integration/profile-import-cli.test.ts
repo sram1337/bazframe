@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { encodeProfileArtifact, type ProfileArtifact } from '../../src/profile-portability/profile-artifact.js';
 import { profileArtifactLimitPolicy } from '../../src/profile-portability/profile-portability-policy.js';
 import { readManagedGitRecord } from '../../src/providers/managed-git-record.js';
+import { readLibrary } from '../../src/skill-collections/skill-collection-store.js';
+import { verifySkillSnapshot } from '../../src/skill-collections/skill-snapshot.js';
 import { createTempDirectory, type TempDirectory } from '../helpers/temp-directory.js';
 
 const cliPath = fileURLToPath(new URL('../../dist/cli.js', import.meta.url));
@@ -95,6 +97,184 @@ describe.skipIf(process.platform === 'win32')('profile import CLI', () => {
     await expect(lstat(join(home, 'profiles/portable'))).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(lstat(gitLog)).rejects.toMatchObject({ code: 'ENOENT' });
   }, 30_000);
+
+  it('exports and imports a mapped local library across separate homes with exact retry reuse', async () => {
+    const directory = await createTempDirectory('bazframe-profile-import-cli-local-');
+    directories.push(directory);
+    const root = await realpath(directory.root);
+    const cwd = await directory.mkdir('cwd');
+    const sourceHome = join(root, 'source-home');
+    const destinationParent = join(root, 'destination-parent');
+    const destinationHome = join(destinationParent, 'home');
+    const mappedRoot = join(root, 'mapped=parents', 'toolkit');
+    const mappedSkill = join(mappedRoot, 'child', 'SKILL.md');
+    const artifact = join(root, 'exports', 'portable');
+    await mkdir(join(mappedRoot, 'child'), { recursive: true });
+    await mkdir(destinationParent);
+    await writeFile(mappedSkill, skillDefinition('child'));
+
+    const sourceEnvironment = { ...process.env, BAZFRAME_HOME: sourceHome, NO_COLOR: '1' };
+    expect(run(['profile', 'add', 'portable'], cwd, sourceEnvironment).status).toBe(0);
+    await writeFile(join(sourceHome, 'profiles', 'portable', 'AGENTS.md'), 'mapped profile instructions\n');
+    expect(run(['library', 'add', mappedRoot], cwd, sourceEnvironment).status).toBe(0);
+    expect(run(['profile', 'library', 'add', '--profile', 'portable', 'toolkit'], cwd, sourceEnvironment).status).toBe(0);
+    await mkdir(join(root, 'exports'));
+    const exported = run(['profile', 'export', 'portable', '--output', artifact], cwd, sourceEnvironment);
+    expect(exported.status, JSON.stringify(exported)).toBe(0);
+    expect(exported.stdout).toContain('Local-mapping libraries:\n  - toolkit');
+
+    const manifestPath = join(artifact, 'bazframe-profile.json');
+    const instructionsPath = join(artifact, 'profile', 'AGENTS.md');
+    const manifestBytes = await readFile(manifestPath);
+    const instructionsBytes = await readFile(instructionsPath);
+    const mappedBytes = await readFile(mappedSkill);
+    const manifest = JSON.parse(manifestBytes.toString('utf8'));
+    expect(manifest.resources).toEqual([{ kind: 'library', id: 'toolkit', source: { type: 'localMapping' } }]);
+    expect(manifestBytes.toString('utf8')).not.toContain(mappedRoot);
+    expect(manifestBytes.toString('utf8')).not.toContain('"root"');
+    expect(manifestBytes.toString('utf8')).not.toContain('"digest"');
+    const initialIdentities = {
+      artifact: await physicalIdentity(artifact),
+      manifest: await physicalIdentity(manifestPath),
+      instructions: await physicalIdentity(instructionsPath),
+      mappedRoot: await physicalIdentity(mappedRoot),
+      mappedSkill: await physicalIdentity(mappedSkill)
+    };
+
+    const gitLog = join(root, 'network.log');
+    const gitWrapper = directory.path('network-forbidden.mjs');
+    await directory.write('network-forbidden.mjs', `#!/usr/bin/env node\nimport{appendFileSync}from'node:fs';appendFileSync(process.env.TEST_GIT_LOG,'invoked\\n');process.exit(91);\n`);
+    await chmod(gitWrapper, 0o755);
+    const destinationEnvironment = {
+      ...process.env,
+      BAZFRAME_HOME: destinationHome,
+      NO_COLOR: '1',
+      BAZFRAME_GIT_COMMAND: gitWrapper,
+      BAZFRAME_GH_COMMAND: gitWrapper,
+      TEST_GIT_LOG: gitLog
+    };
+
+    const parentBeforeMissingMap = await physicalDirectoryObservation(destinationParent);
+    const missingMap = run(['profile', 'import', artifact, '--dry-run', '--json'], cwd, destinationEnvironment);
+    expect(missingMap.status, JSON.stringify(missingMap)).toBe(0);
+    expect(missingMap.stderr).toBe('');
+    expect(missingMap.stdout.trim().split('\n')).toHaveLength(1);
+    expect(JSON.parse(missingMap.stdout)).toMatchObject({
+      ok: true,
+      result: {
+        mode: 'dry-run',
+        plan: {
+          resources: [{ kind: 'library', id: 'toolkit', sourceType: 'localMapping', action: 'blocked' }],
+          blockers: [{ code: 'PROFILE_IMPORT_MAPPING_REQUIRED', key: 'library:toolkit' }]
+        }
+      }
+    });
+    await expect(lstat(destinationHome)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await physicalDirectoryObservation(destinationParent)).toEqual(parentBeforeMissingMap);
+
+    const parentBeforeMappedDryRun = await physicalDirectoryObservation(destinationParent);
+    const dryRun = run([
+      'profile', 'import', '--map', `library:toolkit=${mappedRoot}`, '--dry-run', artifact, '--json'
+    ], cwd, destinationEnvironment);
+    expect(dryRun.status, JSON.stringify(dryRun)).toBe(0);
+    expect(dryRun.stderr).toBe('');
+    expect(dryRun.stdout.trim().split('\n')).toHaveLength(1);
+    expect(JSON.parse(dryRun.stdout)).toMatchObject({
+      ok: true,
+      command: 'profile.import',
+      result: {
+        mode: 'dry-run',
+        plan: {
+          blockers: [],
+          resources: [{
+            kind: 'library', id: 'toolkit', sourceType: 'localMapping', root: mappedRoot,
+            action: 'create', networkRequired: false, buildRequired: false
+          }]
+        }
+      }
+    });
+    await expect(lstat(destinationHome)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await physicalDirectoryObservation(destinationParent)).toEqual(parentBeforeMappedDryRun);
+    await expect(lstat(gitLog)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    expect(run(['profile', 'add', 'unrelated'], cwd, destinationEnvironment).status).toBe(0);
+    expect(run(['profile', 'use', 'unrelated'], cwd, destinationEnvironment).status).toBe(0);
+    const activeProfilePath = join(destinationHome, 'active-profile');
+    const activeBefore = {
+      bytes: await readFile(activeProfilePath),
+      identity: await physicalIdentity(activeProfilePath)
+    };
+    const imported = run([
+      'profile', 'import', artifact, `--map=library:toolkit=${mappedRoot}`
+    ], cwd, destinationEnvironment);
+    expect(imported.status, JSON.stringify(imported)).toBe(0);
+    expect(imported.stdout.indexOf('Profile import plan (execution inspection):')).toBeGreaterThanOrEqual(0);
+    expect(imported.stdout.indexOf('Profile import: completed')).toBeGreaterThan(imported.stdout.indexOf('Profile import plan'));
+    expect(imported.stdout).toContain('library:toolkit — create');
+    expect(imported.stdout).toContain(`local mapping: ${mappedRoot}`);
+
+    const libraryRecord = await readLibrary(destinationHome, 'toolkit');
+    expect(libraryRecord).toMatchObject({ schemaVersion: 1, library: 'toolkit', root: mappedRoot });
+    const snapshot = await verifySkillSnapshot(destinationHome, libraryRecord.digest);
+    expect(snapshot.manifest.entries).toContainEqual({
+      path: 'child/SKILL.md', type: 'file', executable: false,
+      sha256: createHash('sha256').update(mappedBytes).digest('hex')
+    });
+    expect(JSON.parse(await readFile(join(destinationHome, 'profiles', 'portable', 'libraries', 'toolkit.json'), 'utf8')))
+      .toEqual({ schemaVersion: 1, library: 'toolkit' });
+    expect(await readFile(join(destinationHome, 'profiles', 'portable', 'AGENTS.md'))).toEqual(instructionsBytes);
+    expect(await readdir(join(destinationHome, 'profiles', 'portable', 'skills'))).toEqual([]);
+    expect(await readFile(activeProfilePath)).toEqual(activeBefore.bytes);
+    expect(await physicalIdentity(activeProfilePath)).toEqual(activeBefore.identity);
+    await expect(lstat(join(destinationHome, 'skills', 'child'))).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(lstat(gitLog)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    const committedPaths = [
+      join(destinationHome, 'libraries', 'toolkit.json'),
+      join(destinationHome, 'profiles', 'portable', 'AGENTS.md'),
+      join(destinationHome, 'profiles', 'portable', 'libraries', 'toolkit.json')
+    ];
+    const committedBefore = await Promise.all(committedPaths.map(async (path) => ({
+      bytes: await readFile(path), identity: await physicalIdentity(path)
+    })));
+    const snapshotBeforeRetry = await snapshotTreeObservation(snapshot.snapshotRoot, snapshot.artifactPath);
+    const retried = run([
+      '--json', 'profile', 'import', `--map=library:toolkit=${mappedRoot}`, artifact
+    ], cwd, destinationEnvironment);
+    expect(retried.status, JSON.stringify(retried)).toBe(0);
+    expect(retried.stderr).toBe('');
+    expect(retried.stdout.trim().split('\n')).toHaveLength(1);
+    expect(JSON.parse(retried.stdout)).toMatchObject({
+      ok: true,
+      command: 'profile.import',
+      result: {
+        mode: 'executed',
+        profileOutcome: 'reused',
+        activeSelectionChanged: false,
+        resources: [{ kind: 'library', id: 'toolkit', outcome: 'reused' }]
+      }
+    });
+    expect((await readLibrary(destinationHome, 'toolkit')).digest).toBe(libraryRecord.digest);
+    const reverifiedSnapshot = await verifySkillSnapshot(destinationHome, libraryRecord.digest);
+    expect(reverifiedSnapshot.manifestBytes).toEqual(snapshot.manifestBytes);
+    expect(reverifiedSnapshot.manifest).toEqual(snapshot.manifest);
+    expect(await snapshotTreeObservation(snapshot.snapshotRoot, snapshot.artifactPath)).toEqual(snapshotBeforeRetry);
+    for (let index = 0; index < committedPaths.length; index += 1) {
+      expect(await readFile(committedPaths[index]!)).toEqual(committedBefore[index]!.bytes);
+      expect(await physicalIdentity(committedPaths[index]!)).toEqual(committedBefore[index]!.identity);
+    }
+    expect(await readFile(activeProfilePath)).toEqual(activeBefore.bytes);
+    expect(await physicalIdentity(activeProfilePath)).toEqual(activeBefore.identity);
+    await expect(lstat(gitLog)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await readFile(manifestPath)).toEqual(manifestBytes);
+    expect(await readFile(instructionsPath)).toEqual(instructionsBytes);
+    expect(await readFile(mappedSkill)).toEqual(mappedBytes);
+    expect(await physicalIdentity(artifact)).toEqual(initialIdentities.artifact);
+    expect(await physicalIdentity(manifestPath)).toEqual(initialIdentities.manifest);
+    expect(await physicalIdentity(instructionsPath)).toEqual(initialIdentities.instructions);
+    expect(await physicalIdentity(mappedRoot)).toEqual(initialIdentities.mappedRoot);
+    expect(await physicalIdentity(mappedSkill)).toEqual(initialIdentities.mappedSkill);
+  }, 60_000);
 
   it('reports retained partial success, then imports exact historical resources and reuses them offline under --as', async () => {
     const fixture = await portableFixture();
@@ -290,6 +470,60 @@ if(original){const destination=args.at(-1);const changed=spawnSync(real,['-C',de
       TEST_LIBRARY_REMOTE: libraryRemote
     },
     revisions: { skill: skillRevision, library: libraryRevision }
+  };
+}
+
+async function physicalIdentity(path: string): Promise<{
+  device: bigint;
+  inode: bigint;
+  size: bigint;
+  mtimeNs: bigint;
+  ctimeNs: bigint;
+}> {
+  const metadata = await lstat(path, { bigint: true });
+  return {
+    device: metadata.dev,
+    inode: metadata.ino,
+    size: metadata.size,
+    mtimeNs: metadata.mtimeNs,
+    ctimeNs: metadata.ctimeNs
+  };
+}
+
+async function physicalDirectoryObservation(path: string): Promise<{
+  identity: Awaited<ReturnType<typeof physicalIdentity>>;
+  entries: string[];
+}> {
+  return {
+    identity: await physicalIdentity(path),
+    entries: (await readdir(path)).sort()
+  };
+}
+
+async function physicalFileObservation(path: string): Promise<{
+  identity: Awaited<ReturnType<typeof physicalIdentity>>;
+  bytes: Buffer;
+}> {
+  return {
+    identity: await physicalIdentity(path),
+    bytes: await readFile(path)
+  };
+}
+
+async function snapshotTreeObservation(snapshotRoot: string, artifactPath: string): Promise<{
+  root: Awaited<ReturnType<typeof physicalDirectoryObservation>>;
+  manifest: Awaited<ReturnType<typeof physicalFileObservation>>;
+  artifact: Awaited<ReturnType<typeof physicalDirectoryObservation>>;
+  child: Awaited<ReturnType<typeof physicalDirectoryObservation>>;
+  skill: Awaited<ReturnType<typeof physicalFileObservation>>;
+}> {
+  const child = join(artifactPath, 'child');
+  return {
+    root: await physicalDirectoryObservation(snapshotRoot),
+    manifest: await physicalFileObservation(join(snapshotRoot, 'manifest.json')),
+    artifact: await physicalDirectoryObservation(artifactPath),
+    child: await physicalDirectoryObservation(child),
+    skill: await physicalFileObservation(join(child, 'SKILL.md'))
   };
 }
 

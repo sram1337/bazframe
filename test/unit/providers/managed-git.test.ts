@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
-import { authorizeManagedGitPackageBuild, captureManagedGitExportHealth, classifyManagedGitImportOutcome, classifyManagedGitImportResource, isManagedGitSource, managedGitCloneInvocation, normalizeManagedGitOrigin, parseManagedGitSource, safeDiagnostic, sameManagedGitExportHealth } from '../../../src/providers/managed-git.js';
+import { authorizeManagedGitPackageBuild, captureManagedGitExportHealth, classifyManagedGitImportOutcome, classifyManagedGitImportResource, classifyManagedGitProviderOccupancy, isManagedGitSource, managedGitCloneInvocation, normalizeManagedGitOrigin, parseManagedGitSource, safeDiagnostic, sameManagedGitExportHealth } from '../../../src/providers/managed-git.js';
 import { addLibrary } from '../../../src/skill-collections/skill-collection-lifecycle.js';
 import { snapshotFilesystem } from '../../helpers/filesystem-snapshot.js';
 import {
@@ -14,6 +14,8 @@ import {
   encodeManagedGitJournal,
   encodeManagedGitRecord,
   managedGitCheckoutRoot,
+  managedGitJournalPath,
+  managedGitRecordPath,
   MAX_MANAGED_GIT_RECORD_BYTES,
   pathFreeManagedGitIdentityFromRecord,
   readManagedGitJournal,
@@ -430,6 +432,51 @@ describe('remote Git source and provenance', () => {
       .resolves.toEqual({ state: 'recovery-required' });
     await expect(classifyManagedGitImportResource(recoveryHome, 'skill', 'toolkit', identity))
       .resolves.toMatchObject({ action: 'blocked', reason: expect.stringContaining('recovery') });
+  });
+
+  it('classifies provider-only library occupancy without writes and fails closed on drift', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'bazframe-managed-git-provider-occupancy-')); roots.push(root);
+    const missingHome = join(root, 'missing-home');
+    const before = await snapshotFilesystem(root);
+    await expect(classifyManagedGitProviderOccupancy(missingHome, 'library', 'toolkit'))
+      .resolves.toBe('absent');
+    expect(await snapshotFilesystem(root)).toEqual(before);
+    await expect(lstat(missingHome)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    const cases = [
+      ['record', (home: string) => managedGitRecordPath(home, 'library', 'toolkit')],
+      ['journal', (home: string) => managedGitJournalPath(home, 'library', 'toolkit')],
+      ['checkout', (home: string) => managedGitCheckoutRoot(home, 'library', 'toolkit')]
+    ] as const;
+    for (const [label, occupiedPath] of cases) {
+      const home = join(root, `${label}-home`);
+      const path = occupiedPath(home);
+      await mkdir(label === 'checkout' ? path : join(path, '..'), { recursive: true });
+      if (label !== 'checkout') await writeFile(path, 'physical occupancy only\n');
+      await expect(classifyManagedGitProviderOccupancy(home, 'library', 'toolkit'))
+        .resolves.toBe('occupied');
+    }
+
+    const packageHome = join(root, 'package-home');
+    for (const path of [
+      managedGitRecordPath(packageHome, 'package', 'toolkit'),
+      managedGitJournalPath(packageHome, 'package', 'toolkit')
+    ]) {
+      await mkdir(join(path, '..'), { recursive: true });
+      await writeFile(path, 'wrong-kind occupancy\n');
+    }
+    await mkdir(managedGitCheckoutRoot(packageHome, 'package', 'toolkit'), { recursive: true });
+    await expect(classifyManagedGitProviderOccupancy(packageHome, 'library', 'toolkit'))
+      .resolves.toBe('absent');
+
+    const changingHome = join(root, 'changing-home');
+    await expect(classifyManagedGitProviderOccupancy(changingHome, 'library', 'toolkit', {
+      afterInitialOccupancy: async () => {
+        const path = managedGitRecordPath(changingHome, 'library', 'toolkit');
+        await mkdir(join(path, '..'), { recursive: true });
+        await writeFile(path, 'appeared between captures\n');
+      }
+    })).rejects.toMatchObject({ code: 'MANAGED_GIT_CHANGED' });
   });
 
   it('blocks create when a missing home parent is substituted', async () => {

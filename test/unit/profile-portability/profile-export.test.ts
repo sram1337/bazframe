@@ -381,7 +381,7 @@ describe('Stage 1 profile export service', () => {
     })).rejects.toMatchObject({ code: 'MANAGED_GIT_RECOVERY_REQUIRED' });
   });
 
-  it('rejects malformed or local libraries, every package, and composition collisions including omitted local Skills', async () => {
+  it('exports local libraries path-free while rejecting malformed libraries, packages, and composition collisions', async () => {
     const malformed = await fixture();
     await mkdir(join(malformed.profile, 'libraries'));
     await writeFile(join(malformed.profile, 'libraries', 'bad.json'), '{}\n');
@@ -392,8 +392,19 @@ describe('Stage 1 profile export service', () => {
     const localRoot = await createSkill(join(local.root, 'libraries', 'local-library'), 'local-library');
     await addLibrary({ bazframeHome: local.home }, localRoot);
     await addLibraryReference(local, 'local-library');
-    await expect(exportProfile({ bazframeHome: local.home, profileId: 'portable', outputDirectory: local.output }))
-      .rejects.toMatchObject({ code: 'PROFILE_EXPORT_LOCAL_LIBRARY_UNSUPPORTED' });
+    await import('node:fs/promises').then(({ rm }) => rm(localRoot, { recursive: true }));
+    const localResult = await exportProfile({ bazframeHome: local.home, profileId: 'portable', outputDirectory: local.output });
+    expect(localResult.resources).toEqual([{ kind: 'library', id: 'local-library', source: { type: 'localMapping' } }]);
+    const localManifest = await readFile(join(local.output, 'bazframe-profile.json'), 'utf8');
+    expect(localManifest).not.toContain(localRoot);
+    expect(localManifest).not.toContain('digest');
+
+    const orphanedManaged = await fixture();
+    const orphanedRoot = await createSkill(managedGitCheckoutRoot(orphanedManaged.home, 'library', 'orphaned'), 'orphaned-child');
+    await addLibrary({ bazframeHome: orphanedManaged.home }, orphanedRoot);
+    await addLibraryReference(orphanedManaged, 'orphaned');
+    await expect(exportProfile({ bazframeHome: orphanedManaged.home, profileId: 'portable', outputDirectory: orphanedManaged.output }))
+      .rejects.toMatchObject({ code: 'PROFILE_EXPORT_SOURCE_INVALID' });
 
     const packaged = await fixture();
     await mkdir(join(packaged.profile, 'packages'));
@@ -402,7 +413,10 @@ describe('Stage 1 profile export service', () => {
       encodeProfileCollectionReference({ schemaVersion: 1, package: 'runner' })
     );
     await expect(exportProfile({ bazframeHome: packaged.home, profileId: 'portable', outputDirectory: packaged.output }))
-      .rejects.toMatchObject({ code: 'PROFILE_EXPORT_STAGE1_UNSUPPORTED' });
+      .rejects.toMatchObject({
+        code: 'PROFILE_EXPORT_STAGE2_UNSUPPORTED',
+        message: 'Stage 2 profile export does not support package references.'
+      });
 
     const collision = await fixture();
     await addLocalDirect(collision, 'same-name');

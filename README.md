@@ -43,7 +43,7 @@ You should see all your profiles added skills.
 - (optional) [Git](https://git-scm.com/) only for remote Git sources. Basic profile use does not require Git.
 
 
-### Export and import a profile (Stage 1)
+### Export and import a profile (Stage 2)
 
 Publish a reviewable directory for an explicit profile without changing the active profile:
 
@@ -51,18 +51,25 @@ Publish a reviewable directory for an explicit profile without changing the acti
 bazframe profile export my-coding-harness --output ./my-coding-harness.bazframe-profile
 ```
 
-Review `./my-coding-harness.bazframe-profile/profile/AGENTS.md` before sharing because Bazframe does not redact user-authored instructions. On the destination machine, inspect first, then import the inactive profile:
+Review `./my-coding-harness.bazframe-profile/profile/AGENTS.md` before sharing because Bazframe does not redact user-authored instructions. On the destination machine, inspect first, then import. For an artifact with no local libraries:
 
 ```bash
-bazframe profile import ./my-coding-harness.bazframe-profile --dry-run
+bazframe profile import --dry-run ./my-coding-harness.bazframe-profile
 bazframe profile import ./my-coding-harness.bazframe-profile
-# Or choose only the destination profile ID:
-bazframe profile import ./my-coding-harness.bazframe-profile --as imported-harness
 ```
 
-Stage 1 supports direct Skills and libraries acquired from remote Git sources at their recorded exact revisions. Healthy local direct Skills are omitted, named in warnings, and recorded in the artifact; they remain omitted after import. Local libraries and every package reference block export, and import rejects local mappings and packages. Import shows the complete plan before execution, never changes the active profile, retains earlier exact resources if later work fails, and safely reuses them on retry.
+If the artifact comes from the Quick Start profile above, it declares local library `my-skills-folder`. Supply the same mapping during inspection and execution; the absolute physical source directory basename must equal the library ID:
 
-Local-library portability, package portability, Windows publication, and full profile portability remain unavailable.
+```bash
+bazframe profile import --map library:my-skills-folder=/srv/skill-libraries/my-skills-folder --dry-run ./my-coding-harness.bazframe-profile
+bazframe profile import --map library:my-skills-folder=/srv/skill-libraries/my-skills-folder ./my-coding-harness.bazframe-profile
+# Or choose only the destination profile ID:
+bazframe profile import --as imported-harness --map library:my-skills-folder=/srv/skill-libraries/my-skills-folder ./my-coding-harness.bazframe-profile
+```
+
+Stage 2 supports direct Skills from recorded exact remote Git revisions and libraries from either exact remote Git revisions or explicit local mappings. Healthy local libraries export only `{ "type": "localMapping" }`, without their source-machine path or snapshot digest. Mapping inspection is read-only; a missing mapping blocks the plan. Import creates an absent mapped library through the ordinary build-free lifecycle or exactly reuses the same canonical root, never overwriting, updating, or repointing it.
+
+Import reports the complete plan before effects. Dry-run performs no network access, build, Bazframe write, or active-profile mutation. A newly published profile remains inactive; an exact existing destination, including one already active, may be reused without changing active selection. Execution never promotes library children into `(default)`; earlier committed resources remain after later failure and exact retry converges through reuse. Healthy local direct Skills remain explicit omissions and cannot be mapped. Packages and `--yes` remain unsupported until Stage 3. Windows publication and full profile portability remain unavailable.
 
 ### Terminal interface
 

@@ -349,6 +349,34 @@ export async function classifyManagedGitImportOutcome(
   }
 }
 
+/** Read-only provider-only occupancy probe for local profile-import classification. */
+export async function classifyManagedGitProviderOccupancy(
+  home: string,
+  kind: 'library',
+  id: string,
+  testHooks: ManagedGitImportResourceTestHooks = {}
+): Promise<'absent' | 'occupied'> {
+  assertSafeSkillId(id);
+  const anchor = await holdReadOnlyPathAnchor(home);
+  try {
+    const paths = {
+      record: managedGitRecordPath(anchor.path, kind, id),
+      journal: managedGitJournalPath(anchor.path, kind, id),
+      root: managedGitCheckoutRoot(anchor.path, kind, id)
+    };
+    const initial = await captureImportOccupancy(anchor.path, paths);
+    await testHooks.afterInitialOccupancy?.();
+    const current = await captureImportOccupancy(anchor.path, paths);
+    if (!sameImportOccupancy(initial, current)) {
+      throw new BazframeError('MANAGED_GIT_CHANGED', `Remote Git ${kind} ${id} provider occupancy changed during inspection.`);
+    }
+    await assertReadOnlyPathAnchor(anchor);
+    return Object.values(paths).every((path) => initial.get(path) === 'absent') ? 'absent' : 'occupied';
+  } finally {
+    await closeReadOnlyPathAnchor(anchor);
+  }
+}
+
 /** Read-only exact-state classification for profile-import planning. */
 export async function classifyManagedGitImportResource(
   home: string,
@@ -447,7 +475,7 @@ function importResourcePaths(home: string, kind: 'skill' | 'library', id: string
 
 async function captureImportOccupancy(
   home: string,
-  paths: ReturnType<typeof importResourcePaths>
+  paths: Readonly<Record<string, string>>
 ): Promise<ReadonlyMap<string, ImportOccupancy>> {
   const result = new Map<string, ImportOccupancy>();
   const held = new Map<string, HeldImportDirectory>();

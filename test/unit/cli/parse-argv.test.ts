@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { PROFILE_EXPORT_HELP, PROFILE_IMPORT_HELP } from '../../../src/cli/help.js';
 import { parseArgv } from '../../../src/cli/parse-argv.js';
 import { containsUnsafeDisplayCharacters } from '../../../src/core/safe-text.js';
 
@@ -25,9 +26,27 @@ describe('parseArgv canonical API', () => {
     expect(parseArgv(['package','update','--yes','--accept-rewrite','suite'])).toMatchObject({kind:'command',command:{yes:true,acceptRewrite:true,id:'suite'}});
     expect(parseArgv(['profile','export','portable','--output','/tmp/export'])).toEqual({kind:'command',command:{name:'profile-export',profileId:'portable',outputDirectory:'/tmp/export'}});
     expect(parseArgv(['profile','export','--output=/tmp/export','portable'])).toEqual({kind:'command',command:{name:'profile-export',profileId:'portable',outputDirectory:'/tmp/export'}});
-    expect(parseArgv(['profile','import','./portable'])).toEqual({kind:'command',command:{name:'profile-import',artifactDirectory:'./portable',dryRun:false}});
-    expect(parseArgv(['profile','import','--dry-run','--as=review','/tmp/portable'])).toEqual({kind:'command',command:{name:'profile-import',artifactDirectory:'/tmp/portable',destinationProfileId:'review',dryRun:true}});
-    expect(parseArgv(['--json','profile','import','artifact','--as','review'])).toEqual({kind:'command',command:{name:'profile-import',artifactDirectory:'artifact',destinationProfileId:'review',dryRun:false},json:true});
+    expect(parseArgv(['profile','import','./portable'])).toEqual({kind:'command',command:{name:'profile-import',artifactDirectory:'./portable',mappings:[],dryRun:false}});
+    expect(parseArgv(['profile','import','--dry-run','--as=review','/tmp/portable'])).toEqual({kind:'command',command:{name:'profile-import',artifactDirectory:'/tmp/portable',destinationProfileId:'review',mappings:[],dryRun:true}});
+    expect(parseArgv(['--json','profile','import','artifact','--as','review'])).toEqual({kind:'command',command:{name:'profile-import',artifactDirectory:'artifact',destinationProfileId:'review',mappings:[],dryRun:false},json:true});
+  });
+
+  it('parses repeatable typed local-library mappings without losing equals signs', () => {
+    expect(parseArgv([
+      'profile','import','--map','library:alpha=/srv/alpha=one=two','artifact',
+      '--map=library:beta=/srv/beta','--as','review','--dry-run'
+    ])).toEqual({kind:'command',command:{
+      name:'profile-import',artifactDirectory:'artifact',destinationProfileId:'review',dryRun:true,
+      mappings:[
+        {kind:'library',id:'alpha',root:'/srv/alpha=one=two'},
+        {kind:'library',id:'beta',root:'/srv/beta'}
+      ]
+    }});
+    expect(parseArgv([
+      '--json','profile','import','artifact','--map=library:alpha=/srv/a=b=c'
+    ])).toEqual({kind:'command',command:{
+      name:'profile-import',artifactDirectory:'artifact',mappings:[{kind:'library',id:'alpha',root:'/srv/a=b=c'}],dryRun:false
+    },json:true});
   });
 
   it('extracts --json globally but leaves post-Pi-delimiter data untouched', () => {
@@ -81,8 +100,18 @@ describe('parseArgv canonical API', () => {
       ['profile','import'],['profile','import','one','two'],['profile','import','bad\0path'],
       ['profile','import','artifact','--as','Bad'],['profile','import','artifact','--as','one','--as','two'],
       ['profile','import','artifact','--dry-run','--dry-run'],['profile','import','artifact','--dry-run=true'],
-      ['profile','import','artifact','--map','library:x=/tmp/x'],['profile','import','artifact','--yes'],
-      ['profile','import','--artifact']
+      ['profile','import','artifact','--yes'],['profile','import','--artifact'],
+      ['profile','import','artifact','--map'],['profile','import','artifact','--map='],
+      ['profile','import','artifact','--map','library:x'],['profile','import','artifact','--map','library:=/tmp/x'],
+      ['profile','import','artifact','--map','library:x='],['profile','import','artifact','--map','library:Bad=/tmp/x'],
+      ['profile','import','artifact','--map','library:x=relative'],['profile','import','artifact','--map','library:x=/tmp/x\0bad'],
+      ['profile','import','artifact','--map','skill:x=/tmp/x'],['profile','import','artifact','--map','package:x=/tmp/x'],
+      ['profile','import','artifact','--map','other:x=/tmp/x'],['profile','import','artifact','--map','library:x:/tmp/x'],
+      ['profile','import','artifact','--map','library:x=/tmp/x','--map=library:x=/other/x'],
+      ['profile','import','artifact','--map','--json','library:x=/tmp/x'],
+      ['profile','import','artifact','--as','--json','review'],
+      ['profile','export','portable','--output','--json','/tmp/export'],
+      ['profile','skill','add','alpha','--profile','--json','portable']
     ]) expect(parseArgv(argv)).toMatchObject({kind:'usage-error'});
   });
 
@@ -91,5 +120,10 @@ describe('parseArgv canonical API', () => {
     expect(parseArgv(['profile','export','--help'])).toEqual({kind:'help',topic:'profile-export'});
     expect(parseArgv(['help','profile','import'])).toEqual({kind:'help',topic:'profile-import'});
     expect(parseArgv(['profile','import','--help'])).toEqual({kind:'help',topic:'profile-import'});
+    expect(PROFILE_IMPORT_HELP).toContain('Usage: bazframe profile import [--json] [--as <profile>] [--map library:<id>=<absolute-source-directory>]... [--dry-run] <directory>');
+    expect(PROFILE_IMPORT_HELP).toContain('--as changes only the destination profile ID; resource IDs remain exact.');
+    expect(PROFILE_IMPORT_HELP).not.toContain('inactive destination profile ID');
+    expect(PROFILE_IMPORT_HELP).toContain('Packages and --yes remain unsupported in Stage 2.');
+    expect(PROFILE_EXPORT_HELP).toContain('Healthy local libraries are exported as path-free localMapping requirements');
   });
 });

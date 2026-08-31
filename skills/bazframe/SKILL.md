@@ -81,17 +81,26 @@ bazframe profile edit <profile>
 bazframe profile use <profile>
 bazframe profile current
 bazframe profile export <profile> --output <directory>
-bazframe profile import <directory> --dry-run
-bazframe profile import <directory> [--as <profile>]
+bazframe profile import --dry-run <directory>
+bazframe profile import <directory>
 bazframe global show
 bazframe project list
 ```
 
 `profile edit` opens the named profile's `AGENTS.md` without changing selection. Use an executable wrapper for editor flags or GUI wait behavior, and run `/bazframe reload` in an existing Pi session afterward.
 
-Stage 1 `profile export` publishes canonical `bazframe-profile.json` plus exact `profile/AGENTS.md` bytes for an explicit profile without changing active selection. It includes direct Skills and libraries acquired from remote Git sources, omits and reports healthy local direct Skills, and blocks local libraries and all packages. Review the exported `profile/AGENTS.md` before sharing.
+Stage 2 `profile export` publishes canonical `bazframe-profile.json` plus exact `profile/AGENTS.md` bytes for an explicit profile without changing active selection. It includes direct Skills from exact remote Git revisions and libraries from exact remote Git revisions or healthy local sources. A healthy local library exports only `{ "type": "localMapping" }`, without a source-machine path or snapshot digest. Healthy local direct Skills remain named omissions and cannot be mapped; all packages are blocked. Review the exported `profile/AGENTS.md` before sharing.
 
-Stage 1 `profile import` always reports an inspection plan first. Use `--dry-run` for no-network, no-write inspection; a blocked dry-run is still a successful inspection. Execution creates or exactly reuses recorded remote Git revisions, publishes an inactive profile, leaves omitted local Skills omitted, and never promotes library children into `(default)`. `--as` changes only the destination profile ID. Earlier created resources remain on partial failure and are reused on retry; inspect recovery-required and commit-ambiguous outcomes before continuing. Stage 1 accepts no `--map` or `--yes` and supports no local mappings or packages. Local-library portability, package portability, Windows publication, and full portability remain unavailable.
+Stage 2 `profile import` always reports an inspection plan first. Its canonical grammar is `bazframe profile import [--json] [--as <profile>] [--map library:<id>=<absolute-source-directory>]... [--dry-run] <directory>`. The mapping-free commands above apply when the artifact declares no local libraries. If it declares local library `toolkit`, supply the same mapping during inspection and execution:
+
+```bash
+bazframe profile import --map library:toolkit=/srv/skill-libraries/toolkit --dry-run <directory>
+bazframe profile import --as <profile> --map library:toolkit=/srv/skill-libraries/toolkit <directory>
+```
+
+Supply one repeatable mapping for each artifact-declared local library; extra mappings are rejected. The mapping root must be an absolute physical source directory with basename equal to the library ID; inspection is read-only and a missing mapping blocks the plan.
+
+Use `--dry-run` for no-network, no-build, no-Bazframe-write inspection; a blocked dry-run is still a successful inspection. Execution creates or exactly reuses recorded remote Git revisions, creates an absent mapped library through ordinary build-free `addLibrary` or exactly reuses the same canonical root, and never overwrites, updates, or repoints a library. It publishes an inactive profile, leaves omitted local Skills omitted, keeps active selection unchanged, and never promotes library children into `(default)`. `--as` changes only the destination profile ID. Earlier created resources remain on partial failure and are reused on retry; inspect recovery-required and commit-ambiguous outcomes before continuing. Packages and `--yes` remain unsupported until Stage 3. Windows publication and full portability remain unavailable.
 
 ## Pi adapter and diagnosis
 

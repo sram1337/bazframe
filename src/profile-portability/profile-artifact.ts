@@ -22,11 +22,16 @@ export interface LocalMappingArtifactSource {
 
 export type ProfileArtifactResourceKind = 'skill' | 'library' | 'package';
 
-export interface ProfileArtifactResource {
-  kind: ProfileArtifactResourceKind;
-  id: string;
-  source: RemoteGitArtifactSource | LocalMappingArtifactSource;
-}
+export type ProfileArtifactRemoteResource =
+  | { kind: 'skill'; id: string; source: RemoteGitArtifactSource }
+  | { kind: 'library'; id: string; source: RemoteGitArtifactSource }
+  | { kind: 'package'; id: string; source: RemoteGitArtifactSource };
+
+export type ProfileArtifactLocalResource =
+  | { kind: 'library'; id: string; source: LocalMappingArtifactSource }
+  | { kind: 'package'; id: string; source: LocalMappingArtifactSource };
+
+export type ProfileArtifactResource = ProfileArtifactRemoteResource | ProfileArtifactLocalResource;
 
 export interface ProfileArtifactProfile {
   id: string;
@@ -112,10 +117,20 @@ export function decodeProfileArtifactObject(
     previousResourceKey = resourceKey;
     resourceKeys.add(`${candidate.kind}:${candidate.id}`);
     const source = decodeArtifactSource(candidate.source, candidate.id);
-    if (candidate.kind === 'skill' && source.type === 'localMapping') {
-      throw invalid('local direct-Skill resources are not portable; use profile.omittedLocalSkills');
+    if (candidate.kind === 'skill') {
+      if (source.type === 'localMapping') {
+        throw invalid('local direct-Skill resources are not portable; use profile.omittedLocalSkills');
+      }
+      resources.push({ kind: 'skill', id: candidate.id, source });
+    } else if (candidate.kind === 'library') {
+      resources.push(source.type === 'remoteGit'
+        ? { kind: 'library', id: candidate.id, source }
+        : { kind: 'library', id: candidate.id, source });
+    } else {
+      resources.push(source.type === 'remoteGit'
+        ? { kind: 'package', id: candidate.id, source }
+        : { kind: 'package', id: candidate.id, source });
     }
-    resources.push({ kind: candidate.kind, id: candidate.id, source });
   }
 
   for (const omittedId of omittedLocalSkills) {
@@ -203,6 +218,21 @@ export function assertStage1ProfileArtifactCapabilities(artifact: ProfileArtifac
     throw new BazframeError(
       'PROFILE_ARTIFACT_STAGE1_UNSUPPORTED',
       'Stage 1 profile portability does not support local mappings.'
+    );
+  }
+}
+
+export function assertStage2ProfileArtifactCapabilities(artifact: ProfileArtifact): void {
+  if (artifact.profile.packages.length > 0 || artifact.resources.some((resource) => resource.kind === 'package')) {
+    throw new BazframeError(
+      'PROFILE_ARTIFACT_STAGE2_UNSUPPORTED',
+      'Stage 2 profile portability does not support packages.'
+    );
+  }
+  if (artifact.resources.some((resource) => resource.source.type === 'localMapping' && resource.kind !== 'library')) {
+    throw new BazframeError(
+      'PROFILE_ARTIFACT_STAGE2_UNSUPPORTED',
+      'Stage 2 profile portability supports local mappings only for libraries.'
     );
   }
 }

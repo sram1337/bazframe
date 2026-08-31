@@ -34,16 +34,27 @@ import {
 } from '../skill-collections/skill-collection-resolver.js';
 import type { LibraryRecord } from '../skill-collections/skill-collection-store.js';
 import { assertSafeProfileId } from '../profiles/profile-id.js';
+import { assertSafeSkillId } from '../skills/skill-id.js';
 import {
   assertReadOnlyPathAnchor,
   closeReadOnlyPathAnchor,
   holdReadOnlyPathAnchor
 } from '../state/read-only-path-anchor.js';
 import {
-  assertStage1ProfileArtifactCapabilities,
+  assertStage2ProfileArtifactCapabilities,
+  type LocalMappingArtifactSource,
   type ProfileArtifactResource,
   type RemoteGitArtifactSource
 } from './profile-artifact.js';
+import {
+  captureLocalLibraryMapping,
+  classifyLocalLibraryImportResource,
+  sameLocalLibraryHealth,
+  type LocalLibraryHealthSnapshot,
+  type LocalLibraryImportResourceClassification,
+  type LocalLibraryMappingSnapshot,
+  type ProfileImportMappingInput
+} from './profile-import-local-library.js';
 import {
   readProfileArtifactDirectory,
   type ProfileArtifactDirectorySnapshot
@@ -64,15 +75,25 @@ export interface ProfileImportBlocker {
   message: string;
 }
 
-export interface ResourceImportPlan {
-  kind: 'skill' | 'library';
-  id: string;
-  source: RemoteGitArtifactSource;
-  action: ResourceImportAction;
-  reason?: string;
-  networkRequired: boolean;
-  buildRequired: false;
-}
+export type ResourceImportPlan =
+  | {
+    kind: 'skill' | 'library';
+    id: string;
+    source: RemoteGitArtifactSource;
+    action: ResourceImportAction;
+    reason?: string;
+    networkRequired: boolean;
+    buildRequired: false;
+  }
+  | {
+    kind: 'library';
+    id: string;
+    source: LocalMappingArtifactSource & { root?: string };
+    action: ResourceImportAction;
+    reason?: string;
+    networkRequired: false;
+    buildRequired: false;
+  };
 
 export interface ActiveSelectionImportPlan {
   state: 'absent' | 'selected' | 'blocked';
@@ -109,21 +130,23 @@ export interface ProfileImportPlan {
 }
 
 /** Internal execution handoff. Only plan is suitable for later CLI projection. */
+export type ProfileImportResourceSnapshot =
+  | { kind: 'skill' | 'library'; id: string; sourceType: 'remoteGit'; health: ManagedGitExportHealthSnapshot }
+  | { kind: 'library'; id: string; sourceType: 'localMapping'; health: LocalLibraryHealthSnapshot };
+
 export interface ProfileImportPlanningResult {
   plan: ProfileImportPlan;
   homePath: string;
   artifactSnapshot: ProfileArtifactDirectorySnapshot;
-  resourceSnapshots: Array<{
-    kind: 'skill' | 'library';
-    id: string;
-    health: ManagedGitExportHealthSnapshot;
-  }>;
+  resourceSnapshots: ProfileImportResourceSnapshot[];
+  mappingSnapshots: LocalLibraryMappingSnapshot[];
 }
 
 export interface PlanProfileImportOptions {
   bazframeHome: string;
   artifactDirectory: string;
   destinationProfileId?: string;
+  mappings?: readonly ProfileImportMappingInput[];
   environment?: NodeJS.ProcessEnv;
 }
 
@@ -131,6 +154,8 @@ export interface ProfileImportPlanDependencies {
   limitPolicy?: Partial<ProfileArtifactLimitPolicy>;
   readArtifact?: typeof readProfileArtifactDirectory;
   classifyResource?: typeof classifyManagedGitImportResource;
+  captureMapping?: typeof captureLocalLibraryMapping;
+  classifyLocalLibrary?: typeof classifyLocalLibraryImportResource;
   readActiveSelection?: typeof readOptionalActiveProfileSnapshot;
   classifyActiveProfilePresence?: typeof classifyActiveProfilePresence;
   resolveLibrary?: (
@@ -144,13 +169,24 @@ export interface ProfileImportPlanDependencies {
   classifyDestination?: typeof classifyDestinationProfile;
   testHooks?: {
     afterCapabilityValidation?: () => void | Promise<void>;
+    afterMappingClosureValidation?: (blockers: readonly ProfileImportBlocker[]) => void | Promise<void>;
     beforeDestinationFinalCheck?: () => void | Promise<void>;
   };
 }
 
-interface ClassifiedResource {
-  resource: ProfileArtifactResource & { source: RemoteGitArtifactSource };
-  classification: ManagedGitImportResourceClassification;
+type ImportableRemoteResource =
+  | { kind: 'skill'; id: string; source: RemoteGitArtifactSource }
+  | { kind: 'library'; id: string; source: RemoteGitArtifactSource };
+type LocalLibraryResource = { kind: 'library'; id: string; source: LocalMappingArtifactSource };
+type ClassifiedResource =
+  | { sourceType: 'remoteGit'; resource: ImportableRemoteResource; classification: ManagedGitImportResourceClassification }
+  | { sourceType: 'localMapping'; resource: LocalLibraryResource; mapping?: LocalLibraryMappingSnapshot; classification: LocalLibraryImportResourceClassification };
+
+function isImportableRemoteResource(resource: ProfileArtifactResource): resource is ImportableRemoteResource {
+  return resource.source.type === 'remoteGit' && resource.kind !== 'package';
+}
+function isLocalLibraryResource(resource: ProfileArtifactResource): resource is LocalLibraryResource {
+  return resource.kind === 'library' && resource.source.type === 'localMapping';
 }
 
 interface DestinationClassification {
@@ -177,7 +213,7 @@ export async function planProfileImport(
   const artifactSnapshot = await readArtifact(options.artifactDirectory, policy);
 
   // Capability rejection is intentionally before every target-side classifier.
-  assertStage1ProfileArtifactCapabilities(artifactSnapshot.artifact);
+  assertStage2ProfileArtifactCapabilities(artifactSnapshot.artifact);
   await dependencies.testHooks?.afterCapabilityValidation?.();
 
   const artifact = artifactSnapshot.artifact;
@@ -193,6 +229,8 @@ export async function planProfileImport(
       );
     }
     const classifyResource = dependencies.classifyResource ?? classifyManagedGitImportResource;
+    const captureMapping = dependencies.captureMapping ?? captureLocalLibraryMapping;
+    const classifyLocalLibrary = dependencies.classifyLocalLibrary ?? classifyLocalLibraryImportResource;
     const readActiveSelection = dependencies.readActiveSelection ?? readOptionalActiveProfileSnapshot;
     const classifyActiveProfile = dependencies.classifyActiveProfilePresence ?? classifyActiveProfilePresence;
     const classifyDestination = dependencies.classifyDestination ?? classifyDestinationProfile;
@@ -203,29 +241,67 @@ export async function planProfileImport(
     const maxProfileNamespaceEntries = boundedProfileNamespaceEntries(dependencies.maxProfileNamespaceEntries);
     const blockers: ProfileImportBlocker[] = [];
     const classifiedResources: ClassifiedResource[] = [];
-
-    for (const resource of artifact.resources) {
-      if (resource.kind === 'package' || resource.source.type !== 'remoteGit') {
-        throw new BazframeError('PROFILE_ARTIFACT_STAGE1_UNSUPPORTED', 'Stage 1 profile import encountered an unsupported resource after capability validation.');
+    const mappingInputs = validateMappingInputs(options.mappings ?? [], artifact.resources);
+    const mappingSnapshots: LocalLibraryMappingSnapshot[] = [];
+    for (const mapping of mappingInputs) {
+      const snapshot = await captureMapping(mapping);
+      if (pathsOverlap(snapshot.root, home) || pathsOverlap(snapshot.root, artifactSnapshot.root.path)) {
+        throw new BazframeError('PROFILE_IMPORT_MAPPING_OVERLAP', `Mapped library ${mapping.id} overlaps the artifact root or BAZFRAME_HOME.`);
       }
-      const classification = await classifyResource(
-        home,
-        resource.kind,
-        resource.id,
-        pathFreeRemoteGitIdentity(resource.source),
-        environment
-      );
-      classifiedResources.push({
-        resource: resource as ProfileArtifactResource & { source: RemoteGitArtifactSource },
-        classification
-      });
-      if (classification.action === 'blocked') {
+      for (const existing of mappingSnapshots) {
+        if (pathsOverlap(snapshot.root, existing.root)) {
+          throw new BazframeError('PROFILE_IMPORT_MAPPING_OVERLAP', `Mapped libraries ${existing.id} and ${mapping.id} overlap.`);
+        }
+      }
+      mappingSnapshots.push(snapshot);
+    }
+    const mappingById = new Map(mappingSnapshots.map((mapping) => [mapping.id, mapping]));
+    for (const resource of artifact.resources) {
+      if (isLocalLibraryResource(resource) && !mappingById.has(resource.id)) {
         blockers.push(blocker(
-          'PROFILE_IMPORT_RESOURCE_BLOCKED',
-          `${resource.kind}:${resource.id}`,
-          classification.reason ?? `Resource ${resource.kind}:${resource.id} is blocked.`
+          'PROFILE_IMPORT_MAPPING_REQUIRED',
+          `library:${resource.id}`,
+          `Local library ${resource.id} requires --map library:${resource.id}=<absolute-source-directory>.`
         ));
       }
+    }
+    await dependencies.testHooks?.afterMappingClosureValidation?.(blockers.map((item) => ({ ...item })));
+
+    for (const resource of artifact.resources) {
+      if (isImportableRemoteResource(resource)) {
+        const classification = await classifyResource(
+          home,
+          resource.kind,
+          resource.id,
+          pathFreeRemoteGitIdentity(resource.source),
+          environment
+        );
+        classifiedResources.push({ sourceType: 'remoteGit', resource, classification });
+        if (classification.action === 'blocked') {
+          blockers.push(blocker(
+            'PROFILE_IMPORT_RESOURCE_BLOCKED',
+            `${resource.kind}:${resource.id}`,
+            classification.reason ?? `Resource ${resource.kind}:${resource.id} is blocked.`
+          ));
+        }
+        continue;
+      }
+      if (isLocalLibraryResource(resource)) {
+        const mapping = mappingById.get(resource.id);
+        const classification: LocalLibraryImportResourceClassification = mapping === undefined
+          ? { action: 'blocked', reason: `Local library ${resource.id} requires an explicit mapping.` }
+          : await classifyLocalLibrary(home, resource.id, mapping);
+        classifiedResources.push({ sourceType: 'localMapping', resource, ...(mapping === undefined ? {} : { mapping }), classification });
+        if (classification.action === 'blocked' && mapping !== undefined) {
+          blockers.push(blocker(
+            'PROFILE_IMPORT_RESOURCE_BLOCKED',
+            `library:${resource.id}`,
+            classification.reason
+          ));
+        }
+        continue;
+      }
+      throw new BazframeError('PROFILE_ARTIFACT_STAGE2_UNSUPPORTED', 'Stage 2 profile import encountered an unsupported resource after capability validation.');
     }
 
     let activeSelectionState = await classifyActiveSelection(home, readActiveSelection, classifyActiveProfile);
@@ -266,6 +342,7 @@ export async function planProfileImport(
       home,
       classifiedResources,
       classifyResource,
+      classifyLocalLibrary,
       environment,
       blockers
     );
@@ -328,15 +405,30 @@ export async function planProfileImport(
     const profileAction: ProfileImportAction = sortedBlockers.length > 0
       ? 'blocked'
       : destination.action;
-    const resources: ResourceImportPlan[] = classifiedResources.map(({ resource, classification }) => ({
-      kind: resource.kind as 'skill' | 'library',
-      id: resource.id,
-      source: { ...resource.source },
-      action: classification.action,
-      ...(classification.reason === undefined ? {} : { reason: boundedTextForDisplay(classification.reason) }),
-      networkRequired: classification.action === 'create',
-      buildRequired: false
-    }));
+    const resources: ResourceImportPlan[] = classifiedResources.map((item) => {
+      const common = {
+        id: item.resource.id,
+        action: item.classification.action,
+        ...(!('reason' in item.classification) || item.classification.reason === undefined
+          ? {}
+          : { reason: boundedTextForDisplay(item.classification.reason) }),
+        buildRequired: false as const
+      };
+      if (item.sourceType === 'localMapping') {
+        return {
+          ...common,
+          kind: 'library' as const,
+          source: { type: 'localMapping' as const, ...(item.mapping === undefined ? {} : { root: item.mapping.root }) },
+          networkRequired: false as const
+        };
+      }
+      return {
+        ...common,
+        kind: item.resource.kind,
+        source: { ...item.resource.source },
+        networkRequired: item.classification.action === 'create'
+      };
+    });
 
     return {
       plan: {
@@ -362,11 +454,13 @@ export async function planProfileImport(
       },
       homePath: home,
       artifactSnapshot,
-      resourceSnapshots: classifiedResources.flatMap(({ resource, classification }) => (
-        classification.action === 'reuse' && classification.health !== undefined
-          ? [{ kind: resource.kind as 'skill' | 'library', id: resource.id, health: classification.health }]
-          : []
-      ))
+      resourceSnapshots: classifiedResources.flatMap((item): ProfileImportResourceSnapshot[] => {
+        if (item.classification.action !== 'reuse' || item.classification.health === undefined) return [];
+        return item.sourceType === 'localMapping'
+          ? [{ kind: 'library', id: item.resource.id, sourceType: 'localMapping', health: item.classification.health }]
+          : [{ kind: item.resource.kind, id: item.resource.id, sourceType: 'remoteGit', health: item.classification.health }];
+      }),
+      mappingSnapshots: mappingSnapshots.map((mapping) => ({ ...mapping }))
     };
   } finally {
     await closeReadOnlyPathAnchor(homeAnchor);
@@ -490,7 +584,9 @@ async function classifyComposition(
   let aggregateLimitReached = false;
   for (const item of resources) {
     if (item.resource.kind !== 'library' || item.classification.action !== 'reuse') continue;
-    const captured = item.classification.health?.collectionSnapshot?.record;
+    const captured = item.classification.action === 'reuse'
+      ? item.classification.health?.collectionSnapshot?.record
+      : undefined;
     if (captured === undefined || !('library' in captured)) {
       compositionBlocked = true;
       blockers.push(blocker(
@@ -572,39 +668,60 @@ async function revalidateResourceClassifications(
   home: string,
   resources: ClassifiedResource[],
   classifyResource: typeof classifyManagedGitImportResource,
+  classifyLocalLibrary: typeof classifyLocalLibraryImportResource,
   environment: NodeJS.ProcessEnv,
   blockers: ProfileImportBlocker[]
 ): Promise<void> {
   for (const item of resources) {
+    if (item.sourceType === 'localMapping') {
+      const initial = item.classification;
+      if (initial.action === 'blocked') continue;
+      if (item.mapping === undefined) throw new BazframeError('PROFILE_IMPORT_PLAN_INVALID', `Mapped library evidence is missing for ${item.resource.id}.`);
+      const current = await classifyLocalLibrary(home, item.resource.id, item.mapping);
+      const unchanged = initial.action === current.action
+        && (initial.action === 'create'
+          || (initial.health !== undefined && current.action === 'reuse'
+            && sameLocalLibraryHealth(initial.health, current.health)));
+      if (unchanged) {
+        item.classification = current;
+        continue;
+      }
+      blockChangedResource(item, current, 'Local', blockers);
+      continue;
+    }
     const initial = item.classification;
     if (initial.action === 'blocked') continue;
     const current = await classifyResource(
       home,
-      item.resource.kind as 'skill' | 'library',
+      item.resource.kind,
       item.resource.id,
       pathFreeRemoteGitIdentity(item.resource.source),
       environment
     );
     const unchanged = initial.action === current.action
       && (initial.action === 'create'
-        || (initial.health !== undefined
-          && current.action === 'reuse'
-          && current.health !== undefined
+        || (initial.health !== undefined && current.action === 'reuse' && current.health !== undefined
           && sameManagedGitExportHealth(initial.health, current.health)));
     if (unchanged) {
       item.classification = current;
       continue;
     }
-    const reason = current.reason === undefined
-      ? `Remote Git ${item.resource.kind} ${item.resource.id} changed during import planning.`
-      : `Remote Git ${item.resource.kind} ${item.resource.id} changed during import planning: ${current.reason}`;
-    item.classification = { action: 'blocked', reason: boundedTextForDisplay(reason) };
-    blockers.push(blocker(
-      'PROFILE_IMPORT_RESOURCE_CHANGED',
-      `${item.resource.kind}:${item.resource.id}`,
-      reason
-    ));
+    blockChangedResource(item, current, 'Remote Git', blockers);
   }
+}
+
+function blockChangedResource(
+  item: ClassifiedResource,
+  current: ManagedGitImportResourceClassification | LocalLibraryImportResourceClassification,
+  label: 'Local' | 'Remote Git',
+  blockers: ProfileImportBlocker[]
+): void {
+  const currentReason = 'reason' in current ? current.reason : undefined;
+  const reason = currentReason === undefined
+    ? `${label} ${item.resource.kind} ${item.resource.id} changed during import planning.`
+    : `${label} ${item.resource.kind} ${item.resource.id} changed during import planning: ${currentReason}`;
+  item.classification = { action: 'blocked', reason: boundedTextForDisplay(reason) };
+  blockers.push(blocker('PROFILE_IMPORT_RESOURCE_CHANGED', `${item.resource.kind}:${item.resource.id}`, reason));
 }
 
 function pathFreeRemoteGitIdentity(source: RemoteGitArtifactSource): Omit<RemoteGitArtifactSource, 'type'> {
@@ -895,9 +1012,13 @@ async function assertSkillNamespace(
     const evidence = [`${directory.path}:${directory.device}:${directory.inode}`];
     const names = await stableDirectoryNames(directory, maxProfileNamespaceEntries);
     if (!sameStrings(names, expectedIds)) throw mismatch('destination direct Skill membership differs');
-    const roots = new Map(resources
-      .filter((item) => item.resource.kind === 'skill' && item.classification.health !== undefined)
-      .map((item) => [item.resource.id, item.classification.health!.root]));
+    const roots = new Map(resources.flatMap((item) => {
+      if (item.sourceType !== 'remoteGit'
+        || item.resource.kind !== 'skill'
+        || item.classification.action !== 'reuse'
+        || item.classification.health === undefined) return [];
+      return [[item.resource.id, item.classification.health.root] as const];
+    }));
     for (const id of expectedIds) {
       const membershipPath = join(path, id);
       const before = await lstat(membershipPath, { bigint: true });
@@ -996,6 +1117,37 @@ function mismatch(detail: string): BazframeError {
 
 function safeReason(error: unknown): string {
   return boundedTextForDisplay(error instanceof Error ? error.message : String(error));
+}
+
+function validateMappingInputs(
+  entered: readonly ProfileImportMappingInput[],
+  resources: readonly ProfileArtifactResource[]
+): ProfileImportMappingInput[] {
+  if (!Array.isArray(entered)) {
+    throw new BazframeError('PROFILE_IMPORT_MAPPING_INVALID', 'Profile import mappings must be an array.');
+  }
+  const expected = new Set(resources
+    .filter((resource) => resource.kind === 'library' && resource.source.type === 'localMapping')
+    .map((resource) => `library:${resource.id}`));
+  const seen = new Set<string>();
+  const result: ProfileImportMappingInput[] = [];
+  for (const raw of entered) {
+    if (raw === null || typeof raw !== 'object' || raw.kind !== 'library'
+      || typeof raw.id !== 'string' || typeof raw.root !== 'string') {
+      throw new BazframeError('PROFILE_IMPORT_MAPPING_INVALID', 'Each profile import mapping must identify one local library and absolute source root.');
+    }
+    try { assertSafeSkillId(raw.id); }
+    catch (error) { throw new BazframeError('PROFILE_IMPORT_MAPPING_INVALID', `Mapped library ID is invalid: ${raw.id}`, { cause: error }); }
+    if (!isAbsolute(raw.root) || raw.root.length === 0 || raw.root.includes('\0')) {
+      throw new BazframeError('PROFILE_IMPORT_MAPPING_INVALID', 'Mapped library root must be a non-NUL absolute path.');
+    }
+    const key = `library:${raw.id}`;
+    if (seen.has(key)) throw new BazframeError('PROFILE_IMPORT_MAPPING_INVALID', `Duplicate profile import mapping: ${key}`);
+    if (!expected.has(key)) throw new BazframeError('PROFILE_IMPORT_MAPPING_INVALID', `Profile artifact does not require local mapping ${key}.`);
+    seen.add(key);
+    result.push({ kind: 'library', id: raw.id, root: raw.root });
+  }
+  return result.sort((left, right) => compare(left.id, right.id));
 }
 
 function pathsOverlap(left: string, right: string): boolean {

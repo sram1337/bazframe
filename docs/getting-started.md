@@ -165,7 +165,7 @@ export PI_CODING_AGENT_DIR=/absolute/path/to/pi-agent-state
 
 Set these before running Bazframe setup commands. Changing either value points the tools at different state; it does not copy or migrate existing state.
 
-> **Do not copy `BAZFRAME_HOME` between machines.** Use the supported Stage 1 artifact workflow instead: `bazframe profile export <profile> --output <directory>`, review the exported `profile/AGENTS.md`, transfer the artifact directory, run `bazframe profile import <directory> --dry-run`, then run import without `--dry-run`. Stage 1 imports exact remote Git Skills and libraries into an inactive profile; local-library mappings, packages, Windows publication, and full portability remain unavailable.
+> **Do not copy `BAZFRAME_HOME` between machines.** Use the supported Stage 2 artifact workflow instead: `bazframe profile export <profile> --output <directory>`, review the exported `profile/AGENTS.md`, and transfer the artifact directory. Run `bazframe profile import --dry-run <directory>`, then repeat without `--dry-run`. If the artifact declares local library `toolkit`, use `bazframe profile import --map library:toolkit=/srv/skill-libraries/toolkit --dry-run <directory>` and the same mapping for execution; provide one mapping for every artifact-declared local library. Stage 2 imports exact remote Git Skills/libraries and read-only inspects absolute, basename-matching local-library roots before ordinary build-free creation or exact same-root reuse. It publishes an inactive profile without promoting library children. Local direct-Skill mappings, packages and `--yes`, Windows publication, and full portability remain unavailable.
 
 ## Diagnose setup with status
 

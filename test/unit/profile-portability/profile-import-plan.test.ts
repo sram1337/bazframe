@@ -65,17 +65,16 @@ async function fixture(
 }
 
 function remote(kind: 'skill' | 'library' | 'package', id: string): ProfileArtifactResource {
-  return {
-    kind,
-    id,
-    source: {
-      type: 'remoteGit',
-      remote: `example.test/team/${id}`,
-      fetchUrl: `https://example.test/team/${id}.git`,
-      branch: 'main',
-      revision: id.charCodeAt(0).toString(16).padStart(2, '0').repeat(20).slice(0, 40)
-    }
+  const source = {
+    type: 'remoteGit' as const,
+    remote: `example.test/team/${id}`,
+    fetchUrl: `https://example.test/team/${id}.git`,
+    branch: 'main',
+    revision: id.charCodeAt(0).toString(16).padStart(2, '0').repeat(20).slice(0, 40)
   };
+  if (kind === 'skill') return { kind, id, source };
+  if (kind === 'library') return { kind, id, source };
+  return { kind, id, source };
 }
 
 function fakeHealth(
@@ -223,10 +222,8 @@ describe('Stage 1 profile import planner', () => {
     expect(result.plan.resources[0]?.source).toEqual(resource.source);
   });
 
-  it.each([
-    ['package', [remote('package', 'automation')]],
-    ['localMapping', [{ kind: 'library', id: 'toolkit', source: { type: 'localMapping' } } satisfies ProfileArtifactResource]]
-  ])('rejects unsupported %s capability before every target classifier', async (_label, resources) => {
+  it('rejects package capability before every target classifier', async () => {
+    const resources = [remote('package', 'automation')];
     const f = await fixture(resources);
     const classifyResource = vi.fn();
     const readActiveSelection = vi.fn();
@@ -238,13 +235,120 @@ describe('Stage 1 profile import planner', () => {
     await expect(planProfileImport(
       { bazframeHome: f.home, artifactDirectory: f.artifact },
       { classifyResource, readActiveSelection, classifyActiveProfilePresence, classifyDestination, resolveLibrary, testHooks: { afterCapabilityValidation: hook } }
-    )).rejects.toMatchObject({ code: 'PROFILE_ARTIFACT_STAGE1_UNSUPPORTED' });
+    )).rejects.toMatchObject({ code: 'PROFILE_ARTIFACT_STAGE2_UNSUPPORTED' });
     expect(classifyResource).not.toHaveBeenCalled();
     expect(readActiveSelection).not.toHaveBeenCalled();
     expect(classifyActiveProfilePresence).not.toHaveBeenCalled();
     expect(classifyDestination).not.toHaveBeenCalled();
     expect(resolveLibrary).not.toHaveBeenCalled();
     expect(hook).not.toHaveBeenCalled();
+  });
+
+  it('precomputes missing mapping blockers before remote classification and still returns the complete plan', async () => {
+    const resource = { kind: 'library', id: 'toolkit', source: { type: 'localMapping' } } satisfies ProfileArtifactResource;
+    const f = await fixture([remote('skill', 'alpha'), resource]);
+    const events: string[] = [];
+    const classifyResource = vi.fn(async () => { events.push('remote-classifier'); return { action: 'create' as const }; });
+    const result = await planProfileImport(
+      { bazframeHome: f.home, artifactDirectory: f.artifact },
+      {
+        classifyResource,
+        testHooks: { afterMappingClosureValidation: (blockers) => {
+          events.push('mapping-closure');
+          expect(blockers).toContainEqual(expect.objectContaining({ code: 'PROFILE_IMPORT_MAPPING_REQUIRED', key: 'library:toolkit' }));
+        } }
+      }
+    );
+    expect(result.plan.resources).toEqual([
+      expect.objectContaining({ kind: 'skill', id: 'alpha', action: 'create' }),
+      expect.objectContaining({ kind: 'library', id: 'toolkit', source: { type: 'localMapping' }, action: 'blocked', networkRequired: false })
+    ]);
+    expect(result.plan.blockers).toContainEqual(expect.objectContaining({ code: 'PROFILE_IMPORT_MAPPING_REQUIRED', key: 'library:toolkit' }));
+    expect(events[0]).toBe('mapping-closure');
+    expect(classifyResource).toHaveBeenCalledTimes(2);
+  });
+
+  it('validates and projects canonical local-library mappings without remote work', async () => {
+    const resource = { kind: 'library', id: 'toolkit', source: { type: 'localMapping' } } satisfies ProfileArtifactResource;
+    const f = await fixture([resource]);
+    const root = join(f.root, 'sources', 'toolkit');
+    await mkdir(root, { recursive: true });
+    const classifyResource = vi.fn();
+    const classifyLocalLibrary = vi.fn(async () => ({ action: 'create' as const }));
+    const result = await planProfileImport(
+      { bazframeHome: f.home, artifactDirectory: f.artifact, mappings: [{ kind: 'library', id: 'toolkit', root }] },
+      { classifyResource, classifyLocalLibrary }
+    );
+    expect(result.plan.resources).toEqual([expect.objectContaining({
+      kind: 'library', id: 'toolkit', source: { type: 'localMapping', root: await realpath(root) },
+      action: 'create', networkRequired: false, buildRequired: false
+    })]);
+    expect(result.mappingSnapshots).toEqual([expect.objectContaining({ id: 'toolkit', root: await realpath(root) })]);
+    expect(classifyResource).not.toHaveBeenCalled();
+    expect(classifyLocalLibrary).toHaveBeenCalledTimes(2);
+
+    await expect(planProfileImport(
+      { bazframeHome: f.home, artifactDirectory: f.artifact, mappings: [{ kind: 'library', id: 'extra', root }] }
+    )).rejects.toMatchObject({ code: 'PROFILE_IMPORT_MAPPING_INVALID' });
+  });
+
+  it('rejects mapped-root overlap with BAZFRAME_HOME and other mappings', async () => {
+    const one = await fixture([{ kind: 'library', id: 'toolkit', source: { type: 'localMapping' } }]);
+    const insideHome = join(one.home, 'toolkit');
+    await mkdir(insideHome, { recursive: true });
+    await expect(planProfileImport({
+      bazframeHome: one.home,
+      artifactDirectory: one.artifact,
+      mappings: [{ kind: 'library', id: 'toolkit', root: insideHome }]
+    })).rejects.toMatchObject({ code: 'PROFILE_IMPORT_MAPPING_OVERLAP' });
+
+    const two = await fixture([
+      { kind: 'library', id: 'alpha', source: { type: 'localMapping' } },
+      { kind: 'library', id: 'beta', source: { type: 'localMapping' } }
+    ]);
+    const alpha = join(two.root, 'sources', 'alpha');
+    const beta = join(alpha, 'beta');
+    await mkdir(beta, { recursive: true });
+    await expect(planProfileImport({
+      bazframeHome: two.home,
+      artifactDirectory: two.artifact,
+      mappings: [
+        { kind: 'library', id: 'alpha', root: alpha },
+        { kind: 'library', id: 'beta', root: beta }
+      ]
+    })).rejects.toMatchObject({ code: 'PROFILE_IMPORT_MAPPING_OVERLAP' });
+
+    const artifactNested = await fixture([{ kind: 'library', id: 'toolkit', source: { type: 'localMapping' } }]);
+    const enclosingMapping = join(artifactNested.root, 'toolkit');
+    await mkdir(enclosingMapping);
+    const nestedArtifact = join(enclosingMapping, 'artifact');
+    await rename(artifactNested.artifact, nestedArtifact);
+    await expect(planProfileImport({
+      bazframeHome: artifactNested.home,
+      artifactDirectory: nestedArtifact,
+      mappings: [{ kind: 'library', id: 'toolkit', root: enclosingMapping }]
+    })).rejects.toMatchObject({ code: 'PROFILE_IMPORT_MAPPING_OVERLAP' });
+
+    const homeNested = await fixture([{ kind: 'library', id: 'toolkit', source: { type: 'localMapping' } }]);
+    const homeEnclosingMapping = join(homeNested.root, 'toolkit');
+    await mkdir(homeEnclosingMapping);
+    await expect(planProfileImport({
+      bazframeHome: join(homeEnclosingMapping, 'home'),
+      artifactDirectory: homeNested.artifact,
+      mappings: [{ kind: 'library', id: 'toolkit', root: homeEnclosingMapping }]
+    })).rejects.toMatchObject({ code: 'PROFILE_IMPORT_MAPPING_OVERLAP' });
+
+    const nearby = await fixture([{ kind: 'library', id: 'toolkit', source: { type: 'localMapping' } }]);
+    const nearbyRoot = join(nearby.root, 'home-nearby', 'toolkit');
+    await mkdir(nearbyRoot, { recursive: true });
+    await expect(planProfileImport(
+      {
+        bazframeHome: nearby.home,
+        artifactDirectory: nearby.artifact,
+        mappings: [{ kind: 'library', id: 'toolkit', root: nearbyRoot }]
+      },
+      { classifyLocalLibrary: async () => ({ action: 'create' }) }
+    )).resolves.toMatchObject({ plan: { resources: [expect.objectContaining({ action: 'create' })] } });
   });
 
   it('returns sorted escaped resource blockers and computes the profile action last', async () => {

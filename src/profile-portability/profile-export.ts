@@ -16,6 +16,7 @@ import { BazframeError, errorCode } from '../core/errors.js';
 import { boundedPathForDisplay } from '../core/safe-text.js';
 import {
   captureManagedGitExportHealth,
+  classifyManagedGitProviderOccupancy,
   type ManagedGitExportHealthSnapshot
 } from '../providers/managed-git.js';
 import {
@@ -52,6 +53,7 @@ import { isSafeSkillId } from '../skills/skill-id.js';
 import { withStateLock } from '../state/lock.js';
 import {
   encodeProfileArtifact,
+  type LocalMappingArtifactSource,
   type ProfileArtifact,
   type ProfileArtifactResource,
   type RemoteGitArtifactSource
@@ -92,11 +94,10 @@ export interface ProfileExportResult {
   omittedLocalSkills: string[];
   libraries: string[];
   packages: [];
-  resources: Array<{
-    kind: 'skill' | 'library';
-    id: string;
-    source: RemoteGitArtifactSource;
-  }>;
+  resources: Array<
+    | { kind: 'skill'; id: string; source: RemoteGitArtifactSource }
+    | { kind: 'library'; id: string; source: RemoteGitArtifactSource | LocalMappingArtifactSource }
+  >;
   warnings: ProfileExportWarning[];
 }
 
@@ -146,7 +147,7 @@ interface LibraryCapture {
   id: string;
   reference: ProfileSkillCollectionReferenceSnapshot;
   record: SkillCollectionRecordSnapshot<LibraryRecord>;
-  managed: ManagedGitExportHealthSnapshot;
+  managed?: ManagedGitExportHealthSnapshot;
   children: DerivedSkill[];
 }
 interface SourceCapture {
@@ -396,8 +397,8 @@ async function captureSource(
         );
       }
       throw new BazframeError(
-        'PROFILE_EXPORT_STAGE1_UNSUPPORTED',
-        'Stage 1 profile export does not support package references.'
+        'PROFILE_EXPORT_STAGE2_UNSUPPORTED',
+        'Stage 2 profile export does not support package references.'
       );
     }
 
@@ -414,19 +415,24 @@ async function captureSource(
         maxBytes: dependencies.limitPolicy.maxManifestBytes
       });
       const provenance = await optionalProvenance(home, 'library', id);
+      let managed: ManagedGitExportHealthSnapshot | undefined;
+      let resource: ProfileArtifactResource;
       if (provenance === undefined) {
-        throw new BazframeError(
-          'PROFILE_EXPORT_LOCAL_LIBRARY_UNSUPPORTED',
-          `Stage 1 profile export does not support local library ${JSON.stringify(id)}.`
-        );
+        if (isWithin(managedGitCheckoutsRoot(home), record.record.root)
+          || await classifyManagedGitProviderOccupancy(home, 'library', id) !== 'absent') {
+          throw invalidSource(`library ${JSON.stringify(id)} has managed Git checkout or provider state without matching provenance`);
+        }
+        resource = { kind: 'library', id, source: { type: 'localMapping' } };
+      } else {
+        if (provenance.record.root !== record.record.root) {
+          throw invalidSource(`remote Git provenance does not match library ${JSON.stringify(id)}`);
+        }
+        managed = await dependencies.captureManagedGitHealth(home, 'library', id, environment);
+        resource = resourceFromManaged('library', id, managed);
       }
-      if (provenance.record.root !== record.record.root) {
-        throw invalidSource(`remote Git provenance does not match library ${JSON.stringify(id)}`);
-      }
-      const managed = await dependencies.captureManagedGitHealth(home, 'library', id, environment);
       const children = await resolveGlobalSkillCollection(home, record.record);
-      libraries.push({ id, reference, record, managed, children });
-      resources.push(resourceFromManaged('library', id, managed));
+      libraries.push({ id, reference, record, ...(managed === undefined ? {} : { managed }), children });
+      resources.push(resource);
       assertResourceLimit(resources.length, dependencies.limitPolicy.maxResources);
     }
 
@@ -560,14 +566,13 @@ function resourceFromManaged(
   id: string,
   managed: ManagedGitExportHealthSnapshot
 ): ProfileArtifactResource {
-  return {
-    kind,
-    id,
-    source: {
-      type: 'remoteGit',
-      ...pathFreeManagedGitIdentityFromRecord(managed.recordSnapshot.record)
-    }
+  const source: RemoteGitArtifactSource = {
+    type: 'remoteGit',
+    ...pathFreeManagedGitIdentityFromRecord(managed.recordSnapshot.record)
   };
+  return kind === 'skill'
+    ? { kind: 'skill', id, source }
+    : { kind: 'library', id, source };
 }
 
 function assertResourceLimit(count: number, maximum: number): void {
@@ -717,7 +722,7 @@ function evidenceFor(
       id: library.id,
       reference: referenceEvidence(library.reference),
       record: collectionEvidence(library.record),
-      managed: managedEvidence(library.managed),
+      managed: library.managed === undefined ? null : managedEvidence(library.managed),
       children: library.children.map((child) => ({
         name: child.name,
         baseDir: child.baseDir,
@@ -794,11 +799,15 @@ function resultFromCapture(
     omittedLocalSkills: omitted,
     libraries: [...artifact.profile.libraries],
     packages: [],
-    resources: artifact.resources.map((resource) => ({
-      kind: resource.kind as 'skill' | 'library',
-      id: resource.id,
-      source: { ...resource.source } as RemoteGitArtifactSource
-    })),
+    resources: artifact.resources.map((resource) => {
+      if (resource.kind === 'skill' && resource.source.type === 'remoteGit') {
+        return { kind: 'skill' as const, id: resource.id, source: { ...resource.source } };
+      }
+      if (resource.kind === 'library') {
+        return { kind: 'library' as const, id: resource.id, source: { ...resource.source } };
+      }
+      throw invalidSource('captured artifact contains an unsupported resource');
+    }),
     warnings
   };
 }

@@ -113,7 +113,7 @@ bazframe package update [--accept-rewrite] [--yes] <package>
 
 Update acquires the recorded default branch into Bazframe-managed staging, verifies remote identity and a clean checkout, and activates a fast-forward revision transactionally. `--accept-rewrite` authorizes a reviewed non-fast-forward branch change. `package build` rebuilds the recorded remote Git revision without network access and restores a clean checkout after success or failure. Repeating an already-current add verifies provenance, checkout, and registration locally. Resource removal applies the existing reference checks, then removes the Bazframe-managed checkout and provenance while leaving the upstream remote available. `bazframe status` reports each remote Git source's remote, branch, full revision, checkout path, health, and resource-specific update command. Retained recovery records describe the stopped operation and paths. Recovery is inspect-first and fail-closed. Add, update, and build recovery require manual reconciliation to one revision before removing the record and retrying. Removal recovery retains its record while the same remove command verifies and finishes any surviving resource, checkout, and provenance.
 
-## Stage 1 profile export and import
+## Stage 2 profile export and import
 
 Export always names an explicit profile and an explicit absent output directory; it does not use or change the active selection:
 
@@ -121,19 +121,28 @@ Export always names an explicit profile and an explicit absent output directory;
 bazframe profile export focused --output ./focused.bazframe-profile
 ```
 
-The live Stage 1 slice includes healthy direct Skills and whole libraries acquired from remote Git sources. Export performs no network access. Healthy local direct Skills are omitted, recorded in `omittedLocalSkills`, and reported individually. A local library or any package reference blocks export. The artifact contains canonical `bazframe-profile.json` and the exact `profile/AGENTS.md` bytes; review that `AGENTS.md` before sharing it.
+The live Stage 2 slice includes healthy direct Skills acquired from remote Git sources and whole libraries acquired from remote Git or added locally. Export performs no network access. Healthy local direct Skills are omitted, recorded in `omittedLocalSkills`, and reported individually. A healthy local library becomes a path-free `{ "type": "localMapping" }` requirement; its source path and snapshot digest are not exported. Every package reference blocks export. The artifact contains canonical `bazframe-profile.json` and the exact `profile/AGENTS.md` bytes; review that `AGENTS.md` before sharing it.
 
-Inspect the artifact on the destination machine before executing import:
+Inspect the artifact on the destination machine before executing import. For an artifact with no local libraries:
 
 ```bash
-bazframe profile import ./focused.bazframe-profile --dry-run
+bazframe profile import --dry-run ./focused.bazframe-profile
 bazframe profile import ./focused.bazframe-profile
-bazframe profile import ./focused.bazframe-profile --as imported-focused
 ```
 
-Import always reports the complete plan first. A completed dry-run exits successfully even when the plan contains blockers and performs no network acquisition, builds, Bazframe writes, or active-profile change. Execution creates or exactly reuses direct Skills and libraries at the recorded remote Git branch-reachable revisions, then publishes an inactive profile. `--as` changes only the destination profile ID. Omitted local Skills stay omitted, and library children never enter `(default)`.
+If the artifact declares local library `toolkit`, supply that mapping during both inspection and execution. Each mapped root must be an absolute physical source directory whose basename equals the library ID:
 
-Import is forward-resumable rather than globally atomic. A resource created before later failure remains available; inspect `created`, `recovery-required`, and `commit-ambiguous` outcomes, fix recovery state without destructive assumptions, and rerun import so exact resources can be reused. Stage 1 accepts neither `--map` nor `--yes` and rejects local mappings and packages. Local-library portability, package portability, Windows publication, and full profile portability are still unavailable.
+```bash
+bazframe profile import --map library:toolkit=/srv/skill-libraries/toolkit --dry-run ./focused.bazframe-profile
+bazframe profile import --map library:toolkit=/srv/skill-libraries/toolkit ./focused.bazframe-profile
+bazframe profile import --as imported-focused --map library:toolkit=/srv/skill-libraries/toolkit ./focused.bazframe-profile
+```
+
+The canonical grammar is `bazframe profile import [--json] [--as <profile>] [--map library:<id>=<absolute-source-directory>]... [--dry-run] <directory>`. Import read-only inspects every mapping and reports the complete plan first. A missing required mapping blocks the plan. A completed dry-run exits successfully even when the plan contains blockers and performs no network acquisition, build, Bazframe write, or active-profile mutation.
+
+Execution creates or exactly reuses remote Git resources at their recorded branch-reachable revisions. It creates an absent mapped library through ordinary build-free `addLibrary` or exactly reuses the same canonical root; it never overwrites, updates, or repoints a library. `--as` changes only the destination profile ID. Omitted local Skills stay omitted, active selection stays unchanged, and library children never enter `(default)`.
+
+Import is forward-resumable rather than globally atomic. A resource created before later failure remains available; inspect `created`, `recovery-required`, and `commit-ambiguous` outcomes, fix recovery state without destructive assumptions, and rerun import so exact resources can be reused. Local direct Skills have no mapping. Packages and `--yes` remain unsupported until Stage 3. Windows publication and full profile portability are still unavailable.
 
 ## Bazify Skills
 
