@@ -33,9 +33,11 @@ try {
   const piVersion = execFileSync(piExecutable, ['--version'], { encoding: 'utf8' }).trim();
   const piVersionMatch = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u.exec(piVersion);
   const supportedPiVersion = piVersionMatch !== null
-    && (Number(piVersionMatch[1]) > 0 || Number(piVersionMatch[2]) >= 82);
+    && (Number(piVersionMatch[1]) > 0
+      || Number(piVersionMatch[2]) > 84
+      || (Number(piVersionMatch[2]) === 84 && Number(piVersionMatch[3]) >= 4));
   if (!supportedPiVersion) {
-    throw new Error(`Real-Pi acceptance requires a stable Pi 0.82.0 or newer; found ${piVersion}.`);
+    throw new Error(`Real-Pi acceptance requires a stable Pi 0.84.4 or newer; found ${piVersion}.`);
   }
 
   const [{ filename }] = JSON.parse(execFileSync(
@@ -200,7 +202,7 @@ try {
   const packageBeforeAdd = providerManifest(packageProvider);
   const packageAdded = run(executable, ['package', 'add', realpathSync(packageProvider)], temporaryRoot, environment);
   assert(packageAdded.stdout.includes('Global package: added'), 'Packed CLI did not add the package.');
-  assert(providerManifest(packageProvider) !== packageBeforeAdd, 'Declared package build did not create its provider-owned artifact.');
+  assert(providerManifest(packageProvider) !== packageBeforeAdd, 'Declared package build did not create its source-owned artifact.');
   const expectedPackageRecord = JSON.parse(readFileSync(packageRecordPath, 'utf8'));
   assert(expectedPackageRecord.schemaVersion === 1
     && expectedPackageRecord.package === 'demo-package'
@@ -552,7 +554,7 @@ try {
   const globalPackageRemoved = run(executable, ['package', 'remove', 'demo-package'], temporaryRoot, environment);
   assert(globalPackageRemoved.stdout.includes('Global package: removed'), 'Packed CLI did not remove unreferenced package.');
   assert(!existsSync(packageRecordPath) && !existsSync(packageReferencePath), 'Package removal left Bazframe state.');
-  assert(providerManifest(packageProvider) === packageBeforeRemove, 'Package removal changed provider-owned bytes.');
+  assert(providerManifest(packageProvider) === packageBeforeRemove, 'Package removal changed source-owned bytes.');
   assert(ownedManifest([obsoleteGlobalPath, obsoleteProfilePath, obsoleteSnapshotPath]) === obsoleteStateBefore, 'Obsolete pre-alpha state was read destructively or changed.');
 
   run(executable, ['adapter', 'uninstall', 'pi'], temporaryRoot, environment);

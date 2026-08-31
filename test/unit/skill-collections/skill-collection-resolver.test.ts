@@ -9,8 +9,10 @@ import { encodeProfileCollectionReference } from '../../../src/profiles/profile-
 import {
   loadFlatSkillIdentities,
   resolveProfileSkillCollections,
+  validateCapturedSkillComposition,
   UNKNOWN_COLLECTION_ID,
-  type DefinitionLoader
+  type DefinitionLoader,
+  type DerivedSkill
 } from '../../../src/skill-collections/skill-collection-resolver.js';
 
 const directories: TempDirectory[] = [];
@@ -504,6 +506,43 @@ describe('Skill collection resolver', () => {
     ]);
   });
 
+  it('validates only captured direct identities and resolved children across every collision class', () => {
+    const child = (collectionId: string, name: string, relativePath: string, collectionKind: 'library' | 'package' = 'library'): DerivedSkill => ({
+      name,
+      baseDir: `/captured/${collectionId}`,
+      definitionPath: `/captured/${collectionId}/${relativePath}`,
+      collectionKind,
+      collectionId,
+      collectionRoot: `/captured/${collectionId}`,
+      relativePath
+    });
+    const diagnostics = validateCapturedSkillComposition(
+      [
+        { name: 'direct-conflict', definitionPath: '/captured/direct/SKILL.md' },
+        { name: 'omitted-conflict', definitionPath: '/captured/omitted/SKILL.md' }
+      ],
+      [
+        child('one', 'within', 'a/SKILL.md'),
+        child('one', 'within', 'b/SKILL.md'),
+        child('one', 'direct-conflict', 'direct/SKILL.md'),
+        child('two', 'omitted-conflict', 'omitted/SKILL.md'),
+        child('two', 'cross', 'cross/SKILL.md'),
+        child('three', 'cross', 'cross/SKILL.md', 'package'),
+        child('three', 'unique', 'unique/SKILL.md', 'package')
+      ]
+    );
+    expect(diagnostics.map((item) => item.category === 'duplicate-name'
+      ? `${item.collectionKind}:${item.collectionId}:${item.path}:${item.name}`
+      : item.category)).toEqual([
+      'library:one:a/SKILL.md:within',
+      'library:one:b/SKILL.md:within',
+      'library:one:direct/SKILL.md:direct-conflict',
+      'library:two:cross/SKILL.md:cross',
+      'library:two:omitted/SKILL.md:omitted-conflict',
+      'package:three:cross/SKILL.md:cross'
+    ]);
+  });
+
   it('marks every duplicate path and withholds all involved libraries/packages while a profile Skill wins', async () => {
     const { directory, profile } = await fixture();
     const one = await directory.mkdir('one');
@@ -586,7 +625,7 @@ describe('Skill collection resolver', () => {
     expect(result.directCollections[0]).toMatchObject({ preparationState: 'failed' });
   });
 
-  it('keeps an activated snapshot usable after the provider root is retargeted', async () => {
+  it('keeps an activated snapshot usable after the source root is retargeted', async () => {
     const { directory, profile } = await fixture();
     const root = await directory.mkdir('retargeted');
     await directory.write('retargeted/SKILL.md', skill('retargeted'));

@@ -59,7 +59,7 @@ describe('skill definition editor', () => {
     await expect(resolveSkillDefinitionEditorTarget({
       bazframeHome: escaping.home,
       skillId: 'demo-skill'
-    })).rejects.toThrow(/must remain within its provider root/u);
+    })).rejects.toThrow(/must remain within its source root/u);
   });
 
   it('rejects registration, catalog, and provider substitutions before launch', async () => {

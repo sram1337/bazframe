@@ -40,6 +40,8 @@ export interface ProfileArtifactPublicationOptions {
   artifact: ProfileArtifact;
   instructionBytes: Uint8Array;
   limitPolicy: ProfileArtifactLimitPolicy;
+  /** Production revalidation performed after staged-tree validation and before commit checks. */
+  beforeCommit?: () => void | Promise<void>;
 }
 
 export interface ProfileArtifactPublicationResult {
@@ -108,6 +110,7 @@ interface PreparedPublication {
   manifestBytes: Uint8Array;
   instructionBytes: Uint8Array;
   policy: ProfileArtifactLimitPolicy;
+  beforeCommit?: () => void | Promise<void>;
 }
 
 interface HeldDirectory extends PhysicalArtifactDirectoryIdentity {
@@ -199,7 +202,8 @@ export async function publishProfileArtifactDirectory(
       stagingPath: initialStaging,
       manifestBytes: Uint8Array.from(manifestBytes),
       instructionBytes,
-      policy
+      policy,
+      ...(options.beforeCommit === undefined ? {} : { beforeCommit: options.beforeCommit })
     };
   } catch (error) {
     throw new ProfileArtifactPublicationError(
@@ -337,6 +341,7 @@ async function publishPrepared(
     await assertCreatedFileStable(entries.manifest, 'Staged manifest');
     await assertCreatedFileStable(entries.instructions, 'Staged instructions');
 
+    await prepared.beforeCommit?.();
     await hooks.atPhase?.('before-commit-checks');
     await assertDirectoryStable(home, 'BAZFRAME_HOME');
     await assertDirectoryStable(parent, 'Output parent');

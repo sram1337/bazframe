@@ -1,14 +1,18 @@
 import { BazframeError } from '../core/errors.js';
+import { boundedTextForDisplay } from '../core/safe-text.js';
+import { ProfileExportError, type ProfileExportCommitState } from '../profile-portability/profile-export.js';
+import { ProfileImportBlockedError, ProfileImportExecutionError } from '../profile-portability/profile-import.js';
+import { profileImportPartialResult, profileImportPlanResult } from './command-results.js';
 import type { Command } from './parse-argv.js';
 
 export interface JsonDiagnostic { level: 'warning' | 'info'; code: string; message: string }
 export interface JsonSuccess { schemaVersion: 1; ok: true; command: string; result: unknown; diagnostics: JsonDiagnostic[] }
-export interface JsonFailure { schemaVersion: 1; ok: false; command: string; error: { category: 'usage' | 'migration' | 'unsupported' | 'operational' | 'internal'; code: string; message: string; topic?: string }; diagnostics: JsonDiagnostic[] }
+export interface JsonFailure { schemaVersion: 1; ok: false; command: string; error: { category: 'usage' | 'migration' | 'unsupported' | 'operational' | 'internal'; code: string; message: string; topic?: string; commitState?: ProfileExportCommitState; outputPath?: string; plan?: Record<string, unknown>; partialResult?: Record<string, unknown> }; diagnostics: JsonDiagnostic[] }
 
 export function commandId(command: Command): string {
   const ids: Record<Command['name'], string> = {
     'profiles-overview':'profile.list','profile-list':'profile.list','profile-current':'profile.current',
-    'profile-add':'profile.add','profile-duplicate':'profile.duplicate','profile-remove':'profile.remove','profile-rename':'profile.rename','profile-use':'profile.use','profile-edit':'profile.edit',
+    'profile-add':'profile.add','profile-duplicate':'profile.duplicate','profile-remove':'profile.remove','profile-rename':'profile.rename','profile-use':'profile.use','profile-edit':'profile.edit','profile-export':'profile.export','profile-import':'profile.import',
     'skills-overview':'skill.list','default-skill-add':'skill.add','default-skill-remove':'skill.remove','skill-update':'skill.update','skill-edit':'skill.edit',
     'profile-skills-overview':'profile.skill.list','profile-skill-add':'profile.skill.add','profile-skill-remove':'profile.skill.remove',
     'libraries-overview':'library.list','libraries-add':'library.add','libraries-update':'library.update','libraries-remove':'library.remove',
@@ -37,16 +41,20 @@ export function inferredCommandId(argv: readonly string[]): string {
 }
 
 export function successDocument(command: string, result: unknown, diagnostics: JsonDiagnostic[] = []): JsonSuccess {
-  return { schemaVersion: 1, ok: true, command, result, diagnostics };
+  return { schemaVersion: 1, ok: true, command, result, diagnostics: safeDiagnostics(diagnostics) };
 }
 
 export function errorDocument(command: string, error: unknown, diagnostics: JsonDiagnostic[] = []): JsonFailure {
+  const safe = safeDiagnostics(diagnostics);
   if (isCliError(error)) {
     const category = error.code === 'CLI_MIGRATION_REQUIRED' ? 'migration' : error.code === 'CLI_JSON_UNSUPPORTED' ? 'unsupported' : 'usage';
-    return { schemaVersion:1, ok:false, command, error:{ category, code:error.code, message:safeMessage(error.message), ...(error.topic === undefined ? {} : { topic:error.topic }) }, diagnostics };
+    return { schemaVersion:1, ok:false, command, error:{ category, code:error.code, message:safeMessage(error.message), ...(error.topic === undefined ? {} : { topic:error.topic }) }, diagnostics:safe };
   }
-  if (error instanceof BazframeError) return { schemaVersion:1, ok:false, command, error:{ category:'operational', code:error.code, message:safeMessage(error.message) }, diagnostics };
-  return { schemaVersion:1, ok:false, command, error:{ category:'internal', code:'INTERNAL_ERROR', message:'Bazframe encountered an unexpected internal error.' }, diagnostics };
+  if (error instanceof ProfileExportError) return { schemaVersion:1, ok:false, command, error:{ category:'operational', code:error.code, message:safeMessage(error.message), commitState:error.commitState, outputPath:error.outputPath }, diagnostics:safe };
+  if (error instanceof ProfileImportBlockedError) return { schemaVersion:1, ok:false, command, error:{ category:'operational', code:error.code, message:safeMessage(error.message), plan:profileImportPlanResult(error.plan) }, diagnostics:safe };
+  if (error instanceof ProfileImportExecutionError) return { schemaVersion:1, ok:false, command, error:{ category:'operational', code:error.code, message:safeMessage(error.message), partialResult:profileImportPartialResult(error.result) }, diagnostics:safe };
+  if (error instanceof BazframeError) return { schemaVersion:1, ok:false, command, error:{ category:'operational', code:error.code, message:safeMessage(error.message) }, diagnostics:safe };
+  return { schemaVersion:1, ok:false, command, error:{ category:'internal', code:'INTERNAL_ERROR', message:'Bazframe encountered an unexpected internal error.' }, diagnostics:safe };
 }
 
 export function serializeJsonDocument(document: JsonSuccess | JsonFailure): string {
@@ -57,11 +65,5 @@ export function cliError(code: 'CLI_USAGE'|'CLI_MIGRATION_REQUIRED'|'CLI_JSON_UN
   return { code, message, ...(topic === undefined ? {} : { topic }), cli:true };
 }
 function isCliError(value:unknown):value is {code:'CLI_USAGE'|'CLI_MIGRATION_REQUIRED'|'CLI_JSON_UNSUPPORTED';message:string;topic?:string;cli:true}{return value!==null&&typeof value==='object'&&'cli'in value&&value.cli===true&&'code'in value&&typeof value.code==='string'&&'message'in value&&typeof value.message==='string';}
-function safeMessage(value:string):string{
-  let result='';
-  for(let index=0;index<value.length;index++){
-    if(value.charCodeAt(index)===27&&value[index+1]==='['){index+=2;while(index<value.length&&value[index]!=='m')index++;continue;}
-    if(value.charCodeAt(index)!==0)result+=value[index];
-  }
-  return result;
-}
+function safeMessage(value:string):string{return boundedTextForDisplay(value);}
+function safeDiagnostics(diagnostics:readonly JsonDiagnostic[]):JsonDiagnostic[]{return diagnostics.map((diagnostic)=>({...diagnostic,message:safeMessage(diagnostic.message)}));}

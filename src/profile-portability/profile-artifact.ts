@@ -5,9 +5,15 @@ import {
 } from '../providers/managed-git-record.js';
 import { isSafeProfileId } from '../profiles/profile-id.js';
 import { isSafeSkillId } from '../skills/skill-id.js';
+import {
+  profileArtifactLimitPolicy,
+  type ProfileArtifactLimitPolicy
+} from './profile-portability-policy.js';
 
-export interface ManagedGitArtifactSource extends PathFreeManagedGitIdentity {
-  type: 'managedGit';
+export type { ProfileArtifactLimitPolicy } from './profile-portability-policy.js';
+
+export interface RemoteGitArtifactSource extends PathFreeManagedGitIdentity {
+  type: 'remoteGit';
 }
 
 export interface LocalMappingArtifactSource {
@@ -19,7 +25,7 @@ export type ProfileArtifactResourceKind = 'skill' | 'library' | 'package';
 export interface ProfileArtifactResource {
   kind: ProfileArtifactResourceKind;
   id: string;
-  source: ManagedGitArtifactSource | LocalMappingArtifactSource;
+  source: RemoteGitArtifactSource | LocalMappingArtifactSource;
 }
 
 export interface ProfileArtifactProfile {
@@ -41,17 +47,11 @@ export interface ProfileArtifact {
   resources: ProfileArtifactResource[];
 }
 
-export interface ProfileArtifactLimitPolicy {
-  maxManifestBytes: number;
-  maxProfileEntries: number;
-  maxResources: number;
-}
-
 const TOP_LEVEL_KEYS = ['kind', 'profile', 'resources', 'schemaVersion'] as const;
 const PROFILE_KEYS = ['id', 'instructions', 'libraries', 'omittedLocalSkills', 'packages', 'skills'] as const;
 const INSTRUCTION_KEYS = ['path', 'sha256'] as const;
 const RESOURCE_KEYS = ['id', 'kind', 'source'] as const;
-const MANAGED_SOURCE_KEYS = ['branch', 'fetchUrl', 'remote', 'revision', 'type'] as const;
+const REMOTE_GIT_SOURCE_KEYS = ['branch', 'fetchUrl', 'remote', 'revision', 'type'] as const;
 const LOCAL_SOURCE_KEYS = ['type'] as const;
 const RESOURCE_KINDS = ['skill', 'library', 'package'] as const;
 const SHA256 = /^[a-f0-9]{64}$/u;
@@ -111,7 +111,7 @@ export function decodeProfileArtifactObject(
     }
     previousResourceKey = resourceKey;
     resourceKeys.add(`${candidate.kind}:${candidate.id}`);
-    const source = decodeArtifactSource(candidate.source);
+    const source = decodeArtifactSource(candidate.source, candidate.id);
     if (candidate.kind === 'skill' && source.type === 'localMapping') {
       throw invalid('local direct-Skill resources are not portable; use profile.omittedLocalSkills');
     }
@@ -207,25 +207,25 @@ export function assertStage1ProfileArtifactCapabilities(artifact: ProfileArtifac
   }
 }
 
-function decodeArtifactSource(value: unknown): ManagedGitArtifactSource | LocalMappingArtifactSource {
+function decodeArtifactSource(value: unknown, resourceId: string): RemoteGitArtifactSource | LocalMappingArtifactSource {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw invalid('resource source must be a JSON object');
   }
   const source = value as Record<string, unknown>;
-  if (source.type === 'managedGit') {
-    exactObject(source, MANAGED_SOURCE_KEYS, 'managed source');
+  if (source.type === 'remoteGit') {
+    exactObject(source, REMOTE_GIT_SOURCE_KEYS, 'remote Git source');
     try {
       const identity = decodePathFreeManagedGitIdentity({
         remote: source.remote,
         fetchUrl: source.fetchUrl,
         branch: source.branch,
         revision: source.revision
-      });
-      return { type: 'managedGit', ...identity };
+      }, resourceId);
+      return { type: 'remoteGit', ...identity };
     } catch (error) {
       throw new BazframeError(
         'PROFILE_ARTIFACT_INVALID',
-        'Invalid profile artifact: managed source identity is invalid.',
+        'Invalid profile artifact: remote Git source identity is invalid.',
         { cause: error }
       );
     }
@@ -297,19 +297,8 @@ function boundedArray(value: unknown, label: string, maximum: number): unknown[]
 
 function copyLimitPolicy(policy: ProfileArtifactLimitPolicy): ProfileArtifactLimitPolicy {
   if (policy === null || typeof policy !== 'object') throw invalid('limit policy is invalid');
-  const copied = {
-    maxManifestBytes: policy.maxManifestBytes,
-    maxProfileEntries: policy.maxProfileEntries,
-    maxResources: policy.maxResources
-  };
-  for (const [label, value] of [
-    ['maxManifestBytes', copied.maxManifestBytes],
-    ['maxProfileEntries', copied.maxProfileEntries],
-    ['maxResources', copied.maxResources]
-  ] as const) {
-    if (!Number.isSafeInteger(value) || value < 0) throw invalid(`${label} must be a finite nonnegative integer`);
-  }
-  return copied;
+  try { return profileArtifactLimitPolicy(policy); }
+  catch (error) { throw invalidLimitPolicy(error); }
 }
 
 function assertManifestBound(artifact: ProfileArtifact, maximum: number): void {
@@ -331,6 +320,10 @@ function orderedResourceKey(kind: ProfileArtifactResourceKind, id: string): stri
 
 function invalid(detail: string): BazframeError {
   return new BazframeError('PROFILE_ARTIFACT_INVALID', `Invalid profile artifact: ${detail}.`);
+}
+function invalidLimitPolicy(error: unknown): BazframeError {
+  const detail = error instanceof Error ? error.message : String(error);
+  return new BazframeError('PROFILE_ARTIFACT_INVALID', `Invalid profile artifact limit policy: ${detail}`, { cause: error });
 }
 
 function compare(left: string, right: string): number {

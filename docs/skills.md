@@ -113,6 +113,28 @@ bazframe package update [--accept-rewrite] [--yes] <package>
 
 Update acquires the recorded default branch into Bazframe-managed staging, verifies remote identity and a clean checkout, and activates a fast-forward revision transactionally. `--accept-rewrite` authorizes a reviewed non-fast-forward branch change. `package build` rebuilds the recorded remote Git revision without network access and restores a clean checkout after success or failure. Repeating an already-current add verifies provenance, checkout, and registration locally. Resource removal applies the existing reference checks, then removes the Bazframe-managed checkout and provenance while leaving the upstream remote available. `bazframe status` reports each remote Git source's remote, branch, full revision, checkout path, health, and resource-specific update command. Retained recovery records describe the stopped operation and paths. Recovery is inspect-first and fail-closed. Add, update, and build recovery require manual reconciliation to one revision before removing the record and retrying. Removal recovery retains its record while the same remove command verifies and finishes any surviving resource, checkout, and provenance.
 
+## Stage 1 profile export and import
+
+Export always names an explicit profile and an explicit absent output directory; it does not use or change the active selection:
+
+```bash
+bazframe profile export focused --output ./focused.bazframe-profile
+```
+
+The live Stage 1 slice includes healthy direct Skills and whole libraries acquired from remote Git sources. Export performs no network access. Healthy local direct Skills are omitted, recorded in `omittedLocalSkills`, and reported individually. A local library or any package reference blocks export. The artifact contains canonical `bazframe-profile.json` and the exact `profile/AGENTS.md` bytes; review that `AGENTS.md` before sharing it.
+
+Inspect the artifact on the destination machine before executing import:
+
+```bash
+bazframe profile import ./focused.bazframe-profile --dry-run
+bazframe profile import ./focused.bazframe-profile
+bazframe profile import ./focused.bazframe-profile --as imported-focused
+```
+
+Import always reports the complete plan first. A completed dry-run exits successfully even when the plan contains blockers and performs no network acquisition, builds, Bazframe writes, or active-profile change. Execution creates or exactly reuses direct Skills and libraries at the recorded remote Git branch-reachable revisions, then publishes an inactive profile. `--as` changes only the destination profile ID. Omitted local Skills stay omitted, and library children never enter `(default)`.
+
+Import is forward-resumable rather than globally atomic. A resource created before later failure remains available; inspect `created`, `recovery-required`, and `commit-ambiguous` outcomes, fix recovery state without destructive assumptions, and rerun import so exact resources can be reused. Stage 1 accepts neither `--map` nor `--yes` and rejects local mappings and packages. Local-library portability, package portability, Windows publication, and full profile portability are still unavailable.
+
 ## Bazify Skills
 
 Bazframe ships a `bazify` Agent Skill beside the `bazframe` self-management Skill under `dist/skills/`. Installation activates neither Skill. After a global npm install, locate the package with `BAZFRAME_PACKAGE_ROOT="$(npm root --global)/bazframe"`, then explicitly add `"$BAZFRAME_PACKAGE_ROOT/dist/skills/bazify"` to `(default)` and the desired profile before invoking the Skill or its dependency-free Node script.

@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -52,9 +53,22 @@ try {
   assertExists(join(packageRoot, 'dist', 'skill-collections', 'skill-collection-resolver.js'));
   assertExists(join(packageRoot, 'dist', 'skill-collections', 'skill-collection-preparation.js'));
   assertExists(join(packageRoot, 'dist', 'skill-collections', 'skill-snapshot.js'));
+  assertExists(join(packageRoot, 'dist', 'profile-portability', 'profile-artifact.js'));
+  assertExists(join(packageRoot, 'dist', 'profile-portability', 'profile-artifact-io.js'));
+  assertExists(join(packageRoot, 'dist', 'profile-portability', 'profile-artifact-publication.js'));
+  assertExists(join(packageRoot, 'dist', 'profile-portability', 'profile-export.js'));
+  assertExists(join(packageRoot, 'dist', 'profile-portability', 'profile-import-plan.js'));
+  assertExists(join(packageRoot, 'dist', 'profile-portability', 'profile-import-publication.js'));
+  assertExists(join(packageRoot, 'dist', 'profile-portability', 'profile-import.js'));
+  assertExists(join(packageRoot, 'dist', 'profile-portability', 'profile-portability-policy.js'));
   assertExists(join(packageRoot, 'dist', 'packages', 'package-manifest.js'));
   assertExists(join(packageRoot, 'dist', 'providers', 'managed-git.js'));
   assertExists(join(packageRoot, 'dist', 'providers', 'managed-git-record.js'));
+  assertExists(join(packageRoot, 'dist', 'providers', 'managed-git-acquisition-inspection.js'));
+  assertExists(join(packageRoot, 'dist', 'providers', 'managed-git-process.js'));
+  assertExists(join(packageRoot, 'dist', 'providers', 'managed-git-source.js'));
+  assertExists(join(packageRoot, 'dist', 'state', 'bounded-file-read.js'));
+  assertExists(join(packageRoot, 'dist', 'state', 'read-only-path-anchor.js'));
   assertMissing(join(packageRoot, 'dist', 'sources'));
   assertMissing(join(packageRoot, 'dist', 'source-units'));
   assertMissing(join(packageRoot, 'dist', 'profiles', 'profile-source-reference.js'));
@@ -125,11 +139,11 @@ try {
     throw new Error('Packed public-package metadata does not match the pending beta contract.');
   }
   if (
-    manifest.dependencies?.['@earendil-works/pi-coding-agent'] !== '>=0.82.0'
+    manifest.dependencies?.['@earendil-works/pi-coding-agent'] !== '>=0.84.4'
     || manifest.dependencies?.ink !== '7.1.1'
     || manifest.dependencies?.react !== '19.2.8'
   ) {
-    throw new Error('Expected minimum Pi 0.82.0 and exact Ink/React runtime dependencies.');
+    throw new Error('Expected minimum Pi 0.84.4 and exact Ink/React runtime dependencies.');
   }
 
   const executable = process.platform === 'win32'
@@ -154,6 +168,101 @@ try {
     );
   }
 
+  const exportHelp = spawnSync(executable, ['help', 'profile', 'export'], { encoding: 'utf8', shell: false });
+  if (exportHelp.status !== 0
+    || !exportHelp.stdout.includes('bazframe profile export [--json] <profile> --output <directory>')
+    || !exportHelp.stdout.includes('Healthy local direct Skills are omitted')
+    || !exportHelp.stdout.includes('Local libraries and every package reference block export')
+    || !exportHelp.stdout.includes('Stage 1 import is available')
+    || !exportHelp.stdout.includes('full portability remains unavailable')) {
+    throw new Error(`Installed profile export help failed (${exportHelp.status}).\nstdout: ${exportHelp.stdout}\nstderr: ${exportHelp.stderr}`);
+  }
+
+  const importHelp = spawnSync(executable, ['help', 'profile', 'import'], { encoding: 'utf8', shell: false });
+  const importUsageLine = importHelp.stdout.split('\n')[0] ?? '';
+  if (importHelp.status !== 0
+    || !importHelp.stdout.includes('bazframe profile import [--json] <directory> [--as <profile>] [--dry-run]')
+    || !importHelp.stdout.includes('exits successfully even when the returned plan is blocked')
+    || !importHelp.stdout.includes('Local mappings and packages are unsupported in Stage 1')
+    || importUsageLine.includes('--map')
+    || importUsageLine.includes('--yes')) {
+    throw new Error(`Installed profile import help failed (${importHelp.status}).\nstdout: ${importHelp.stdout}\nstderr: ${importHelp.stderr}`);
+  }
+
+  if (process.platform !== 'win32') {
+    const canonicalTemporaryRoot = realpathSync(temporaryRoot);
+    const packedExportHome = join(canonicalTemporaryRoot, 'packed-export-home');
+    const packedExportEnvironment = { ...process.env, BAZFRAME_HOME: packedExportHome, NO_COLOR: '1' };
+    runInstalled(executable, ['profile', 'add', 'portable'], packedExportEnvironment, 'Profile lifecycle: added');
+    const instructionBytes = 'packed exact instructions\r\n';
+    writeFileSync(join(packedExportHome, 'profiles', 'portable', 'AGENTS.md'), instructionBytes);
+    const packedExports = join(canonicalTemporaryRoot, 'packed-exports');
+    mkdirSync(packedExports);
+    const proseOutput = join(packedExports, 'prose');
+    const proseExport = runInstalled(executable, ['profile', 'export', 'portable', '--output', proseOutput], packedExportEnvironment, 'Profile export: published');
+    if (!proseExport.stderr.includes(`Review ${join(proseOutput, 'profile', 'AGENTS.md')} before sharing`)) {
+      throw new Error(`Installed profile export warning was missing.\nstderr: ${proseExport.stderr}`);
+    }
+    if (readFileSync(join(proseOutput, 'profile', 'AGENTS.md'), 'utf8') !== instructionBytes
+      || readdirSync(proseOutput).join(',') !== 'bazframe-profile.json,profile'
+      || readdirSync(join(proseOutput, 'profile')).join(',') !== 'AGENTS.md') {
+      throw new Error('Installed profile export did not publish the canonical two-file artifact.');
+    }
+    const manifest = JSON.parse(readFileSync(join(proseOutput, 'bazframe-profile.json'), 'utf8'));
+    if (manifest.profile.id !== 'portable' || manifest.profile.packages.length !== 0 || manifest.resources.length !== 0) {
+      throw new Error('Installed profile export manifest was not minimal and canonical.');
+    }
+    const jsonOutput = join(packedExports, 'json');
+    const jsonExport = spawnSync(executable, ['profile', 'export', '--json', 'portable', '--output', jsonOutput], {
+      encoding: 'utf8', shell: false, env: packedExportEnvironment
+    });
+    const jsonLines = jsonExport.stdout.trim().split('\n');
+    const jsonDocument = JSON.parse(jsonExport.stdout);
+    if (jsonExport.status !== 0 || jsonExport.stderr !== '' || jsonLines.length !== 1
+      || jsonDocument.command !== 'profile.export'
+      || jsonDocument.result.outputPath !== jsonOutput
+      || jsonDocument.result.instructions.path !== 'profile/AGENTS.md'
+      || jsonDocument.diagnostics.at(-1)?.code !== 'PROFILE_EXPORT_REVIEW_INSTRUCTIONS'
+      || readFileSync(join(jsonOutput, 'profile', 'AGENTS.md'), 'utf8') !== instructionBytes) {
+      throw new Error(`Installed JSON profile export failed (${jsonExport.status}).\nstdout: ${jsonExport.stdout}\nstderr: ${jsonExport.stderr}`);
+    }
+
+    const packedImportHome = join(canonicalTemporaryRoot, 'packed-import-home');
+    const packedImportEnvironment = { ...process.env, BAZFRAME_HOME: packedImportHome, NO_COLOR: '1' };
+    const dryImport = spawnSync(executable, ['profile', 'import', proseOutput, '--dry-run', '--json'], {
+      encoding: 'utf8', shell: false, env: packedImportEnvironment
+    });
+    const dryImportDocument = JSON.parse(dryImport.stdout);
+    if (dryImport.status !== 0 || dryImport.stderr !== '' || dryImport.stdout.trim().split('\n').length !== 1
+      || dryImportDocument.command !== 'profile.import'
+      || dryImportDocument.result.mode !== 'dry-run'
+      || dryImportDocument.result.plan.profileAction !== 'publish'
+      || existsSync(packedImportHome)) {
+      throw new Error(`Installed JSON profile import dry-run failed (${dryImport.status}).\nstdout: ${dryImport.stdout}\nstderr: ${dryImport.stderr}`);
+    }
+    runInstalled(executable, ['profile', 'add', 'active'], packedImportEnvironment, 'Profile lifecycle: added');
+    runInstalled(executable, ['profile', 'use', 'active'], packedImportEnvironment, 'Active profile: active');
+    const activeSelectionBytes = readFileSync(join(packedImportHome, 'active-profile'), 'utf8');
+    const proseImport = runInstalled(executable, ['profile', 'import', proseOutput], packedImportEnvironment, 'Profile import: completed');
+    if (!proseImport.stdout.includes('Profile import plan (execution inspection):')
+      || readFileSync(join(packedImportHome, 'profiles', 'portable', 'AGENTS.md'), 'utf8') !== instructionBytes
+      || readFileSync(join(packedImportHome, 'active-profile'), 'utf8') !== activeSelectionBytes) {
+      throw new Error(`Installed profile import did not publish an inactive exact profile.\nstdout: ${proseImport.stdout}\nstderr: ${proseImport.stderr}`);
+    }
+    const retryImport = spawnSync(executable, ['--json', 'profile', 'import', proseOutput], {
+      encoding: 'utf8', shell: false, env: packedImportEnvironment
+    });
+    const retryDocument = JSON.parse(retryImport.stdout);
+    if (retryImport.status !== 0 || retryImport.stderr !== '' || retryImport.stdout.trim().split('\n').length !== 1
+      || retryDocument.command !== 'profile.import'
+      || retryDocument.result.mode !== 'executed'
+      || retryDocument.result.profileOutcome !== 'reused'
+      || retryDocument.result.activeSelectionChanged !== false
+      || readFileSync(join(packedImportHome, 'active-profile'), 'utf8') !== activeSelectionBytes) {
+      throw new Error(`Installed JSON profile import retry failed (${retryImport.status}).\nstdout: ${retryImport.stdout}\nstderr: ${retryImport.stderr}`);
+    }
+  }
+
   const managedPackageHelp = spawnSync(executable, ['help', 'package', 'update'], { encoding: 'utf8', shell: false });
   if (managedPackageHelp.status !== 0
     || !managedPackageHelp.stdout.includes('bazframe package update [--accept-rewrite] [--yes] [--json] <package>')
@@ -166,13 +275,13 @@ try {
   const managedMissing = spawnSync(executable, ['package', 'update', 'missing', '--yes'], {
     encoding: 'utf8', shell: false, env: { ...process.env, BAZFRAME_HOME: packedManagedHome, NO_COLOR: '1' }
   });
-  if (managedMissing.status !== 1 || !managedMissing.stderr.includes('is not a managed Git provider')) {
+  if (managedMissing.status !== 1 || !managedMissing.stderr.includes('was not acquired from a remote Git source')) {
     throw new Error(`Installed managed package dispatch failed (${managedMissing.status}).\nstdout: ${managedMissing.stdout}\nstderr: ${managedMissing.stderr}`);
   }
 
   const packedRemote = join(temporaryRoot, 'packed-managed-remote', 'packed-managed-package');
   mkdirSync(join(packedRemote, 'skills', 'packed-remote-skill'), { recursive: true });
-  writeFileSync(join(packedRemote, 'skills', 'packed-remote-skill', 'SKILL.md'), '---\nname: packed-remote-skill\ndescription: Packed managed Git Skill.\n---\n# Packed remote\n');
+  writeFileSync(join(packedRemote, 'skills', 'packed-remote-skill', 'SKILL.md'), '---\nname: packed-remote-skill\ndescription: Packed remote Git Skill.\n---\n# Packed remote\n');
   writeFileSync(join(packedRemote, '.gitignore'), 'dist/\n');
   writeFileSync(join(packedRemote, 'build.mjs'), "import{cp,rm}from'node:fs/promises';await rm('dist',{recursive:true,force:true});await cp('skills','dist/skills',{recursive:true});\n");
   writeFileSync(join(packedRemote, 'bazframe-package.json'), JSON.stringify({ schemaVersion: 1, build: [process.execPath, 'build.mjs'], artifactRoot: 'dist', skillsRoot: 'skills' }));
@@ -187,12 +296,94 @@ import{spawnSync}from'node:child_process';const args=process.argv.slice(2);let o
 `);
   chmodSync(packedGitWrapper, 0o755);
   const packedManagedEnvironment = { ...process.env, BAZFRAME_HOME: packedManagedHome, NO_COLOR: '1', BAZFRAME_GIT_COMMAND: packedGitWrapper, BAZFRAME_GH_COMMAND: join(temporaryRoot, 'missing-gh'), TEST_REMOTE: packedRemote };
-  runInstalled(executable, ['package', 'add', 'https://example.test/team/packed-managed-package.git', '--yes'], packedManagedEnvironment, 'Managed Git package: added');
-  runInstalled(executable, ['package', 'add', 'https://example.test/team/packed-managed-package.git', '--yes'], { ...packedManagedEnvironment, TEST_FAIL_CLONE: '1' }, 'Managed Git package: current');
+  runInstalled(executable, ['package', 'add', 'https://example.test/team/packed-managed-package.git', '--yes'], packedManagedEnvironment, 'Remote Git source package: added');
+  runInstalled(executable, ['package', 'add', 'https://example.test/team/packed-managed-package.git', '--yes'], { ...packedManagedEnvironment, TEST_FAIL_CLONE: '1' }, 'Remote Git source package: current');
   const packedManagedStatus = spawnSync(executable, ['status'], { encoding: 'utf8', shell: false, env: packedManagedEnvironment });
   if (![0, 3].includes(packedManagedStatus.status ?? -1)
     || !packedManagedStatus.stdout.includes('package packed-managed-package: ready; example.test/team/packed-managed-package')) {
     throw new Error(`Installed managed package status failed (${packedManagedStatus.status}).\nstdout: ${packedManagedStatus.stdout}\nstderr: ${packedManagedStatus.stderr}`);
+  }
+
+  if (process.platform !== 'win32') {
+    const packedImportSkillRemote = join(temporaryRoot, 'packed-import-remotes', 'packed-import-skill');
+    const packedImportLibraryRemote = join(temporaryRoot, 'packed-import-remotes', 'packed-import-library');
+    mkdirSync(packedImportSkillRemote, { recursive: true });
+    writeFileSync(join(packedImportSkillRemote, 'SKILL.md'), '---\nname: packed-import-skill\ndescription: Packed imported Skill.\n---\n# Packed import Skill\n');
+    mkdirSync(join(packedImportLibraryRemote, 'packed-child'), { recursive: true });
+    writeFileSync(join(packedImportLibraryRemote, 'packed-child', 'SKILL.md'), '---\nname: packed-child\ndescription: Packed library child.\n---\n# Packed child\n');
+    for (const remote of [packedImportSkillRemote, packedImportLibraryRemote]) {
+      execFileSync('git', ['init', '-b', 'main'], { cwd: remote, stdio: 'ignore' });
+      execFileSync('git', ['config', 'user.name', 'Pack Test'], { cwd: remote });
+      execFileSync('git', ['config', 'user.email', 'pack@example.test'], { cwd: remote });
+      execFileSync('git', ['add', '.'], { cwd: remote });
+      execFileSync('git', ['commit', '-m', 'historical'], { cwd: remote, stdio: 'ignore' });
+    }
+    const packedImportSkillRevision = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: packedImportSkillRemote, encoding: 'utf8' }).trim();
+    const packedImportLibraryRevision = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: packedImportLibraryRemote, encoding: 'utf8' }).trim();
+    for (const remote of [packedImportSkillRemote, packedImportLibraryRemote]) {
+      writeFileSync(join(remote, 'README.md'), 'new branch head\n');
+      execFileSync('git', ['add', '.'], { cwd: remote });
+      execFileSync('git', ['commit', '-m', 'advance'], { cwd: remote, stdio: 'ignore' });
+    }
+    const packedImportArtifact = join(temporaryRoot, 'packed-import-resource-artifact');
+    const packedImportInstructions = 'packed imported instructions\r\n';
+    mkdirSync(join(packedImportArtifact, 'profile'), { recursive: true });
+    writeFileSync(join(packedImportArtifact, 'profile', 'AGENTS.md'), packedImportInstructions);
+    writeFileSync(join(packedImportArtifact, 'bazframe-profile.json'), `${JSON.stringify({
+      schemaVersion: 1,
+      kind: 'bazframe-profile-export',
+      profile: {
+        id: 'packed-imported',
+        instructions: { path: 'profile/AGENTS.md', sha256: createHash('sha256').update(packedImportInstructions).digest('hex') },
+        skills: ['packed-import-skill'],
+        omittedLocalSkills: [],
+        libraries: ['packed-import-library'],
+        packages: []
+      },
+      resources: [
+        { kind: 'skill', id: 'packed-import-skill', source: { type: 'remoteGit', remote: 'example.test/team/packed-import-skill', fetchUrl: 'https://example.test/team/packed-import-skill.git', branch: 'main', revision: packedImportSkillRevision } },
+        { kind: 'library', id: 'packed-import-library', source: { type: 'remoteGit', remote: 'example.test/team/packed-import-library', fetchUrl: 'https://example.test/team/packed-import-library.git', branch: 'main', revision: packedImportLibraryRevision } }
+      ]
+    }, null, 2)}\n`);
+    const packedImportGitWrapper = join(temporaryRoot, 'packed-import-git-wrapper.mjs');
+    writeFileSync(packedImportGitWrapper, `#!/usr/bin/env node
+import{spawnSync}from'node:child_process';const args=process.argv.slice(2);let original;if(args.includes('clone')){if(process.env.TEST_FAIL_CLONE==='1')process.exit(87);const index=args.findIndex(value=>/^https?:|^ssh:/.test(value));original=args[index];args[index]=original.endsWith('/packed-import-skill.git')?process.env.TEST_SKILL_REMOTE:process.env.TEST_LIBRARY_REMOTE;const protocol=args.indexOf('protocol.file.allow=never');if(protocol>=0)args[protocol]='protocol.file.allow=always';}const result=spawnSync('git',args,{stdio:'inherit',env:process.env});if(result.status!==0)process.exit(result.status??1);if(original){const destination=args.at(-1);const changed=spawnSync('git',['-C',destination,'remote','set-url','origin',original],{stdio:'inherit',env:process.env});process.exit(changed.status??1);}
+`);
+    chmodSync(packedImportGitWrapper, 0o755);
+    const packedResourceImportHome = join(temporaryRoot, 'packed-resource-import-home');
+    const packedResourceImportEnvironment = {
+      ...process.env,
+      BAZFRAME_HOME: packedResourceImportHome,
+      NO_COLOR: '1',
+      BAZFRAME_GIT_COMMAND: packedImportGitWrapper,
+      BAZFRAME_GH_COMMAND: join(temporaryRoot, 'missing-import-gh'),
+      TEST_SKILL_REMOTE: packedImportSkillRemote,
+      TEST_LIBRARY_REMOTE: packedImportLibraryRemote
+    };
+    runInstalled(executable, ['profile', 'add', 'active'], packedResourceImportEnvironment, 'Profile lifecycle: added');
+    runInstalled(executable, ['profile', 'use', 'active'], packedResourceImportEnvironment, 'Active profile: active');
+    const packedResourceActiveBytes = readFileSync(join(packedResourceImportHome, 'active-profile'), 'utf8');
+    const packedResourceImport = runInstalled(executable, ['profile', 'import', packedImportArtifact, '--as', 'packed-target'], packedResourceImportEnvironment, 'Profile import: completed');
+    const packedSkillRecord = JSON.parse(readFileSync(join(packedResourceImportHome, 'providers', 'git', 'records', 'skill', 'packed-import-skill.json'), 'utf8'));
+    const packedLibraryRecord = JSON.parse(readFileSync(join(packedResourceImportHome, 'providers', 'git', 'records', 'library', 'packed-import-library.json'), 'utf8'));
+    if (!packedResourceImport.stdout.includes('Destination profile: packed-target')
+      || packedSkillRecord.revision !== packedImportSkillRevision
+      || packedLibraryRecord.revision !== packedImportLibraryRevision
+      || !existsSync(join(packedResourceImportHome, 'profiles', 'packed-target', 'skills', 'packed-import-skill'))
+      || existsSync(join(packedResourceImportHome, 'skills', 'packed-child'))
+      || readFileSync(join(packedResourceImportHome, 'active-profile'), 'utf8') !== packedResourceActiveBytes) {
+      throw new Error(`Installed exact-resource profile import failed.\nstdout: ${packedResourceImport.stdout}\nstderr: ${packedResourceImport.stderr}`);
+    }
+    const packedResourceRetry = spawnSync(executable, ['profile', 'import', packedImportArtifact, '--as=packed-target', '--json'], {
+      encoding: 'utf8', shell: false, env: { ...packedResourceImportEnvironment, TEST_FAIL_CLONE: '1' }
+    });
+    const packedResourceRetryDocument = JSON.parse(packedResourceRetry.stdout);
+    if (packedResourceRetry.status !== 0 || packedResourceRetry.stderr !== ''
+      || packedResourceRetryDocument.result.profileOutcome !== 'reused'
+      || packedResourceRetryDocument.result.resources.some((resource) => resource.outcome !== 'reused')
+      || readFileSync(join(packedResourceImportHome, 'active-profile'), 'utf8') !== packedResourceActiveBytes) {
+      throw new Error(`Installed exact-resource profile import retry failed (${packedResourceRetry.status}).\nstdout: ${packedResourceRetry.stdout}\nstderr: ${packedResourceRetry.stderr}`);
+    }
   }
 
   const bazifySource = join(temporaryRoot, 'bazify-provider', 'packed-bazify-skill');
@@ -288,7 +479,7 @@ import{spawnSync}from'node:child_process';const args=process.argv.slice(2);let o
   if (
     skillEditorHelp.status !== 0
     || !skillEditorHelp.stdout.includes('bazframe skill edit <skill>')
-    || !skillEditorHelp.stdout.includes('edit provider input')
+    || !skillEditorHelp.stdout.includes('edit source input')
     || !skillEditorHelp.stdout.includes('bazframe library update <library>')
     || !skillEditorHelp.stdout.includes('bazframe package build <package>')
   ) {

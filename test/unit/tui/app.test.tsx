@@ -24,7 +24,7 @@ describe('TuiApp', () => {
     await waitForDashboard(view);
     expect(view.lastFrame()).toContain('* 1 Skills');
     expect(view.lastFrame()).toContain('demo-skill');
-    expect(view.lastFrame()).toContain('Provider-owned');
+    expect(view.lastFrame()).toContain('Source-owned');
     view.stdin.write('\r');
     await vi.waitFor(() => expect(view.lastFrame()).not.toContain('demo-skill'));
     view.stdin.write('\u001B[C');
@@ -40,7 +40,7 @@ describe('TuiApp', () => {
     view.stdin.write('1');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Skills'));
     expect(view.lastFrame()).toContain('demo-skill');
-    expect(view.lastFrame()).toContain('Provider-owned');
+    expect(view.lastFrame()).toContain('Source-owned');
     view.stdin.write('\r');
     await vi.waitFor(() => expect(view.lastFrame()).not.toContain('demo-skill'));
     view.stdin.write('\u001B[C');
@@ -198,7 +198,7 @@ describe('TuiApp', () => {
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Skills'));
 
     view.stdin.write('a');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('Absolute path, ~/ path, or managed Git'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Absolute path, ~/ path, or remote Git'));
     view.stdin.write('H');
     view.stdin.write('L');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Source: HL'));
@@ -634,9 +634,9 @@ describe('TuiApp', () => {
     const titleLine = view.lastFrame()!.split('\n').find((line) => line.includes('┃ Skills'));
     expect(titleLine).toBeDefined();
     expect([...titleLine!.matchAll(/┃/gu)].map((match) => match.index)).toEqual([0, 36]);
-    const detailLine = view.lastFrame()!.split('\n').find((line) => line.includes('Provider-owned'));
+    const detailLine = view.lastFrame()!.split('\n').find((line) => line.includes('Source-owned'));
     expect(detailLine).toBeDefined();
-    expect(detailLine!.indexOf('Provider-owned')).toBeGreaterThanOrEqual(37);
+    expect(detailLine!.indexOf('Source-owned')).toBeGreaterThanOrEqual(37);
     assertFrameBounds(view.lastFrame(), 80, 24);
   });
 
@@ -838,7 +838,7 @@ describe('TuiApp', () => {
     const view = render(<TuiApp service={service} dimensions={{ columns: 60, rows: 16 }} />);
     await waitForDashboard(view);
     view.stdin.write('a');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('Absolute path, ~/ path, or managed Git'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Absolute path, ~/ path, or remote Git'));
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Current: /tmp'));
     view.stdin.write('\r');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Add library tmp'));
@@ -851,7 +851,7 @@ describe('TuiApp', () => {
     await vi.waitFor(() => expect(service.addLibrary).toHaveBeenCalledWith({ source: '/physical/tmp' }));
   });
 
-  it('reviews and adds a managed Git library source after literal-y consent', async () => {
+  it('reviews and adds a remote Git library source after literal-y consent', async () => {
     const service = fakeService();
     const source = 'git:sram1337/personal-agent-network';
     vi.mocked(service.inspectLibraryInput).mockImplementation(async (input) => input === source
@@ -873,10 +873,10 @@ describe('TuiApp', () => {
     view.stdin.write('a');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Absolute path'));
     view.stdin.write(source);
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('Managed Git library: personal-agent-network'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Remote Git library: personal-agent-network'));
     expect(view.lastFrame()).toContain('Remote: github.com/sram1337/personal-agent-network');
     view.stdin.write('\r');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain(`Managed Git source: ${source}`));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain(`Remote Git source: ${source}`));
     expect(view.lastFrame()).toContain('Network access may use configured Git or GitHub authentication.');
     expect(service.addLibrary).not.toHaveBeenCalled();
     view.stdin.write('y');
@@ -887,14 +887,14 @@ describe('TuiApp', () => {
   it('renders a durable source error instead of an indefinite loading state', async () => {
     const service = fakeService();
     vi.mocked(service.inspectLibraryInput).mockRejectedValue(
-      new BazframeError('MANAGED_GIT_SOURCE_INVALID', 'Managed Git source is invalid.')
+      new BazframeError('MANAGED_GIT_SOURCE_INVALID', 'Remote Git source is invalid.')
     );
     const view = render(<TuiApp service={service} dimensions={{ columns: 80, rows: 24 }} />);
     await waitForDashboard(view);
 
     view.stdin.write('a');
     await vi.waitFor(() => expect(view.lastFrame()).toContain(
-      'Source unavailable: Managed Git source is invalid.'
+      'Source unavailable: Remote Git source is invalid.'
     ));
     expect(view.lastFrame()).not.toContain('Inspecting source...');
   });
@@ -914,7 +914,7 @@ describe('TuiApp', () => {
     await waitForDashboard(view);
 
     view.stdin.write('a');
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('Absolute path, ~/ path, or managed Git'));
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Absolute path, ~/ path, or remote Git'));
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Current: /tmp'));
     view.stdin.write('\r');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('Add library skilllib'));
@@ -1169,7 +1169,7 @@ describe('TuiApp', () => {
     view.stdin.write('\r');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('<- Skills / Library: toolkit'));
     expect(view.lastFrame()).toContain('Health: ready; 0 Skills; references: 2');
-    expect(view.lastFrame()).toContain('Provider input: /providers/library/toolkit');
+    expect(view.lastFrame()).toContain('Source input: /providers/library/toolkit');
     expect(view.lastFrame()).toContain('Activated digest: sha256:aaaaaaaa');
     expect(view.lastFrame()).toContain('Artifact root: .; Skills root: .');
     expect(view.lastFrame()).toContain('Update: available (CLI only)');
@@ -1183,7 +1183,7 @@ describe('TuiApp', () => {
     view.stdin.write('L');
     await vi.waitFor(() => expect(view.lastFrame()).toContain('<- Skills / Package: toolkit'));
     expect(view.lastFrame()).toContain('Health: ready; 0 Skills; references: 0');
-    expect(view.lastFrame()).toContain('Provider input: /providers/package/toolkit');
+    expect(view.lastFrame()).toContain('Source input: /providers/package/toolkit');
     expect(view.lastFrame()).toContain('Activated digest: sha256:bbbbbbbb');
     expect(view.lastFrame()).toContain('Artifact root: dist; Skills root: skills');
     expect(view.lastFrame()).toContain('Build: available (CLI only)');

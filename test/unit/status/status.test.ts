@@ -438,7 +438,7 @@ describe('Bazframe status', () => {
     expect(statusExitStatus(inspection)).toBe(3);
   });
 
-  it('formats inspectable managed Git provenance and resource-specific update guidance', () => {
+  it('formats inspectable remote Git provenance and resource-specific update guidance', () => {
     const text = formatStatus({
       bazframeHome: '/home/.bazframe',
       piAgentDirectory: '/home/.pi/agent',
@@ -462,9 +462,10 @@ describe('Bazframe status', () => {
       managedGitDiagnostics: [`recovery${String.fromCharCode(0x9b)}\u202e`],
       correctiveActions: []
     });
-    expect(text).toContain('Managed Git providers:');
+    expect(text).toContain('Remote Git sources:');
     expect(text).toContain(`package personal-agent-network: ready\\u009b31m\\u202e; github.com/sram1337/personal-agent-network; branch:main; revision:${'a'.repeat(40)}`);
-    expect(text).toContain('provider:/home/.bazframe/providers/git/checkouts/package/personal-agent-network\\u009b');
+    expect(text).toContain('checkout:/home/.bazframe/providers/git/checkouts/package/personal-agent-network\\u009b');
+    expect(text).toContain('Remote Git source failures:');
     expect(text).toContain('recovery\\u009b\\u202e');
     expect(text).not.toContain(String.fromCharCode(0x9b));
     expect(text).not.toContain('\u202e');

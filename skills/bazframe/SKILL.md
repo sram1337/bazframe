@@ -1,7 +1,7 @@
 ---
 name: bazframe
-description: Manages Bazframe profiles, added Skills, Skill libraries, Skill packages, policy, the Pi adapter, status, and the terminal UI. Use when configuring or diagnosing Bazframe.
-compatibility: Requires the Bazframe CLI and Pi 0.82.0 or newer.
+description: Manages, exports, and imports Bazframe profiles, added Skills, Skill libraries, Skill packages, policy, the Pi adapter, status, and the terminal UI. Use when configuring or diagnosing Bazframe.
+compatibility: Requires the Bazframe CLI and Pi 0.84.4 or newer.
 ---
 
 # Bazframe
@@ -80,11 +80,18 @@ bazframe profile add <profile>
 bazframe profile edit <profile>
 bazframe profile use <profile>
 bazframe profile current
+bazframe profile export <profile> --output <directory>
+bazframe profile import <directory> --dry-run
+bazframe profile import <directory> [--as <profile>]
 bazframe global show
 bazframe project list
 ```
 
 `profile edit` opens the named profile's `AGENTS.md` without changing selection. Use an executable wrapper for editor flags or GUI wait behavior, and run `/bazframe reload` in an existing Pi session afterward.
+
+Stage 1 `profile export` publishes canonical `bazframe-profile.json` plus exact `profile/AGENTS.md` bytes for an explicit profile without changing active selection. It includes direct Skills and libraries acquired from remote Git sources, omits and reports healthy local direct Skills, and blocks local libraries and all packages. Review the exported `profile/AGENTS.md` before sharing.
+
+Stage 1 `profile import` always reports an inspection plan first. Use `--dry-run` for no-network, no-write inspection; a blocked dry-run is still a successful inspection. Execution creates or exactly reuses recorded remote Git revisions, publishes an inactive profile, leaves omitted local Skills omitted, and never promotes library children into `(default)`. `--as` changes only the destination profile ID. Earlier created resources remain on partial failure and are reused on retry; inspect recovery-required and commit-ambiguous outcomes before continuing. Stage 1 accepts no `--map` or `--yes` and supports no local mappings or packages. Local-library portability, package portability, Windows publication, and full portability remain unavailable.
 
 ## Pi adapter and diagnosis
 

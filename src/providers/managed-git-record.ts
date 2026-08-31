@@ -3,9 +3,11 @@ import { constants } from 'node:fs';
 import { lstat, open, readdir, realpath, type FileHandle } from 'node:fs/promises';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { BazframeError, errorCode } from '../core/errors.js';
+import { readAtMostOneBeyond } from '../state/bounded-file-read.js';
 import { containsUnsafeDisplayCharacters, escapeUnsafeDisplayCharacters, replaceUnsafeDisplayCharacters } from '../core/safe-text.js';
 import { isSafeSkillId } from '../skills/skill-id.js';
 import type { SkillCollectionKind } from '../skill-collections/skill-collection-store.js';
+import { canonicalManagedGitSourceForIdentity, parseManagedGitSource } from './managed-git-source.js';
 
 export type ManagedGitResourceKind = 'skill' | SkillCollectionKind;
 export interface ManagedGitRecord {
@@ -32,7 +34,7 @@ export interface ManagedGitRecordSnapshot {
   inode: bigint;
   contentSha256: string;
 }
-export type ManagedGitOperation = 'add' | 'update' | 'remove' | 'build';
+export type ManagedGitOperation = 'add' | 'add-exact' | 'update' | 'remove' | 'build';
 export interface ManagedGitJournal {
   schemaVersion: 1;
   operation: ManagedGitOperation;
@@ -63,12 +65,16 @@ export interface ManagedGitRecordDiagnostic {
   path: string;
   message: string;
 }
+export interface ManagedGitRecordReadOptions {
+  maxBytes?: number;
+  testHooks?: { afterInitialStat?: () => void | Promise<void>; afterPathStat?: () => void | Promise<void>; afterClose?: () => void | Promise<void> };
+}
 
 const RECORD_KEYS = ['branch', 'fetchUrl', 'id', 'kind', 'remote', 'revision', 'root', 'schemaVersion', 'transport'] as const;
 const PATH_FREE_IDENTITY_KEYS = ['branch', 'fetchUrl', 'remote', 'revision'] as const;
 const JOURNAL_KEYS = ['backup', 'branch', 'fetchUrl', 'id', 'kind', 'nextRevision', 'operation', 'phase', 'previousRevision', 'remote', 'resourceStateSha256', 'root', 'schemaVersion', 'staging', 'transport'] as const;
 const KINDS = new Set<ManagedGitResourceKind>(['skill', 'library', 'package']);
-const OPERATIONS = new Set<ManagedGitOperation>(['add', 'update', 'remove', 'build']);
+const OPERATIONS = new Set<ManagedGitOperation>(['add', 'add-exact', 'update', 'remove', 'build']);
 export const MAX_MANAGED_GIT_RECORD_BYTES = 16 * 1024;
 
 export function managedGitRoot(home: string): string { return join(home, 'providers', 'git'); }
@@ -100,23 +106,27 @@ export function decodeManagedGitRecord(value: unknown, expected?: { kind: Manage
     fetchUrl: candidate.fetchUrl,
     branch: candidate.branch,
     revision: candidate.revision
-  });
+  }, candidate.id);
   if (candidate.transport !== 'git' && candidate.transport !== 'gh') throw invalid('transport is invalid');
   if (candidate.transport === 'gh' && !identity.remote.startsWith('github.com/')) throw invalid('gh transport requires a GitHub remote');
   return { schemaVersion: 1, kind, id: candidate.id, root, ...identity, transport: candidate.transport };
 }
 
-export function decodePathFreeManagedGitIdentity(value: unknown): PathFreeManagedGitIdentity {
+export function decodePathFreeManagedGitIdentity(value: unknown, expectedId?: string): PathFreeManagedGitIdentity {
   const candidate = exactObject(value, PATH_FREE_IDENTITY_KEYS, 'path-free identity', invalid);
   assertBoundedPathFreeIdentityInput(candidate);
-  const remote = decodeRemote(candidate.remote);
-  const fetchUrl = decodeFetchUrl(candidate.fetchUrl);
-  if (remoteForFetchUrl(fetchUrl) !== remote) throw invalid('fetchUrl does not match remote');
+  let source;
+  try {
+    source = expectedId === undefined
+      ? parseManagedGitSource(candidate.fetchUrl)
+      : canonicalManagedGitSourceForIdentity(expectedId, { remote: candidate.remote, fetchUrl: candidate.fetchUrl });
+  } catch { throw invalid('fetchUrl or remote Git source identity is not canonical'); }
+  if (source.remote !== candidate.remote || source.fetchUrl !== candidate.fetchUrl) throw invalid('fetchUrl does not match canonical remote identity');
   const branch = decodeBranch(candidate.branch);
   const revision = decodeRevision(candidate.revision);
-  const identity = { remote, fetchUrl, branch, revision };
+  const identity = { remote: source.remote, fetchUrl: source.fetchUrl, branch, revision };
   if (Buffer.byteLength(`${JSON.stringify(identity, null, 2)}\n`, 'utf8') > MAX_MANAGED_GIT_RECORD_BYTES) {
-    throw invalid(`path-free identity exceeds the ${MAX_MANAGED_GIT_RECORD_BYTES}-byte managed Git record limit`);
+    throw invalid(`path-free identity exceeds the ${MAX_MANAGED_GIT_RECORD_BYTES}-byte remote Git provenance record limit`);
   }
   return identity;
 }
@@ -127,7 +137,7 @@ export function pathFreeManagedGitIdentityFromRecord(record: ManagedGitRecord): 
     fetchUrl: record.fetchUrl,
     branch: record.branch,
     revision: record.revision
-  });
+  }, record.id);
 }
 
 function assertBoundedPathFreeIdentityInput(candidate: Record<string, unknown>): asserts candidate is Record<keyof PathFreeManagedGitIdentity, string> {
@@ -137,7 +147,7 @@ function assertBoundedPathFreeIdentityInput(candidate: Record<string, unknown>):
     if (typeof field !== 'string') throw invalid(`${key} is invalid`);
     totalBytes += Buffer.byteLength(field, 'utf8');
     if (totalBytes > MAX_MANAGED_GIT_RECORD_BYTES) {
-      throw invalid(`path-free identity exceeds the ${MAX_MANAGED_GIT_RECORD_BYTES}-byte managed Git record limit`);
+      throw invalid(`path-free identity exceeds the ${MAX_MANAGED_GIT_RECORD_BYTES}-byte remote Git provenance record limit`);
     }
   }
 }
@@ -149,47 +159,50 @@ export function decodeManagedGitJournal(value: unknown, expected?: { kind: Manag
   if (typeof candidate.phase !== 'string' || candidate.phase.length === 0 || candidate.phase.length > 64 || !/^[a-z][a-z-]*$/u.test(candidate.phase)) throw invalidJournal('phase is invalid');
   const kind = decodeKind(candidate.kind);
   if (candidate.operation === 'build' && kind !== 'package') throw invalidJournal('build operation requires package kind');
+  if (candidate.operation === 'add-exact' && kind === 'package') throw invalidJournal('add-exact operation supports only Skill and library kinds');
   if (typeof candidate.id !== 'string' || !isSafeSkillId(candidate.id)) throw invalidJournal('id is invalid');
   if (expected !== undefined && (kind !== expected.kind || candidate.id !== expected.id)) throw invalidJournal('identity does not match its path');
   const root = decodeRoot(candidate.root);
-  const remote = decodeRemote(candidate.remote);
-  const fetchUrl = decodeFetchUrl(candidate.fetchUrl);
-  if (remoteForFetchUrl(fetchUrl) !== remote) throw invalidJournal('fetchUrl does not match remote');
+  let identity: PathFreeManagedGitIdentity;
+  try {
+    identity = decodePathFreeManagedGitIdentity({ remote: candidate.remote, fetchUrl: candidate.fetchUrl, branch: candidate.branch, revision: candidate.nextRevision }, candidate.id);
+  } catch { throw invalidJournal('remote Git source identity is invalid'); }
   if (candidate.transport !== 'git' && candidate.transport !== 'gh') throw invalidJournal('transport is invalid');
-  if (candidate.transport === 'gh' && !remote.startsWith('github.com/')) throw invalidJournal('gh transport requires a GitHub remote');
-  const branch = decodeBranch(candidate.branch);
+  if (candidate.transport === 'gh' && !identity.remote.startsWith('github.com/')) throw invalidJournal('gh transport requires a GitHub remote');
   const previousRevision = candidate.previousRevision === null ? null : decodeRevision(candidate.previousRevision);
-  const nextRevision = decodeRevision(candidate.nextRevision);
+  const nextRevision = identity.revision;
   const staging = candidate.staging === null ? null : decodeManagedPath(candidate.staging, 'staging');
   const backup = candidate.backup === null ? null : decodeManagedPath(candidate.backup, 'backup');
   const resourceStateSha256 = candidate.resourceStateSha256 === null ? null : decodeSha256(candidate.resourceStateSha256, 'resourceStateSha256');
   if ((candidate.operation === 'remove') !== (resourceStateSha256 !== null)) throw invalidJournal('resourceStateSha256 must be present exactly for remove operations');
-  return { schemaVersion: 1, operation: candidate.operation as ManagedGitOperation, phase: candidate.phase, kind, id: candidate.id, remote, fetchUrl, transport: candidate.transport, branch, previousRevision, nextRevision, root, staging, backup, resourceStateSha256 };
+  return { schemaVersion: 1, operation: candidate.operation as ManagedGitOperation, phase: candidate.phase, kind, id: candidate.id, remote: identity.remote, fetchUrl: identity.fetchUrl, transport: candidate.transport, branch: identity.branch, previousRevision, nextRevision, root, staging, backup, resourceStateSha256 };
 }
 
 export function assertValidManagedGitBranch(value: string): void { decodeBranch(value); }
 export function assertValidManagedGitRevision(value: string): void { decodeRevision(value); }
 
-export async function readManagedGitJournal(home: string, kind: ManagedGitResourceKind, id: string): Promise<ManagedGitJournalSnapshot> {
+export async function readManagedGitJournal(home: string, kind: ManagedGitResourceKind, id: string, options: ManagedGitRecordReadOptions = {}): Promise<ManagedGitJournalSnapshot> {
   if (!isSafeSkillId(id)) throw invalidJournal('id is invalid');
   const path = managedGitJournalPath(home, kind, id);
   const ancestors = [home, join(home, 'providers'), managedGitRoot(home), managedGitRecoveryRoot(home)];
   const ancestorIdentities = await Promise.all(ancestors.map(assertPhysicalJournalDirectory));
-  const snapshot = await readBoundedJsonSnapshot(path);
+  const snapshot = await readBoundedJsonSnapshot(path, 'journal', options);
   const journal = decodeManagedGitJournal(snapshot.value, { kind, id });
   const canonicalHome = await realpath(home);
-  if (journal.root !== managedGitCheckoutRoot(canonicalHome, kind, id)) throw invalidJournal('root does not match the deterministic managed provider path');
+  if (journal.root !== managedGitCheckoutRoot(canonicalHome, kind, id)) throw invalidJournal('root does not match the deterministic Bazframe-managed checkout path');
   const currentAncestors = await Promise.all(ancestors.map(assertPhysicalJournalDirectory));
   if (!currentAncestors.every((identity, index) => sameIdentity(identity, ancestorIdentities[index]!))) throw invalidJournal('recovery namespace changed while reading');
   return { journal, path, device: snapshot.device, inode: snapshot.inode, contentSha256: snapshot.contentSha256 };
 }
 
-export async function readManagedGitRecord(home: string, kind: ManagedGitResourceKind, id: string): Promise<ManagedGitRecordSnapshot> {
+export async function readManagedGitRecord(home: string, kind: ManagedGitResourceKind, id: string, options: ManagedGitRecordReadOptions = {}): Promise<ManagedGitRecordSnapshot> {
   if (!isSafeSkillId(id)) throw invalid('id is invalid');
   const path = managedGitRecordPath(home, kind, id);
   const ancestors = managedGitRecordAncestors(home, kind);
   let ancestorIdentities: DirectoryIdentity[] = [];
   let handle: FileHandle | undefined;
+  let result: ManagedGitRecordSnapshot | undefined;
+  let operationError: unknown;
   try {
     ancestorIdentities = await Promise.all(ancestors.map(assertPhysicalDirectory));
     try { handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
@@ -200,22 +213,43 @@ export async function readManagedGitRecord(home: string, kind: ManagedGitResourc
       }
       throw error;
     }
+    const maximum = boundedManagedGitRecordBytes(options.maxBytes, invalid);
     const before = await handle.stat({ bigint: true });
-    if (!before.isFile() || before.size > BigInt(MAX_MANAGED_GIT_RECORD_BYTES)) throw invalid('record must be a bounded physical regular file');
-    const bytes = await handle.readFile();
-    const after = await handle.stat({ bigint: true });
+    if (!before.isFile() || before.size > BigInt(maximum)) throw invalid('record must be a bounded physical regular file');
+    await options.testHooks?.afterInitialStat?.();
+    const bytes = await readAtMostOneBeyond(handle, maximum);
+    const afterRead = await handle.stat({ bigint: true });
     const current = await lstat(path, { bigint: true });
-    if (!after.isFile() || current.isSymbolicLink() || !current.isFile() || before.dev !== after.dev || before.ino !== after.ino || after.dev !== current.dev || after.ino !== current.ino || before.size !== after.size || before.mtimeNs !== after.mtimeNs) throw invalid('record identity changed while reading');
+    await options.testHooks?.afterPathStat?.();
+    const final = await handle.stat({ bigint: true });
+    const finalPath = await lstat(path, { bigint: true });
+    if (bytes.byteLength > maximum || !afterRead.isFile() || !final.isFile() || current.isSymbolicLink() || !current.isFile()
+      || finalPath.isSymbolicLink() || !finalPath.isFile()
+      || before.dev !== afterRead.dev || before.ino !== afterRead.ino || afterRead.dev !== current.dev || afterRead.ino !== current.ino
+      || current.dev !== final.dev || current.ino !== final.ino || finalPath.dev !== final.dev || finalPath.ino !== final.ino
+      || before.size !== afterRead.size || before.mtimeNs !== afterRead.mtimeNs || before.ctimeNs !== afterRead.ctimeNs
+      || afterRead.size !== final.size || afterRead.mtimeNs !== final.mtimeNs || afterRead.ctimeNs !== final.ctimeNs
+      || current.size !== final.size || current.mtimeNs !== final.mtimeNs || current.ctimeNs !== final.ctimeNs
+      || finalPath.size !== final.size || finalPath.mtimeNs !== final.mtimeNs || finalPath.ctimeNs !== final.ctimeNs
+      || BigInt(bytes.byteLength) !== final.size) throw invalid('record identity changed or exceeded its byte limit while reading');
     const currentAncestors = await Promise.all(ancestors.map(assertPhysicalDirectory));
     if (!currentAncestors.every((identity, index) => sameIdentity(identity, ancestorIdentities[index]!))) throw invalid('record namespace changed while reading');
     const record = decodeManagedGitRecord(parseJson(bytes, path, 'MANAGED_GIT_RECORD_INVALID'), { kind, id });
     const canonicalHome = await realpath(home);
-    if (record.root !== managedGitCheckoutRoot(canonicalHome, kind, id)) throw invalid('root does not match the deterministic managed provider path');
-    return { record, path, device: before.dev, inode: before.ino, contentSha256: createHash('sha256').update(bytes).digest('hex') };
+    if (record.root !== managedGitCheckoutRoot(canonicalHome, kind, id)) throw invalid('root does not match the deterministic Bazframe-managed checkout path');
+    result = { record, path, device: before.dev, inode: before.ino, contentSha256: createHash('sha256').update(bytes).digest('hex') };
   } catch (error) {
-    if (error instanceof BazframeError) throw error;
-    throw new BazframeError('MANAGED_GIT_RECORD_READ_FAILED', `Could not read managed Git record: ${path}${formatCode(error)}`, { cause: error });
-  } finally { await handle?.close().catch(() => undefined); }
+    operationError = error instanceof BazframeError
+      ? error
+      : new BazframeError('MANAGED_GIT_RECORD_READ_FAILED', `Could not read remote Git provenance record: ${path}${formatCode(error)}`, { cause: error });
+  }
+  if (handle !== undefined) {
+    try { await handle.close(); await options.testHooks?.afterClose?.(); }
+    catch (error) { operationError ??= new BazframeError('MANAGED_GIT_RECORD_READ_FAILED', `Could not close remote Git provenance record: ${path}${formatCode(error)}`, { cause: error }); }
+  }
+  if (operationError !== undefined) throw operationError;
+  if (result === undefined) throw new BazframeError('MANAGED_GIT_RECORD_READ_FAILED', `Could not read remote Git provenance record: ${path}.`);
+  return result;
 }
 
 export async function optionalManagedGitRecord(home: string, kind: ManagedGitResourceKind, id: string): Promise<ManagedGitRecordSnapshot | undefined> {
@@ -272,7 +306,7 @@ export async function scanManagedGitRecords(home: string): Promise<{ records: Ma
 export async function canonicalManagedGitRoot(record: ManagedGitRecord): Promise<string> {
   const canonical = await realpath(record.root);
   const metadata = await lstat(canonical);
-  if (canonical !== record.root || metadata.isSymbolicLink() || !metadata.isDirectory()) throw new BazframeError('MANAGED_GIT_ROOT_INVALID', `Managed Git provider root is invalid: ${record.root}`);
+  if (canonical !== record.root || metadata.isSymbolicLink() || !metadata.isDirectory()) throw new BazframeError('MANAGED_GIT_ROOT_INVALID', `Bazframe-managed checkout root is invalid: ${record.root}`);
   return canonical;
 }
 
@@ -298,24 +332,50 @@ async function scanRecovery(home: string, diagnostics: ManagedGitRecordDiagnosti
       const command = recoveryRetryCommand(journal);
       const recovery = journal.operation === 'remove'
         ? `manually inspect ${path} and its recorded root, staging, and backup paths, then retry ${command} with this recovery record retained to finish identity-verified forward removal`
-        : `manually inspect ${path} and its recorded root, staging, and backup paths, restore provider/provenance/registration consistency, then remove this recovery record before retrying ${command}`;
+        : `manually inspect ${path} and its recorded root, staging, and backup paths, restore source checkout/provenance/registration consistency, then remove this recovery record before retrying ${command}`;
       diagnostics.push({ kind, id, path, message: escapeUnsafeDisplayCharacters(`${journal.operation} stopped in phase ${journal.phase}; remote ${journal.remote}; branch ${journal.branch}; revision ${journal.nextRevision}; ${recovery}`) });
     } catch (error) { diagnostics.push({ kind, id, path, message: `recovery record is invalid: ${safeMessage(error)}` }); }
   }
 }
 
-async function readBoundedJsonSnapshot(path: string): Promise<{ value: unknown; device: bigint; inode: bigint; contentSha256: string }> {
+async function readBoundedJsonSnapshot(
+  path: string,
+  _kind: 'journal',
+  options: ManagedGitRecordReadOptions
+): Promise<{ value: unknown; device: bigint; inode: bigint; contentSha256: string }> {
   let handle: FileHandle | undefined;
+  let result: { value: unknown; device: bigint; inode: bigint; contentSha256: string } | undefined;
+  let operationError: unknown;
   try {
+    const maximum = boundedManagedGitRecordBytes(options.maxBytes, invalidJournal);
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const before = await handle.stat({ bigint: true });
-    if (!before.isFile() || before.size > BigInt(MAX_MANAGED_GIT_RECORD_BYTES)) throw invalidJournal('record must be a bounded physical regular file');
-    const bytes = await handle.readFile();
-    const after = await handle.stat({ bigint: true });
+    if (!before.isFile() || before.size > BigInt(maximum)) throw invalidJournal('record must be a bounded physical regular file');
+    await options.testHooks?.afterInitialStat?.();
+    const bytes = await readAtMostOneBeyond(handle, maximum);
+    const afterRead = await handle.stat({ bigint: true });
     const current = await lstat(path, { bigint: true });
-    if (!after.isFile() || current.isSymbolicLink() || !current.isFile() || before.dev !== after.dev || before.ino !== after.ino || after.dev !== current.dev || after.ino !== current.ino || before.size !== after.size || before.mtimeNs !== after.mtimeNs) throw invalidJournal('record changed while reading');
-    return { value: parseJson(bytes, path, 'MANAGED_GIT_JOURNAL_INVALID'), device: before.dev, inode: before.ino, contentSha256: createHash('sha256').update(bytes).digest('hex') };
-  } finally { await handle?.close(); }
+    await options.testHooks?.afterPathStat?.();
+    const final = await handle.stat({ bigint: true });
+    const finalPath = await lstat(path, { bigint: true });
+    if (bytes.byteLength > maximum || !afterRead.isFile() || !final.isFile() || current.isSymbolicLink() || !current.isFile()
+      || finalPath.isSymbolicLink() || !finalPath.isFile()
+      || before.dev !== afterRead.dev || before.ino !== afterRead.ino || afterRead.dev !== current.dev || afterRead.ino !== current.ino
+      || current.dev !== final.dev || current.ino !== final.ino || finalPath.dev !== final.dev || finalPath.ino !== final.ino
+      || before.size !== afterRead.size || before.mtimeNs !== afterRead.mtimeNs || before.ctimeNs !== afterRead.ctimeNs
+      || afterRead.size !== final.size || afterRead.mtimeNs !== final.mtimeNs || afterRead.ctimeNs !== final.ctimeNs
+      || current.size !== final.size || current.mtimeNs !== final.mtimeNs || current.ctimeNs !== final.ctimeNs
+      || finalPath.size !== final.size || finalPath.mtimeNs !== final.mtimeNs || finalPath.ctimeNs !== final.ctimeNs
+      || BigInt(bytes.byteLength) !== final.size) throw invalidJournal('record changed or exceeded its byte limit while reading');
+    result = { value: parseJson(bytes, path, 'MANAGED_GIT_JOURNAL_INVALID'), device: before.dev, inode: before.ino, contentSha256: createHash('sha256').update(bytes).digest('hex') };
+  } catch (error) { operationError = error; }
+  if (handle !== undefined) {
+    try { await handle.close(); await options.testHooks?.afterClose?.(); }
+    catch (error) { operationError ??= new BazframeError('MANAGED_GIT_JOURNAL_INVALID', `Could not close remote Git recovery record: ${path}${formatCode(error)}`, { cause: error }); }
+  }
+  if (operationError !== undefined) throw operationError;
+  if (result === undefined) throw invalidJournal('could not read record');
+  return result;
 }
 
 interface DirectoryIdentity { device: bigint; inode: bigint }
@@ -323,23 +383,33 @@ function managedGitRecordAncestors(home: string, kind: ManagedGitResourceKind): 
 async function assertPhysicalDirectory(path: string): Promise<DirectoryIdentity> { const metadata = await lstat(path, { bigint: true }); if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw invalid(`record namespace must be physical: ${path}`); return { device: metadata.dev, inode: metadata.ino }; }
 async function assertPhysicalJournalDirectory(path: string): Promise<DirectoryIdentity> { const metadata = await lstat(path, { bigint: true }); if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw invalidJournal(`recovery namespace must be physical: ${path}`); return { device: metadata.dev, inode: metadata.ino }; }
 function sameIdentity(left: DirectoryIdentity, right: DirectoryIdentity): boolean { return left.device === right.device && left.inode === right.inode; }
+function boundedManagedGitRecordBytes(
+  maximum: number | undefined,
+  failure: (detail: string) => BazframeError
+): number {
+  const value = maximum ?? MAX_MANAGED_GIT_RECORD_BYTES;
+  if (!Number.isSafeInteger(value) || value < 0 || value > MAX_MANAGED_GIT_RECORD_BYTES) {
+    throw failure(`byte limit must be a finite nonnegative integer no greater than ${MAX_MANAGED_GIT_RECORD_BYTES}`);
+  }
+  return value;
+}
 function exactObject(value: unknown, keys: readonly string[], label: string, failure: (detail: string) => BazframeError): Record<string, unknown> { if (value === null || typeof value !== 'object' || Array.isArray(value)) throw failure(`${label} must be a JSON object`); const candidate = value as Record<string, unknown>; const actual = Object.keys(candidate).sort(); if (actual.length !== keys.length || !actual.every((key, index) => key === keys[index])) throw failure(`${label} must contain exactly the schema-v1 fields`); return candidate; }
 function decodeKind(value: unknown): ManagedGitResourceKind { if (typeof value !== 'string' || !KINDS.has(value as ManagedGitResourceKind)) throw invalid('kind is invalid'); return value as ManagedGitResourceKind; }
 function decodeRoot(value: unknown): string { if (typeof value !== 'string' || value.includes('\u0000') || !isAbsolute(value) || resolve(value) !== value) throw invalid('root is invalid'); return value; }
 function decodeManagedPath(value: unknown, label: string): string { if (typeof value !== 'string' || value.includes('\u0000') || !isAbsolute(value) || resolve(value) !== value) throw invalidJournal(`${label} is invalid`); return value; }
-function decodeRemote(value: unknown): string { if (typeof value !== 'string' || !/^[a-z0-9.-]+(?::[0-9]+)?\/[A-Za-z0-9._~/-]+$/u.test(value) || value.includes('..') || value.includes('//')) throw invalid('remote is invalid'); return value; }
-function decodeFetchUrl(value: unknown): string { if (typeof value !== 'string' || containsUnsafeDisplayCharacters(value) || value.includes('%')) throw invalid('fetchUrl is invalid'); try { const url = new URL(value); if ((url.protocol !== 'https:' && url.protocol !== 'ssh:') || url.href !== value || url.password !== '' || (url.protocol === 'https:' ? url.username !== '' : url.username !== '' && url.username !== 'git') || url.search !== '' || url.hash !== '' || !url.pathname.endsWith('.git')) throw new Error(); return value; } catch { throw invalid('fetchUrl is invalid'); } }
-function remoteForFetchUrl(value: string): string { const url = new URL(value); const path = url.pathname.replace(/^\/+|\.git$/gu, ''); return `${url.hostname.toLowerCase()}${url.port === '' ? '' : `:${url.port}`}/${path}`; }
 function decodeRevision(value: unknown): string { if (typeof value !== 'string' || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value)) throw invalid('revision is invalid'); return value; }
 function decodeSha256(value: unknown, label: string): string { if (typeof value !== 'string' || !/^[a-f0-9]{64}$/u.test(value)) throw invalidJournal(`${label} is invalid`); return value; }
-function decodeBranch(value: unknown): string { if (typeof value !== 'string' || value.length === 0 || value.length > 255 || containsUnsafeDisplayCharacters(value) || value === '@' || value.startsWith('-') || value.endsWith('/') || value.endsWith('.') || value.includes('..') || value.includes('@{') || value.includes('//') || [...value].some(forbiddenRefCharacter)) throw invalid('branch is invalid'); const components = value.split('/'); if (components.some((part) => part.length === 0 || part.startsWith('.') || part.endsWith('.') || part.endsWith('.lock'))) throw invalid('branch is invalid'); return value; }
+function decodeBranch(value: unknown): string { if (typeof value !== 'string' || value.length === 0 || value.length > 255 || containsUnsafeDisplayCharacters(value) || value === '@' || value.toLowerCase() === 'head' || value.startsWith('-') || value.endsWith('/') || value.endsWith('.') || value.includes('..') || value.includes('@{') || value.includes('//') || [...value].some(forbiddenRefCharacter)) throw invalid('branch is invalid'); const components = value.split('/'); if (components.some((part) => part.length === 0 || part.startsWith('.') || part.endsWith('.') || part.endsWith('.lock'))) throw invalid('branch is invalid'); return value; }
 function forbiddenRefCharacter(character: string): boolean { const code = character.charCodeAt(0); return code <= 0x20 || code === 0x7f || '~^:?*[\\'.includes(character); }
-function parseJson(bytes: Uint8Array, path: string, code: string): unknown { try { const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); return JSON.parse(text); } catch (error) { throw new BazframeError(code, `Invalid managed Git JSON: ${path}`, { cause: error }); } }
+function parseJson(bytes: Uint8Array, path: string, code: string): unknown { try { const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); return JSON.parse(text); } catch (error) { throw new BazframeError(code, `Invalid remote Git provenance JSON: ${path}`, { cause: error }); } }
 function recoveryRetryCommand(journal: ManagedGitJournal): string {
   if (journal.operation === 'build') return `bazframe package build ${journal.id}`;
   if (journal.operation === 'add') {
     if (journal.kind === 'skill') return `bazframe skill add ${journal.fetchUrl}`;
     return `bazframe ${journal.kind} add ${journal.fetchUrl}`;
+  }
+  if (journal.operation === 'add-exact') {
+    return `the originating exact profile import for ${journal.fetchUrl} at branch ${journal.branch} and revision ${journal.nextRevision}`;
   }
   if (journal.operation === 'remove') {
     if (journal.kind === 'skill') return `bazframe skill remove ${journal.id}`;
@@ -350,7 +420,7 @@ function recoveryRetryCommand(journal: ManagedGitJournal): string {
 }
 function safeName(value: string): string { return replaceUnsafeDisplayCharacters(value, '?').slice(0, 200); }
 function safeMessage(error: unknown): string { return replaceUnsafeDisplayCharacters(error instanceof Error ? error.message : String(error), ' ').slice(0, 1000); }
-function invalid(detail: string): BazframeError { return new BazframeError('MANAGED_GIT_RECORD_INVALID', `Invalid managed Git record: ${detail}.`); }
-function invalidJournal(detail: string): BazframeError { return new BazframeError('MANAGED_GIT_JOURNAL_INVALID', `Invalid managed Git recovery record: ${detail}.`); }
+function invalid(detail: string): BazframeError { return new BazframeError('MANAGED_GIT_RECORD_INVALID', `Invalid remote Git provenance record: ${detail}.`); }
+function invalidJournal(detail: string): BazframeError { return new BazframeError('MANAGED_GIT_JOURNAL_INVALID', `Invalid remote Git recovery record: ${detail}.`); }
 function formatCode(error: unknown): string { const code = errorCode(error); return code === undefined ? '' : ` (${code})`; }
 function compare(left: string, right: string): number { return left < right ? -1 : left > right ? 1 : 0; }

@@ -3,6 +3,8 @@ import { constants } from 'node:fs';
 import { lstat, open, readdir, type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 import { BazframeError, errorCode } from '../core/errors.js';
+import { boundedStateJsonBytes } from '../profile-portability/profile-portability-policy.js';
+import { readAtMostOneBeyond } from '../state/bounded-file-read.js';
 import { collectionKey, type SkillCollectionKey, type SkillCollectionKind } from '../skill-collections/skill-collection-store.js';
 import { isSafeSkillId } from '../skills/skill-id.js';
 import { isSafeProfileId } from './profile-id.js';
@@ -11,6 +13,10 @@ import { profileDirectory } from './profile-store.js';
 export type ProfileSkillCollectionReference = { schemaVersion: 1; library: string } | { schemaVersion: 1; package: string };
 export interface ProfileSkillCollectionReferencePath { key: SkillCollectionKey; path: string; relativePath: string }
 export interface ProfileSkillCollectionReferenceSnapshot { reference: ProfileSkillCollectionReference; path: string; device: bigint; inode: bigint; contentSha256: string }
+export interface ProfileSkillCollectionReferenceReadOptions {
+  maxBytes?: number;
+  testHooks?: { afterInitialStat?: () => void | Promise<void>; afterPathStat?: () => void | Promise<void>; afterClose?: () => void | Promise<void> };
+}
 export interface ProfileSkillCollectionReferenceDiagnostic { key: SkillCollectionKey; path: string }
 export interface ProfileSkillCollectionReferenceNamespace {
   references: ProfileSkillCollectionReferencePath[];
@@ -34,17 +40,69 @@ export function decodeProfileCollectionReference(value:unknown,kind:SkillCollect
   return kind==='library'?{schemaVersion:1,library:id}:{schemaVersion:1,package:id};
 }
 export async function readProfileCollectionReference(home:string,profileId:string,key:SkillCollectionKey):Promise<ProfileSkillCollectionReference>{return(await readProfileCollectionReferenceSnapshot(home,profileId,key)).reference;}
-export async function readProfileCollectionReferenceSnapshot(home:string,profileId:string,key:SkillCollectionKey):Promise<ProfileSkillCollectionReferenceSnapshot>{
-  if(!isSafeProfileId(profileId))throw invalid(key.kind,'profile is invalid'); if(!isSafeSkillId(key.id))throw invalid(key.kind,`${key.kind} is invalid`);
-  const directoryPaths=[home,join(home,'profiles'),profileDirectory(home,profileId),profileCollectionDirectory(home,profileId,key.kind)]; const path=profileCollectionReferencePath(home,profileId,key); const directories:OpenDirectory[]=[]; let handle:FileHandle|undefined;
-  try{
-    for(const directoryPath of directoryPaths)directories.push(await openExistingDirectory(directoryPath,'reference ancestor must be a physical directory',key.kind));
-    handle=await open(path,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK); const before=await handle.stat({bigint:true}); if(!before.isFile())throw invalid(key.kind,'reference must be a physical regular file'); const bytes=await handle.readFile(); const after=await handle.stat({bigint:true}); const pathMetadata=await lstat(path,{bigint:true});
-    if(!after.isFile()||pathMetadata.isSymbolicLink()||!pathMetadata.isFile()||before.dev!==after.dev||before.ino!==after.ino||after.dev!==pathMetadata.dev||after.ino!==pathMetadata.ino)throw invalid(key.kind,'reference identity changed while reading'); for(const directory of[...directories].reverse())await assertDirectoryStable(directory);
-    let text:string;try{text=new TextDecoder('utf-8',{fatal:true}).decode(bytes);}catch(error){throw new BazframeError('SKILL_COLLECTION_REFERENCE_INVALID',`Profile ${key.kind} reference is not valid UTF-8.`,{cause:error});} let value:unknown;try{value=JSON.parse(text);}catch(error){throw new BazframeError('SKILL_COLLECTION_REFERENCE_INVALID',`Profile ${key.kind} reference is not valid JSON.`,{cause:error});}
-    return{reference:decodeProfileCollectionReference(value,key.kind,key.id),path,device:before.dev,inode:before.ino,contentSha256:createHash('sha256').update(bytes).digest('hex')};
-  }catch(error){if(error instanceof BazframeError)throw error;if(errorCode(error)==='ELOOP')throw invalid(key.kind,'reference and its namespace ancestors must be physical');throw new BazframeError('SKILL_COLLECTION_REFERENCE_READ_FAILED',`Could not read profile ${key.kind} reference ${path}${formatCode(error)}`,{cause:error});}
-  finally{await handle?.close().catch(()=>undefined);for(const directory of[...directories].reverse())await directory.handle.close().catch(()=>undefined);}
+export async function readProfileCollectionReferenceSnapshot(
+  home: string,
+  profileId: string,
+  key: SkillCollectionKey,
+  options: ProfileSkillCollectionReferenceReadOptions = {}
+): Promise<ProfileSkillCollectionReferenceSnapshot> {
+  if (!isSafeProfileId(profileId)) throw invalid(key.kind, 'profile is invalid');
+  if (!isSafeSkillId(key.id)) throw invalid(key.kind, `${key.kind} is invalid`);
+  const maximum = boundedStateJsonBytes(options.maxBytes);
+  const directoryPaths = [home, join(home, 'profiles'), profileDirectory(home, profileId), profileCollectionDirectory(home, profileId, key.kind)];
+  const path = profileCollectionReferencePath(home, profileId, key);
+  const directories: OpenDirectory[] = [];
+  let handle: FileHandle | undefined;
+  let result: ProfileSkillCollectionReferenceSnapshot | undefined;
+  let operationError: unknown;
+  try {
+    for (const directoryPath of directoryPaths) directories.push(await openExistingDirectory(directoryPath, 'reference ancestor must be a physical directory', key.kind));
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const before = await handle.stat({ bigint: true });
+    if (!before.isFile() || before.size > BigInt(maximum)) throw invalid(key.kind, `reference must be a bounded physical regular file (${maximum} bytes)`);
+    await options.testHooks?.afterInitialStat?.();
+    const bytes = await readAtMostOneBeyond(handle, maximum);
+    const afterRead = await handle.stat({ bigint: true });
+    const pathMetadata = await lstat(path, { bigint: true });
+    await options.testHooks?.afterPathStat?.();
+    const final = await handle.stat({ bigint: true });
+    const finalPathMetadata = await lstat(path, { bigint: true });
+    if (bytes.byteLength > maximum || !afterRead.isFile() || !final.isFile() || pathMetadata.isSymbolicLink() || !pathMetadata.isFile()
+      || finalPathMetadata.isSymbolicLink() || !finalPathMetadata.isFile()
+      || before.dev !== afterRead.dev || before.ino !== afterRead.ino || afterRead.dev !== pathMetadata.dev || afterRead.ino !== pathMetadata.ino
+      || pathMetadata.dev !== final.dev || pathMetadata.ino !== final.ino
+      || finalPathMetadata.dev !== final.dev || finalPathMetadata.ino !== final.ino
+      || before.size !== afterRead.size || before.mtimeNs !== afterRead.mtimeNs || before.ctimeNs !== afterRead.ctimeNs
+      || afterRead.size !== final.size || afterRead.mtimeNs !== final.mtimeNs || afterRead.ctimeNs !== final.ctimeNs
+      || pathMetadata.size !== final.size || pathMetadata.mtimeNs !== final.mtimeNs || pathMetadata.ctimeNs !== final.ctimeNs
+      || finalPathMetadata.size !== final.size || finalPathMetadata.mtimeNs !== final.mtimeNs || finalPathMetadata.ctimeNs !== final.ctimeNs
+      || BigInt(bytes.byteLength) !== final.size) throw invalid(key.kind, 'reference identity changed or exceeded its byte limit while reading');
+    for (const directory of [...directories].reverse()) await assertDirectoryStable(directory);
+    let text: string;
+    try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+    catch (error) { throw new BazframeError('SKILL_COLLECTION_REFERENCE_INVALID', `Profile ${key.kind} reference is not valid UTF-8.`, { cause: error }); }
+    let value: unknown;
+    try { value = JSON.parse(text); }
+    catch (error) { throw new BazframeError('SKILL_COLLECTION_REFERENCE_INVALID', `Profile ${key.kind} reference is not valid JSON.`, { cause: error }); }
+    result = { reference: decodeProfileCollectionReference(value, key.kind, key.id), path, device: before.dev, inode: before.ino, contentSha256: createHash('sha256').update(bytes).digest('hex') };
+  } catch (error) {
+    operationError = error instanceof BazframeError
+      ? error
+      : errorCode(error) === 'ELOOP'
+        ? invalid(key.kind, 'reference and its namespace ancestors must be physical')
+        : new BazframeError('SKILL_COLLECTION_REFERENCE_READ_FAILED', `Could not read profile ${key.kind} reference ${path}${formatCode(error)}`, { cause: error });
+  }
+  if (handle !== undefined) {
+    try { await handle.close(); await options.testHooks?.afterClose?.(); }
+    catch (error) { operationError ??= new BazframeError('SKILL_COLLECTION_REFERENCE_READ_FAILED', `Could not close profile ${key.kind} reference ${path}${formatCode(error)}`, { cause: error }); }
+  }
+  for (const directory of [...directories].reverse()) {
+    try { await directory.handle.close(); }
+    catch (error) { operationError ??= new BazframeError('SKILL_COLLECTION_REFERENCE_READ_FAILED', `Could not close profile ${key.kind} reference namespace ${directory.path}${formatCode(error)}`, { cause: error }); }
+  }
+  if (operationError !== undefined) throw operationError;
+  if (result === undefined) throw new BazframeError('SKILL_COLLECTION_REFERENCE_READ_FAILED', `Could not read profile ${key.kind} reference ${path}.`);
+  return result;
 }
 export function sameProfileCollectionReferenceSnapshot(a:ProfileSkillCollectionReferenceSnapshot,b:ProfileSkillCollectionReferenceSnapshot):boolean{return a.device===b.device&&a.inode===b.inode&&a.contentSha256===b.contentSha256;}
 export async function scanProfileCollectionReferences(home:string,profileId:string):Promise<ProfileSkillCollectionReferenceNamespace>{const[libraries,packages]=await Promise.all([scanReferenceRoot(profileCollectionDirectory(home,profileId,'library'),'library'),scanReferenceRoot(profileCollectionDirectory(home,profileId,'package'),'package')]);return{references:[...libraries.references,...packages.references].sort((a,b)=>compare(collectionKey(a.key.kind,a.key.id),collectionKey(b.key.kind,b.key.id))),diagnostics:[...libraries.diagnostics,...packages.diagnostics],namespaceIdentities:{library:libraries.identity,package:packages.identity}};}

@@ -19,6 +19,7 @@ import {
   type ProfileArtifact,
   type ProfileArtifactLimitPolicy
 } from './profile-artifact.js';
+import { profileArtifactLimitPolicy } from './profile-portability-policy.js';
 
 export interface PhysicalArtifactDirectoryIdentity {
   path: string;
@@ -32,6 +33,19 @@ export interface ProfileArtifactDirectorySnapshot {
   manifestBytes: Uint8Array;
   artifact: ProfileArtifact;
   instructions: PhysicalInstructionSnapshot;
+}
+
+export function sameProfileArtifactDirectorySnapshot(
+  left: ProfileArtifactDirectorySnapshot,
+  right: ProfileArtifactDirectorySnapshot
+): boolean {
+  return sameDirectoryIdentity(left.root, right.root)
+    && left.root.path === right.root.path
+    && sameDirectoryIdentity(left.profileDirectory, right.profileDirectory)
+    && left.profileDirectory.path === right.profileDirectory.path
+    && Buffer.from(left.manifestBytes).equals(Buffer.from(right.manifestBytes))
+    && samePhysicalInstructionSnapshot(left.instructions, right.instructions)
+    && left.instructions.path === right.instructions.path;
 }
 
 export type ProfileArtifactCloseTarget =
@@ -171,21 +185,11 @@ function copyLimitPolicy(policy: ProfileArtifactLimitPolicy): ProfileArtifactLim
   if (policy === null || typeof policy !== 'object') {
     throw invalidArtifact('limit policy is invalid');
   }
-  const copied = {
-    maxManifestBytes: policy.maxManifestBytes,
-    maxProfileEntries: policy.maxProfileEntries,
-    maxResources: policy.maxResources
-  };
-  for (const [label, value] of [
-    ['maxManifestBytes', copied.maxManifestBytes],
-    ['maxProfileEntries', copied.maxProfileEntries],
-    ['maxResources', copied.maxResources]
-  ] as const) {
-    if (!Number.isSafeInteger(value) || value < 0) {
-      throw invalidArtifact(`${label} must be a finite nonnegative integer`);
-    }
+  try { return profileArtifactLimitPolicy(policy); }
+  catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new BazframeError('PROFILE_ARTIFACT_INVALID', `Invalid profile artifact limit policy: ${detail}`, { cause: error });
   }
-  return copied;
 }
 
 async function canonicalPhysicalDirectory(entered: string, label: string): Promise<string> {

@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { symlink, unlink } from 'node:fs/promises';
+import { appendFile, rename, symlink, unlink } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -75,6 +75,48 @@ describe('Skill collection store', () => {
     await unlink(directory.path(`home/${namespace}`)); await directory.mkdir(`home/${namespace}`);
     await symlink(directory.path(`outside/${namespace}/toolkit.json`), directory.path(`home/${namespace}/toolkit.json`));
     await expect(read(directory.path('home'), 'toolkit')).rejects.toBeDefined();
+  });
+
+  it('bounds stable global-record reads below, at, and above and detects concurrent growth', async () => {
+    const directory = await createTempDirectory('bazframe-collection-bounded-'); directories.push(directory);
+    const bytes = encodeLibrary(library);
+    const path = await directory.write('home/libraries/toolkit.json', bytes);
+    await expect(readLibrarySnapshot(directory.path('home'), 'toolkit', { maxBytes: Buffer.byteLength(bytes) - 1 }))
+      .rejects.toThrow(/bounded|byte limit/u);
+    await expect(readLibrarySnapshot(directory.path('home'), 'toolkit', { maxBytes: Buffer.byteLength(bytes) }))
+      .resolves.toMatchObject({ record: library });
+    await expect(readLibrarySnapshot(directory.path('home'), 'toolkit', { maxBytes: Buffer.byteLength(bytes) + 1 }))
+      .resolves.toMatchObject({ record: library });
+    await expect(readLibrarySnapshot(directory.path('home'), 'toolkit', {
+      maxBytes: Buffer.byteLength(bytes),
+      testHooks: { afterInitialStat: async () => { await appendFile(path, 'x'); } }
+    })).rejects.toThrow(/changed|byte limit/u);
+    await directory.write('home/libraries/toolkit.json', bytes);
+    await expect(readLibrarySnapshot(directory.path('home'), 'toolkit', {
+      maxBytes: Buffer.byteLength(bytes) + 1,
+      testHooks: { afterPathStat: async () => { await appendFile(path, 'x'); } }
+    })).rejects.toThrow(/changed|byte limit/u);
+    await directory.write('home/libraries/toolkit.json', bytes);
+    await expect(readLibrarySnapshot(directory.path('home'), 'toolkit', {
+      maxBytes: Buffer.byteLength(bytes),
+      testHooks: { afterPathStat: async () => {
+        await rename(path, `${path}.replaced-during-read`);
+        await directory.write('home/libraries/toolkit.json', bytes);
+      } }
+    })).rejects.toThrow(/identity changed/u);
+    await directory.write('home/libraries/toolkit.json', bytes);
+    await expect(readLibrarySnapshot(directory.path('home'), 'toolkit', {
+      maxBytes: Buffer.byteLength(bytes),
+      testHooks: {
+        afterInitialStat: async () => { await appendFile(path, 'x'); },
+        afterClose: () => { throw new Error('close failed'); }
+      }
+    })).rejects.toMatchObject({ code: 'SKILL_COLLECTION_RECORD_INVALID', message: expect.stringContaining('changed') });
+    await directory.write('home/libraries/toolkit.json', bytes);
+    await expect(readLibrarySnapshot(directory.path('home'), 'toolkit', {
+      maxBytes: Buffer.byteLength(bytes),
+      testHooks: { afterClose: () => { throw new Error('close failed'); } }
+    })).rejects.toMatchObject({ code: 'SKILL_COLLECTION_RECORD_READ_FAILED' });
   });
 
   it('captures record identity/content so replacement is distinguishable at commit', async () => {

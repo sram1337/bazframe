@@ -1,3 +1,6 @@
+import type { ProfileExportResult } from '../profile-portability/profile-export.js';
+import type { ProfileImportPlan } from '../profile-portability/profile-import-plan.js';
+import type { ProfileImportPartialResult, ProfileImportResult } from '../profile-portability/profile-import.js';
 import type { RepositoryProjectState } from '../project/registration.js';
 import type { GlobalPolicy } from '../policy/global-policy.js';
 import type { StatusInspection } from '../status/status.js';
@@ -9,6 +12,67 @@ import type {
 import { collectionKey, idForRecord, kindForRecord, skillsRootForRecord, type SkillCollectionKind } from '../skill-collections/skill-collection-store.js';
 
 export interface ProtocolDiagnostic { level:'warning'|'info'; code:string; message:string }
+
+export function profileImportPlanResult(plan: ProfileImportPlan): Record<string, unknown> {
+ return {
+  artifactPath:plan.artifactPath,
+  schemaVersion:plan.schemaVersion,
+  exportedProfileId:plan.exportedProfileId,
+  destinationProfileId:plan.destinationProfileId,
+  instructions:{path:plan.instructions.path,digest:plan.instructions.sha256},
+  skills:[...plan.skills],
+  omittedLocalSkills:[...plan.omittedLocalSkills],
+  libraries:[...plan.libraries],
+  packages:[...plan.packages],
+  resources:plan.resources.map((resource)=>({
+   kind:resource.kind,id:resource.id,sourceType:'remoteGit',remote:resource.source.remote,
+   fetchUrl:resource.source.fetchUrl,branch:resource.source.branch,revision:resource.source.revision,
+   action:resource.action,networkRequired:resource.networkRequired,buildRequired:resource.buildRequired,
+   ...(resource.reason===undefined?{}:{reason:resource.reason})
+  })),
+  activeSelection:{...plan.activeSelection},
+  composition:{...plan.composition,deferredLibraries:[...plan.composition.deferredLibraries],knownCollectionSkillPreview:[...plan.composition.knownCollectionSkillPreview]},
+  exclusions:{...plan.exclusions},
+  profileAction:plan.profileAction,
+  blockers:plan.blockers.map((blocker)=>({...blocker}))
+ };
+}
+
+export function profileImportDryRunResult(plan: ProfileImportPlan): Record<string, unknown> {
+ return {mode:'dry-run',plan:profileImportPlanResult(plan)};
+}
+
+export function profileImportExecutionResult(result: ProfileImportResult): Record<string, unknown> {
+ return {
+  mode:'executed',plan:profileImportPlanResult(result.plan),
+  resources:result.resources.map((resource)=>({...resource})),
+  profileOutcome:result.profileOutcome,destinationPath:result.destinationPath,
+  activeSelectionChanged:result.activeSelectionChanged
+ };
+}
+
+export function profileImportPartialResult(result: ProfileImportPartialResult): Record<string, unknown> {
+ return {
+  mode:'partial',plan:profileImportPlanResult(result.plan),
+  resources:result.resources.map((resource)=>({...resource})),
+  profileOutcome:result.profileOutcome,destinationPath:result.destinationPath,
+  activeSelectionChanged:result.activeSelectionChanged
+ };
+}
+
+export function profileExportResult(result: ProfileExportResult): Record<string, unknown> {
+ return {
+  action:result.action,
+  exportedProfileId:result.exportedProfileId,
+  outputPath:result.outputPath,
+  instructions:{path:result.instructions.path,digest:result.instructions.sha256},
+  skills:[...result.skills],
+  omittedLocalSkills:[...result.omittedLocalSkills],
+  libraries:[...result.libraries],
+  packages:[...result.packages],
+  resources:result.resources.map(({kind,id,source})=>({kind,id,sourceType:'remoteGit',remote:source.remote,fetchUrl:source.fetchUrl,branch:source.branch,revision:source.revision}))
+ };
+}
 
 export function profileListResult(profileIds:readonly string[],activeProfile:string|undefined):Record<string,unknown>{
  const activeAvailable=activeProfile!==undefined&&profileIds.includes(activeProfile);
@@ -32,5 +96,5 @@ export function projectListResult(projectStates:readonly RepositoryProjectState[
 }
 export function statusResult(status:StatusInspection,health:'ready'|'attention'):Record<string,unknown>{
  const profile=status.profile.state!=='ready'?status.profile:{state:'ready',id:status.profile.id,instructionsPath:status.profile.instructionsPath,flatSkillCount:status.profile.flatSkillCount??status.profile.skillCount,collectionReferenceCount:status.profile.collectionReferenceCount??0,collections:(status.profile.collections??[]).map((item)=>({kind:item.collectionKind,id:item.collectionId,health:item.preparationState,root:item.collectionRoot??null,digest:item.snapshotDigest??null,skillsRoot:item.skillsRoot??null,rebuildAvailability:item.rebuildAvailability})),derivedSkills:(status.profile.derivedSkills??[]).map((item)=>({name:item.name,kind:item.collectionKind,collectionId:item.collectionId,relativePath:item.relativePath})),diagnostics:(status.profile.collectionDiagnostics??[]).map(collectionDiagnosticResult)};
- return{health,bazframeHome:status.bazframeHome,piAgentDirectory:status.piAgentDirectory,adapter:{state:status.adapter.state,targetPath:status.adapter.targetPath,installedBazframeVersion:status.adapter.installedBazframeVersion??null},globalPolicy:status.globalPolicy.policy==='enabled'?{policy:'enabled',statePath:null}:{policy:'disabled',statePath:status.globalPolicy.statePath},repository:status.repository,effectiveBehavior:status.effectiveBehavior,profile,cachedCollisionAliasCount:status.cachedCollisionAliasCount,managedProviders:(status.managedGitProviders??[]).map(({record,health:providerHealth})=>({kind:record.kind,id:record.id,health:providerHealth,remote:record.remote,branch:record.branch,revision:record.revision,root:record.root})),managedProviderDiagnostics:[...(status.managedGitDiagnostics??[])],correctiveActions:status.correctiveActions.map((item)=>({id:item.id,message:item.message}))};
+ return{health,bazframeHome:status.bazframeHome,piAgentDirectory:status.piAgentDirectory,adapter:{state:status.adapter.state,targetPath:status.adapter.targetPath,installedBazframeVersion:status.adapter.installedBazframeVersion??null},globalPolicy:status.globalPolicy.policy==='enabled'?{policy:'enabled',statePath:null}:{policy:'disabled',statePath:status.globalPolicy.statePath},repository:status.repository,effectiveBehavior:status.effectiveBehavior,profile,cachedCollisionAliasCount:status.cachedCollisionAliasCount,remoteGitSources:(status.managedGitProviders??[]).map(({record,health})=>({kind:record.kind,id:record.id,health,remote:record.remote,branch:record.branch,revision:record.revision,root:record.root})),remoteGitSourceDiagnostics:[...(status.managedGitDiagnostics??[])],correctiveActions:status.correctiveActions.map((item)=>({id:item.id,message:item.message}))};
 }

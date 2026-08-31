@@ -1,6 +1,6 @@
 # Profile Portability Design
 
-> Status: approved product target; unexposed foundations exist, artifact-codec terminology alignment and vertical slice pending
+> Status: Stage 1 remote-Git, build-free export/import is live on macOS and Linux; later portability stages remain pending
 >
 > `docs/design.md` remains the product source of truth. This document defines the implementation contract for profile export and import.
 
@@ -195,6 +195,8 @@ bazframe profile import <directory> --dry-run
   [--map <kind>:<id>=<absolute-source-directory>]...
 ```
 
+The live Stage 1 grammar is the strict subset `bazframe profile import <directory> [--as <profile>] [--dry-run]`. It accepts neither `--map` nor `--yes`; local mappings arrive in Stage 2 and package consent in Stage 3.
+
 Import always begins with inspection and displays the resulting plan before it does anything else. By default it then executes that plan. `--dry-run` stops after inspection, with no DNS, clone, fetch, build, package-declared process execution, Bazframe-home write, artifact write, active-profile change, or policy/adapter/cache mutation. Inspection may perform bounded local reads and isolated non-network Git health checks for resources already present. Package execution retains its separate interactive confirmation or exact `--yes` authorization.
 
 A local library or package export deliberately omits the old machine's path. A typed mapping such as `--map library:toolkit=/srv/toolkit` tells import which existing source directory on this machine should satisfy that named resource.
@@ -258,6 +260,8 @@ The report is deterministic and terminal-safe. It shows:
 10. the invariant that collection children will not enter `(default)`.
 
 All user-controlled values are escaped and bounded in diagnostics.
+
+Dry-run reports are advisory point-in-time observations from stable per-object reads. A completed Stage 1 dry-run exits successfully even when its plan is blocked, because inspection itself completed; execute-by-default reports the same plan and then fails before side effects. Execution recomputes inspection and performs its authoritative rechecks under the final global state lock. JSON writes one document: dry-run and successful execution place the complete plan under `result`, blocked execution places it under `error.plan`, and later execution failure places exact resource/profile outcomes under `error.partialResult` with retry diagnostics.
 
 ## Import execution
 
@@ -378,11 +382,13 @@ Implementation reuses the existing safe-ID, instruction-byte, traversal, Skill-d
 - use private staging and identity-checked cleanup preparation with a fresh root identity check before recursive removal;
 - avoid printing instruction bodies during ordinary inspection and errors.
 
-Existing authoritative limits apply where their semantics match, including the current effective-instruction and Skill traversal limits. Stage 1 profile artifacts authorize a 1 MiB canonical manifest, 1,024 total profile entries across included Skills, omitted local Skills, libraries, and packages, 256 resources, and 1,024 entries in each streamed profile namespace inspection. Capture will enforce those ceilings before production exposure.
+Existing authoritative limits apply where their semantics match, including the current effective-instruction and Skill traversal limits. Live Stage 1 export enforces a 1 MiB canonical manifest, 1,024 total profile entries across included Skills, omitted local Skills, libraries, and packages, 256 resources, and 1,024 entries in each streamed profile namespace inspection through its export-specific capture scanner.
 
 Skill snapshot publication and verification enforce a 4 MiB raw and canonical manifest, 8,192 physical entries including the root, depth 32 with the root at depth zero, 4,096 UTF-8 bytes per relative path, 64 MiB logical bytes per regular file, and 512 MiB aggregate logical regular-file bytes. Directory enumeration and file copy/hash are streamed; per-file and aggregate budgets reconcile actual streamed bytes and stop concurrent growth after reading at most one byte beyond the applicable ceiling. Verification performs two bounded manifest/tree comparisons while retaining stable no-follow per-file reads and held root-directory identities. Cleanup preparation uses the same ceilings, makes only identity-checked physical directories writable through held handles, and refuses linked, special, unknown, or substituted entries. It freshly revalidates the cleanup root's physical identity immediately before recursive removal. Portable Node lacks handle-relative recursive deletion, so a non-cooperating same-user process can still substitute the root between that last check and `rm`; this residual final-pathname race is not claimed as identity-proven deletion. Test-only policy injection may lower but never raise these production limits.
 
-Git/checkout, package-manifest/argv, process-duration, and remaining acquisition limits must be centralized, documented, and tested below/at/above their approved values as their implementation arrives. Git transfer limits need defined timeout/abort, child termination, staging quarantine, and identity-proven cleanup behavior; where a hard portable pre-transfer byte cap cannot be guaranteed, the supported transport/platform contract must state the enforceable approximation and fail safely on timeout or post-transfer budget excess. An unbounded untrusted checkout, package manifest, or process duration remains a release blocker.
+The owner approved the remaining production ceilings: 64 KiB package manifests; package argv of at most 64 entries, 4 KiB per argument, and 16 KiB aggregate UTF-8; 4,096 UTF-8 bytes per package path; 30 seconds for Git metadata commands; 10 minutes for clone/fetch; 30 minutes for builds; a 5-second termination grace; 1 GiB of Git objects; checkout ceilings of 8,192 entries, depth 32, 4,096 UTF-8 path bytes, 64 MiB per file, and 512 MiB aggregate; total staging ceilings of 32,768 entries, depth 64, 8,192 UTF-8 path bytes, and 1.5 GiB logical regular-file bytes; 1 MiB for each Git stdout/stderr stream; 1 KiB per diagnostic and 1 MiB per diagnostic report; and 16 KiB provenance. The artifact-manifest 1 MiB ceiling also bounds each captured typed profile reference and global collection record; no separate numeric JSON-record limit is introduced.
+
+There is no claimed hard wire-byte cap. Enforcement combines wall time, monitoring, and post-transfer/post-build validation. Any breach prevents activation. Children receive bounded termination followed by the approved grace, and cleanup removes only identity-proven state. Uncertain cleanup or outcome enters existing recovery or quarantine state rather than claiming absence. Managed Git commands enforce the approved metadata versus clone/fetch durations, independent stdout/stderr ceilings, graceful-to-force termination grace, live acquisition-storage monitoring, and authoritative post-command Git-object/checkout validation. Remaining package-manifest/argv/build-duration and diagnostic-report enforcement must still be implemented and tested below, at, and above each approved value before the stages that use them are released. An unbounded untrusted package manifest or build duration remains a release blocker for package import.
 
 Windows validation must cover junctions/reparse points, UNC paths, case-insensitive basename identity, no-follow fallback behavior, destination collision behavior, and ACL/privacy behavior where POSIX modes are unavailable. Private staging is claimed only when platform permissions or inherited ACLs establish it.
 
@@ -393,7 +399,8 @@ A digest proves integrity, not authorship or safety. Portability does not add si
 CLI prose is derived from structured service results such as:
 
 ```ts
-type PortabilityAction = 'create' | 'reuse' | 'blocked';
+type ResourceImportAction = 'create' | 'reuse' | 'blocked';
+type ProfileImportAction = 'publish' | 'reuse' | 'blocked';
 type PortabilityOutcome =
   | 'created'
   | 'reused'
@@ -405,7 +412,7 @@ interface ResourceImportPlan {
   kind: 'skill' | 'library' | 'package';
   id: string;
   sourceType: 'remoteGit' | 'localMapping';
-  action: PortabilityAction;
+  action: ResourceImportAction;
   reason?: string;
   networkRequired: boolean;
   buildRequired: boolean;
@@ -417,7 +424,7 @@ interface ProfileImportPlan {
   destinationProfileId: string;
   omittedLocalSkills: string[];
   resources: ResourceImportPlan[];
-  profileAction: PortabilityAction;
+  profileAction: ProfileImportAction;
   blockers: string[];
 }
 ```
@@ -443,10 +450,10 @@ Reuse:
 Add:
 
 - `src/profile-portability/profile-artifact.ts`: exact object schema and canonical object codec behind explicit approved-limit injection;
-- bounded physical artifact I/O and exclusive export publication in later Stage 1 services after the remaining limits are approved;
-- `src/profile-portability/profile-export.ts`: locked profile/dependency capture and revalidation;
-- `src/profile-portability/profile-import-plan.ts`: no-write planning, mappings, and collision classification;
-- `src/profile-portability/profile-import.ts`: resource orchestration and final profile publication.
+- `src/profile-portability/profile-artifact-io.ts` and `profile-artifact-publication.ts`: bounded physical artifact I/O and exclusive export publication;
+- `src/profile-portability/profile-export.ts`: live locked profile/dependency capture and revalidation;
+- `src/profile-portability/profile-import-plan.ts`: live no-write Stage 1 planning and collision classification, with later-stage mappings still deferred;
+- `src/profile-portability/profile-import.ts`: live Stage 1 resource orchestration and final profile publication.
 
 Required factoring:
 
@@ -466,13 +473,9 @@ CLI parsing/reporting remains separate from portability orchestration. TUI suppo
 
 ### Stage 1: remote Git, build-free vertical slice
 
-- implement the complete schema codec, including recognized local-library/package variants and required local-Skill omissions;
-- export/import direct Skills and libraries from remote Git sources;
-- warn, omit, and permanently record only healthy local direct Skill IDs whose profile links exactly match their added Skills;
-- fail export on local libraries and every package reference before publication;
-- add exact-revision remote Git acquisition;
-- provide inspection/execution, collision/reuse, inactive atomic publication, partial-success, and retry behavior;
-- reject local mappings and packages before planning mutation; perform no local mapping or package execution.
+Stage 1 export and import are live in the production CLI on macOS and Linux. Export writes direct Skills and libraries from remote Git sources, warns, omits, and permanently records healthy matching local direct Skill IDs, blocks local libraries and every package reference, publishes an inactive reviewable artifact, and requires review of exported `profile/AGENTS.md` before sharing.
+
+Import provides exact-revision remote Git acquisition, no-write inspection and collision/reuse planning, inactive atomic profile publication, partial-success outcomes and forward retry, and rejection of local mappings and packages before mutation. It reports the plan before work, leaves active selection unchanged, and never promotes collection children into `(default)`. Stage 2 local-library mappings, Stage 3 packages, Windows publication validation, and full portability remain pending.
 
 ### Stage 2: local build-free libraries
 

@@ -13,7 +13,7 @@ afterEach(async () => Promise.all(directories.splice(0).map((directory) => direc
 interface Result { status: number | null; stdout: string; stderr: string }
 const skill = (name: string) => `---\nname: ${name}\ndescription: ${name} Skill\n---\n# ${name}\n`;
 
-describe('managed Git CLI', () => {
+describe('remote Git source CLI', () => {
   it('acquires, repeats, updates, and reports a Personal Agent Network-shaped package without profile activation', async () => {
     const directory = await createTempDirectory('bazframe-managed-git-cli-'); directories.push(directory);
     const cwd = await directory.mkdir('cwd');
@@ -45,7 +45,7 @@ describe('managed Git CLI', () => {
     expect(added.stdout).toContain('\\u202e');
     expect(added.stdout).not.toContain(c1BuildArgument);
     expect(added.stdout).not.toContain(bidiBuildArgument);
-    expect(added.stdout).toContain('Managed Git package: added');
+    expect(added.stdout).toContain('Remote Git source package: added');
     expect(await readFile(directory.path('home/providers/git/checkouts/package/personal-agent-network/skills/personal-agent-network-setup/SKILL.md'), 'utf8')).toContain('name: personal-agent-network-setup');
     expect((await run(['profile', 'package', 'list'], cwd, environment)).stdout).toContain('Referenced packages:\n  (none)');
 
@@ -67,7 +67,7 @@ describe('managed Git CLI', () => {
     git(['config', '--unset', 'filter.evil.smudge'], managedRoot);
     const repeated = await run(['package', 'add', source, '--yes'], cwd, { ...environment, TEST_FAIL_CLONE: '1' });
     expect(repeated).toMatchObject({ status: 0, stderr: '' });
-    expect(repeated.stdout).toContain('Managed Git package: current');
+    expect(repeated.stdout).toContain('Remote Git source package: current');
     expect(repeated.stdout).not.toContain('build authorization');
 
     await directory.write('remote/personal-agent-network/skills/personal-agent-network/note.txt', 'updated\n');
@@ -76,7 +76,7 @@ describe('managed Git CLI', () => {
     const updated = await run(['package', 'update', 'personal-agent-network', '--yes'], cwd, {...environment,TEST_LOCK_CAPTURE:lockCapture});
     expect(updated).toMatchObject({ status: 0, stderr: '' });
     expect(JSON.parse(await readFile(lockCapture,'utf8'))).toMatchObject({command:'bazframe package update'});
-    expect(updated.stdout).toContain('Managed Git package: updated');
+    expect(updated.stdout).toContain('Remote Git source package: updated');
     const fastForwardRevision = git(['rev-parse', 'HEAD'], remote).trim();
     await directory.write('remote/personal-agent-network/build.mjs', 'process.exit(9);\n');
     git(['add', '.'], remote); git(['commit', '-m', 'failing build'], remote);
@@ -100,12 +100,14 @@ describe('managed Git CLI', () => {
     expect(failedBuild.status).toBe(1);
     expect(git(['status', '--porcelain=v1', '--untracked-files=all', '--ignored'], managedRoot)).toBe('');
     expect((await run(['package', 'build', 'personal-agent-network'], cwd, environment)).status).toBe(0);
-    const noisyJson=await run(['package','build','--json','personal-agent-network'],cwd,{...environment,TEST_MANAGED_NOISE:'1'});expect(noisyJson.status).toBe(0);expect(noisyJson.stderr).toContain('managed-stdout');expect(noisyJson.stderr).toContain('managed-stderr');expect(noisyJson.stdout.trim().split('\n')).toHaveLength(1);expect(JSON.parse(noisyJson.stdout)).toMatchObject({schemaVersion:1,ok:true,command:'package.build',result:{providerKind:'managed-git'}});
+    const noisyJson=await run(['package','build','--json','personal-agent-network'],cwd,{...environment,TEST_MANAGED_NOISE:'1'});expect(noisyJson.status).toBe(0);expect(noisyJson.stderr).toContain('managed-stdout');expect(noisyJson.stderr).toContain('managed-stderr');expect(noisyJson.stdout.trim().split('\n')).toHaveLength(1);const noisyDocument=JSON.parse(noisyJson.stdout);expect(noisyDocument).toMatchObject({schemaVersion:1,ok:true,command:'package.build',result:{sourceType:'remoteGit'}});
 
     const status = await run(['status'], cwd, environment);
-    expect(status.stdout).toContain('Managed Git providers:');
+    expect(status.stdout).toContain('Remote Git sources:');
     expect(status.stdout).toContain('package personal-agent-network: ready; example.test/sram1337/personal-agent-network; branch:main; revision:');
     expect(status.stdout).toContain('bazframe package update personal-agent-network');
+    const statusDocument = JSON.parse((await run(['status', '--json'], cwd, environment)).stdout);
+    expect(statusDocument).toMatchObject({ result: { remoteGitSources: [expect.objectContaining({ kind: 'package', id: 'personal-agent-network' })], remoteGitSourceDiagnostics: [] } });
     const provenance = JSON.parse(await readFile(directory.path('home/providers/git/records/package/personal-agent-network.json'), 'utf8')) as { revision: string; remote: string };
     expect(provenance.remote).toBe('example.test/sram1337/personal-agent-network');
     expect(provenance.revision).toBe(git(['rev-parse', 'HEAD'], remote).trim());
@@ -120,6 +122,9 @@ describe('managed Git CLI', () => {
     const recoveryStatus = await run(['status'], cwd, environment);
     expect(recoveryStatus.status).toBe(3);
     expect(recoveryStatus.stdout).toContain('recovery state requires inspection');
+    const recoveryStatusDocument = JSON.parse((await run(['status', '--json'], cwd, environment)).stdout);
+    expect(recoveryStatusDocument.result.correctiveActions).toContainEqual(expect.objectContaining({ id: 'remote-git' }));
+    expect(recoveryStatusDocument.result.remoteGitSourceDiagnostics).not.toHaveLength(0);
   }, 60_000);
 
   it('retains recovery state instead of publishing a package-build replacement of the rollback backup', async () => {
@@ -236,7 +241,7 @@ await rm(journal.backup,{recursive:true,force:true});await mkdir(journal.backup,
     await rename(displacedRoot, managedRoot);
     const resumed = await run(['library', 'remove', 'recovery-library'], cwd, environment);
     expect(resumed).toMatchObject({ status: 0, stderr: '' });
-    expect(resumed.stdout).toContain('Managed Git library: removed');
+    expect(resumed.stdout).toContain('Remote Git source library: removed');
     await expect(readFile(journalPath)).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(readFile(directory.path('home/providers/git/records/library/recovery-library.json'))).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(readFile(`${managedRoot}/alpha/SKILL.md`)).rejects.toMatchObject({ code: 'ENOENT' });
@@ -258,7 +263,7 @@ await rm(journal.backup,{recursive:true,force:true});await mkdir(journal.backup,
     }));
     const refused = await run(['library', 'remove', 'outside-library'], cwd, { ...process.env, BAZFRAME_HOME: home, PI_CODING_AGENT_DIR: directory.path('pi-agent'), NO_COLOR: '1' });
     expect(refused.status).toBe(1);
-    expect(refused.stderr).toContain('deterministic managed provider path');
+    expect(refused.stderr).toContain('deterministic Bazframe-managed checkout path');
     expect(await readFile(directory.path('outside-library/alpha/SKILL.md'), 'utf8')).toContain('name: alpha');
   });
 
@@ -296,7 +301,7 @@ import{mkdirSync}from'node:fs';const args=process.argv.slice(2);if(args[0]==='au
     await chmod(gh, 0o755);
     const result = await run(['library', 'add', 'git:Example/Fallback-Library'], cwd, { ...environment, BAZFRAME_GH_COMMAND: gh, GIT_SSH_COMMAND: '/tmp/hostile-routing' });
     expect(result).toMatchObject({ status: 0, stderr: '' });
-    expect(result.stdout).toContain('Managed Git library: added');
+    expect(result.stdout).toContain('Remote Git source library: added');
   });
 
   it('acquires and updates through an authenticated GitHub CLI transport', async () => {
@@ -310,7 +315,8 @@ import{mkdirSync}from'node:fs';const args=process.argv.slice(2);if(args[0]==='au
     await directory.write('gh-success-wrapper.mjs', `#!/usr/bin/env node
 import{spawnSync}from'node:child_process';
 const args=process.argv.slice(2);if(args[0]==='auth')process.exit(0);if(args[0]!=='repo'||args[1]!=='clone')process.exit(91);
-const result=spawnSync(process.env.REAL_GIT,['clone','--no-checkout','--template=',process.env.TEST_REMOTE,args[3]],{stdio:'inherit',env:process.env});if(result.status!==0)process.exit(result.status??1);
+const separator=args.indexOf('--');if(separator<0)process.exit(92);const cloneFlags=args.slice(separator+1);
+const result=spawnSync(process.env.REAL_GIT,['clone',...cloneFlags,process.env.TEST_REMOTE,args[3]],{stdio:'inherit',env:process.env});if(result.status!==0)process.exit(result.status??1);
 const changed=spawnSync(process.env.REAL_GIT,['-C',args[3],'remote','set-url','origin','https://github.com/example/private-library.git'],{stdio:'inherit',env:process.env});process.exit(changed.status??1);
 `);
     await chmod(gh, 0o755);
@@ -324,7 +330,7 @@ const changed=spawnSync(process.env.REAL_GIT,['-C',args[3],'remote','set-url','o
     expect((await run(['library', 'list'], cwd, githubEnvironment)).stdout).toContain('beta');
   });
 
-  it('updates managed Skills through stable profile links and acquires managed libraries through the shared lifecycle', async () => {
+  it('updates remote Git Skills through stable profile links and acquires remote Git libraries through the shared lifecycle', async () => {
     const directory = await createTempDirectory('bazframe-managed-git-resources-'); directories.push(directory);
     const cwd = await directory.mkdir('cwd');
     await run(['profile', 'add', 'focused'], cwd, { ...process.env, BAZFRAME_HOME: directory.path('home'), PI_CODING_AGENT_DIR: directory.path('pi-agent'), NO_COLOR: '1' });
@@ -398,7 +404,7 @@ function git(args: string[], cwd: string): string {
 }
 function gitExecutable(): string {
   const result = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' });
-  if (result.status !== 0) throw new Error('git is required for managed Git integration tests');
+  if (result.status !== 0) throw new Error('git is required for remote Git source integration tests');
   return result.stdout.trim();
 }
 function run(args: readonly string[], cwd: string, environment: NodeJS.ProcessEnv): Promise<Result> {

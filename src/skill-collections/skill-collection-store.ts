@@ -3,6 +3,8 @@ import { constants } from 'node:fs';
 import { lstat, open, readdir, realpath, type FileHandle } from 'node:fs/promises';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { BazframeError, errorCode } from '../core/errors.js';
+import { boundedStateJsonBytes } from '../profile-portability/profile-portability-policy.js';
+import { readAtMostOneBeyond } from '../state/bounded-file-read.js';
 import { isPortableRelativePath } from './portable-relative-path.js';
 import { isSafeSkillId } from '../skills/skill-id.js';
 
@@ -13,6 +15,10 @@ export interface PackageRecord { schemaVersion: 1; package: string; root: string
 export type SkillCollectionRecord = LibraryRecord | PackageRecord;
 export interface SkillCollectionRecordSnapshot<T extends SkillCollectionRecord = SkillCollectionRecord> {
   record: T; path: string; device: bigint; inode: bigint; contentSha256: string;
+}
+export interface SkillCollectionRecordReadOptions {
+  maxBytes?: number;
+  testHooks?: { afterInitialStat?: () => void | Promise<void>; afterPathStat?: () => void | Promise<void>; afterClose?: () => void | Promise<void> };
 }
 export interface SkillCollectionRecordPath { key: SkillCollectionKey; path: string; relativePath: string }
 export interface SkillCollectionNamespaceDiagnostic { key: SkillCollectionKey; path: string }
@@ -74,29 +80,67 @@ export function decodePackage(value: unknown, expectedId?: string): PackageRecor
 export async function readLibrary(home: string, id: string): Promise<LibraryRecord> { return (await readLibrarySnapshot(home, id)).record; }
 export async function readPackage(home: string, id: string): Promise<PackageRecord> { return (await readPackageSnapshot(home, id)).record; }
 export async function readCollection(home: string, key: SkillCollectionKey): Promise<SkillCollectionRecord> { return key.kind === 'library' ? readLibrary(home, key.id) : readPackage(home, key.id); }
-export async function readLibrarySnapshot(home: string, id: string): Promise<SkillCollectionRecordSnapshot<LibraryRecord>> { return readRecord(home, 'library', id) as Promise<SkillCollectionRecordSnapshot<LibraryRecord>>; }
-export async function readPackageSnapshot(home: string, id: string): Promise<SkillCollectionRecordSnapshot<PackageRecord>> { return readRecord(home, 'package', id) as Promise<SkillCollectionRecordSnapshot<PackageRecord>>; }
-export async function readCollectionSnapshot(home: string, key: SkillCollectionKey): Promise<SkillCollectionRecordSnapshot> { return readRecord(home, key.kind, key.id); }
+export async function readLibrarySnapshot(home: string, id: string, options: SkillCollectionRecordReadOptions = {}): Promise<SkillCollectionRecordSnapshot<LibraryRecord>> { return readRecord(home, 'library', id, options) as Promise<SkillCollectionRecordSnapshot<LibraryRecord>>; }
+export async function readPackageSnapshot(home: string, id: string, options: SkillCollectionRecordReadOptions = {}): Promise<SkillCollectionRecordSnapshot<PackageRecord>> { return readRecord(home, 'package', id, options) as Promise<SkillCollectionRecordSnapshot<PackageRecord>>; }
+export async function readCollectionSnapshot(home: string, key: SkillCollectionKey, options: SkillCollectionRecordReadOptions = {}): Promise<SkillCollectionRecordSnapshot> { return readRecord(home, key.kind, key.id, options); }
 
-async function readRecord(home: string, kind: SkillCollectionKind, id: string): Promise<SkillCollectionRecordSnapshot> {
+async function readRecord(home: string, kind: SkillCollectionKind, id: string, options: SkillCollectionRecordReadOptions): Promise<SkillCollectionRecordSnapshot> {
   if (!isSafeSkillId(id)) throw invalid(kind, `${kind} is invalid`);
-  const rootPath = globalCollectionDirectory(home, kind); const path = globalCollectionPath(home, kind, id);
-  const directories: OpenDirectory[] = []; let handle: FileHandle | undefined;
+  const maximum = boundedStateJsonBytes(options.maxBytes);
+  const rootPath = globalCollectionDirectory(home, kind);
+  const path = globalCollectionPath(home, kind, id);
+  const directories: OpenDirectory[] = [];
+  let handle: FileHandle | undefined;
+  let result: SkillCollectionRecordSnapshot | undefined;
+  let operationError: unknown;
   try {
     for (const directoryPath of [home, rootPath]) directories.push(await openExistingDirectory(directoryPath, 'record ancestor must be a physical directory', kind));
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-    const before = await handle.stat({ bigint: true }); if (!before.isFile()) throw invalid(kind, 'record must be a physical regular file');
-    const bytes = await handle.readFile(); const after = await handle.stat({ bigint: true }); const pathMetadata = await lstat(path, { bigint: true });
-    if (!after.isFile() || pathMetadata.isSymbolicLink() || !pathMetadata.isFile() || before.dev !== after.dev || before.ino !== after.ino || after.dev !== pathMetadata.dev || after.ino !== pathMetadata.ino) throw invalid(kind, 'record identity changed while reading');
+    const before = await handle.stat({ bigint: true });
+    if (!before.isFile() || before.size > BigInt(maximum)) throw invalid(kind, `record must be a bounded physical regular file (${maximum} bytes)`);
+    await options.testHooks?.afterInitialStat?.();
+    const bytes = await readAtMostOneBeyond(handle, maximum);
+    const afterRead = await handle.stat({ bigint: true });
+    const pathMetadata = await lstat(path, { bigint: true });
+    await options.testHooks?.afterPathStat?.();
+    const final = await handle.stat({ bigint: true });
+    const finalPathMetadata = await lstat(path, { bigint: true });
+    if (bytes.byteLength > maximum || !afterRead.isFile() || !final.isFile() || pathMetadata.isSymbolicLink() || !pathMetadata.isFile()
+      || finalPathMetadata.isSymbolicLink() || !finalPathMetadata.isFile()
+      || before.dev !== afterRead.dev || before.ino !== afterRead.ino || afterRead.dev !== pathMetadata.dev || afterRead.ino !== pathMetadata.ino
+      || pathMetadata.dev !== final.dev || pathMetadata.ino !== final.ino
+      || finalPathMetadata.dev !== final.dev || finalPathMetadata.ino !== final.ino
+      || before.size !== afterRead.size || before.mtimeNs !== afterRead.mtimeNs || before.ctimeNs !== afterRead.ctimeNs
+      || afterRead.size !== final.size || afterRead.mtimeNs !== final.mtimeNs || afterRead.ctimeNs !== final.ctimeNs
+      || pathMetadata.size !== final.size || pathMetadata.mtimeNs !== final.mtimeNs || pathMetadata.ctimeNs !== final.ctimeNs
+      || finalPathMetadata.size !== final.size || finalPathMetadata.mtimeNs !== final.mtimeNs || finalPathMetadata.ctimeNs !== final.ctimeNs
+      || BigInt(bytes.byteLength) !== final.size) throw invalid(kind, 'record identity changed or exceeded its byte limit while reading');
     for (const directory of [...directories].reverse()) await assertDirectoryStable(directory);
-    let text: string; try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch (error) { throw new BazframeError('SKILL_COLLECTION_RECORD_INVALID', `Global ${kind} is not valid UTF-8.`, { cause: error }); }
-    let value: unknown; try { value = JSON.parse(text); } catch (error) { throw new BazframeError('SKILL_COLLECTION_RECORD_INVALID', `Global ${kind} is not valid JSON.`, { cause: error }); }
-    return { record: kind === 'library' ? decodeLibrary(value, id) : decodePackage(value, id), path, device: before.dev, inode: before.ino, contentSha256: createHash('sha256').update(bytes).digest('hex') };
+    let text: string;
+    try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+    catch (error) { throw new BazframeError('SKILL_COLLECTION_RECORD_INVALID', `Global ${kind} is not valid UTF-8.`, { cause: error }); }
+    let value: unknown;
+    try { value = JSON.parse(text); }
+    catch (error) { throw new BazframeError('SKILL_COLLECTION_RECORD_INVALID', `Global ${kind} is not valid JSON.`, { cause: error }); }
+    result = { record: kind === 'library' ? decodeLibrary(value, id) : decodePackage(value, id), path, device: before.dev, inode: before.ino, contentSha256: createHash('sha256').update(bytes).digest('hex') };
   } catch (error) {
-    if (error instanceof BazframeError) throw error;
-    if (errorCode(error) === 'ELOOP') throw invalid(kind, 'record and its namespace ancestors must be physical');
-    throw new BazframeError('SKILL_COLLECTION_RECORD_READ_FAILED', `Could not read global ${kind} ${path}${formatCode(error)}`, { cause: error });
-  } finally { await handle?.close().catch(() => undefined); for (const directory of [...directories].reverse()) await directory.handle.close().catch(() => undefined); }
+    operationError = error instanceof BazframeError
+      ? error
+      : errorCode(error) === 'ELOOP'
+        ? invalid(kind, 'record and its namespace ancestors must be physical')
+        : new BazframeError('SKILL_COLLECTION_RECORD_READ_FAILED', `Could not read global ${kind} ${path}${formatCode(error)}`, { cause: error });
+  }
+  if (handle !== undefined) {
+    try { await handle.close(); await options.testHooks?.afterClose?.(); }
+    catch (error) { operationError ??= new BazframeError('SKILL_COLLECTION_RECORD_READ_FAILED', `Could not close global ${kind} ${path}${formatCode(error)}`, { cause: error }); }
+  }
+  for (const directory of [...directories].reverse()) {
+    try { await directory.handle.close(); }
+    catch (error) { operationError ??= new BazframeError('SKILL_COLLECTION_RECORD_READ_FAILED', `Could not close global ${kind} namespace ${directory.path}${formatCode(error)}`, { cause: error }); }
+  }
+  if (operationError !== undefined) throw operationError;
+  if (result === undefined) throw new BazframeError('SKILL_COLLECTION_RECORD_READ_FAILED', `Could not read global ${kind} ${path}.`);
+  return result;
 }
 export function sameCollectionSnapshot(left: SkillCollectionRecordSnapshot, right: SkillCollectionRecordSnapshot): boolean { return left.device === right.device && left.inode === right.inode && left.contentSha256 === right.contentSha256; }
 

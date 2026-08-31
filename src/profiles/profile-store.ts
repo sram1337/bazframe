@@ -1,8 +1,11 @@
+import { createHash } from 'node:crypto';
+import { constants } from 'node:fs';
 import { join } from 'node:path';
-import { lstat, readFile, readdir, stat } from 'node:fs/promises';
+import { lstat, open, readdir, stat, type FileHandle } from 'node:fs/promises';
 import { readUtf8InstructionFile } from '../core/content.js';
 import { BazframeError, errorCode } from '../core/errors.js';
 import { writeFileAtomic } from '../state/atomic-file.js';
+import { readAtMostOneBeyond } from '../state/bounded-file-read.js';
 import { withStateLock } from '../state/lock.js';
 export { resolveBazframeHome } from '../state/paths.js';
 import { assertSafeProfileId } from './profile-id.js';
@@ -112,64 +115,153 @@ export async function discoverSkillDirectories(skillsRoot: string): Promise<stri
   return result;
 }
 
-export async function readActiveProfile(bazframeHome: string): Promise<string> {
+export interface ActiveProfileSnapshot {
+  profileId: string;
+  path: string;
+  device: bigint;
+  inode: bigint;
+  contentSha256: string;
+}
+
+export interface ActiveProfileSnapshotReadOptions {
+  testHooks?: {
+    afterInitialStat?: () => void | Promise<void>;
+    afterPathStat?: () => void | Promise<void>;
+    afterClose?: () => void | Promise<void>;
+  };
+}
+
+export async function readOptionalActiveProfileSnapshot(
+  bazframeHome: string,
+  options: ActiveProfileSnapshotReadOptions = {}
+): Promise<ActiveProfileSnapshot | undefined> {
   const statePath = join(bazframeHome, ACTIVE_PROFILE_FILE);
-  let metadata;
+  let handle: FileHandle | undefined;
+  let snapshot: ActiveProfileSnapshot | undefined;
+  let operationError: unknown;
   try {
-    metadata = await lstat(statePath);
-  } catch (error) {
-    if (errorCode(error) === 'ENOENT') {
+    try {
+      handle = await open(
+        statePath,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+      );
+    } catch (error) {
+      if (errorCode(error) === 'ENOENT') return undefined;
+      if (errorCode(error) === 'ELOOP') {
+        throw new BazframeError(
+          'INVALID_ACTIVE_PROFILE_STATE',
+          `Active-profile state must be a regular UTF-8 file no larger than ${MAX_STATE_BYTES} bytes: ${statePath}`,
+          { cause: error }
+        );
+      }
+      throw error;
+    }
+    const before = await handle.stat({ bigint: true });
+    if (!before.isFile() || before.size > BigInt(MAX_STATE_BYTES)) {
       throw new BazframeError(
-        'NO_ACTIVE_PROFILE',
-        'No active profile. Run `bazframe profile use <profile>` first.'
+        'INVALID_ACTIVE_PROFILE_STATE',
+        `Active-profile state must be a regular UTF-8 file no larger than ${MAX_STATE_BYTES} bytes: ${statePath}`
       );
     }
-    throw stateReadError(statePath, error);
-  }
-  if (metadata.isSymbolicLink() || !metadata.isFile() || metadata.size > MAX_STATE_BYTES) {
-    throw new BazframeError(
-      'INVALID_ACTIVE_PROFILE_STATE',
-      `Active-profile state must be a regular UTF-8 file no larger than ${MAX_STATE_BYTES} bytes: ${statePath}`
-    );
-  }
+    await options.testHooks?.afterInitialStat?.();
+    const bytes = await readAtMostOneBeyond(handle, MAX_STATE_BYTES);
+    const afterRead = await handle.stat({ bigint: true });
+    const current = await lstat(statePath, { bigint: true });
+    await options.testHooks?.afterPathStat?.();
+    const final = await handle.stat({ bigint: true });
+    const finalPath = await lstat(statePath, { bigint: true });
+    if (bytes.byteLength > MAX_STATE_BYTES) {
+      throw new BazframeError(
+        'INVALID_ACTIVE_PROFILE_STATE',
+        `Active-profile state exceeds ${MAX_STATE_BYTES} bytes: ${statePath}`
+      );
+    }
+    if (!afterRead.isFile()
+      || !final.isFile()
+      || current.isSymbolicLink()
+      || !current.isFile()
+      || finalPath.isSymbolicLink()
+      || !finalPath.isFile()
+      || before.dev !== afterRead.dev
+      || before.ino !== afterRead.ino
+      || afterRead.dev !== current.dev
+      || afterRead.ino !== current.ino
+      || current.dev !== final.dev
+      || current.ino !== final.ino
+      || finalPath.dev !== final.dev
+      || finalPath.ino !== final.ino
+      || before.size !== afterRead.size
+      || before.mtimeNs !== afterRead.mtimeNs
+      || before.ctimeNs !== afterRead.ctimeNs
+      || afterRead.size !== final.size
+      || afterRead.mtimeNs !== final.mtimeNs
+      || afterRead.ctimeNs !== final.ctimeNs
+      || current.size !== final.size
+      || current.mtimeNs !== final.mtimeNs
+      || current.ctimeNs !== final.ctimeNs
+      || finalPath.size !== final.size
+      || finalPath.mtimeNs !== final.mtimeNs
+      || finalPath.ctimeNs !== final.ctimeNs
+      || BigInt(bytes.byteLength) !== final.size) {
+      throw new BazframeError(
+        'INVALID_ACTIVE_PROFILE_STATE',
+        `Active-profile state changed while being read: ${statePath}`
+      );
+    }
 
-  let bytes: Uint8Array;
-  try {
-    bytes = await readFile(statePath);
+    let text: string;
+    try {
+      text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch (error) {
+      throw new BazframeError(
+        'INVALID_ACTIVE_PROFILE_STATE',
+        `Active-profile state is not valid UTF-8: ${statePath}`,
+        { cause: error }
+      );
+    }
+    if (text.includes('\0')) {
+      throw new BazframeError(
+        'INVALID_ACTIVE_PROFILE_STATE',
+        `Active-profile state contains a NUL byte: ${statePath}`
+      );
+    }
+    const profileId = text.endsWith('\r\n')
+      ? text.slice(0, -2)
+      : text.endsWith('\n')
+        ? text.slice(0, -1)
+        : text;
+    assertSafeProfileId(profileId);
+    snapshot = {
+      profileId,
+      path: statePath,
+      device: before.dev,
+      inode: before.ino,
+      contentSha256: createHash('sha256').update(bytes).digest('hex')
+    };
   } catch (error) {
-    throw stateReadError(statePath, error);
+    operationError = error instanceof BazframeError ? error : stateReadError(statePath, error);
   }
-  if (bytes.byteLength > MAX_STATE_BYTES) {
-    throw new BazframeError(
-      'INVALID_ACTIVE_PROFILE_STATE',
-      `Active-profile state exceeds ${MAX_STATE_BYTES} bytes: ${statePath}`
-    );
+  if (handle !== undefined) {
+    try {
+      await handle.close();
+      await options.testHooks?.afterClose?.();
+    } catch (error) {
+      operationError ??= stateReadError(statePath, error);
+    }
   }
+  if (operationError !== undefined) throw operationError;
+  return snapshot;
+}
 
-  let text: string;
-  try {
-    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  } catch (error) {
+export async function readActiveProfile(bazframeHome: string): Promise<string> {
+  const snapshot = await readOptionalActiveProfileSnapshot(bazframeHome);
+  if (snapshot === undefined) {
     throw new BazframeError(
-      'INVALID_ACTIVE_PROFILE_STATE',
-      `Active-profile state is not valid UTF-8: ${statePath}`,
-      { cause: error }
+      'NO_ACTIVE_PROFILE',
+      'No active profile. Run `bazframe profile use <profile>` first.'
     );
   }
-  if (text.includes('\0')) {
-    throw new BazframeError(
-      'INVALID_ACTIVE_PROFILE_STATE',
-      `Active-profile state contains a NUL byte: ${statePath}`
-    );
-  }
-
-  const profileId = text.endsWith('\r\n')
-    ? text.slice(0, -2)
-    : text.endsWith('\n')
-      ? text.slice(0, -1)
-      : text;
-  assertSafeProfileId(profileId);
-  return profileId;
+  return snapshot.profileId;
 }
 
 export async function selectProfile(

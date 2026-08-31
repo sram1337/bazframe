@@ -133,7 +133,7 @@ describe('CLI and TUI service state agreement', () => {
     expect(await snapshotFilesystem(provider)).toEqual(providerBefore);
   });
 
-  it('acquires a managed Git library without implicit profile composition', async () => {
+  it('acquires a remote Git library without implicit profile composition', async () => {
     const directory = await createTempDirectory('bazframe remote library state agreement ');
     temporaryDirectories.push(directory);
     const home = directory.path('home');
@@ -280,7 +280,7 @@ function git(args: string[], cwd: string): string {
 
 function gitExecutable(): string {
   const result = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' });
-  if (result.status !== 0) throw new Error('git is required for managed Git integration tests');
+  if (result.status !== 0) throw new Error('git is required for remote Git source integration tests');
   return result.stdout.trim();
 }
 

@@ -50,11 +50,12 @@ afterEach(async () => {
 
 describe('packaged Pi adapter command', () => {
   it.each([
-    ['0.81.9', false],
-    ['0.82.0-beta.1', false],
+    ['0.84.3', false],
+    ['0.84.4-beta.1', false],
     ['not-a-version', false],
-    ['0.82.0', true],
-    ['0.84.3', true]
+    ['0.84.4', true],
+    ['0.85.0', true],
+    ['1.0.0', true]
   ])('enforces the stable Pi minimum for %s', async (piVersion, supported) => {
     const fixture = await activeFixture(`pi-version-${piVersion.replaceAll('.', '-')}`);
     const harness = register(await loadArtifact(fixture.directory, false, piVersion), []);
@@ -74,7 +75,7 @@ describe('packaged Pi adapter command', () => {
       expect(info.message).toContain('Profile: focused');
     } else {
       expect(notifications).toEqual([{
-        message: `Bazframe profile failed to load: Bazframe requires a stable Pi 0.82.0 or newer; this process is Pi ${piVersion}.`,
+        message: `Bazframe profile failed to load: Bazframe requires a stable Pi 0.84.4 or newer; this process is Pi ${piVersion}.`,
         level: 'error'
       }]);
     }
@@ -147,7 +148,7 @@ describe('packaged Pi adapter command', () => {
     expect(notification.message).not.toContain('Aliases:');
   });
 
-  it('composes the exact Pi 0.82 prompt order and reports each mode once per load', async () => {
+  it('composes the exact Pi prompt order and reports each mode once per load', async () => {
     const fixture = await activeFixture('exact-prompt-order');
     const harness = register(await loadArtifact(fixture.directory), []);
     await required(harness.events, 'session_start')({}, sessionContext(fixture.repository));
@@ -1092,7 +1093,7 @@ function register(adapter: LoadedAdapter, runtimeCommands: RuntimeCommand[]): Ha
 async function loadArtifact(
   directory: TempDirectory,
   loadSkills: false | true | 'reject' | 'parity' = false,
-  piVersion = '0.82.0'
+  piVersion = '0.84.4'
 ): Promise<LoadedAdapter> {
   const source = await readFile(
     new URL('../../../artifacts/pi/bazframe.ts', import.meta.url),

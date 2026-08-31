@@ -32,16 +32,37 @@ pi
 
 You should see all your profiles added skills.
 
- > * The current beta version supports only Pi 0.82.0 or newer on macOS and Linux.
+ > * The current beta version supports only Pi 0.84.4 or newer on macOS and Linux.
 
 ### Requirements
 
 - [Node.js](https://nodejs.org/) 22.19.0 or newer.
-- Pi 0.82.0 or newer.
+- Pi 0.84.4 or newer.
 - macOS or Linux.
 - A model provider supported by Pi; see [Pi's authentication documentation](https://github.com/earendil-works/pi#readme).
 - (optional) [Git](https://git-scm.com/) only for remote Git sources. Basic profile use does not require Git.
 
+
+### Export and import a profile (Stage 1)
+
+Publish a reviewable directory for an explicit profile without changing the active profile:
+
+```bash
+bazframe profile export my-coding-harness --output ./my-coding-harness.bazframe-profile
+```
+
+Review `./my-coding-harness.bazframe-profile/profile/AGENTS.md` before sharing because Bazframe does not redact user-authored instructions. On the destination machine, inspect first, then import the inactive profile:
+
+```bash
+bazframe profile import ./my-coding-harness.bazframe-profile --dry-run
+bazframe profile import ./my-coding-harness.bazframe-profile
+# Or choose only the destination profile ID:
+bazframe profile import ./my-coding-harness.bazframe-profile --as imported-harness
+```
+
+Stage 1 supports direct Skills and libraries acquired from remote Git sources at their recorded exact revisions. Healthy local direct Skills are omitted, named in warnings, and recorded in the artifact; they remain omitted after import. Local libraries and every package reference block export, and import rejects local mappings and packages. Import shows the complete plan before execution, never changes the active profile, retains earlier exact resources if later work fails, and safely reuses them on retry.
+
+Local-library portability, package portability, Windows publication, and full profile portability remain unavailable.
 
 ### Terminal interface
 

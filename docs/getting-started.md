@@ -9,7 +9,7 @@ This guide covers installation of the Pi integration, a first profile, policy, a
 You need:
 
 - Node.js 22.19.0 or newer, including `npm`.
-- Pi 0.82.0 or newer.
+- Pi 0.84.4 or newer.
 - macOS or Linux.
 - Access to a Pi-supported model provider.
 
@@ -33,7 +33,7 @@ pi --version
 bazframe --version
 ```
 
-Pi must report version 0.82.0 or newer. Bazframe reports `Bazframe <installed-version>`.
+Pi must report version 0.84.4 or newer. Bazframe reports `Bazframe <installed-version>`.
 
 To update, repeat the installation commands. After each Bazframe update, reinstall the packaged Pi adapter so its version matches the CLI:
 
@@ -165,7 +165,7 @@ export PI_CODING_AGENT_DIR=/absolute/path/to/pi-agent-state
 
 Set these before running Bazframe setup commands. Changing either value points the tools at different state; it does not copy or migrate existing state.
 
-> **Profile export/import is not released.** Installing Bazframe on another machine does not copy or activate profiles from an existing `BAZFRAME_HOME`. Do not treat copying the internal state directory as a supported portability workflow.
+> **Do not copy `BAZFRAME_HOME` between machines.** Use the supported Stage 1 artifact workflow instead: `bazframe profile export <profile> --output <directory>`, review the exported `profile/AGENTS.md`, transfer the artifact directory, run `bazframe profile import <directory> --dry-run`, then run import without `--dry-run`. Stage 1 imports exact remote Git Skills and libraries into an inactive profile; local-library mappings, packages, Windows publication, and full portability remain unavailable.
 
 ## Diagnose setup with status
 

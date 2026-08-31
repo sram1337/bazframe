@@ -220,24 +220,40 @@ export async function resolveProfileSkillCollections<T = unknown>(
   return composeCandidates(directCollections, candidates, flatSkills, diagnostics);
 }
 
-function composeCandidates<T>(directCollections: DirectSkillCollection[], candidates: CandidateCollection<T>[], flatSkills: readonly FlatSkillIdentity[], diagnostics: SkillCollectionDiagnostic[]): ProfileSkillCollectionComposition<T> {
-  const duplicateCollections = new Set<string>();
+export function validateCapturedSkillComposition<T = unknown>(
+  flatSkills: readonly FlatSkillIdentity[],
+  collectionSkills: readonly DerivedSkill<T>[]
+): SkillCollectionDiagnostic[] {
   const flatNames = new Set(flatSkills.map((skill) => skill.name));
   const byName = new Map<string, DerivedSkill<T>[]>();
-  for (const candidate of candidates) for (const skill of candidate.skills) {
-    const group = byName.get(skill.name) ?? []; group.push(skill); byName.set(skill.name, group);
+  for (const skill of collectionSkills) {
+    const group = byName.get(skill.name) ?? [];
+    group.push(skill);
+    byName.set(skill.name, group);
   }
+  const diagnostics: SkillCollectionDiagnostic[] = [];
   for (const [name, skills] of [...byName.entries()].sort(([left], [right]) => compare(left, right))) {
     if (!flatNames.has(name) && skills.length < 2) continue;
     for (const skill of skills) {
-      duplicateCollections.add(collectionKey(skill.collectionKind, skill.collectionId));
-      diagnostics.push({ category: 'duplicate-name', collectionKind: skill.collectionKind, collectionId: skill.collectionId, path: skill.relativePath, name });
+      diagnostics.push({
+        category: 'duplicate-name',
+        collectionKind: skill.collectionKind,
+        collectionId: skill.collectionId,
+        path: skill.relativePath,
+        name
+      });
     }
   }
+  return sortDiagnostics(diagnostics);
+}
+
+function composeCandidates<T>(directCollections: DirectSkillCollection[], candidates: CandidateCollection<T>[], flatSkills: readonly FlatSkillIdentity[], diagnostics: SkillCollectionDiagnostic[]): ProfileSkillCollectionComposition<T> {
+  const capturedDiagnostics = validateCapturedSkillComposition(flatSkills, candidates.flatMap((candidate) => candidate.skills));
+  const duplicateCollections = new Set(capturedDiagnostics.map((diagnostic) => collectionKey(diagnostic.collectionKind, diagnostic.collectionId)));
   return {
     directCollections,
     derivedSkills: candidates.filter((candidate) => !duplicateCollections.has(collectionKey(candidate.direct.collectionKind, candidate.direct.collectionId))).flatMap((candidate) => candidate.skills),
-    diagnostics: sortDiagnostics(diagnostics)
+    diagnostics: sortDiagnostics([...diagnostics, ...capturedDiagnostics])
   };
 }
 

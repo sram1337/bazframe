@@ -699,7 +699,7 @@ describe('fixed-tree profile artifact publication', () => {
     }
   });
 
-  it('escapes diagnostic paths, omits instruction bodies, and has no lock/caller/recursive cleanup', async () => {
+  it('escapes diagnostic paths, omits instruction bodies, and has no internal lock or recursive cleanup', async () => {
     const directory = await temporaryDirectory();
     const home = await directory.mkdir('home');
     const parent = await directory.mkdir('exports');
@@ -718,7 +718,7 @@ describe('fixed-tree profile artifact publication', () => {
     );
     expect(source).not.toMatch(/with(?:Global)?StateLock|recursive:\s*true|removeManagedDirectoryTree/u);
     const productionFiles = (await sortedDirectoryEntries(join(process.cwd(), 'src/profile-portability')))
-      .filter((name) => name !== 'profile-artifact-publication.ts');
+      .filter((name) => name !== 'profile-artifact-publication.ts' && name !== 'profile-export.ts');
     for (const name of productionFiles) {
       expect(await readFile(join(process.cwd(), 'src/profile-portability', name), 'utf8'))
         .not.toContain('publishProfileArtifactDirectory');

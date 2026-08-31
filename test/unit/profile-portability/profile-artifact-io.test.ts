@@ -11,7 +11,10 @@ import {
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MAX_EFFECTIVE_INSTRUCTION_BYTES } from '../../../src/core/content.js';
-import { readProfileArtifactDirectory } from '../../../src/profile-portability/profile-artifact-io.js';
+import {
+  readProfileArtifactDirectory,
+  sameProfileArtifactDirectorySnapshot
+} from '../../../src/profile-portability/profile-artifact-io.js';
 import type {
   ProfileArtifact,
   ProfileArtifactLimitPolicy
@@ -39,7 +42,7 @@ interface ArtifactFixture {
 async function createFixture(
   directory: TempDirectory,
   name = 'portable-profile',
-  instructionBytes = Buffer.from('one\r\nmultibyte: é\n', 'utf8')
+  instructionBytes: Uint8Array = Buffer.from('one\r\nmultibyte: é\n', 'utf8')
 ): Promise<ArtifactFixture> {
   const root = await directory.mkdir(name);
   const profile = await directory.mkdir(`${name}/profile`);
@@ -68,7 +71,7 @@ async function createFixture(
     manifestPath,
     instructionPath,
     manifestBytes,
-    instructionBytes,
+    instructionBytes: Buffer.from(instructionBytes),
     policy: {
       maxManifestBytes: manifestBytes.byteLength,
       maxProfileEntries: 0,
@@ -101,6 +104,41 @@ describe('physical profile artifact inspection', () => {
     expect(await snapshotFilesystem(directory.root)).toEqual(before);
   });
 
+  it('compares complete artifact bytes, paths, and physical identities', async () => {
+    const directory = await temporaryDirectory();
+    const fixture = await createFixture(directory, 'first');
+    const same = await readProfileArtifactDirectory(fixture.root, fixture.policy);
+    const reread = await readProfileArtifactDirectory(fixture.root, fixture.policy);
+    expect(sameProfileArtifactDirectorySnapshot(same, reread)).toBe(true);
+
+    const secondFixture = await createFixture(directory, 'second', Uint8Array.from(fixture.instructionBytes));
+    const substituted = await readProfileArtifactDirectory(secondFixture.root, secondFixture.policy);
+    expect(Buffer.from(substituted.manifestBytes)).toEqual(Buffer.from(same.manifestBytes));
+    expect(Buffer.from(substituted.instructions.bytes)).toEqual(Buffer.from(same.instructions.bytes));
+    expect(sameProfileArtifactDirectorySnapshot(same, substituted)).toBe(false);
+
+    expect(sameProfileArtifactDirectorySnapshot(same, {
+      ...same,
+      manifestBytes: Uint8Array.from([...same.manifestBytes.slice(0, -1), 0x20])
+    })).toBe(false);
+    expect(sameProfileArtifactDirectorySnapshot(same, {
+      ...same,
+      root: { ...same.root, inode: same.root.inode + 1n }
+    })).toBe(false);
+    expect(sameProfileArtifactDirectorySnapshot(same, {
+      ...same,
+      profileDirectory: { ...same.profileDirectory, path: `${same.profileDirectory.path}-other` }
+    })).toBe(false);
+    expect(sameProfileArtifactDirectorySnapshot(same, {
+      ...same,
+      instructions: { ...same.instructions, path: `${same.instructions.path}-other` }
+    })).toBe(false);
+    expect(sameProfileArtifactDirectorySnapshot(same, {
+      ...same,
+      instructions: { ...same.instructions, inode: same.instructions.inode + 1n }
+    })).toBe(false);
+  });
+
   it('rejects noncanonical, invalid, and over-limit raw manifests', async () => {
     const noncanonicalDirectory = await temporaryDirectory();
     const noncanonical = await createFixture(noncanonicalDirectory);
@@ -123,6 +161,10 @@ describe('physical profile artifact inspection', () => {
       ...oversized.policy,
       maxManifestBytes: oversized.manifestBytes.byteLength - 1
     })).rejects.toThrow(/byte limit/u);
+    await expect(readProfileArtifactDirectory(oversized.root, {
+      ...oversized.policy,
+      maxManifestBytes: Number.POSITIVE_INFINITY
+    })).rejects.toMatchObject({ code: 'PROFILE_ARTIFACT_INVALID' });
   });
 
   it('rejects digest mismatch, invalid instruction bytes, and oversized instructions', async () => {

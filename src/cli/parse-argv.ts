@@ -9,7 +9,7 @@ import { isSafeSkillId } from '../skills/skill-id.js';
 export type HelpTopic =
   | 'root' | 'pi' | 'adapter' | 'status' | 'global' | 'project' | 'tui'
   | 'profile' | 'profile-add' | 'profile-duplicate' | 'profile-remove' | 'profile-rename'
-  | 'profile-use' | 'profile-edit' | 'profile-list' | 'profile-current' | 'profile-skills'
+  | 'profile-use' | 'profile-edit' | 'profile-export' | 'profile-import' | 'profile-list' | 'profile-current' | 'profile-skills'
   | 'profile-skills-add' | 'profile-skills-remove' | 'profile-libraries' | 'profile-libraries-add' | 'profile-libraries-remove'
   | 'profile-packages' | 'profile-packages-add' | 'profile-packages-remove'
   | 'libraries' | 'libraries-add' | 'libraries-update' | 'libraries-remove'
@@ -22,6 +22,8 @@ type NoArgumentCommand = { [Name in NoArgumentCommandName]: { name: Name } }[NoA
 export type Command =
   | NoArgumentCommand
   | { name: 'profile-add' | 'profile-use' | 'profile-edit'; profileId: string }
+  | { name: 'profile-export'; profileId: string; outputDirectory: string }
+  | { name: 'profile-import'; artifactDirectory: string; destinationProfileId?: string; dryRun: boolean }
   | { name: 'profile-duplicate'; sourceProfileId: string; profileId: string }
   | { name: 'profile-remove'; profileId: string; force: boolean }
   | { name: 'profile-rename'; previousProfileId: string; profileId: string }
@@ -115,7 +117,7 @@ function parseHelp(args: readonly string[]): ParseResult {
   if (legacy !== undefined) return migration(['help', ...legacy], 'root');
   const key = args.join(' ');
   const topics = new Map<string, HelpTopic>([
-    ['profile','profile'], ['profile list','profile-list'], ['profile current','profile-current'], ['profile add','profile-add'], ['profile duplicate','profile-duplicate'], ['profile remove','profile-remove'], ['profile rename','profile-rename'], ['profile use','profile-use'], ['profile edit','profile-edit'],
+    ['profile','profile'], ['profile list','profile-list'], ['profile current','profile-current'], ['profile add','profile-add'], ['profile duplicate','profile-duplicate'], ['profile remove','profile-remove'], ['profile rename','profile-rename'], ['profile use','profile-use'], ['profile edit','profile-edit'], ['profile export','profile-export'], ['profile import','profile-import'],
     ['profile skill','profile-skills'], ['profile skill list','profile-skills'], ['profile skill add','profile-skills-add'], ['profile skill remove','profile-skills-remove'],
     ['profile library','profile-libraries'], ['profile library list','profile-libraries'], ['profile library add','profile-libraries-add'], ['profile library remove','profile-libraries-remove'],
     ['profile package','profile-packages'], ['profile package list','profile-packages'], ['profile package add','profile-packages-add'], ['profile package remove','profile-packages-remove'],
@@ -152,13 +154,34 @@ function parseProfile(args: readonly string[]): ParseResult {
     if (parsed.operands.length !== 1 || !isSafeProfileId(parsed.operands[0]!)) return invalidProfile(topic, 'profile remove requires one valid <profile>.');
     return command({ name:'profile-remove', profileId:parsed.operands[0]!, force:parsed.booleans.has('force') });
   }
+  if (verb === 'export') {
+    const parsed = options(rest, [], ['output'], topic); if ('kind' in parsed) return parsed;
+    if (parsed.operands.length !== 1 || !isSafeProfileId(parsed.operands[0]!)) return invalidProfile(topic, 'profile export requires one valid <profile>.');
+    const outputDirectory = parsed.values.get('output');
+    if (outputDirectory === undefined || outputDirectory.includes('\0')) return usage('profile export requires one nonempty --output <directory> value without NUL bytes.', topic);
+    return command({ name:'profile-export', profileId:parsed.operands[0]!, outputDirectory });
+  }
+  if (verb === 'import') {
+    const parsed = options(rest, ['dry-run'], ['as'], topic); if ('kind' in parsed) return parsed;
+    if (parsed.operands.length !== 1 || parsed.operands[0]!.length === 0 || parsed.operands[0]!.includes('\0')) {
+      return usage('profile import requires one nonempty <directory> value without NUL bytes.', topic);
+    }
+    const destinationProfileId = parsed.values.get('as');
+    if (destinationProfileId !== undefined && !isSafeProfileId(destinationProfileId)) return invalidProfile(topic);
+    return command({
+      name: 'profile-import',
+      artifactDirectory: parsed.operands[0]!,
+      ...(destinationProfileId === undefined ? {} : { destinationProfileId }),
+      dryRun: parsed.booleans.has('dry-run')
+    });
+  }
   if (verb === 'add' || verb === 'use' || verb === 'edit') {
     const operands = noOptions(rest, topic); if (!Array.isArray(operands)) return operands;
     if (operands.length !== 1) return usage(`profile ${verb} requires exactly one <profile> argument.`, topic);
     if (!isSafeProfileId(operands[0]!)) return invalidProfile(topic);
     return command({ name:`profile-${verb}` as 'profile-add'|'profile-use'|'profile-edit', profileId:operands[0]! });
   }
-  return usage('profile requires `list`, `current`, a lifecycle verb, or singular `skill`, `library`, or `package`.', 'profile');
+  return usage('profile requires `list`, `current`, `export`, `import`, a lifecycle verb, or singular `skill`, `library`, or `package`.', 'profile');
 }
 
 function parseSkill(args: readonly string[]): ParseResult {
@@ -169,7 +192,7 @@ function parseSkill(args: readonly string[]): ParseResult {
   if (verb==='list') return parseNoArgs('skills-overview',rest,'skills');
   if (verb==='add') {
     const operands=noOptions(rest,topic); if(!Array.isArray(operands))return operands;
-    if(operands.length!==1||(!isAbsolute(operands[0]!)&&!isManagedGitSource(operands[0]!))||operands[0]!.includes('\0'))return usage('Skill input must be one absolute path or managed Git source without NUL bytes.',topic);
+    if(operands.length!==1||(!isAbsolute(operands[0]!)&&!isManagedGitSource(operands[0]!))||operands[0]!.includes('\0'))return usage('Skill input must be one absolute path or remote Git source without NUL bytes.',topic);
     return command({name:'default-skill-add',skillRoot:operands[0]!});
   }
   if (verb==='remove'||verb==='edit') {
@@ -197,8 +220,8 @@ function parseCollection(kind:'library'|'package',args:readonly string[]):ParseR
   if(verb==='add'){
     const parsed=options(rest,kind==='package'?['yes']:[],[],topic);if('kind'in parsed)return parsed;
     if(parsed.operands.length!==1)return usage(`${kind} add requires one <absolute-root-or-git-source>.`,topic);
-    const root=parsed.operands[0]!;if((!isAbsolute(root)&&!isManagedGitSource(root))||root.includes('\0'))return usage(`${capitalize(kind)} input must be an absolute path or managed Git source without NUL bytes.`,topic);
-    const yes=parsed.booleans.has('yes');if(yes&&isAbsolute(root))return usage('--yes applies only to managed Git package acquisition.',topic);
+    const root=parsed.operands[0]!;if((!isAbsolute(root)&&!isManagedGitSource(root))||root.includes('\0'))return usage(`${capitalize(kind)} input must be an absolute path or remote Git source without NUL bytes.`,topic);
+    const yes=parsed.booleans.has('yes');if(yes&&isAbsolute(root))return usage('--yes applies only to package acquisition from a remote Git source.',topic);
     return command(kind==='library'?{name:'libraries-add',root}:{name:'packages-add',root,yes});
   }
   const flags=verb==='update'?(kind==='package'?['accept-rewrite','yes']:['accept-rewrite']):[];

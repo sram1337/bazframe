@@ -1,9 +1,10 @@
-import { readdir, rm, symlink } from 'node:fs/promises';
+import { lstat, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   discoverSkillDirectories,
   loadProfile,
   readActiveProfile,
+  readOptionalActiveProfileSnapshot,
   resolveBazframeHome,
   selectProfile,
   writeActiveProfile
@@ -86,6 +87,39 @@ describe('profile store', () => {
     await directory.mkdir('home/profiles/broken/skills');
     await expect(selectProfile(home, 'broken')).rejects.toThrow(/instructions/u);
     expect(await readActiveProfile(home)).toBe('focused');
+  });
+
+  it('captures stable optional active-profile identity without creating missing state', async () => {
+    const directory = await temporary();
+    const home = directory.path('home');
+    expect(await readOptionalActiveProfileSnapshot(home)).toBeUndefined();
+    await expect(lstat(home)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    await directory.write('home/active-profile', 'focused\n');
+    await expect(readOptionalActiveProfileSnapshot(home)).resolves.toMatchObject({
+      profileId: 'focused',
+      path: directory.path('home/active-profile'),
+      device: expect.any(BigInt),
+      inode: expect.any(BigInt),
+      contentSha256: expect.stringMatching(/^[a-f0-9]{64}$/u)
+    });
+  });
+
+  it('rejects active-profile substitution during stable inspection', async () => {
+    const directory = await temporary();
+    const home = directory.path('home');
+    const state = directory.path('home/active-profile');
+    const moved = directory.path('home/original-active-profile');
+    await directory.write('home/active-profile', 'focused\n');
+
+    await expect(readOptionalActiveProfileSnapshot(home, {
+      testHooks: {
+        afterPathStat: async () => {
+          await rename(state, moved);
+          await writeFile(state, 'focused\n');
+        }
+      }
+    })).rejects.toThrow(/changed while being read/u);
   });
 
   it('rejects missing, malformed, and symlinked active state', async () => {

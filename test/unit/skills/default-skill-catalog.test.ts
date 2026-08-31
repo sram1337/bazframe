@@ -6,7 +6,9 @@ import {
   inspectDefaultSkillCatalog,
   readDefaultSkillRegistration,
   readDefaultSkillRegistrationLink,
-  removeDefaultSkill
+  readDefaultSkillRegistrationSnapshot,
+  removeDefaultSkill,
+  sameDefaultSkillRegistrationSnapshot
 } from '../../../src/skills/default-skill-catalog.js';
 import { snapshotFilesystem } from '../../helpers/filesystem-snapshot.js';
 import { createTempDirectory, type TempDirectory } from '../../helpers/temp-directory.js';
@@ -68,6 +70,36 @@ describe('default skill catalog', () => {
     const occupied = await fixture();
     await occupied.directory.mkdir('home/skills/demo-skill');
     await expect(addDefaultSkill(occupied.home, occupied.target)).rejects.toThrow(/occupied/u);
+  });
+
+  it('surfaces snapshot catalog close failures while preserving primary validation failures', async () => {
+    if (process.platform === 'win32') return;
+    const value = await fixture();
+    await addDefaultSkill(value.home, value.target);
+    const closeFailure = { testHooks: { afterClose: () => { throw new Error('close failed'); } } };
+    await expect(readDefaultSkillRegistrationSnapshot(value.home, 'demo-skill', closeFailure))
+      .rejects.toMatchObject({ code: 'DEFAULT_SKILL_CATALOG_READ_FAILED' });
+    await value.directory.write('provider/demo-skill/SKILL.md', '---\nname: changed\ndescription: Changed.\n---\n');
+    await expect(readDefaultSkillRegistrationSnapshot(value.home, 'demo-skill', closeFailure))
+      .rejects.toMatchObject({ code: 'DEFAULT_SKILL_NAME_MISMATCH' });
+  });
+
+  it('captures neutral registration identities, declared names, and re-read drift', async () => {
+    if (process.platform === 'win32') return;
+    const value = await fixture();
+    await addDefaultSkill(value.home, value.target);
+    const first = await readDefaultSkillRegistrationSnapshot(value.home, 'demo-skill');
+    expect(sameDefaultSkillRegistrationSnapshot(first, await readDefaultSkillRegistrationSnapshot(value.home, 'demo-skill'))).toBe(true);
+
+    await rename(value.target, `${value.target}-old`);
+    await value.directory.write('provider/demo-skill/SKILL.md', '---\nname: demo-skill\ndescription: Replacement.\n---\n');
+    const replacement = await readDefaultSkillRegistrationSnapshot(value.home, 'demo-skill');
+    expect(replacement.target).toBe(value.target);
+    expect(sameDefaultSkillRegistrationSnapshot(first, replacement)).toBe(false);
+
+    await value.directory.write('provider/demo-skill/SKILL.md', '---\nname: changed\ndescription: Changed.\n---\n');
+    await expect(readDefaultSkillRegistrationSnapshot(value.home, 'demo-skill'))
+      .rejects.toMatchObject({ code: 'DEFAULT_SKILL_NAME_MISMATCH' });
   });
 
   it('refuses referenced removal, then removes only the registration', async () => {

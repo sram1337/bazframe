@@ -7,8 +7,8 @@ import {
 } from '../core/external-editor.js';
 import { BazframeError, errorCode } from '../core/errors.js';
 import {
-  readDefaultSkillEditorRegistration,
-  type DefaultSkillEditorRegistration
+  readDefaultSkillRegistrationSnapshot,
+  sameDefaultSkillRegistrationSnapshot
 } from './default-skill-catalog.js';
 import { assertSafeSkillId } from './skill-id.js';
 import { optionalManagedGitRecord } from '../providers/managed-git-record.js';
@@ -53,22 +53,24 @@ export async function resolveSkillDefinitionEditorTarget(
   if (await optionalManagedGitRecord(options.bazframeHome, 'skill', options.skillId) !== undefined) {
     throw new BazframeError(
       'MANAGED_GIT_SKILL_EDIT_REFUSED',
-      `Skill ${JSON.stringify(options.skillId)} is a managed Git provider. Edit its upstream repository, then run \`bazframe skill update ${options.skillId}\`.`
+      `Skill ${JSON.stringify(options.skillId)} was acquired from a remote Git source. Edit its upstream repository, then run \`bazframe skill update ${options.skillId}\`.`
     );
   }
-  const before = await readDefaultSkillEditorRegistration(
+  const before = await readDefaultSkillRegistrationSnapshot(
     options.bazframeHome,
-    options.skillId
+    options.skillId,
+    { validateDeclaredName: false }
   );
   const definitionBefore = await resolveDefinition(before.target, options.skillId);
 
   await options.testHooks?.beforeRevalidate?.();
 
-  const after = await readDefaultSkillEditorRegistration(
+  const after = await readDefaultSkillRegistrationSnapshot(
     options.bazframeHome,
-    options.skillId
+    options.skillId,
+    { validateDeclaredName: false }
   );
-  if (!sameRegistration(before, after)) {
+  if (!sameDefaultSkillRegistrationSnapshot(before, after)) {
     throw new BazframeError(
       'SKILL_EDITOR_TARGET_CHANGED',
       `Refusing to open changed default skill registration: ${before.registrationPath}`
@@ -114,7 +116,7 @@ async function resolveDefinition(providerRoot: string, skillId: string): Promise
   if (!isWithin(providerRoot, canonical)) {
     throw new BazframeError(
       'SKILL_DEFINITION_ESCAPES_ROOT',
-      `Default skill ${JSON.stringify(skillId)} definition must remain within its provider root: ${enteredPath} -> ${canonical}`
+      `Default skill ${JSON.stringify(skillId)} definition must remain within its source root: ${enteredPath} -> ${canonical}`
     );
   }
   let metadata;
@@ -134,21 +136,6 @@ async function resolveDefinition(providerRoot: string, skillId: string): Promise
     );
   }
   return { path: canonical, device: metadata.dev, inode: metadata.ino };
-}
-
-function sameRegistration(
-  left: DefaultSkillEditorRegistration,
-  right: DefaultSkillEditorRegistration
-): boolean {
-  return left.id === right.id
-    && left.registrationPath === right.registrationPath
-    && left.target === right.target
-    && left.catalogDevice === right.catalogDevice
-    && left.catalogInode === right.catalogInode
-    && left.registrationDevice === right.registrationDevice
-    && left.registrationInode === right.registrationInode
-    && left.targetDevice === right.targetDevice
-    && left.targetInode === right.targetInode;
 }
 
 function isWithin(root: string, candidate: string): boolean {

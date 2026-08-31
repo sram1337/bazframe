@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { rename, symlink, unlink } from 'node:fs/promises';
+import { appendFile, rename, symlink, unlink } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -88,6 +88,49 @@ describe('profile library/package reference codec', () => {
     await unlink(directory.path(`home/profiles/focused/${namespace}`)); await directory.mkdir(`home/profiles/focused/${namespace}`);
     await symlink(directory.path(`outside/profiles/focused/${namespace}/toolkit.json`), directory.path(`home/profiles/focused/${namespace}/toolkit.json`));
     await expect(readProfileCollectionReferenceSnapshot(directory.path('home'), 'focused', { kind, id: 'toolkit' })).rejects.toBeDefined();
+  });
+
+  it('bounds stable reference reads below, at, and above and detects concurrent growth', async () => {
+    const directory = await createTempDirectory('bazframe-reference-bounded-'); directories.push(directory);
+    const bytes = encodeProfileCollectionReference(library);
+    const path = await directory.write('home/profiles/focused/libraries/toolkit.json', bytes);
+    const read = (maxBytes: number, afterInitialStat?: () => Promise<void>) => readProfileCollectionReferenceSnapshot(
+      directory.path('home'),
+      'focused',
+      { kind: 'library', id: 'toolkit' },
+      { maxBytes, ...(afterInitialStat === undefined ? {} : { testHooks: { afterInitialStat } }) }
+    );
+    await expect(read(Buffer.byteLength(bytes) - 1)).rejects.toThrow(/bounded|byte limit/u);
+    await expect(read(Buffer.byteLength(bytes))).resolves.toMatchObject({ reference: library });
+    await expect(read(Buffer.byteLength(bytes) + 1)).resolves.toMatchObject({ reference: library });
+    await expect(read(Buffer.byteLength(bytes), async () => { await appendFile(path, 'x'); }))
+      .rejects.toThrow(/changed|byte limit/u);
+    await directory.write('home/profiles/focused/libraries/toolkit.json', bytes);
+    await expect(readProfileCollectionReferenceSnapshot(
+      directory.path('home'), 'focused', { kind: 'library', id: 'toolkit' },
+      { maxBytes: Buffer.byteLength(bytes) + 1, testHooks: { afterPathStat: async () => { await appendFile(path, 'x'); } } }
+    )).rejects.toThrow(/changed|byte limit/u);
+    await directory.write('home/profiles/focused/libraries/toolkit.json', bytes);
+    await expect(readProfileCollectionReferenceSnapshot(
+      directory.path('home'), 'focused', { kind: 'library', id: 'toolkit' },
+      { maxBytes: Buffer.byteLength(bytes), testHooks: { afterPathStat: async () => {
+        await rename(path, `${path}.replaced-during-read`);
+        await directory.write('home/profiles/focused/libraries/toolkit.json', bytes);
+      } } }
+    )).rejects.toThrow(/identity changed/u);
+    await directory.write('home/profiles/focused/libraries/toolkit.json', bytes);
+    await expect(readProfileCollectionReferenceSnapshot(
+      directory.path('home'), 'focused', { kind: 'library', id: 'toolkit' },
+      { maxBytes: Buffer.byteLength(bytes), testHooks: {
+        afterInitialStat: async () => { await appendFile(path, 'x'); },
+        afterClose: () => { throw new Error('close failed'); }
+      } }
+    )).rejects.toMatchObject({ code: 'SKILL_COLLECTION_REFERENCE_INVALID', message: expect.stringContaining('changed') });
+    await directory.write('home/profiles/focused/libraries/toolkit.json', bytes);
+    await expect(readProfileCollectionReferenceSnapshot(
+      directory.path('home'), 'focused', { kind: 'library', id: 'toolkit' },
+      { maxBytes: Buffer.byteLength(bytes) + 1, testHooks: { afterClose: () => { throw new Error('close failed'); } } }
+    )).rejects.toMatchObject({ code: 'SKILL_COLLECTION_REFERENCE_READ_FAILED' });
   });
 
   it('captures reference identity/content so replacement is distinguishable at commit', async () => {

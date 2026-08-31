@@ -17,12 +17,17 @@ describe('parseArgv canonical API', () => {
     expect(parseArgv(['package','build','suite'])).toEqual({kind:'command',command:{name:'packages-build',id:'suite'}});
   });
 
-  it('accepts known options in either order and --profile=value', () => {
+  it('accepts known options in either order and inline option values', () => {
     expect(parseArgv(['profile','remove','--force','focused'])).toMatchObject({kind:'command',command:{force:true,profileId:'focused'}});
     expect(parseArgv(['profile','remove','focused','--force'])).toMatchObject({kind:'command',command:{force:true,profileId:'focused'}});
     expect(parseArgv(['profile','skill','add','--profile','other','review'])).toMatchObject({kind:'command',command:{profileId:'other',skillId:'review'}});
     expect(parseArgv(['profile','skill','add','review','--profile=other'])).toMatchObject({kind:'command',command:{profileId:'other',skillId:'review'}});
     expect(parseArgv(['package','update','--yes','--accept-rewrite','suite'])).toMatchObject({kind:'command',command:{yes:true,acceptRewrite:true,id:'suite'}});
+    expect(parseArgv(['profile','export','portable','--output','/tmp/export'])).toEqual({kind:'command',command:{name:'profile-export',profileId:'portable',outputDirectory:'/tmp/export'}});
+    expect(parseArgv(['profile','export','--output=/tmp/export','portable'])).toEqual({kind:'command',command:{name:'profile-export',profileId:'portable',outputDirectory:'/tmp/export'}});
+    expect(parseArgv(['profile','import','./portable'])).toEqual({kind:'command',command:{name:'profile-import',artifactDirectory:'./portable',dryRun:false}});
+    expect(parseArgv(['profile','import','--dry-run','--as=review','/tmp/portable'])).toEqual({kind:'command',command:{name:'profile-import',artifactDirectory:'/tmp/portable',destinationProfileId:'review',dryRun:true}});
+    expect(parseArgv(['--json','profile','import','artifact','--as','review'])).toEqual({kind:'command',command:{name:'profile-import',artifactDirectory:'artifact',destinationProfileId:'review',dryRun:false},json:true});
   });
 
   it('extracts --json globally but leaves post-Pi-delimiter data untouched', () => {
@@ -68,7 +73,23 @@ describe('parseArgv canonical API', () => {
   it('rejects duplicate, missing, valued boolean, unknown, and option-shaped operands', () => {
     for(const argv of [
       ['profile','remove','--force','--force','focused'],['profile','skill','add','--profile','review'],
-      ['profile','remove','--force=true','focused'],['profile','remove','--other','focused'],['skill','remove','--bad']
+      ['profile','remove','--force=true','focused'],['profile','remove','--other','focused'],['skill','remove','--bad'],
+      ['profile','export','portable'],['profile','export','portable','--output',''],
+      ['profile','export','portable','--output','--other'],['profile','export','portable','--output=/tmp/a','--output=/tmp/b'],
+      ['profile','export','portable','--output=/tmp/a','extra'],['profile','export','--portable','--output=/tmp/a'],
+      ['profile','export','portable','--output=/tmp/a\0b'],['profile','export','Bad','--output=/tmp/a'],
+      ['profile','import'],['profile','import','one','two'],['profile','import','bad\0path'],
+      ['profile','import','artifact','--as','Bad'],['profile','import','artifact','--as','one','--as','two'],
+      ['profile','import','artifact','--dry-run','--dry-run'],['profile','import','artifact','--dry-run=true'],
+      ['profile','import','artifact','--map','library:x=/tmp/x'],['profile','import','artifact','--yes'],
+      ['profile','import','--artifact']
     ]) expect(parseArgv(argv)).toMatchObject({kind:'usage-error'});
+  });
+
+  it('discovers profile export and import help', () => {
+    expect(parseArgv(['help','profile','export'])).toEqual({kind:'help',topic:'profile-export'});
+    expect(parseArgv(['profile','export','--help'])).toEqual({kind:'help',topic:'profile-export'});
+    expect(parseArgv(['help','profile','import'])).toEqual({kind:'help',topic:'profile-import'});
+    expect(parseArgv(['profile','import','--help'])).toEqual({kind:'help',topic:'profile-import'});
   });
 });

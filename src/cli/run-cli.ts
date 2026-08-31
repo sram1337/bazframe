@@ -1,6 +1,6 @@
 import { tmpdir } from 'node:os';
 import { createInterface } from 'node:readline/promises';
-import { basename } from 'node:path';
+import { basename, join } from 'node:path';
 import {
   inspectPiAdapter,
   installPiAdapter,
@@ -11,7 +11,7 @@ import { childExitStatus, spawnPi } from '../agents/spawn-pi.js';
 import { BazframeError } from '../core/errors.js';
 import { EXIT_STATUS } from '../core/exit-status.js';
 import type { InheritedChildRunner } from '../core/external-editor.js';
-import { escapeUnsafeDisplayCharacters, stringifyForTerminal } from '../core/safe-text.js';
+import { boundedPathForDisplay, boundedPrefixedTextForDisplay, boundedTextForDisplay, escapeUnsafeDisplayCharacters, stringifyForTerminal } from '../core/safe-text.js';
 import { composeInstructions } from '../harness/compose-instructions.js';
 import { createTemporaryInstructionFile } from '../harness/temporary-instructions.js';
 import { resolveEffectivePolicy } from '../policy/effective-policy.js';
@@ -54,6 +54,15 @@ import {
   selectProfile
 } from '../profiles/profile-store.js';
 import { editProfileInstructions } from '../profiles/profile-instruction-editor.js';
+import { exportProfile, ProfileExportError, type ProfileExportResult } from '../profile-portability/profile-export.js';
+import { planProfileImport, type ProfileImportPlan } from '../profile-portability/profile-import-plan.js';
+import {
+  executeProfileImport,
+  ProfileImportBlockedError,
+  ProfileImportExecutionError,
+  type ProfileImportPartialResult,
+  type ProfileImportResult
+} from '../profile-portability/profile-import.js';
 import { findGitRoot } from '../project/git-root.js';
 import {
   disableRepository,
@@ -106,6 +115,8 @@ import {
   PROFILE_CURRENT_HELP,
   PROFILE_DUPLICATE_HELP,
   PROFILE_EDIT_HELP,
+  PROFILE_EXPORT_HELP,
+  PROFILE_IMPORT_HELP,
   PROFILE_HELP,
   PROFILE_LIST_HELP,
   PROFILE_REMOVE_HELP,
@@ -129,7 +140,17 @@ import {
   VERSION
 } from './help.js';
 import { parseArgv, type Command, type HelpTopic } from './parse-argv.js';
-import { globalCollectionsResult, profileCollectionsResult, profileListResult, projectListResult, statusResult, type ProtocolDiagnostic } from './command-results.js';
+import {
+  globalCollectionsResult,
+  profileCollectionsResult,
+  profileExportResult,
+  profileImportDryRunResult,
+  profileImportExecutionResult,
+  profileListResult,
+  projectListResult,
+  statusResult,
+  type ProtocolDiagnostic
+} from './command-results.js';
 import { cliError, commandId, errorDocument, inferredCommandId, serializeJsonDocument, successDocument } from './json-protocol.js';
 
 export interface CliDependencies {
@@ -147,6 +168,9 @@ export interface CliDependencies {
   terminateProcess?: (status: number) => void;
   editorChildRunner?: InheritedChildRunner;
   confirmManagedGitPackageBuild?: (details: ManagedGitBuildAuthorization) => boolean | Promise<boolean>;
+  /** Internal deterministic CLI test seams; production dispatch uses the portability services. */
+  planProfileImport?: typeof planProfileImport;
+  executeProfileImport?: typeof executeProfileImport;
   /** Internal transport seams; callers select these through argv --json. */
   jsonMode?: boolean;
   captureResult?: (result: Record<string, unknown>) => void;
@@ -211,10 +235,10 @@ export async function runCli(
     const diagnostics: ProtocolDiagnostic[] = [];
     try {
       if (parsed.command.name === 'packages-add' && isManagedGitSource(parsed.command.root) && !parsed.command.yes) {
-        throw new BazframeError('MANAGED_GIT_BUILD_CONFIRMATION_REQUIRED', 'JSON managed package acquisition requires --yes.');
+        throw new BazframeError('MANAGED_GIT_BUILD_CONFIRMATION_REQUIRED', 'Package acquisition from a remote Git source in JSON mode requires --yes.');
       }
       if (parsed.command.name === 'packages-update' && !parsed.command.yes) {
-        throw new BazframeError('MANAGED_GIT_BUILD_CONFIRMATION_REQUIRED', 'JSON managed package update requires --yes.');
+        throw new BazframeError('MANAGED_GIT_BUILD_CONFIRMATION_REQUIRED', 'Package update from a remote Git source in JSON mode requires --yes.');
       }
       if (parsed.command.name === 'status') {
         const bazframeHome = resolveBazframeHome(environment, dependencies.userHome);
@@ -243,6 +267,7 @@ export async function runCli(
       writeStdout(serializeJsonDocument(successDocument(id, result, diagnostics)));
       return status;
     } catch (error) {
+      if (parsed.command.name === 'profile-import') diagnostics.push(...profileImportFailureDiagnostics(error));
       writeStdout(serializeJsonDocument(errorDocument(id, error, diagnostics)));
       return EXIT_STATUS.failure;
     }
@@ -251,7 +276,11 @@ export async function runCli(
   try {
     return await runCommand(parsed.command, dependencies, writeStdout, writeStderr, stdoutColors, stderrColors);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = parsed.command.name === 'profile-export'
+      ? formatProfileExportFailure(error)
+      : parsed.command.name === 'profile-import'
+        ? formatProfileImportFailure(error)
+        : error instanceof Error ? error.message : String(error);
     writeStderr(`${stderrColors.error('error:')} ${message}\n`);
     return EXIT_STATUS.failure;
   }
@@ -397,6 +426,67 @@ async function runCommand(
     writeStdout(formatProfileCollectionsOverview(profileId, kind, composition, stdoutColors));
     return EXIT_STATUS.success;
   }
+  if (command.name === 'profile-export') {
+    const result = await exportProfile({
+      bazframeHome,
+      profileId: command.profileId,
+      outputDirectory: command.outputDirectory,
+      environment
+    });
+    try {
+      captureResult(dependencies, profileExportResult(result));
+      writeStdout(formatProfileExport(result));
+      for (const skillId of result.omittedLocalSkills) {
+        reportWarning(
+          dependencies,
+          writeStderr,
+          stderrColors,
+          'PROFILE_EXPORT_LOCAL_SKILL_OMITTED',
+          `Local Skill ${escapeUnsafeDisplayCharacters(skillId)} was omitted from the export and recorded in omittedLocalSkills.`
+        );
+      }
+      reportWarning(
+        dependencies,
+        writeStderr,
+        stderrColors,
+        'PROFILE_EXPORT_REVIEW_INSTRUCTIONS',
+        profileExportReviewDiagnostic(result.outputPath)
+      );
+      return EXIT_STATUS.success;
+    } catch {
+      throw new ProfileExportError('published', result.outputPath);
+    }
+  }
+  if (command.name === 'profile-import') {
+    if (command.dryRun) {
+      const planning = await (dependencies.planProfileImport ?? planProfileImport)({
+        bazframeHome,
+        artifactDirectory: command.artifactDirectory,
+        ...(command.destinationProfileId === undefined ? {} : { destinationProfileId: command.destinationProfileId }),
+        environment
+      });
+      captureResult(dependencies, profileImportDryRunResult(planning.plan));
+      writeStdout(formatProfileImportPlan(planning.plan, 'dry-run'));
+      return EXIT_STATUS.success;
+    }
+    const result = await (dependencies.executeProfileImport ?? executeProfileImport)({
+      bazframeHome,
+      artifactDirectory: command.artifactDirectory,
+      ...(command.destinationProfileId === undefined ? {} : { destinationProfileId: command.destinationProfileId }),
+      environment,
+      ...(dependencies.jsonMode === true ? { childOutputPolicy: 'stdout-and-stderr-to-parent-stderr' as const } : {}),
+      reportPlan: async (plan) => {
+        if (dependencies.jsonMode !== true) writeStdout(formatProfileImportPlan(plan, 'execute'));
+      }
+    });
+    try {
+      captureResult(dependencies, profileImportExecutionResult(result));
+      writeStdout(formatProfileImportSuccess(result));
+    } catch (cause) {
+      throw new ProfileImportExecutionError(result, cause);
+    }
+    return EXIT_STATUS.success;
+  }
   if (command.name === 'profile-use') {
     const profile = await selectProfile(bazframeHome, command.profileId);
     captureResult(dependencies,{action:'selected',profileId:profile.id,directory:profile.directory});
@@ -510,7 +600,7 @@ async function runCommand(
     switch (command.name) {
       case 'libraries-add': result = await addLibrary(options, command.root); break;
       case 'libraries-update':
-        if (command.acceptRewrite) throw new BazframeError('MANAGED_GIT_OPTION_INVALID', '--accept-rewrite applies only to managed Git libraries.');
+        if (command.acceptRewrite) throw new BazframeError('MANAGED_GIT_OPTION_INVALID', '--accept-rewrite applies only to libraries acquired from remote Git sources.');
         result = await updateLibrary(options, command.id); break;
       case 'libraries-remove': result = await removeLibrary(options, command.id); break;
       case 'packages-add': result = await addPackage(options, command.root); break;
@@ -521,7 +611,7 @@ async function runCommand(
       case 'packages-remove': result = await removePackage(options, command.id); break;
       default: throw new Error('unreachable package update dispatch');
     }
-    captureResult(dependencies,{...collectionLifecycleResult(result),providerKind:managedProvider?'managed-git':'local'});
+    captureResult(dependencies,{...collectionLifecycleResult(result),sourceType:managedProvider?'remoteGit':'local'});
     writeStdout(formatCollectionLifecycleResult(result));
     return EXIT_STATUS.success;
   }
@@ -756,9 +846,9 @@ async function validateRuntimeReady(
 }
 
 function captureResult(dependencies:CliDependencies,result:Record<string,unknown>):void{dependencies.captureResult?.(result);}
-function reportWarning(dependencies:CliDependencies,writeStderr:(text:string)=>void,colors:CliColors,code:string,message:string):void{if(dependencies.captureDiagnostic!==undefined)dependencies.captureDiagnostic({level:'warning',code,message});else writeStderr(`${colors.warning('warning:')} ${message}\n`);}
-function managedGitResult(result:ManagedGitLifecycleResult):Record<string,unknown>{return{action:result.action,kind:result.kind,id:result.id,remote:result.remote,branch:result.branch,revision:result.revision,root:result.root,providerKind:'managed-git',resourceAction:result.resourceAction??null,profileMembershipChanged:false};}
-function collectionLifecycleResult(result:SkillCollectionLifecycleResult):Record<string,unknown>{const kind=kindForRecord(result);return{action:result.action,kind,id:idForRecord(result),root:result.root,digest:result.digest,skillsRoot:skillsRootForRecord(result),...('package'in result?{artifactRoot:result.artifactRoot}:{}),recordPath:result.path,providerKind:'local',profileMembershipChanged:false};}
+function reportWarning(dependencies:CliDependencies,writeStderr:(text:string)=>void,colors:CliColors,code:string,message:string):void{const displayed=boundedTextForDisplay(message);if(dependencies.captureDiagnostic!==undefined)dependencies.captureDiagnostic({level:'warning',code,message:displayed});else writeStderr(`${colors.warning('warning:')} ${displayed}\n`);}
+function managedGitResult(result:ManagedGitLifecycleResult):Record<string,unknown>{return{action:result.action,kind:result.kind,id:result.id,remote:result.remote,branch:result.branch,revision:result.revision,root:result.root,sourceType:'remoteGit',resourceAction:result.resourceAction??null,profileMembershipChanged:false};}
+function collectionLifecycleResult(result:SkillCollectionLifecycleResult):Record<string,unknown>{const kind=kindForRecord(result);return{action:result.action,kind,id:idForRecord(result),root:result.root,digest:result.digest,skillsRoot:skillsRootForRecord(result),...('package'in result?{artifactRoot:result.artifactRoot}:{}),recordPath:result.path,sourceType:'local',profileMembershipChanged:false};}
 function collectionReferenceResult(result:ProfileCollectionReferenceResult,explicit:boolean):Record<string,unknown>{return'library'in result?{action:result.action,kind:'library',id:result.library,referencePath:result.path,profileTarget:{id:result.profileId,source:explicit?'explicit':'active-selection'}}:{action:result.action,kind:'package',id:result.package,referencePath:result.path,profileTarget:{id:result.profileId,source:explicit?'explicit':'active-selection'}};}
 
 function formatGlobalOverview(
@@ -804,6 +894,7 @@ function formatProfilesOverview(
     colors.command('  bazframe profile duplicate <source> <new>'),
     colors.command('  bazframe profile use <profile>'),
     colors.command('  bazframe profile edit <profile>'),
+    colors.command('  bazframe profile export <profile> --output <directory>'),
     colors.command('  bazframe profile rename <old> <new>'),
     colors.command('  bazframe profile remove [--force] <profile>'),
     colors.command('  bazframe profile skill list'),
@@ -947,6 +1038,180 @@ function formatAdaptersOverview(
   ].join('\n');
 }
 
+function formatProfileImportPlan(plan: ProfileImportPlan, mode: 'dry-run' | 'execute'): string {
+  const list = (heading: string, values: readonly string[]): string[] => [
+    heading,
+    ...(values.length === 0 ? ['  (none)'] : values.map((value) => `  - ${boundedTextForDisplay(value)}`))
+  ];
+  const resources = plan.resources.length === 0
+    ? ['  (none)']
+    : plan.resources.map((resource) => [
+        `  - ${resource.kind}:${boundedTextForDisplay(resource.id)} — ${resource.action}`,
+        `    remote: ${boundedTextForDisplay(resource.source.remote)}`,
+        `    fetch URL: ${boundedTextForDisplay(resource.source.fetchUrl)}`,
+        `    branch/revision: ${boundedTextForDisplay(resource.source.branch)} @ ${boundedTextForDisplay(resource.source.revision)}`,
+        `    network required: ${resource.networkRequired ? 'yes' : 'no'}; build required: no`,
+        ...(resource.reason === undefined ? [] : [`    reason: ${boundedTextForDisplay(resource.reason)}`])
+      ].join('\n'));
+  const blockers = plan.blockers.length === 0
+    ? ['  (none)']
+    : plan.blockers.map((blocker) => `  - ${boundedTextForDisplay(blocker.code)} [${boundedTextForDisplay(blocker.key)}]: ${boundedTextForDisplay(blocker.message)}`);
+  return [
+    `Profile import plan (${mode === 'dry-run' ? 'dry-run inspection only' : 'execution inspection'}):`,
+    `Artifact: ${boundedPathForDisplay(plan.artifactPath)}`,
+    `Schema: ${plan.schemaVersion}`,
+    `Exported profile: ${boundedTextForDisplay(plan.exportedProfileId)}`,
+    `Destination profile: ${boundedTextForDisplay(plan.destinationProfileId)}`,
+    `Instructions: ${boundedTextForDisplay(plan.instructions.path)} (sha256:${boundedTextForDisplay(plan.instructions.sha256)})`,
+    ...list('Direct remote Git Skills:', plan.skills),
+    ...list('Omitted local Skills:', plan.omittedLocalSkills),
+    ...list('Remote Git libraries:', plan.libraries),
+    'Packages: absent (Stage 1)',
+    'Resources:',
+    ...resources,
+    `Active selection: ${plan.activeSelection.state}${plan.activeSelection.profileId === undefined ? '' : ` (${boundedTextForDisplay(plan.activeSelection.profileId)})`}; will change: no`,
+    ...(plan.activeSelection.reason === undefined ? [] : [`Active-selection reason: ${boundedTextForDisplay(plan.activeSelection.reason)}`]),
+    `Composition: ${plan.composition.status}; known collection Skills: ${plan.composition.knownCollectionSkillCount}`,
+    ...list('Deferred libraries:', plan.composition.deferredLibraries),
+    ...list('Known collection Skill preview:', plan.composition.knownCollectionSkillPreview),
+    `Profile action: ${plan.profileAction}`,
+    'Blockers:',
+    ...blockers,
+    'Exclusions: active selection unchanged; policy unchanged; collection children never enter (default).',
+    mode === 'dry-run'
+      ? 'Dry-run completed without network acquisition, builds, or Bazframe writes. A blocked plan is still a successful inspection.'
+      : 'Execution is authorized only for the displayed create/reuse work and will re-inspect before side effects.',
+    ''
+  ].join('\n');
+}
+
+function formatProfileImportSuccess(result: ProfileImportResult): string {
+  return [
+    'Profile import: completed',
+    `Profile outcome: ${result.profileOutcome}`,
+    `Destination: ${boundedPathForDisplay(result.destinationPath)}`,
+    'Resource outcomes:',
+    ...(result.resources.length === 0
+      ? ['  (none)']
+      : result.resources.map((resource) => `  - ${resource.kind}:${boundedTextForDisplay(resource.id)} — ${resource.outcome}`)),
+    'Active selection changed: no',
+    'Collection children added to (default): no',
+    ''
+  ].join('\n');
+}
+
+function formatProfileImportPartial(result: ProfileImportPartialResult): string {
+  const guidance: string[] = [];
+  if (result.resources.some((resource) => resource.outcome === 'recovery-required')) {
+    guidance.push('Inspect the reported managed-Git recovery state before retrying.');
+  }
+  if (result.resources.some((resource) => resource.outcome === 'commit-ambiguous') || result.profileOutcome === 'commit-ambiguous') {
+    guidance.push('Rerun profile import inspection; do not assume an ambiguous resource or profile is absent.');
+  }
+  if (result.profileOutcome === 'published' || result.profileOutcome === 'commit-ambiguous') {
+    guidance.push(`Inspect the destination at ${boundedPathForDisplay(result.destinationPath)} before retrying.`);
+  }
+  if (result.resources.some((resource) => resource.outcome === 'created')) {
+    guidance.push('Created global resources are retained and will be re-inspected for exact reuse; Bazframe does not roll them back.');
+  }
+  if (guidance.length === 0) guidance.push('Fix the reported condition, then rerun import; inspection is recomputed on every retry.');
+  return [
+    `Profile outcome: ${result.profileOutcome}`,
+    `Destination: ${boundedPathForDisplay(result.destinationPath)}`,
+    'Resource outcomes:',
+    ...(result.resources.length === 0
+      ? ['  (none)']
+      : result.resources.map((resource) => `  - ${resource.kind}:${boundedTextForDisplay(resource.id)} — ${resource.outcome}`)),
+    'Active selection changed: no',
+    ...guidance
+  ].join('\n');
+}
+
+function formatProfileImportFailure(error: unknown): string {
+  if (error instanceof ProfileImportBlockedError) {
+    return 'Profile import is blocked by the already reported plan. No acquisition or profile publication was attempted.';
+  }
+  if (error instanceof ProfileImportExecutionError) {
+    const detail = profileImportFailureDetail(error);
+    return `${boundedTextForDisplay(error.message)}${detail === undefined ? '' : `\n${boundedPrefixedTextForDisplay(`Failure detail: ${detail.code} — `, detail.message)}`}\n${formatProfileImportPartial(error.result)}`;
+  }
+  const detail = boundedTextForDisplay(error instanceof Error ? error.message : String(error));
+  return `Profile import did not complete. ${detail}`;
+}
+
+function profileImportFailureDiagnostics(error: unknown): ProtocolDiagnostic[] {
+  if (!(error instanceof ProfileImportExecutionError)) return [];
+  const diagnostics: ProtocolDiagnostic[] = [];
+  if (error.result.resources.some((resource) => resource.outcome === 'created')) {
+    diagnostics.push({ level: 'warning', code: 'PROFILE_IMPORT_PARTIAL_RESOURCES_RETAINED', message: 'Created global resources remain installed and will be re-inspected for exact reuse on retry.' });
+  }
+  if (error.result.resources.some((resource) => resource.outcome === 'recovery-required')) {
+    diagnostics.push({ level: 'warning', code: 'PROFILE_IMPORT_RECOVERY_REQUIRED', message: 'Inspect managed-Git recovery state before retrying profile import.' });
+  }
+  if (error.result.resources.some((resource) => resource.outcome === 'commit-ambiguous') || error.result.profileOutcome === 'commit-ambiguous') {
+    diagnostics.push({ level: 'warning', code: 'PROFILE_IMPORT_COMMIT_AMBIGUOUS', message: 'Rerun import inspection; do not assume an ambiguous resource or destination is absent.' });
+  }
+  if (error.result.profileOutcome === 'published' || error.result.profileOutcome === 'commit-ambiguous') {
+    diagnostics.push({ level: 'warning', code: 'PROFILE_IMPORT_INSPECT_DESTINATION', message: `Inspect ${boundedPathForDisplay(error.result.destinationPath)} before retrying.` });
+  }
+  const detail = profileImportFailureDetail(error);
+  if (detail !== undefined) {
+    diagnostics.push({ level: 'info', code: 'PROFILE_IMPORT_FAILURE_DETAIL', message: boundedPrefixedTextForDisplay(`${detail.code}: `, detail.message) });
+  }
+  return diagnostics;
+}
+
+function profileImportFailureDetail(error: ProfileImportExecutionError): { code: string; message: string } | undefined {
+  const seen = new Set<unknown>();
+  let current: unknown = error.cause;
+  while (current !== undefined && current !== null && !seen.has(current)) {
+    seen.add(current);
+    if (current instanceof BazframeError) {
+      return { code: current.code, message: current.message };
+    }
+    if (current instanceof Error) current = current.cause;
+    else return undefined;
+  }
+  return undefined;
+}
+
+function profileExportReviewDiagnostic(outputPath: string): string {
+  return `Review ${boundedPathForDisplay(join(outputPath, 'profile', 'AGENTS.md'))} before sharing the export.`;
+}
+
+function formatProfileExport(result: ProfileExportResult): string {
+  const itemLines = (heading: string, values: readonly string[]): string[] => [
+    heading,
+    ...(values.length === 0
+      ? ['  (none)']
+      : values.map((value) => `  - ${boundedTextForDisplay(value)}`))
+  ];
+  return [
+    `Profile export: ${result.action}`,
+    `Profile: ${escapeUnsafeDisplayCharacters(result.exportedProfileId)}`,
+    `Output: ${boundedPathForDisplay(result.outputPath)}`,
+    `Instructions: ${escapeUnsafeDisplayCharacters(result.instructions.path)} (sha256:${escapeUnsafeDisplayCharacters(result.instructions.sha256)})`,
+    ...itemLines('Remote Git Skills:', result.skills),
+    ...itemLines('Remote Git libraries:', result.libraries),
+    ...itemLines('Omitted local Skills:', result.omittedLocalSkills),
+    'Packages: absent (Stage 1)',
+    ''
+  ].join('\n');
+}
+
+function formatProfileExportFailure(error: unknown): string {
+  if (!(error instanceof ProfileExportError)) {
+    const detail = boundedTextForDisplay(error instanceof Error ? error.message : String(error));
+    return `The export output was not published. ${detail}`;
+  }
+  const state = error.commitState === 'published'
+    ? 'The export output is published, but completion reporting failed.'
+    : error.commitState === 'commit-ambiguous'
+      ? 'The export publication state is ambiguous; inspect the requested output before retrying.'
+      : 'The export output was not published.';
+  return `${state} Output: ${boundedPathForDisplay(error.outputPath)}`;
+}
+
 function formatProfileLifecycle(result: ProfileLifecycleResult<string>): string {
   return [
     `Profile lifecycle: ${result.action}`,
@@ -997,7 +1262,7 @@ function formatMembershipResult(
     `Profile: ${result.profileId}`,
     `Profile target: ${explicitlyTargeted ? 'explicit' : 'active-selection'}`,
     `Skill: ${result.skillId}`,
-    `Provider root: ${result.sourceDirectory}`,
+    `Source root: ${result.sourceDirectory}`,
     `Membership: ${result.membershipPath}`,
     ''
   ].join('\n');
@@ -1008,7 +1273,7 @@ function formatManagedPackageBuildAuthorization(details: ManagedGitBuildAuthoriz
     'Remote package build authorization',
     `Remote: ${escapeUnsafeDisplayCharacters(details.remote)}`,
     `Revision: ${escapeUnsafeDisplayCharacters(details.revision)}`,
-    `Managed provider: ${escapeUnsafeDisplayCharacters(details.root)}`,
+    `Bazframe-managed checkout: ${escapeUnsafeDisplayCharacters(details.root)}`,
     `Build argv: ${stringifyForTerminal(details.build)}`,
     'The declared build runs without a shell or sandbox with ordinary user authority.',
     ''
@@ -1027,12 +1292,12 @@ async function confirmManagedPackageBuild(dependencies: CliDependencies): Promis
 
 function formatManagedGitLifecycleResult(result: ManagedGitLifecycleResult): string {
   return [
-    `Managed Git ${result.kind}: ${result.action}`,
+    `Remote Git source ${result.kind}: ${result.action}`,
     `ID: ${escapeUnsafeDisplayCharacters(result.id)}`,
     `Remote: ${escapeUnsafeDisplayCharacters(result.remote)}`,
     `Branch: ${escapeUnsafeDisplayCharacters(result.branch)}`,
     `Revision: ${escapeUnsafeDisplayCharacters(result.revision)}`,
-    `Provider root: ${escapeUnsafeDisplayCharacters(result.root)}`,
+    `Bazframe-managed checkout: ${escapeUnsafeDisplayCharacters(result.root)}`,
     ...(result.resourceAction === undefined ? [] : [`Resource activation: ${escapeUnsafeDisplayCharacters(result.resourceAction)}`]),
     'Profile membership: unchanged',
     ''
@@ -1079,6 +1344,8 @@ function helpFor(topic: HelpTopic): string {
     case 'profile-add': return PROFILE_ADD_HELP;
     case 'profile-duplicate': return PROFILE_DUPLICATE_HELP;
     case 'profile-edit': return PROFILE_EDIT_HELP;
+    case 'profile-export': return PROFILE_EXPORT_HELP;
+    case 'profile-import': return PROFILE_IMPORT_HELP;
     case 'profile-remove': return PROFILE_REMOVE_HELP;
     case 'profile-rename': return PROFILE_RENAME_HELP;
     case 'profile-use': return PROFILE_USE_HELP;

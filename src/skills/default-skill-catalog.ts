@@ -20,13 +20,19 @@ export interface DefaultSkillRegistration {
   target: string;
 }
 
-export interface DefaultSkillEditorRegistration extends DefaultSkillRegistration {
+export interface DefaultSkillRegistrationSnapshot extends DefaultSkillRegistration {
   catalogDevice: bigint;
   catalogInode: bigint;
   registrationDevice: bigint;
   registrationInode: bigint;
   targetDevice: bigint;
   targetInode: bigint;
+}
+export interface DefaultSkillRegistrationSnapshotOptions {
+  /** Repair-oriented callers may validate only the registration target identity. */
+  validateDeclaredName?: boolean;
+  /** Internal close-failure seam used only by focused tests. */
+  testHooks?: { afterClose?: () => void | Promise<void> };
 }
 export interface DefaultSkillCatalog {
   root: string;
@@ -95,13 +101,16 @@ export async function readDefaultSkillRegistration(
   }
 }
 
-export async function readDefaultSkillEditorRegistration(
+export async function readDefaultSkillRegistrationSnapshot(
   bazframeHome: string,
-  skillId: string
-): Promise<DefaultSkillEditorRegistration> {
+  skillId: string,
+  options: DefaultSkillRegistrationSnapshotOptions = {}
+): Promise<DefaultSkillRegistrationSnapshot> {
   assertSafeSkillId(skillId);
   const root = await openCatalogRoot(bazframeHome, false);
   if (root === undefined) throw notFound(skillId);
+  let result: DefaultSkillRegistrationSnapshot | undefined;
+  let operationError: unknown;
   try {
     const registrationPath = join(root.path, skillId);
     const raw = await inspectRawRegistration(registrationPath);
@@ -138,8 +147,36 @@ export async function readDefaultSkillEditorRegistration(
         `Default skill target basename does not match ${JSON.stringify(skillId)}: ${canonical}`
       );
     }
+    if (options.validateDeclaredName !== false) {
+      const declared = await readSkillDeclaredName(canonical);
+      if (declared !== skillId) {
+        throw new BazframeError(
+          'DEFAULT_SKILL_NAME_MISMATCH',
+          `Default skill ${JSON.stringify(skillId)} declares name ${JSON.stringify(declared)}.`
+        );
+      }
+    }
+    const [currentRaw, currentCanonical, currentMetadata] = await Promise.all([
+      inspectRawRegistration(registrationPath),
+      realpath(raw.target),
+      lstat(canonical, { bigint: true })
+    ]);
+    if (currentRaw?.kind !== 'link'
+      || currentRaw.target !== raw.target
+      || currentRaw.device !== raw.device
+      || currentRaw.inode !== raw.inode
+      || currentCanonical !== canonical
+      || currentMetadata.isSymbolicLink()
+      || !currentMetadata.isDirectory()
+      || currentMetadata.dev !== metadata.dev
+      || currentMetadata.ino !== metadata.ino) {
+      throw new BazframeError(
+        'DEFAULT_SKILL_CHANGED',
+        `Default skill registration changed while reading: ${registrationPath}`
+      );
+    }
     await assertDirectoryStable(root);
-    return {
+    result = {
       id: skillId,
       registrationPath,
       target: canonical,
@@ -150,9 +187,31 @@ export async function readDefaultSkillEditorRegistration(
       targetDevice: metadata.dev,
       targetInode: metadata.ino
     };
-  } finally {
-    await root.handle.close().catch(() => undefined);
+  } catch (error) { operationError = error; }
+  try {
+    await root.handle.close();
+    await options.testHooks?.afterClose?.();
+  } catch (error) {
+    operationError ??= new BazframeError('DEFAULT_SKILL_CATALOG_READ_FAILED', `Could not close default skill catalog: ${root.path}${formatCode(error)}`, { cause: error });
   }
+  if (operationError !== undefined) throw operationError;
+  if (result === undefined) throw new BazframeError('DEFAULT_SKILL_CATALOG_READ_FAILED', `Could not read default skill registration: ${skillId}`);
+  return result;
+}
+
+export function sameDefaultSkillRegistrationSnapshot(
+  left: DefaultSkillRegistrationSnapshot,
+  right: DefaultSkillRegistrationSnapshot
+): boolean {
+  return left.id === right.id
+    && left.registrationPath === right.registrationPath
+    && left.target === right.target
+    && left.catalogDevice === right.catalogDevice
+    && left.catalogInode === right.catalogInode
+    && left.registrationDevice === right.registrationDevice
+    && left.registrationInode === right.registrationInode
+    && left.targetDevice === right.targetDevice
+    && left.targetInode === right.targetInode;
 }
 
 export async function readDefaultSkillRegistrationLink(

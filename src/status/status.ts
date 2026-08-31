@@ -84,7 +84,7 @@ export type StatusProfile =
     };
 
 export interface StatusCorrectiveAction {
-  id: 'adapter' | 'active-profile' | 'collections' | 'managed-git';
+  id: 'adapter' | 'active-profile' | 'collections' | 'remote-git';
   message: string;
 }
 
@@ -249,9 +249,9 @@ export async function inspectStatus(options: StatusOptions): Promise<StatusInspe
   })));
   const managedGitDiagnostics = managedGit.diagnostics.map((diagnostic) => `${diagnostic.kind} ${diagnostic.id}: ${diagnostic.message} (${diagnostic.path})`);
   if (managedGitDiagnostics.length > 0 || managedGitProviders.some((provider) => provider.health !== 'ready')) {
-    corrections.set('managed-git', {
-      id: 'managed-git',
-      message: 'Inspect managed Git provider diagnostics and follow their operation-specific recovery instructions. A managed removal retry retains its recovery record for identity-verified forward cleanup; other operations require manual consistency restoration before the record is removed.'
+    corrections.set('remote-git', {
+      id: 'remote-git',
+      message: 'Inspect remote Git source diagnostics and follow their operation-specific recovery instructions. A remote Git removal retry retains its recovery record for identity-verified forward cleanup; other operations require manual consistency restoration before the record is removed.'
     });
   }
 
@@ -359,7 +359,7 @@ export function formatStatus(status: StatusInspection): string {
     ...((status.managedGitProviders ?? []).length === 0 && (status.managedGitDiagnostics ?? []).length === 0
       ? []
       : [
-          'Managed Git providers:',
+          'Remote Git sources:',
           ...((status.managedGitProviders ?? []).length === 0
             ? ['  (none)']
             : (status.managedGitProviders ?? []).map(({ record, health }) => {
@@ -368,9 +368,9 @@ export function formatStatus(status: StatusInspection): string {
                   : record.kind === 'library'
                     ? `bazframe library update ${record.id}`
                     : `bazframe package update ${record.id}`;
-                return escapeUnsafeDisplayCharacters(`  - ${record.kind} ${record.id}: ${health}; ${record.remote}; branch:${record.branch}; revision:${record.revision}; provider:${record.root}; update:${command}`);
+                return escapeUnsafeDisplayCharacters(`  - ${record.kind} ${record.id}: ${health}; ${record.remote}; branch:${record.branch}; revision:${record.revision}; checkout:${record.root}; update:${command}`);
               })),
-          'Managed Git failures:',
+          'Remote Git source failures:',
           ...((status.managedGitDiagnostics ?? []).length === 0 ? ['  (none)'] : (status.managedGitDiagnostics ?? []).map((diagnostic) => `  - ${escapeUnsafeDisplayCharacters(diagnostic)}`))
         ]),
     'Launch:',

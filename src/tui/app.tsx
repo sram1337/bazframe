@@ -379,7 +379,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
           tone: 'error',
           text: libraryInput?.state === 'error'
             ? libraryInput.message
-            : 'Select an existing physical directory or enter a valid managed Git source.'
+            : 'Select an existing physical directory or enter a valid remote Git source.'
         });
         return;
       }
@@ -1115,7 +1115,7 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
             );
           } else if (selectedSkill.originId.startsWith('library:') || selectedSkill.originId.startsWith('package:')) {
             const [kind, id] = selectedSkill.originId.split(':');
-            setMessage({ tone: 'info', text: `Edit provider input, then run \`bazframe ${kind} ${kind === 'library' ? 'update' : 'build'} ${id}\`. This Skill is from an immutable snapshot.` });
+            setMessage({ tone: 'info', text: `Edit source input, then run \`bazframe ${kind} ${kind === 'library' ? 'update' : 'build'} ${id}\`. This Skill is from an immutable snapshot.` });
           }
           return;
         }
@@ -1424,7 +1424,7 @@ function BelowMinimumView({
   if (modal.kind.startsWith('library-')) {
     const blocked = libraryCandidateBlocked(libraryCandidate);
     const step = modal.kind === 'library-root'
-      ? 'Physical library root or managed Git source'
+      ? 'Physical library root or remote Git source'
       : `Review ${modal.originId ?? '(unknown library)'}`;
     return (
       <Box
@@ -1985,7 +1985,7 @@ function CollectionDetails({
         {compact
           ? <>
               <Text>Health: {managed.health}; {managed.skillCount} Skills; references: {managed.referenceCount}</Text>
-              <Text wrap="truncate-end">Provider input: {managed.root}</Text>
+              <Text wrap="truncate-end">Source input: {managed.root}</Text>
               <Text wrap="truncate-end">Activated digest: sha256:{managed.digest}</Text>
               <Text>Artifact root: {managed.artifactRoot ?? '.'}; Skills root: {managed.skillsRoot}</Text>
               <Text>{managed.kind === 'library' ? 'Update' : 'Build'}: {managed.refreshAvailability} (CLI only)</Text>
@@ -1994,7 +1994,7 @@ function CollectionDetails({
               <Text>Health: {managed.health}</Text>
               <Text>{managed.skillCount} Skills</Text>
               <Text>Profile references: {managed.referenceCount}</Text>
-              <Text wrap="truncate-end">Provider input: {managed.root}</Text>
+              <Text wrap="truncate-end">Source input: {managed.root}</Text>
               <Text wrap="truncate-end">Activated digest: sha256:{managed.digest}</Text>
               <Text>Artifact root: {managed.artifactRoot ?? '.'}</Text>
               <Text>Skills root: {managed.skillsRoot}</Text>
@@ -2015,7 +2015,7 @@ function CollectionDetails({
           ? null
           : <Text wrap="truncate-end">Canonical: {root.canonicalRoot}</Text>}
         <Text>Skills: {root.skills.length}</Text>
-        <Text dimColor>Provider-owned; Bazframe artifact lifecycle is unavailable. Skill e hands off to your editor.</Text>
+        <Text dimColor>Source-owned; Bazframe artifact lifecycle is unavailable. Skill e hands off to your editor.</Text>
       </Box>
     );
   }
@@ -2307,7 +2307,7 @@ function Modal({
         <Text wrap="truncate-end">Body/tree: arrows or hjkl move; PageUp/PageDown/Home/End jump.</Text>
         <Text wrap="truncate-end">Skills: Right/l/Enter preview; Left/h back; o/c group; e edits live Added Skills; a adds library.</Text>
         <Text wrap="truncate-end">Profiles: list f favorite, x remove, d inert; details x removes membership; Right/l/Enter opens.</Text>
-        <Text wrap="truncate-end">Managed snapshots are immutable. Uppercase H/L remain Backspace/Enter aliases; J/K jumps profile panes.</Text>
+        <Text wrap="truncate-end">Activated snapshots are immutable. Uppercase H/L remain Backspace/Enter aliases; J/K jumps profile panes.</Text>
         <Text wrap="truncate-end">r refreshes; q exits. Press Esc or Enter to close.</Text>
       </FocusedOverlay>
     );
@@ -2323,7 +2323,7 @@ function Modal({
       : undefined;
     return (
       <FocusedOverlay>
-        <Text bold wrap="truncate-end">Add library - Absolute path, ~/ path, or managed Git source</Text>
+        <Text bold wrap="truncate-end">Add library - Absolute path, ~/ path, or remote Git source</Text>
         <Text inverse wrap="truncate-start">Source: {modal.value.length === 0 ? ' ' : modal.value}</Text>
         {libraryInput === undefined || libraryInput.state === 'loading'
           ? <Text dimColor>Inspecting source...</Text>
@@ -2331,7 +2331,7 @@ function Modal({
             ? <Text color="red" wrap="truncate-end">Source unavailable: {libraryInput.message}</Text>
             : managedGit !== undefined
               ? <>
-                  <Text wrap="truncate-end">Managed Git library: {managedGit.libraryId}</Text>
+                  <Text wrap="truncate-end">Remote Git library: {managedGit.libraryId}</Text>
                   <Text dimColor wrap="truncate-end">Remote: {managedGit.remote}</Text>
                 </>
               : directoryBrowser === undefined
@@ -2362,15 +2362,15 @@ function Modal({
               <Text wrap="truncate-end">Entered library root: {modal.enteredRoot ?? modal.root}</Text>
               <Text wrap="truncate-end">Canonical library root: {modal.canonicalRoot}</Text>
               <Text wrap="truncate-end">Scope: snapshot the complete selected tree; no profile reference is added.</Text>
-              <Text wrap="truncate-end">Provider input remains provider-owned; snapshots are retained.</Text>
+              <Text wrap="truncate-end">Source owners retain source input; snapshots are retained.</Text>
             </>
           : <>
-              <Text wrap="truncate-end">Managed Git source: {managedGit.enteredSource}</Text>
+              <Text wrap="truncate-end">Remote Git source: {managedGit.enteredSource}</Text>
               <Text wrap="truncate-end">Remote: {managedGit.remote}</Text>
               <Text wrap="truncate-end">Scope: acquire, validate, and snapshot this library; no profile reference is added.</Text>
               <Text wrap="truncate-end">Network access may use configured Git or GitHub authentication.</Text>
             </>}
-        <Text wrap="truncate-end">No provider code runs; package builds remain CLI-only.</Text>
+        <Text wrap="truncate-end">No source code runs; package builds remain CLI-only.</Text>
         {blocked
           ? <>
               <Text color="red" wrap="truncate-end">Blocked: package manifest present. Use `bazframe package add {modal.enteredRoot ?? modal.root}`.</Text>

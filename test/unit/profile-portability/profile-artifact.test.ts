@@ -8,9 +8,9 @@ import {
   type ProfileArtifactLimitPolicy
 } from '../../../src/profile-portability/profile-artifact.js';
 
-function managedSource(id: string) {
+function remoteGitSource(id: string) {
   return {
-    type: 'managedGit' as const,
+    type: 'remoteGit' as const,
     remote: `example.test/team/${id}`,
     fetchUrl: `https://example.test/team/${id}.git`,
     branch: 'main',
@@ -18,7 +18,7 @@ function managedSource(id: string) {
   };
 }
 
-function managedFixture(): ProfileArtifact {
+function remoteGitFixture(): ProfileArtifact {
   return {
     schemaVersion: 1,
     kind: 'bazframe-profile-export',
@@ -34,8 +34,8 @@ function managedFixture(): ProfileArtifact {
       packages: []
     },
     resources: [
-      { kind: 'skill', id: 'review-tools', source: managedSource('review-tools') },
-      { kind: 'library', id: 'toolkit', source: managedSource('toolkit') }
+      { kind: 'skill', id: 'review-tools', source: remoteGitSource('review-tools') },
+      { kind: 'library', id: 'toolkit', source: remoteGitSource('toolkit') }
     ]
   };
 }
@@ -67,8 +67,8 @@ function decode(value: ProfileArtifact): ProfileArtifact {
 }
 
 describe('profile artifact object codec', () => {
-  it('canonically round-trips managed direct Skills and libraries', () => {
-    const fixture = managedFixture();
+  it('canonically round-trips remote Git direct Skills and libraries', () => {
+    const fixture = remoteGitFixture();
     const policy = testPolicyFor(fixture);
     const encoded = encodeProfileArtifact(fixture, policy);
 
@@ -78,7 +78,7 @@ describe('profile artifact object codec', () => {
   });
 
   it('requires omittedLocalSkills, accepts it empty, and requires sorted unique omissions', () => {
-    const fixture = managedFixture();
+    const fixture = remoteGitFixture();
     const empty = clone(fixture);
     empty.profile.omittedLocalSkills = [];
     expect(decode(empty).profile.omittedLocalSkills).toEqual([]);
@@ -98,7 +98,7 @@ describe('profile artifact object codec', () => {
   });
 
   it('encodes fixed key order with two spaces and exactly one trailing LF', () => {
-    const fixture = managedFixture();
+    const fixture = remoteGitFixture();
     const encoded = encodeProfileArtifact(fixture, testPolicyFor(fixture));
     expect(encoded).toBe(`${JSON.stringify(fixture, null, 2)}\n`);
     expect(encoded.endsWith('\n')).toBe(true);
@@ -108,7 +108,7 @@ describe('profile artifact object codec', () => {
   });
 
   it('rejects unknown keys and malformed instruction digests, paths, and IDs', () => {
-    const fixture = managedFixture();
+    const fixture = remoteGitFixture();
     const policy = testPolicyFor(fixture);
     expect(() => decodeProfileArtifactObject({ ...fixture, unknown: true }, policy)).toThrow(/exactly/u);
 
@@ -139,7 +139,7 @@ describe('profile artifact object codec', () => {
   });
 
   it('rejects duplicate, unsorted, overlapping, missing, and orphan closure entries', () => {
-    const fixture = managedFixture();
+    const fixture = remoteGitFixture();
     const duplicate = clone(fixture);
     duplicate.profile.skills = ['review-tools', 'review-tools'];
     expect(() => decode(duplicate)).toThrow(/lexical order/u);
@@ -162,7 +162,7 @@ describe('profile artifact object codec', () => {
     expect(() => decode(missing)).toThrow(/exactly match/u);
 
     const orphan = clone(fixture);
-    orphan.resources.push({ kind: 'library', id: 'unused', source: managedSource('unused') });
+    orphan.resources.push({ kind: 'library', id: 'unused', source: remoteGitSource('unused') });
     expect(() => decode(orphan)).toThrow(/ordered|exactly match/u);
 
     const duplicateResource = clone(fixture);
@@ -174,12 +174,44 @@ describe('profile artifact object codec', () => {
     expect(() => decode(wrongOrder)).toThrow(/unique and ordered/u);
   });
 
-  it('rejects mismatched managed identity and path, transport, or unknown source leakage', () => {
-    const fixture = managedFixture();
+  it('rejects mismatched remote Git identity and path, transport, or unknown source leakage', () => {
+    const fixture = remoteGitFixture();
     const mismatched = clone(fixture);
-    const source = mismatched.resources[0]!.source as ReturnType<typeof managedSource>;
+    const source = mismatched.resources[0]!.source as ReturnType<typeof remoteGitSource>;
     source.remote = 'elsewhere.test/team/review-tools';
-    expect(() => decode(mismatched)).toThrow(/managed source identity/u);
+    expect(() => decode(mismatched)).toThrow(/remote Git source identity/u);
+
+    for (const fetchUrl of [
+      'https://example.test/team/other.git',
+      'https://user:secret@example.test/team/review-tools.git',
+      'https://example.test/team/review-tools.git?ref=main',
+      'https://example.test/team/review%2Dtools.git'
+    ]) {
+      const hostile = clone(fixture);
+      (hostile.resources[0]!.source as ReturnType<typeof remoteGitSource>).fetchUrl = fetchUrl;
+      expect(() => decode(hostile)).toThrow(/remote Git source identity/u);
+    }
+    const sha256 = clone(fixture);
+    (sha256.resources[0]!.source as ReturnType<typeof remoteGitSource>).revision = 'b'.repeat(64);
+    expect(decode(sha256).resources[0]!.source).toMatchObject({ revision: 'b'.repeat(64) });
+    for (const length of [39, 41, 63, 65]) {
+      const malformedRevision = clone(fixture);
+      (malformedRevision.resources[0]!.source as ReturnType<typeof remoteGitSource>).revision = 'a'.repeat(length);
+      expect(() => decode(malformedRevision)).toThrow(/remote Git source identity/u);
+    }
+    for (const branch of ['HEAD', 'head', 'Head']) {
+      const pseudoBranch = clone(fixture);
+      (pseudoBranch.resources[0]!.source as ReturnType<typeof remoteGitSource>).branch = branch;
+      expect(() => decode(pseudoBranch)).toThrow(/remote Git source identity/u);
+    }
+
+    const githubCase = clone(fixture);
+    githubCase.resources[0]!.source = {
+      ...remoteGitSource('review-tools'),
+      remote: 'github.com/example/review-tools',
+      fetchUrl: 'https://github.com/Example/Review-Tools.git'
+    };
+    expect(() => decode(githubCase)).toThrow(/remote Git source identity/u);
 
     for (const extra of [
       { root: '/tmp/review-tools' },
@@ -192,13 +224,22 @@ describe('profile artifact object codec', () => {
     }
   });
 
-  it('recognizes future local library and managed/local package variants', () => {
-    const localLibrary = managedFixture();
+  it('rejects unknown source types', () => {
+    const fixture = remoteGitFixture() as unknown as {
+      resources: Array<{ source: Record<string, unknown> }>;
+    };
+    fixture.resources[0]!.source.type = 'unknown';
+    expect(() => decodeProfileArtifactObject(fixture, testPolicyFor(fixture as unknown as ProfileArtifact)))
+      .toThrow(/source type is invalid/u);
+  });
+
+  it('recognizes future local library and remote Git/local package variants', () => {
+    const localLibrary = remoteGitFixture();
     localLibrary.resources[1]!.source = { type: 'localMapping' };
     expect(decode(localLibrary).resources[1]!.source).toEqual({ type: 'localMapping' });
 
-    for (const packageSource of [managedSource('automation'), { type: 'localMapping' as const }]) {
-      const withPackage = managedFixture();
+    for (const packageSource of [remoteGitSource('automation'), { type: 'localMapping' as const }]) {
+      const withPackage = remoteGitFixture();
       withPackage.profile.packages = ['automation'];
       withPackage.resources.push({ kind: 'package', id: 'automation', source: packageSource });
       expect(decode(withPackage).resources[2]!.source).toEqual(packageSource);
@@ -206,18 +247,18 @@ describe('profile artifact object codec', () => {
   });
 
   it('universally rejects local direct-Skill resources', () => {
-    const fixture = managedFixture();
+    const fixture = remoteGitFixture();
     fixture.resources[0]!.source = { type: 'localMapping' };
     expect(() => decode(fixture)).toThrow(/not portable/u);
   });
 
   it('refuses local libraries and every package variant at the Stage 1 capability guard', () => {
-    const localLibrary = managedFixture();
+    const localLibrary = remoteGitFixture();
     localLibrary.resources[1]!.source = { type: 'localMapping' };
     expect(() => assertStage1ProfileArtifactCapabilities(decode(localLibrary))).toThrow(/local mappings/u);
 
-    for (const packageSource of [managedSource('automation'), { type: 'localMapping' as const }]) {
-      const withPackage = managedFixture();
+    for (const packageSource of [remoteGitSource('automation'), { type: 'localMapping' as const }]) {
+      const withPackage = remoteGitFixture();
       withPackage.profile.packages = ['automation'];
       withPackage.resources.push({ kind: 'package', id: 'automation', source: packageSource });
       expect(() => assertStage1ProfileArtifactCapabilities(decode(withPackage))).toThrow(/packages/u);
@@ -225,7 +266,7 @@ describe('profile artifact object codec', () => {
   });
 
   it('enforces fixture-derived below, at, and above canonical manifest byte ceilings', () => {
-    const fixture = managedFixture();
+    const fixture = remoteGitFixture();
     const exactBytes = Buffer.byteLength(`${JSON.stringify(fixture, null, 2)}\n`, 'utf8');
     const base = testPolicyFor(fixture);
     expect(() => decodeProfileArtifactObject(fixture, { ...base, maxManifestBytes: exactBytes - 1 })).toThrow(/canonical manifest/u);
@@ -234,7 +275,7 @@ describe('profile artifact object codec', () => {
   });
 
   it('enforces fixture-derived below, at, and above total profile-entry ceilings', () => {
-    const fixture = managedFixture();
+    const fixture = remoteGitFixture();
     const exactEntries = profileEntryCount(fixture);
     const base = testPolicyFor(fixture);
     expect(() => decodeProfileArtifactObject(fixture, { ...base, maxProfileEntries: exactEntries - 1 })).toThrow(/profile entries|entry limit/u);
@@ -243,7 +284,7 @@ describe('profile artifact object codec', () => {
   });
 
   it('enforces fixture-derived below, at, and above resource-count ceilings', () => {
-    const fixture = managedFixture();
+    const fixture = remoteGitFixture();
     const exactResources = fixture.resources.length;
     const base = testPolicyFor(fixture);
     expect(() => decodeProfileArtifactObject(fixture, { ...base, maxResources: exactResources - 1 })).toThrow(/resources.*entry limit/u);
@@ -252,7 +293,7 @@ describe('profile artifact object codec', () => {
   });
 
   it('decodes only exact canonical raw manifest bytes', () => {
-    const fixture = managedFixture();
+    const fixture = remoteGitFixture();
     const policy = testPolicyFor(fixture);
     const canonical = Buffer.from(encodeProfileArtifact(fixture, policy), 'utf8');
     expect(decodeProfileArtifactBytes(canonical, policy)).toEqual(fixture);
@@ -281,7 +322,7 @@ describe('profile artifact object codec', () => {
   });
 
   it('rejects invalid UTF-8, invalid JSON, and raw bytes outside the injected ceiling', () => {
-    const fixture = managedFixture();
+    const fixture = remoteGitFixture();
     const canonical = Buffer.from(encodeProfileArtifact(fixture, testPolicyFor(fixture)), 'utf8');
     const policy = {
       ...testPolicyFor(fixture),
@@ -307,10 +348,12 @@ describe('profile artifact object codec', () => {
   });
 
   it('requires explicit finite nonnegative integer test policies', () => {
-    const fixture = managedFixture();
+    const fixture = remoteGitFixture();
     const policy = testPolicyFor(fixture);
     for (const key of ['maxManifestBytes', 'maxProfileEntries', 'maxResources'] as const) {
       for (const value of [Number.POSITIVE_INFINITY, Number.NaN, -1, 1.5]) {
+        expect(() => decodeProfileArtifactObject(fixture, { ...policy, [key]: value }))
+          .toThrow(expect.objectContaining({ code: 'PROFILE_ARTIFACT_INVALID' }));
         expect(() => decodeProfileArtifactObject(fixture, { ...policy, [key]: value }))
           .toThrow(/finite nonnegative integer/u);
       }

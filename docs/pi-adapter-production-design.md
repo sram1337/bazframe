@@ -1,6 +1,6 @@
 # Pi Adapter Production Design
 
-> Status: implemented baseline; acceptance gates passing for Pi 0.82.0 on the current macOS/Node environment
+> Status: implemented baseline; Pi 0.84.4 is the minimum supported runtime
 >
 > Product source of truth: [`design.md`](design.md)
 >
@@ -28,7 +28,7 @@ bazframe adapter install pi
 bazframe status
 ```
 
-Pi 0.82.0 is the minimum supported runtime; installation selects a current Pi release. Adapter installation is explicit. The command places one self-contained Bazframe artifact in Pi's effective global extension directory and records its identity under the Bazframe home. Pi auto-discovers the extension, which lets the user invoke `pi` directly. Absent global state enables Bazframe without a policy file. Project overrides take precedence.
+Pi 0.84.4 is the minimum supported runtime; installation selects a current Pi release. Adapter installation is explicit. The command places one self-contained Bazframe artifact in Pi's effective global extension directory and records its identity under the Bazframe home. Pi auto-discovers the extension, which lets the user invoke `pi` directly. Absent global state enables Bazframe without a policy file. Project overrides take precedence.
 
 ### 2.2 Configure defaults
 
@@ -332,7 +332,7 @@ A default-enabled session applies the complete validated profile in Git and non-
 - Ownership hashes protect modified and independently owned extension files.
 - Locking and atomic operations coordinate concurrent Bazframe CLI operations; non-cooperating external pathname races remain a documented boundary.
 - Runtime Git discovery uses an argument array, sanitized environment, captured output, and timeout.
-- The initial verified platform baseline is macOS with Node `>=22.19.0` and Pi `0.82.x`; Pi 0.82.0 is the minimum supported version.
+- The initial verified platform baseline used macOS with Node `>=22.19.0` and Pi `0.82.x`; the current minimum supported version is Pi 0.84.4.
 - Adapter startup checks the Pi APIs required for `resources_discover`, command provenance, reload, and structured system-prompt options.
 - A Pi context API that supports selective context loading requires a new compatibility decision before activation.
 
@@ -396,7 +396,7 @@ Deliver:
 - compatibility and visible failure handling;
 - bounded asynchronous Git discovery and file operations where startup latency benefits.
 
-Gate: isolated Pi 0.82 tests pass for both context modes, reload, collisions, trust-owned resources, malformed state, file-free defaults, disabled sessions, and enabled/disabled non-Git directories.
+Gate: isolated Pi 0.84.4 minimum-version tests pass for both context modes, reload, collisions, trust-owned resources, malformed state, file-free defaults, disabled sessions, and enabled/disabled non-Git directories.
 
 ### Milestone 5: package and migration gate
 
@@ -417,7 +417,7 @@ Gate: install/build/typecheck/lint/unit/integration/pack/real-Pi checks pass fro
 | Adapter lifecycle | Unit and packed-package checks cover install, idempotence, managed update, adoption, drift preservation, manifest-gated repair, occupied destinations, uninstall, and cache cleanup. |
 | Policy and status | Unit and fake-CLI integration cover global/project precedence, file-free defaults, enabled/disabled overrides, legacy compatibility, read-only status, malformed-state preservation, and stable worktrees. |
 | Profile and membership lifecycle | Unit and built-CLI integration cover create/duplicate/list/current/use/rename/remove, force guards, active and missing-active refusal, selection rollback, staged-copy cleanup, parallel catalog/profile link policy, broken source references, alias-cache cleanup/no-op preservation, source preservation, and strict CLI parsing. |
-| Runtime adapter | Packed Pi 0.82 probes cover context modes, profile skills, global disable, project enable/disable precedence, and stable repositories. Deterministic current-artifact tests cover the exact compact `/bazframe info` projection, context restoration reporting, effective skills and collisions, command registration, strict argument dispatch, awaited reload, and fail-closed behavior. The packed real-Pi gate does not claim live slash-command coverage. |
+| Runtime adapter | Packed Pi 0.84.4 probes cover context modes, profile skills, global disable, project enable/disable precedence, and stable repositories. Deterministic current-artifact tests cover the exact compact `/bazframe info` projection, context restoration reporting, effective skills and collisions, command registration, strict argument dispatch, awaited reload, and fail-closed behavior. The packed real-Pi gate does not claim live slash-command coverage. |
 | Packed real-Pi flow | `npm run test:real-pi` proves file-free defaults, global disable, project-enabled override, project-disabled override, both Pi context modes, source preservation, and stable Git status. |
 
 The repeatable production gates are:
