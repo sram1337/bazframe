@@ -127,8 +127,8 @@ try {
   if (sourceManifest.license !== undefined && sourceManifest.license !== 'UNLICENSED') {
     assertExists(join(packageRoot, 'LICENSE'));
   }
-  if (manifest.bin?.bazframe !== 'dist/cli.js') {
-    throw new Error(`Unexpected packaged bin target: ${manifest.bin?.bazframe}`);
+  if (manifest.bin?.bazframe !== 'dist/cli.js' || manifest.bin?.bzf !== 'dist/cli.js') {
+    throw new Error(`Unexpected packaged bin targets: ${JSON.stringify(manifest.bin)}`);
   }
   if (
     manifest.repository?.type !== 'git'
@@ -167,6 +167,16 @@ try {
   if (result.status !== 0 || result.stdout !== `Bazframe ${manifest.version}\n`) {
     throw new Error(
       `Installed CLI version check failed (${result.status}).\nstdout: ${result.stdout}\nstderr: ${result.stderr}`
+    );
+  }
+
+  const aliasExecutable = process.platform === 'win32'
+    ? join(temporaryRoot, 'node_modules', '.bin', 'bzf.cmd')
+    : join(temporaryRoot, 'node_modules', '.bin', 'bzf');
+  const aliasResult = spawnSync(aliasExecutable, ['--version'], { encoding: 'utf8', shell: false });
+  if (aliasResult.status !== 0 || aliasResult.stdout !== `Bazframe ${manifest.version}\n`) {
+    throw new Error(
+      `Installed bzf version check failed (${aliasResult.status}).\nstdout: ${aliasResult.stdout}\nstderr: ${aliasResult.stderr}`
     );
   }
 

@@ -8,7 +8,8 @@
     "node": ">=22.19.0"
   },
   "bin": {
-    "bazframe": "dist/cli.js"
+    "bazframe": "dist/cli.js",
+    "bzf": "dist/cli.js"
   },
   "files": [
     "artifacts/",
