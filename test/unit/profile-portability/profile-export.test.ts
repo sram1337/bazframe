@@ -5,6 +5,7 @@ import {
   readFile,
   readdir,
   realpath,
+  rm,
   symlink,
   writeFile
 } from 'node:fs/promises';
@@ -24,7 +25,11 @@ import {
 import {
   encodeProfileCollectionReference
 } from '../../../src/profiles/profile-skill-collection-reference.js';
-import { addLibrary } from '../../../src/skill-collections/skill-collection-lifecycle.js';
+import { addLibrary, addPackage } from '../../../src/skill-collections/skill-collection-lifecycle.js';
+import {
+  encodePackage,
+  readPackage
+} from '../../../src/skill-collections/skill-collection-store.js';
 import { createTempDirectory, type TempDirectory } from '../../helpers/temp-directory.js';
 
 const temporaryDirectories: TempDirectory[] = [];
@@ -73,7 +78,7 @@ async function addLocalDirect(f: Fixture, id: string): Promise<string> {
 
 async function initializeManagedGit(
   f: Fixture,
-  kind: 'skill' | 'library',
+  kind: 'skill' | 'library' | 'package',
   id: string,
   root: string
 ): Promise<{ record: ManagedGitRecord; environment: NodeJS.ProcessEnv; log: string }> {
@@ -142,6 +147,50 @@ async function addRemoteLibrary(
   const managed = await initializeManagedGit(f, 'library', id, root);
   await addLibrary({ bazframeHome: f.home }, root);
   await addLibraryReference(f, id);
+  return managed;
+}
+
+async function createPackageSource(root: string, childName: string): Promise<string> {
+  await createSkill(join(root, 'dist', 'skills', childName), childName);
+  await writeFile(
+    join(root, 'build.mjs'),
+    `import{mkdir,writeFile}from'node:fs/promises';await mkdir('dist/skills/${childName}',{recursive:true});await writeFile('dist/skills/${childName}/SKILL.md',${JSON.stringify(`---\nname: ${childName}\ndescription: Export fixture.\n---\n# ${childName}\n`)});\n`
+  );
+  await writeFile(join(root, 'bazframe-package.json'), `${JSON.stringify({
+    schemaVersion: 1,
+    build: [process.execPath, 'build.mjs'],
+    artifactRoot: 'dist',
+    skillsRoot: 'skills'
+  }, null, 2)}\n`);
+  return await realpath(root);
+}
+
+async function addPackageReference(f: Fixture, id: string): Promise<void> {
+  const directory = join(f.profile, 'packages');
+  await mkdir(directory, { recursive: true });
+  await writeFile(
+    join(directory, `${id}.json`),
+    encodeProfileCollectionReference({ schemaVersion: 1, package: id })
+  );
+}
+
+async function addLocalPackage(f: Fixture, id: string, childName = `${id}-child`): Promise<string> {
+  const root = await createPackageSource(join(f.root, 'packages', id), childName);
+  await addPackage({ bazframeHome: f.home }, root);
+  await addPackageReference(f, id);
+  return root;
+}
+
+async function addRemotePackage(
+  f: Fixture,
+  id: string,
+  childName = `${id}-child`
+): Promise<ReturnType<typeof initializeManagedGit>> {
+  const root = managedGitCheckoutRoot(f.home, 'package', id);
+  await createPackageSource(root, childName);
+  const managed = await initializeManagedGit(f, 'package', id, root);
+  await addPackage({ bazframeHome: f.home }, root);
+  await addPackageReference(f, id);
   return managed;
 }
 
@@ -230,12 +279,19 @@ describe('Stage 1 profile export service', () => {
     expect(await readFile(managed.log, 'utf8')).not.toMatch(/\b(?:clone|fetch)\b/u);
   });
 
-  it('sorts the complete closure deterministically', async () => {
+  it('sorts the complete Skill to library to package closure deterministically', async () => {
     const f = await fixture();
     await addLocalDirect(f, 'z-local');
     await addLocalDirect(f, 'a-local');
     const remoteZ = await addRemoteDirect(f, 'z-remote');
     await addRemoteDirect(f, 'a-remote');
+    for (const id of ['z-library', 'a-library']) {
+      const root = await createSkill(join(f.root, 'libraries', id), `${id}-child`);
+      await addLibrary({ bazframeHome: f.home }, root);
+      await addLibraryReference(f, id);
+    }
+    await addLocalPackage(f, 'z-package');
+    await addLocalPackage(f, 'a-package');
     const result = await exportProfile({
       bazframeHome: f.home,
       profileId: 'portable',
@@ -244,8 +300,17 @@ describe('Stage 1 profile export service', () => {
     });
     expect(result.skills).toEqual(['a-remote', 'z-remote']);
     expect(result.omittedLocalSkills).toEqual(['a-local', 'z-local']);
-    expect(result.resources.map(({ id }) => id)).toEqual(['a-remote', 'z-remote']);
-  });
+    expect(result.libraries).toEqual(['a-library', 'z-library']);
+    expect(result.packages).toEqual(['a-package', 'z-package']);
+    expect(result.resources.map(({ kind, id }) => `${kind}:${id}`)).toEqual([
+      'skill:a-remote',
+      'skill:z-remote',
+      'library:a-library',
+      'library:z-library',
+      'package:a-package',
+      'package:z-package'
+    ]);
+  }, 15_000);
 
   it.each(['profile-root', 'instructions', 'skills'] as const)('rejects linked %s input', async (target) => {
     const f = await fixture();
@@ -381,50 +446,162 @@ describe('Stage 1 profile export service', () => {
     })).rejects.toMatchObject({ code: 'MANAGED_GIT_RECOVERY_REQUIRED' });
   });
 
-  it('exports local libraries path-free while rejecting malformed libraries, packages, and composition collisions', async () => {
-    const malformed = await fixture();
-    await mkdir(join(malformed.profile, 'libraries'));
-    await writeFile(join(malformed.profile, 'libraries', 'bad.json'), '{}\n');
-    await expect(exportProfile({ bazframeHome: malformed.home, profileId: 'portable', outputDirectory: malformed.output }))
-      .rejects.toMatchObject({ code: 'SKILL_COLLECTION_REFERENCE_INVALID' });
+  it('exports healthy local libraries and packages path-free from immutable snapshots after source removal', async () => {
+    const f = await fixture();
+    const libraryRoot = await createSkill(join(f.root, 'libraries', 'local-library'), 'library-child');
+    await addLibrary({ bazframeHome: f.home }, libraryRoot);
+    await addLibraryReference(f, 'local-library');
+    const packageRoot = await addLocalPackage(f, 'local-package', 'package-child');
+    await rm(libraryRoot, { recursive: true });
+    await rm(packageRoot, { recursive: true });
 
-    const local = await fixture();
-    const localRoot = await createSkill(join(local.root, 'libraries', 'local-library'), 'local-library');
-    await addLibrary({ bazframeHome: local.home }, localRoot);
-    await addLibraryReference(local, 'local-library');
-    await import('node:fs/promises').then(({ rm }) => rm(localRoot, { recursive: true }));
-    const localResult = await exportProfile({ bazframeHome: local.home, profileId: 'portable', outputDirectory: local.output });
-    expect(localResult.resources).toEqual([{ kind: 'library', id: 'local-library', source: { type: 'localMapping' } }]);
-    const localManifest = await readFile(join(local.output, 'bazframe-profile.json'), 'utf8');
-    expect(localManifest).not.toContain(localRoot);
-    expect(localManifest).not.toContain('digest');
+    const result = await exportProfile({ bazframeHome: f.home, profileId: 'portable', outputDirectory: f.output });
+    expect(result).toMatchObject({
+      skills: [],
+      libraries: ['local-library'],
+      packages: ['local-package']
+    });
+    expect(result.resources).toEqual([
+      { kind: 'library', id: 'local-library', source: { type: 'localMapping' } },
+      { kind: 'package', id: 'local-package', source: { type: 'localMapping' } }
+    ]);
+    const manifestText = await readFile(join(f.output, 'bazframe-profile.json'), 'utf8');
+    const manifest = JSON.parse(manifestText);
+    expect(manifest.profile.packages).toEqual(['local-package']);
+    expect(manifest.resources[1].source).toEqual({ type: 'localMapping' });
+    for (const forbidden of [f.root, packageRoot, libraryRoot, 'artifactRoot', 'skillsRoot', 'build.mjs', process.execPath, 'digest', 'manifest', 'argv', 'transport', 'device', 'inode']) {
+      expect(manifestText).not.toContain(forbidden);
+    }
+  });
 
-    const orphanedManaged = await fixture();
-    const orphanedRoot = await createSkill(managedGitCheckoutRoot(orphanedManaged.home, 'library', 'orphaned'), 'orphaned-child');
-    await addLibrary({ bazframeHome: orphanedManaged.home }, orphanedRoot);
-    await addLibraryReference(orphanedManaged, 'orphaned');
-    await expect(exportProfile({ bazframeHome: orphanedManaged.home, profileId: 'portable', outputDirectory: orphanedManaged.output }))
-      .rejects.toMatchObject({ code: 'PROFILE_EXPORT_SOURCE_INVALID' });
-
-    const packaged = await fixture();
-    await mkdir(join(packaged.profile, 'packages'));
-    await writeFile(
-      join(packaged.profile, 'packages', 'runner.json'),
-      encodeProfileCollectionReference({ schemaVersion: 1, package: 'runner' })
-    );
-    await expect(exportProfile({ bazframeHome: packaged.home, profileId: 'portable', outputDirectory: packaged.output }))
-      .rejects.toMatchObject({
-        code: 'PROFILE_EXPORT_STAGE2_UNSUPPORTED',
-        message: 'Stage 2 profile export does not support package references.'
-      });
-
-    const collision = await fixture();
-    await addLocalDirect(collision, 'same-name');
-    const managed = await addRemoteLibrary(collision, 'toolkit', 'same-name');
-    await expect(exportProfile({
-      bazframeHome: collision.home,
-      profileId: 'portable', outputDirectory: collision.output,
+  it('exports a healthy remote package at exact revision without promoting package children', async () => {
+    const f = await fixture();
+    const managed = await addRemotePackage(f, 'remote-package', 'package-child');
+    const result = await exportProfile({
+      bazframeHome: f.home,
+      profileId: 'portable',
+      outputDirectory: f.output,
       environment: managed.environment
+    });
+    expect(result.skills).toEqual([]);
+    expect(result.packages).toEqual(['remote-package']);
+    expect(result.resources).toEqual([{
+      kind: 'package',
+      id: 'remote-package',
+      source: {
+        type: 'remoteGit',
+        remote: managed.record.remote,
+        fetchUrl: managed.record.fetchUrl,
+        branch: managed.record.branch,
+        revision: managed.record.revision
+      }
+    }]);
+    const manifestText = await readFile(join(f.output, 'bazframe-profile.json'), 'utf8');
+    expect(manifestText).not.toContain(managed.record.root);
+    for (const forbidden of ['transport', 'artifactRoot', 'skillsRoot', 'manifest', 'argv', 'digest', 'device', 'inode']) {
+      expect(manifestText).not.toContain(forbidden);
+    }
+    expect(await readFile(managed.log, 'utf8')).not.toMatch(/\b(?:clone|fetch)\b/u);
+  });
+
+  it('rejects malformed package references, records, and immutable snapshots', async () => {
+    const malformedReference = await fixture();
+    await mkdir(join(malformedReference.profile, 'packages'));
+    await writeFile(join(malformedReference.profile, 'packages', 'bad.json'), '{}\n');
+    await expect(exportProfile({
+      bazframeHome: malformedReference.home,
+      profileId: 'portable',
+      outputDirectory: malformedReference.output
+    })).rejects.toMatchObject({ code: 'SKILL_COLLECTION_REFERENCE_INVALID' });
+
+    const malformedRecord = await fixture();
+    await addLocalPackage(malformedRecord, 'malformed-record');
+    await writeFile(join(malformedRecord.home, 'packages', 'malformed-record.json'), '{}\n');
+    await expect(exportProfile({
+      bazframeHome: malformedRecord.home,
+      profileId: 'portable',
+      outputDirectory: malformedRecord.output
+    })).rejects.toMatchObject({ code: 'SKILL_COLLECTION_RECORD_INVALID' });
+
+    const brokenSnapshot = await fixture();
+    await addLocalPackage(brokenSnapshot, 'broken-snapshot');
+    const record = await readPackage(brokenSnapshot.home, 'broken-snapshot');
+    const snapshotRoot = join(brokenSnapshot.home, 'skill-snapshots', 'sha256', record.digest);
+    await chmod(snapshotRoot, 0o700);
+    await chmod(join(snapshotRoot, 'artifact'), 0o700);
+    await chmod(join(snapshotRoot, 'artifact', 'skills'), 0o700);
+    await chmod(join(snapshotRoot, 'artifact', 'skills', 'broken-snapshot-child'), 0o700);
+    await rm(join(snapshotRoot, 'artifact'), { recursive: true });
+    await expect(exportProfile({
+      bazframeHome: brokenSnapshot.home,
+      profileId: 'portable',
+      outputDirectory: brokenSnapshot.output
+    })).rejects.toMatchObject({ code: 'SKILL_COLLECTION_CANDIDATE_INVALID' });
+  });
+
+  it('rejects dirty, recovering, provenance-mismatched, and provenance-free managed package state', async () => {
+    const dirty = await fixture();
+    const dirtyManaged = await addRemotePackage(dirty, 'dirty-package');
+    await writeFile(join(dirtyManaged.record.root, 'untracked.txt'), 'dirty\n');
+    await expect(exportProfile({
+      bazframeHome: dirty.home,
+      profileId: 'portable', outputDirectory: dirty.output,
+      environment: dirtyManaged.environment
+    })).rejects.toMatchObject({ code: 'MANAGED_GIT_DIRTY' });
+
+    const recovery = await fixture();
+    const recoveryManaged = await addRemotePackage(recovery, 'recovery-package');
+    await mkdir(join(recovery.home, 'providers', 'git', 'recovery'), { recursive: true });
+    await writeFile(join(recovery.home, 'providers', 'git', 'recovery', 'package-recovery-package.json'), '{}\n');
+    await expect(exportProfile({
+      bazframeHome: recovery.home,
+      profileId: 'portable', outputDirectory: recovery.output,
+      environment: recoveryManaged.environment
+    })).rejects.toMatchObject({ code: 'MANAGED_GIT_RECOVERY_REQUIRED' });
+
+    const mismatch = await fixture();
+    const mismatchManaged = await addRemotePackage(mismatch, 'mismatch-package');
+    const packageRecord = await readPackage(mismatch.home, 'mismatch-package');
+    await writeFile(
+      join(mismatch.home, 'packages', 'mismatch-package.json'),
+      encodePackage({ ...packageRecord, root: join(mismatch.root, 'other', 'mismatch-package') })
+    );
+    await expect(exportProfile({
+      bazframeHome: mismatch.home,
+      profileId: 'portable', outputDirectory: mismatch.output,
+      environment: mismatchManaged.environment
+    })).rejects.toMatchObject({ code: 'PROFILE_EXPORT_SOURCE_INVALID' });
+
+    const orphaned = await fixture();
+    const orphanedRoot = await createPackageSource(
+      managedGitCheckoutRoot(orphaned.home, 'package', 'orphaned-package'),
+      'orphaned-child'
+    );
+    await addPackage({ bazframeHome: orphaned.home }, orphanedRoot);
+    await addPackageReference(orphaned, 'orphaned-package');
+    await expect(exportProfile({
+      bazframeHome: orphaned.home,
+      profileId: 'portable', outputDirectory: orphaned.output
+    })).rejects.toMatchObject({ code: 'PROFILE_EXPORT_SOURCE_INVALID' });
+  });
+
+  it('rejects direct/package and library/package child collisions without promoting children', async () => {
+    const directCollision = await fixture();
+    await addLocalDirect(directCollision, 'same-name');
+    await addLocalPackage(directCollision, 'runner', 'same-name');
+    await expect(exportProfile({
+      bazframeHome: directCollision.home,
+      profileId: 'portable', outputDirectory: directCollision.output
+    })).rejects.toMatchObject({ code: 'PROFILE_EXPORT_COMPOSITION_INVALID' });
+
+    const collectionCollision = await fixture();
+    const libraryRoot = await createSkill(join(collectionCollision.root, 'libraries', 'toolkit'), 'same-name');
+    await addLibrary({ bazframeHome: collectionCollision.home }, libraryRoot);
+    await addLibraryReference(collectionCollision, 'toolkit');
+    await addLocalPackage(collectionCollision, 'runner', 'same-name');
+    await expect(exportProfile({
+      bazframeHome: collectionCollision.home,
+      profileId: 'portable', outputDirectory: collectionCollision.output
     })).rejects.toMatchObject({ code: 'PROFILE_EXPORT_COMPOSITION_INVALID' });
   });
 
@@ -449,6 +626,23 @@ describe('Stage 1 profile export service', () => {
       commitState: 'not-published'
     });
     await expect(import('node:fs/promises').then(({ lstat }) => lstat(late.output))).rejects.toMatchObject({ code: 'ENOENT' });
+
+    const packageDrift = await fixture();
+    await addLocalPackage(packageDrift, 'drifting-package');
+    const initialRecord = await readPackage(packageDrift.home, 'drifting-package');
+    await expect(exportProfile(
+      { bazframeHome: packageDrift.home, profileId: 'portable', outputDirectory: packageDrift.output },
+      { testHooks: { afterCapture: async (number) => {
+        if (number === 2) {
+          await writeFile(
+            join(packageDrift.home, 'packages', 'drifting-package.json'),
+            encodePackage({ ...initialRecord, root: join(packageDrift.root, 'moved', 'drifting-package') })
+          );
+        }
+      } } }
+    )).rejects.toMatchObject({ code: 'PROFILE_EXPORT_FAILED', commitState: 'not-published' });
+    await expect(import('node:fs/promises').then(({ lstat }) => lstat(packageDrift.output)))
+      .rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('delegates occupied and home-overlapping output classification without replacement or staging disclosure', async () => {

@@ -18,11 +18,12 @@ import {
   type ProfileImportPublicationOptions
 } from '../../../src/profile-portability/profile-import-publication.js';
 import type {
+  ManagedGitExactRevisionReuseRequirement,
   ManagedGitImportOutcomeClassification,
   ManagedGitLifecycleResult,
   ManagedGitOptions
 } from '../../../src/providers/managed-git.js';
-import type { PathFreeManagedGitIdentity } from '../../../src/providers/managed-git-record.js';
+import type { ManagedGitResourceKind, PathFreeManagedGitIdentity } from '../../../src/providers/managed-git-record.js';
 
 const home = '/tmp/bazframe-import-home';
 const artifactPath = '/tmp/profile-artifact';
@@ -35,7 +36,7 @@ const source = (id: string) => ({
   revision
 });
 
-function health(kind: 'skill' | 'library', id: string, inode = 30n) {
+function health(kind: 'skill' | 'library' | 'package', id: string, inode = 30n) {
   const root = `${home}/providers/git/checkouts/${kind}/${id}`;
   const record = {
     schemaVersion: 1 as const,
@@ -62,6 +63,17 @@ function health(kind: 'skill' | 'library', id: string, inode = 30n) {
       collectionSnapshot: {
         record: { schemaVersion: 1 as const, library: id, root, digest: 'c'.repeat(64) },
         path: `${home}/libraries/${id}.json`,
+        device: 1n,
+        inode: inode + 2n,
+        contentSha256: 'd'.repeat(64)
+      }
+    } : kind === 'package' ? {
+      collectionSnapshot: {
+        record: {
+          schemaVersion: 1 as const, package: id, root, digest: 'c'.repeat(64),
+          artifactRoot: 'dist', skillsRoot: 'skills'
+        },
+        path: `${home}/packages/${id}.json`,
         device: 1n,
         inode: inode + 2n,
         contentSha256: 'd'.repeat(64)
@@ -145,12 +157,14 @@ function planning(options: PlanningOptions = {}): ProfileImportPlanningResult {
         networkRequired: resourceAction === 'create',
         buildRequired: false as const
       })),
+      packageBuilds: { total: 0, remote: 0, local: 0, unresolvedRemotePackageIds: [], warnings: [] },
       activeSelection: options.activeProfile === undefined
         ? { state: 'absent' as const, willChange: false as const }
         : { state: 'selected' as const, profileId: options.activeProfile, willChange: false as const },
       composition: {
         status: composition,
         deferredLibraries: composition === 'deferred' ? ['toolkit'] : [],
+        deferredPackages: [],
         knownCollectionSkillCount: composition === 'ready' ? 1 : 0,
         knownCollectionSkillPreview: composition === 'ready' ? ['child'] : []
       },
@@ -191,6 +205,7 @@ function localPlanning(action: 'create' | 'reuse', root = '/tmp/sources/toolkit'
   base.plan.composition = {
     status: action === 'create' ? 'deferred' : 'ready',
     deferredLibraries: action === 'create' ? ['toolkit'] : [],
+    deferredPackages: [],
     knownCollectionSkillCount: action === 'reuse' ? 1 : 0,
     knownCollectionSkillPreview: action === 'reuse' ? ['child'] : []
   };
@@ -244,6 +259,7 @@ function mixedPlanning(action: 'create' | 'reuse'): ProfileImportPlanningResult 
   base.plan.composition = {
     status: action === 'create' ? 'deferred' : 'ready',
     deferredLibraries: action === 'create' ? ['alpha-lib', 'middle', 'zeta-lib'] : [],
+    deferredPackages: [],
     knownCollectionSkillCount: action === 'reuse' ? 3 : 0,
     knownCollectionSkillPreview: action === 'reuse' ? ['alpha-child', 'middle-child', 'zeta-child'] : []
   };
@@ -254,6 +270,88 @@ function mixedPlanning(action: 'create' | 'reuse'): ProfileImportPlanningResult 
     { kind: 'library', id: 'alpha-lib', sourceType: 'remoteGit' as const, health: health('library', 'alpha-lib', 50n) },
     { kind: 'library', id: 'middle', sourceType: 'localMapping' as const, health: localHealth },
     { kind: 'library', id: 'zeta-lib', sourceType: 'remoteGit' as const, health: health('library', 'zeta-lib', 60n) }
+  ] : [];
+  return base;
+}
+
+function packageManifest(root: string, inode = 500n) {
+  return {
+    manifest: { schemaVersion: 1 as const, build: ['node', 'build.mjs', '--literal'], artifactRoot: 'dist', skillsRoot: 'skills' },
+    path: `${root}/bazframe-package.json`,
+    device: 7n,
+    inode,
+    contentSha256: 'f'.repeat(64)
+  };
+}
+
+function packagePlanning(action: 'create' | 'reuse'): ProfileImportPlanningResult {
+  const base = planning({ resourceAction: action, composition: action === 'create' ? 'deferred' : 'ready' });
+  const localRoot = '/tmp/sources/middle-package';
+  const mapping = {
+    kind: 'package' as const,
+    id: 'middle-package',
+    root: localRoot,
+    device: 9n,
+    inode: 90n,
+    manifestSnapshot: packageManifest(localRoot)
+  };
+  const resources = [
+    { kind: 'skill' as const, id: 'alpha', source: source('alpha') },
+    { kind: 'library' as const, id: 'toolkit', source: source('toolkit') },
+    { kind: 'package' as const, id: 'alpha-package', source: source('alpha-package') },
+    { kind: 'package' as const, id: 'middle-package', source: { type: 'localMapping' as const } },
+    { kind: 'package' as const, id: 'zeta-package', source: source('zeta-package') }
+  ];
+  base.artifactSnapshot.artifact.profile.skills = ['alpha'];
+  base.artifactSnapshot.artifact.profile.libraries = ['toolkit'];
+  base.artifactSnapshot.artifact.profile.packages = ['alpha-package', 'middle-package', 'zeta-package'];
+  base.artifactSnapshot.artifact.resources = resources;
+  base.plan.skills = ['alpha'];
+  base.plan.libraries = ['toolkit'];
+  base.plan.packages = ['alpha-package', 'middle-package', 'zeta-package'];
+  base.plan.resources = resources.map((resource) => resource.source.type === 'localMapping'
+    ? {
+        kind: 'package' as const, id: resource.id,
+        source: { type: 'localMapping' as const, root: localRoot }, action,
+        networkRequired: false as const, buildRequired: action === 'create'
+      }
+    : {
+        kind: resource.kind, id: resource.id, source: resource.source, action,
+        networkRequired: action === 'create', buildRequired: resource.kind === 'package' && action === 'create'
+      });
+  base.plan.packageBuilds = {
+    total: action === 'create' ? 3 : 0,
+    remote: action === 'create' ? 2 : 0,
+    local: action === 'create' ? 1 : 0,
+    unresolvedRemotePackageIds: action === 'create' ? ['alpha-package', 'zeta-package'] : [],
+    warnings: action === 'create' ? ['warning'] : []
+  };
+  base.plan.composition = {
+    status: action === 'create' ? 'deferred' : 'ready',
+    deferredLibraries: action === 'create' ? ['toolkit'] : [],
+    deferredPackages: action === 'create' ? ['alpha-package', 'middle-package', 'zeta-package'] : [],
+    knownCollectionSkillCount: action === 'reuse' ? 4 : 0,
+    knownCollectionSkillPreview: action === 'reuse' ? ['child'] : []
+  };
+  base.mappingSnapshots = [mapping];
+  base.resourceSnapshots = action === 'reuse' ? [
+    { kind: 'skill', id: 'alpha', sourceType: 'remoteGit' as const, health: health('skill', 'alpha', 30n) },
+    { kind: 'library', id: 'toolkit', sourceType: 'remoteGit' as const, health: health('library', 'toolkit', 40n) },
+    { kind: 'package', id: 'alpha-package', sourceType: 'remoteGit' as const, health: health('package', 'alpha-package', 50n) },
+    {
+      kind: 'package', id: 'middle-package', sourceType: 'localMapping' as const,
+      health: {
+        mapping,
+        collectionSnapshot: {
+          record: {
+            schemaVersion: 1, package: 'middle-package', root: localRoot, digest: 'c'.repeat(64),
+            artifactRoot: 'dist', skillsRoot: 'skills'
+          },
+          path: `${home}/packages/middle-package.json`, device: 7n, inode: 92n, contentSha256: 'd'.repeat(64)
+        }
+      }
+    },
+    { kind: 'package', id: 'zeta-package', sourceType: 'remoteGit' as const, health: health('package', 'zeta-package', 70n) }
   ] : [];
   return base;
 }
@@ -298,11 +396,21 @@ function baseDependencies(plans: ProfileImportPlanningResult[], events: string[]
       events.push(`library:${id}:${identity.revision}`);
       return { action: plans[0]!.plan.resources.find((item) => item.id === id)!.action === 'reuse' ? 'current' : 'added', kind: 'library', id, root: '', remote: '', branch: 'main', revision };
     }),
+    addPackageAtRevision: vi.fn(async (
+      _options: ManagedGitOptions,
+      id: string,
+      identity: PathFreeManagedGitIdentity
+    ): Promise<ManagedGitLifecycleResult> => {
+      events.push(`package:${id}:${identity.revision}`);
+      return { action: plans[0]!.plan.resources.find((item) => item.id === id)!.action === 'reuse' ? 'current' : 'added', kind: 'package', id, root: '', remote: '', branch: 'main', revision };
+    }),
     classifyResourceOutcome: vi.fn(async (
       _home: string,
-      kind: 'skill' | 'library',
+      kind: ManagedGitResourceKind,
       id: string
-    ): Promise<ManagedGitImportOutcomeClassification> => ({ state: 'exact', health: health(kind, id) })),
+    ): Promise<ManagedGitImportOutcomeClassification> => {
+      return { state: 'exact', health: health(kind, id) };
+    }),
     stateLock: vi.fn(async (_path, _details, operation) => {
       events.push('lock');
       return operation();
@@ -473,7 +581,7 @@ describe('unexposed profile-import execution', () => {
       return { schemaVersion: 1 as const, library: 'toolkit', root, digest: 'd'.repeat(64), action: 'added' as const, path: `${home}/libraries/toolkit.json` };
     });
     const exactSnapshot = exact.resourceSnapshots[0]!;
-    if (exactSnapshot.sourceType !== 'localMapping') throw new Error('Expected local fixture health.');
+    if (exactSnapshot.sourceType !== 'localMapping' || exactSnapshot.kind !== 'library') throw new Error('Expected local fixture health.');
     deps.classifyLocalLibraryOutcome = vi.fn()
       .mockResolvedValueOnce({ state: 'absent' })
       .mockResolvedValue({ state: 'exact', health: exactSnapshot.health });
@@ -595,7 +703,7 @@ describe('unexposed profile-import execution', () => {
     deps.assertLocalMapping = vi.fn(async (mapping) => mapping);
     deps.addLocalLibrary = vi.fn();
     const exactSnapshot = exact.resourceSnapshots[0]!;
-    if (exactSnapshot.sourceType !== 'localMapping') throw new Error('Expected local fixture health.');
+    if (exactSnapshot.sourceType !== 'localMapping' || exactSnapshot.kind !== 'library') throw new Error('Expected local fixture health.');
     // @ts-expect-error Internal planning evidence cannot pair local health with a remote Git source.
     const impossible: ProfileImportResourceSnapshot = { kind: 'library', id: 'toolkit', sourceType: 'remoteGit', health: exactSnapshot.health };
     expect(impossible.sourceType).toBe('remoteGit');
@@ -712,7 +820,7 @@ describe('unexposed profile-import execution', () => {
     deps.assertLocalMapping = vi.fn(async (mapping) => mapping);
     deps.addLocalLibrary = vi.fn(async () => { throw new Error('local add reporting failed at /private/source/toolkit and /private/home'); });
     const exactSnapshot = exact.resourceSnapshots[0]!;
-    if (exactSnapshot.sourceType !== 'localMapping') throw new Error('Expected local fixture health.');
+    if (exactSnapshot.sourceType !== 'localMapping' || exactSnapshot.kind !== 'library') throw new Error('Expected local fixture health.');
     deps.classifyLocalLibraryOutcome = vi.fn()
       .mockResolvedValueOnce({ state: 'absent' })
       .mockResolvedValue({ state: 'exact', health: exactSnapshot.health });
@@ -741,7 +849,7 @@ describe('unexposed profile-import execution', () => {
       path: `${home}/libraries/toolkit.json`
     }));
     const exactSnapshot = exact.resourceSnapshots[0]!;
-    if (exactSnapshot.sourceType !== 'localMapping') throw new Error('Expected local fixture health.');
+    if (exactSnapshot.sourceType !== 'localMapping' || exactSnapshot.kind !== 'library') throw new Error('Expected local fixture health.');
     deps.classifyLocalLibraryOutcome = vi.fn()
       .mockResolvedValueOnce({ state: 'absent' })
       .mockResolvedValue({ state: 'exact', health: exactSnapshot.health });
@@ -753,6 +861,233 @@ describe('unexposed profile-import execution', () => {
       ...runOptions(), mappings: [{ kind: 'library', id: 'toolkit', root: '/tmp/sources/toolkit' }]
     }, deps));
     expect(error.result.resources).toEqual([{ kind: 'library', id: 'toolkit', outcome: 'commit-ambiguous' }]);
+  });
+
+  it('executes Skills then libraries then remote/local packages lexically and authorizes exact reports once', async () => {
+    const events: string[] = [];
+    const create = packagePlanning('create');
+    const exact = packagePlanning('reuse');
+    const deps = baseDependencies([create, create, exact, exact], events);
+    deps.assertLocalCollectionMapping = vi.fn(async (mapping) => mapping);
+    deps.classifyLocalCollectionOutcome = vi.fn(async () => ({ state: 'absent' as const }));
+    deps.addPackageAtRevision = vi.fn(async (
+      options: ManagedGitOptions,
+      id: string,
+      identity: PathFreeManagedGitIdentity
+    ): Promise<ManagedGitLifecycleResult> => {
+      events.push(`package:${id}:${identity.revision}`);
+      const root = `${home}/providers/git/checkouts/package/${id}`;
+      const context = {
+        packageId: id,
+        rootIdentity: { root, device: 4n, inode: 40n },
+        manifestSnapshot: packageManifest(root, id === 'alpha-package' ? 501n : 502n)
+      };
+      await options.beforePackageBuild?.(context);
+      options.onPackageBuildReady?.(context);
+      events.push(`spawn:${id}`);
+      return { action: 'added', kind: 'package', id, root, remote: identity.remote, branch: identity.branch, revision: identity.revision };
+    });
+    deps.addLocalPackage = vi.fn(async (_options, root, lifecycle) => {
+      events.push('package:middle-package:local');
+      const mapping = create.mappingSnapshots[0]!;
+      if (mapping.kind !== 'package') throw new Error('Expected package mapping.');
+      await lifecycle.beforePackageBuild?.({
+        packageId: 'middle-package',
+        rootIdentity: { root, device: mapping.device, inode: mapping.inode },
+        manifestSnapshot: mapping.manifestSnapshot
+      });
+      events.push('spawn:middle-package');
+      return {
+        schemaVersion: 1 as const, package: 'middle-package', root, digest: 'c'.repeat(64),
+        artifactRoot: 'dist', skillsRoot: 'skills', action: 'added' as const,
+        path: `${home}/packages/middle-package.json`
+      };
+    });
+    const reports: unknown[] = [];
+    const result = await executeProfileImport({
+      ...runOptions(),
+      mappings: [{ kind: 'package', id: 'middle-package', root: '/tmp/sources/middle-package' }],
+      authorizePackageBuild: (report) => { reports.push(report); events.push(`authorize:${report.packageId}`); return true; }
+    }, deps);
+
+    expect(events.filter((event) => /^(skill|library|package|authorize|spawn):/u.test(event))).toEqual([
+      `skill:alpha:${revision}`,
+      `library:toolkit:${revision}`,
+      `package:alpha-package:${revision}`,
+      'authorize:alpha-package',
+      'spawn:alpha-package',
+      'package:middle-package:local',
+      'authorize:middle-package',
+      'spawn:middle-package',
+      `package:zeta-package:${revision}`,
+      'authorize:zeta-package',
+      'spawn:zeta-package'
+    ]);
+    expect(reports).toHaveLength(3);
+    expect(reports[0]).toEqual({
+      packageId: 'alpha-package',
+      source: { type: 'remoteGit', remote: 'example.test/team/alpha-package', fetchUrl: 'https://example.test/team/alpha-package.git', branch: 'main', revision },
+      candidateRoot: `${home}/providers/git/checkouts/package/alpha-package`,
+      cwd: `${home}/providers/git/checkouts/package/alpha-package`,
+      argv: ['node', 'build.mjs', '--literal'],
+      manifest: { path: 'bazframe-package.json', sha256: 'f'.repeat(64) },
+      artifactRoot: 'dist', skillsRoot: 'skills', shell: false,
+      environment: { inherited: true, namesAndValuesExposed: false },
+      authority: { sandboxed: false, user: 'current-process-user', access: ['credentials', 'network', 'user-files'] },
+      warning: 'Package build side effects are not rollbackable.'
+    });
+    expect(reports[1]).toMatchObject({
+      packageId: 'middle-package',
+      source: { type: 'localMapping', root: '/tmp/sources/middle-package' },
+      candidateRoot: '/tmp/sources/middle-package'
+    });
+    expect(result.packageBuildReports).toHaveLength(3);
+    expect(result.possibleNonrollbackablePackageEffects).toEqual(['alpha-package', 'middle-package', 'zeta-package']);
+    expect(result.resources.map((resource) => `${resource.kind}:${resource.id}:${resource.outcome}`)).toEqual([
+      'skill:alpha:created', 'library:toolkit:created',
+      'package:alpha-package:created', 'package:middle-package:created', 'package:zeta-package:created'
+    ]);
+    expect(deps.publishProfile).toHaveBeenCalledWith(expect.objectContaining({
+      libraryIds: ['toolkit'], packageIds: ['alpha-package', 'middle-package', 'zeta-package']
+    }));
+  });
+
+  it('defaults package authorization to decline before spawn and reports no possible side effect', async () => {
+    const create = packagePlanning('create');
+    const deps = baseDependencies([create, create]);
+    let spawned = false;
+    deps.addPackageAtRevision = vi.fn(async (options, id) => {
+      const root = `${home}/providers/git/checkouts/package/${id}`;
+      await options.beforePackageBuild?.({
+        packageId: id,
+        rootIdentity: { root, device: 4n, inode: 40n },
+        manifestSnapshot: packageManifest(root)
+      });
+      spawned = true;
+      throw new Error('unreachable');
+    });
+    (deps.classifyResourceOutcome as ReturnType<typeof vi.fn>).mockImplementation(async (_home, kind: ManagedGitResourceKind, id: string) => (
+      kind === 'package' ? { state: 'absent' } : { state: 'exact', health: health(kind, id) }
+    ));
+    const error = await executionError(executeProfileImport({
+      ...runOptions(), mappings: [{ kind: 'package', id: 'middle-package', root: '/tmp/sources/middle-package' }]
+    }, deps));
+    expect(spawned).toBe(false);
+    expect(error.cause).toMatchObject({ code: 'PROFILE_IMPORT_PACKAGE_BUILD_DECLINED' });
+    expect(error.result.packageBuildReports).toHaveLength(1);
+    expect(error.result.possibleNonrollbackablePackageEffects).toEqual([]);
+    expect(error.result.resources).toContainEqual({ kind: 'package', id: 'alpha-package', outcome: 'not-created' });
+    expect(deps.publishProfile).not.toHaveBeenCalled();
+  });
+
+  it('rejects remote callback context manifest mismatch after approval without allowing spawn', async () => {
+    const create = packagePlanning('create');
+    const deps = baseDependencies([create, create]);
+    let spawned = false;
+    deps.addPackageAtRevision = vi.fn(async (options, id) => {
+      const root = `${home}/providers/git/checkouts/package/${id}`;
+      const approvedContext = {
+        packageId: id,
+        rootIdentity: { root, device: 4n, inode: 40n },
+        manifestSnapshot: packageManifest(root)
+      };
+      await options.beforePackageBuild?.(approvedContext);
+      options.onPackageBuildReady?.({
+        ...approvedContext,
+        manifestSnapshot: { ...approvedContext.manifestSnapshot, contentSha256: '0'.repeat(64) }
+      });
+      spawned = true;
+      throw new Error('unreachable');
+    });
+    (deps.classifyResourceOutcome as ReturnType<typeof vi.fn>).mockImplementation(async (_home, kind: ManagedGitResourceKind, id: string) => (
+      kind === 'package' ? { state: 'absent' } : { state: 'exact', health: health(kind, id) }
+    ));
+    const error = await executionError(executeProfileImport({
+      ...runOptions(),
+      mappings: [{ kind: 'package', id: 'middle-package', root: '/tmp/sources/middle-package' }],
+      authorizePackageBuild: () => true
+    }, deps));
+    expect(spawned).toBe(false);
+    expect(error.cause).toMatchObject({ code: 'PROFILE_IMPORT_PACKAGE_CHANGED' });
+    expect(error.result.packageBuildReports).toHaveLength(1);
+    expect(error.result.possibleNonrollbackablePackageEffects).toEqual([]);
+  });
+
+  it('fails callback-time local manifest identity drift without allowing spawn', async () => {
+    const create = packagePlanning('create');
+    create.artifactSnapshot.artifact.profile.skills = [];
+    create.artifactSnapshot.artifact.profile.libraries = [];
+    create.artifactSnapshot.artifact.profile.packages = ['middle-package'];
+    create.artifactSnapshot.artifact.resources = create.artifactSnapshot.artifact.resources.filter((item) => item.id === 'middle-package');
+    create.plan.skills = [];
+    create.plan.libraries = [];
+    create.plan.packages = ['middle-package'];
+    create.plan.resources = create.plan.resources.filter((item) => item.id === 'middle-package');
+    create.plan.composition.deferredLibraries = [];
+    create.plan.composition.deferredPackages = ['middle-package'];
+    const deps = baseDependencies([create, create]);
+    const mapping = create.mappingSnapshots[0]!;
+    if (mapping.kind !== 'package') throw new Error('Expected package mapping.');
+    let assertions = 0;
+    deps.assertLocalCollectionMapping = vi.fn(async () => {
+      assertions += 1;
+      return assertions === 3
+        ? { ...mapping, manifestSnapshot: { ...mapping.manifestSnapshot, contentSha256: '0'.repeat(64) } }
+        : mapping;
+    }) as unknown as NonNullable<ProfileImportExecutionDependencies['assertLocalCollectionMapping']>;
+    deps.classifyLocalCollectionOutcome = vi.fn(async () => ({ state: 'absent' as const }));
+    let spawned = false;
+    deps.addLocalPackage = vi.fn(async (_options, root, lifecycle) => {
+      await lifecycle.beforePackageBuild?.({
+        packageId: 'middle-package',
+        rootIdentity: { root, device: mapping.device, inode: mapping.inode },
+        manifestSnapshot: mapping.manifestSnapshot
+      });
+      spawned = true;
+      throw new Error('unreachable');
+    });
+    const error = await executionError(executeProfileImport({
+      ...runOptions(),
+      mappings: [{ kind: 'package', id: 'middle-package', root: mapping.root }],
+      authorizePackageBuild: () => true
+    }, deps));
+    expect(spawned).toBe(false);
+    expect(error.cause).toMatchObject({ code: 'PROFILE_IMPORT_MAPPING_CHANGED' });
+    expect(error.result.packageBuildReports).toHaveLength(1);
+    expect(error.result.possibleNonrollbackablePackageEffects).toEqual([]);
+  });
+
+  it('reuses exact packages without report, authorization, network, build, or lifecycle work', async () => {
+    const exact = packagePlanning('reuse');
+    const deps = baseDependencies([exact, exact, exact, exact]);
+    const authorization = vi.fn(() => true);
+    deps.addPackageAtRevision = vi.fn(async (
+      _options: ManagedGitOptions,
+      id: string,
+      identity: PathFreeManagedGitIdentity,
+      requirement?: ManagedGitExactRevisionReuseRequirement
+    ): Promise<ManagedGitLifecycleResult> => {
+      expect(requirement?.mode).toBe('must-reuse');
+      return {
+        action: 'current', kind: 'package', id, root: '', remote: identity.remote,
+        branch: identity.branch, revision: identity.revision
+      };
+    });
+    deps.addLocalPackage = vi.fn(async () => { throw new Error('local lifecycle must not run'); });
+    deps.assertLocalCollectionMapping = vi.fn(async (mapping) => mapping);
+    const localSnapshot = exact.resourceSnapshots.find((item) => item.kind === 'package' && item.id === 'middle-package');
+    if (localSnapshot?.sourceType !== 'localMapping') throw new Error('Expected local package health.');
+    deps.classifyLocalCollectionOutcome = (vi.fn(async () => ({ state: 'exact' as const, health: localSnapshot.health })) as unknown as NonNullable<ProfileImportExecutionDependencies['classifyLocalCollectionOutcome']>);
+    const result = await executeProfileImport({
+      ...runOptions(),
+      mappings: [{ kind: 'package', id: 'middle-package', root: '/tmp/sources/middle-package' }],
+      authorizePackageBuild: authorization
+    }, deps);
+    expect(authorization).not.toHaveBeenCalled();
+    expect(deps.addPackageAtRevision).toHaveBeenCalledTimes(2);
+    expect(deps.addLocalPackage).not.toHaveBeenCalled();
+    expect(result.packageBuildReports).toEqual([]);
+    expect(result.possibleNonrollbackablePackageEffects).toEqual([]);
   });
 
   it('preserves proven reuse across lock-release failure', async () => {

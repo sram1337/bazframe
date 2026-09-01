@@ -13,7 +13,7 @@ Bazframe composes a personal profile with coding-agent runtime and repository co
 - Use `bazframe` commands for normal state changes under `${BAZFRAME_HOME:-$HOME/.bazframe}`. Do not edit catalog links, profile memberships, records, references, snapshots, policy, or adapter artifacts manually. Follow retained remote-Git recovery guidance exactly: add/update/build require inspected manual reconciliation before removing the recovery record; removal keeps its recovery record while the listed remove command verifies and finishes forward cleanup.
 - Added Skills in `(default)` are live. Local sources remain externally owned; Skills acquired from remote Git sources update only through `bazframe skill update`.
 - A library is an already-prepared directory. Adding or updating one executes nothing; remote Git updates acquire the recorded branch before snapshot activation.
-- A package is a buildable project with `bazframe-package.json`. Package add/build/update executes its literal argv unsandboxed with ordinary user authority.
+- A package is a buildable project with `bazframe-package.json`. Package add/build/update executes its literal argv unsandboxed with current-process-user authority.
 - Library/package snapshots are immutable. Edit source input, then explicitly update the library or build the package.
 - Treat live `bazframe --help` and resource help as authoritative.
 
@@ -89,18 +89,20 @@ bazframe project list
 
 `profile edit` opens the named profile's `AGENTS.md` without changing selection. Use an executable wrapper for editor flags or GUI wait behavior, and run `/bazframe reload` in an existing Pi session afterward.
 
-Stage 2 `profile export` publishes canonical `bazframe-profile.json` plus exact `profile/AGENTS.md` bytes for an explicit profile without changing active selection. It includes direct Skills from exact remote Git revisions and libraries from exact remote Git revisions or healthy local sources. A healthy local library exports only `{ "type": "localMapping" }`, without a source-machine path or snapshot digest. Healthy local direct Skills remain named omissions and cannot be mapped; all packages are blocked. Review the exported `profile/AGENTS.md` before sharing.
+Stage 3 package portability is live on macOS and Linux; Windows publication and full portability are not. `profile export` publishes path-free canonical `bazframe-profile.json` plus exact `profile/AGENTS.md` bytes without changing active selection. It includes direct Skills and whole libraries/packages from exact remote Git revisions. Healthy local libraries/packages export only `{ "type": "localMapping" }`, without source-machine paths, snapshots, or copied source. Healthy local direct Skills remain named omissions and have no mapping. Review exported `profile/AGENTS.md` for secrets because Bazframe does not redact user-authored instructions.
 
-Stage 2 `profile import` always reports an inspection plan first. Its canonical grammar is `bazframe profile import [--json] [--as <profile>] [--map library:<id>=<absolute-source-directory>]... [--dry-run] <directory>`. The mapping-free commands above apply when the artifact declares no local libraries. If it declares local library `toolkit`, supply the same mapping during inspection and execution:
+`profile import` always reports an inspection plan first. Its canonical grammar is `bazframe profile import [--json] [--as <profile>] [--map (library|package):<id>=<absolute-source-directory>]... [--dry-run | --yes] <directory>`. Supply one repeatable typed map for each declared local library/package; each root must be absolute, physical, and basename-matching:
 
 ```bash
-bazframe profile import --map library:toolkit=/srv/skill-libraries/toolkit --dry-run <directory>
-bazframe profile import --as <profile> --map library:toolkit=/srv/skill-libraries/toolkit <directory>
+bazframe profile import --map library:toolkit=/srv/libraries/toolkit --map package:automation=/srv/packages/automation --dry-run <directory>
+bazframe profile import --as <profile> --map library:toolkit=/srv/libraries/toolkit --map package:automation=/srv/packages/automation --yes <directory>
 ```
 
-Supply one repeatable mapping for each artifact-declared local library; extra mappings are rejected. The mapping root must be an absolute physical source directory with basename equal to the library ID; inspection is read-only and a missing mapping blocks the plan.
+Dry-run takes no Bazframe write lock and performs no Bazframe writes, network access, builds, prompts, or active-selection mutation. `--yes` is invalid with it. Execution creates or exactly reuses branch-reachable historical remote revisions, never substitutes current branch HEAD, and processes packages last. Exact healthy package reuse is offline, build/report/prompt/consent-free.
 
-Use `--dry-run` for no-network, no-build, no-Bazframe-write inspection; a blocked dry-run is still a successful inspection. Execution creates or exactly reuses recorded remote Git revisions, creates an absent mapped library through ordinary build-free `addLibrary` or exactly reuses the same canonical root, and never overwrites, updates, or repoints a library. It publishes an inactive profile, leaves omitted local Skills omitted, keeps active selection unchanged, and never promotes library children into `(default)`. `--as` changes only the destination profile ID. Earlier created resources remain on partial failure and are reused on retry; inspect recovery-required and commit-ambiguous outcomes before continuing. Packages and `--yes` remain unsupported until Stage 3. Windows publication and full portability remain unavailable.
+Before each new package build, inspect the exact package/source, candidate-root/cwd, literal argv, manifest path/SHA-256, artifact/Skills roots, `shell: false`, inherited-environment, and authority report. Builds are unsandboxed as `current-process-user`, may access credentials, networks, and user files, and can have nonrollbackable effects. Interactive consent accepts only literal `y` and defaults to decline; `--yes` authorizes exact revalidated reports. Limits are 64 KiB manifest; 64 argv entries, 4 KiB each and 16 KiB aggregate; 4,096-byte package paths; 30-minute builds; and 5-second termination grace.
+
+Import retains earlier resources on partial failure; inspect recovery-required/commit-ambiguous outcomes and retry for exact reuse. JSON hides environment names/values and private physical identity fields but reports explicit local mapping roots. A newly published profile remains inactive; exact reuse of an already-active destination leaves that selection unchanged. Active selection never changes, and collection children never enter `(default)`.
 
 ## Pi adapter and diagnosis
 

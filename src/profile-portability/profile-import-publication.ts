@@ -47,6 +47,7 @@ export interface ProfileImportPublicationOptions {
   instructionBytes: Uint8Array;
   skills: readonly ProfileImportPublicationSkillTarget[];
   libraryIds: readonly string[];
+  packageIds?: readonly string[];
   commit: (publish: () => Promise<void>) => Promise<ProfileImportPublicationAction>;
 }
 
@@ -105,12 +106,14 @@ interface PreparedPublication {
   instructionBytes: Uint8Array;
   skills: PreparedSkill[];
   libraryIds: string[];
+  packageIds: string[];
   commit: ProfileImportPublicationOptions['commit'];
 }
 interface CreatedTree {
   staging?: HeldDirectory;
   skills?: HeldDirectory;
   libraries?: HeldDirectory;
+  packages?: HeldDirectory;
   instructions?: FileIdentity;
   links: LinkIdentity[];
   references: FileIdentity[];
@@ -142,8 +145,9 @@ function prepare(options: ProfileImportPublicationOptions): PreparedPublication 
     throw new BazframeError('PROFILE_IMPORT_PUBLICATION_INVALID', 'Bazframe home must be a non-empty path without NUL bytes.');
   }
   if (typeof options.commit !== 'function') throw new BazframeError('PROFILE_IMPORT_PUBLICATION_INVALID', 'A commit callback is required.');
-  if (!Array.isArray(options.skills) || !Array.isArray(options.libraryIds)) {
-    throw new BazframeError('PROFILE_IMPORT_PUBLICATION_INVALID', 'Skill targets and library IDs must be arrays.');
+  if (!Array.isArray(options.skills) || !Array.isArray(options.libraryIds)
+    || (options.packageIds !== undefined && !Array.isArray(options.packageIds))) {
+    throw new BazframeError('PROFILE_IMPORT_PUBLICATION_INVALID', 'Skill targets, library IDs, and package IDs must be arrays.');
   }
   assertSafeProfileId(options.destinationProfileId);
   const home = resolve(options.bazframeHome);
@@ -174,6 +178,9 @@ function prepare(options: ProfileImportPublicationOptions): PreparedPublication 
   const libraryIds = [...options.libraryIds];
   for (const id of libraryIds) assertSafeSkillId(id);
   assertSortedUnique(libraryIds, 'library IDs');
+  const packageIds = [...(options.packageIds ?? [])];
+  for (const id of packageIds) assertSafeSkillId(id);
+  assertSortedUnique(packageIds, 'package IDs');
   return {
     home,
     profilesRoot,
@@ -183,6 +190,7 @@ function prepare(options: ProfileImportPublicationOptions): PreparedPublication 
     instructionBytes,
     skills,
     libraryIds,
+    packageIds,
     commit: options.commit
   };
 }
@@ -249,8 +257,21 @@ async function publishPrepared(
         ));
       }
     }
+    if (prepared.packageIds.length > 0) {
+      const packagesPath = join(prepared.stagingPath, 'packages');
+      await mkdir(packagesPath, { mode: DIRECTORY_MODE });
+      tree.packages = await holdDirectory(packagesPath, 'Imported profile packages');
+      for (const id of prepared.packageIds) {
+        const reference: ProfileSkillCollectionReference = { schemaVersion: 1, package: id };
+        tree.references.push(await createFile(
+          join(packagesPath, `${id}.json`),
+          Buffer.from(encodeProfileCollectionReference(reference), 'utf8')
+        ));
+      }
+    }
     await syncDirectory(tree.skills);
     if (tree.libraries !== undefined) await syncDirectory(tree.libraries);
+    if (tree.packages !== undefined) await syncDirectory(tree.packages);
     await syncDirectory(tree.staging);
     await hooks.atPhase?.('after-tree-written');
     await validateTree(prepared, parent, tree, prepared.stagingPath);
@@ -426,24 +447,41 @@ async function validateTree(
   if (tree.staging === undefined || tree.skills === undefined || tree.instructions === undefined) throw invalid('Imported profile staging is incomplete');
   const skillsPath = join(rootPath, 'skills');
   const librariesPath = join(rootPath, 'libraries');
+  const packagesPath = join(rootPath, 'packages');
   await assertDirectoryIdentity(parent, 'Profiles parent changed during publication');
   await assertDirectoryIdentity({ ...tree.staging, path: rootPath }, 'Imported profile staging changed');
   await assertDirectoryIdentity({ ...tree.skills, path: skillsPath }, 'Imported profile skills directory changed');
   if (tree.libraries !== undefined) {
     await assertDirectoryIdentity({ ...tree.libraries, path: librariesPath }, 'Imported profile libraries directory changed');
   }
+  if (tree.packages !== undefined) {
+    await assertDirectoryIdentity({ ...tree.packages, path: packagesPath }, 'Imported profile packages directory changed');
+  }
   await assertMode(rootPath, DIRECTORY_MODE);
   await assertMode(skillsPath, DIRECTORY_MODE);
   if (tree.libraries !== undefined) await assertMode(librariesPath, DIRECTORY_MODE);
-  const rootNames = ['AGENTS.md', 'skills', ...(tree.libraries === undefined ? [] : ['libraries'])].sort(compare);
+  if (tree.packages !== undefined) await assertMode(packagesPath, DIRECTORY_MODE);
+  const rootNames = [
+    'AGENTS.md', 'skills',
+    ...(tree.libraries === undefined ? [] : ['libraries']),
+    ...(tree.packages === undefined ? [] : ['packages'])
+  ].sort(compare);
   await assertExactNames(rootPath, rootNames);
   await assertExactNames(skillsPath, prepared.skills.map((skill) => skill.id));
   if (tree.libraries !== undefined) await assertExactNames(librariesPath, prepared.libraryIds.map((id) => `${id}.json`));
+  if (tree.packages !== undefined) await assertExactNames(packagesPath, prepared.packageIds.map((id) => `${id}.json`));
   await assertFile({ ...tree.instructions, path: join(rootPath, 'AGENTS.md') });
   for (const [index, reference] of tree.references.entries()) {
-    await assertFile({ ...reference, path: join(librariesPath, `${prepared.libraryIds[index]!}.json`) });
+    if (index < prepared.libraryIds.length) {
+      await assertFile({ ...reference, path: join(librariesPath, `${prepared.libraryIds[index]!}.json`) });
+    } else {
+      await assertFile({ ...reference, path: join(packagesPath, `${prepared.packageIds[index - prepared.libraryIds.length]!}.json`) });
+    }
   }
-  if (tree.links.length !== prepared.skills.length || tree.references.length !== prepared.libraryIds.length) throw invalid('Imported profile staging entries are incomplete');
+  if (tree.links.length !== prepared.skills.length
+    || tree.references.length !== prepared.libraryIds.length + prepared.packageIds.length) {
+    throw invalid('Imported profile staging entries are incomplete');
+  }
   for (const [index, link] of tree.links.entries()) {
     const skill = prepared.skills[index]!;
     if (link.target !== skill.target) throw invalid('Imported profile Skill evidence changed');
@@ -530,7 +568,7 @@ async function probeIdentity(path: string, expected: DirectoryIdentity): Promise
 }
 
 async function closeTree(tree: CreatedTree): Promise<void> {
-  for (const directory of [tree.libraries, tree.skills, tree.staging]) {
+  for (const directory of [tree.packages, tree.libraries, tree.skills, tree.staging]) {
     if (directory !== undefined) await closeDirectory(directory);
   }
 }
@@ -549,13 +587,23 @@ async function cleanupOwnedTree(
 ): Promise<void> {
   if (tree.staging === undefined || tree.skills === undefined || tree.instructions === undefined) return;
   await assertDirectoryIdentity(parent, 'Refusing to clean through a changed profiles parent');
-  await assertExactNames(tree.staging.path, ['AGENTS.md', 'skills', ...(tree.libraries === undefined ? [] : ['libraries'])].sort(compare));
+  await assertExactNames(tree.staging.path, [
+    'AGENTS.md', 'skills',
+    ...(tree.libraries === undefined ? [] : ['libraries']),
+    ...(tree.packages === undefined ? [] : ['packages'])
+  ].sort(compare));
   await assertExactNames(tree.skills.path, prepared.skills.map((skill) => skill.id));
   if (tree.libraries !== undefined) await assertExactNames(tree.libraries.path, prepared.libraryIds.map((id) => `${id}.json`));
+  if (tree.packages !== undefined) await assertExactNames(tree.packages.path, prepared.packageIds.map((id) => `${id}.json`));
   for (const file of [...tree.references].reverse()) {
     await hooks.beforeCleanupEntry?.(file.path);
     await assertFile(file);
     await unlink(file.path);
+  }
+  if (tree.packages !== undefined) {
+    await hooks.beforeCleanupEntry?.(tree.packages.path);
+    await assertDirectoryIdentity(tree.packages, 'Refusing to clean changed packages directory');
+    await rmdir(tree.packages.path);
   }
   if (tree.libraries !== undefined) {
     await hooks.beforeCleanupEntry?.(tree.libraries.path);

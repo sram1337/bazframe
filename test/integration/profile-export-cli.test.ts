@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { lstat, mkdir, readFile, realpath, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, readdir, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { containsUnsafeDisplayCharacters } from '../../src/core/safe-text.js';
@@ -53,7 +53,8 @@ describe.skipIf(process.platform === 'win32')('profile export CLI', () => {
     expect(exported.status, JSON.stringify(exported)).toBe(0);
     expect(exported.stdout).toContain('Profile export: published');
     expect(exported.stdout).toContain(`Output: ${output}`);
-    expect(exported.stdout).toContain('Packages: absent (Stage 2)');
+    expect(exported.stdout).toContain('Remote Git packages:\n  (none)');
+    expect(exported.stdout).toContain('Local-mapping packages:\n  (none)');
     expect(exported.stderr).toBe(`warning: Review ${output}/profile/AGENTS.md before sharing the export.\n`);
     expect(await readFile(`${output}/profile/AGENTS.md`)).toEqual(bytes);
     expect(await readdir(output)).toEqual(['bazframe-profile.json', 'profile']);
@@ -205,7 +206,7 @@ describe.skipIf(process.platform === 'win32')('profile export CLI', () => {
     await expect(readFile(`${f.home}/export/bazframe-profile.json`)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it('exports local libraries path-free in Stage 2 while packages remain blocked', async () => {
+  it('exports local libraries and source-built packages path-free in Stage 3 prose and JSON', async () => {
     const f = await fixture();
     const library = `${f.root}/local-library`;
     await mkdir(`${library}/library-skill`, { recursive: true });
@@ -218,7 +219,7 @@ describe.skipIf(process.platform === 'win32')('profile export CLI', () => {
     const exported = run(['profile', 'export', 'portable', '--output', proseOutput], f.cwd, f.environment);
     expect(exported.status, JSON.stringify(exported)).toBe(0);
     expect(exported.stdout).toContain('Local-mapping libraries:\n  - local-library');
-    expect(exported.stdout).toContain('Packages: absent (Stage 2)');
+    expect(exported.stdout).toContain('Local-mapping packages:\n  (none)');
     const manifestText = await readFile(`${proseOutput}/bazframe-profile.json`, 'utf8');
     const manifest = JSON.parse(manifestText);
     expect(manifest.resources).toEqual([{ kind: 'library', id: 'local-library', source: { type: 'localMapping' } }]);
@@ -257,24 +258,38 @@ describe.skipIf(process.platform === 'win32')('profile export CLI', () => {
     expect(run(['package', 'add', packageRoot], f.cwd, f.environment).status).toBe(0);
     expect(run(['profile', 'package', 'add', '--profile', 'portable', 'local-package'], f.cwd, f.environment).status).toBe(0);
 
-    const blockedPackageOutput = `${f.root}/exports/package`;
-    const blockedPackage = run(['profile', 'export', 'portable', '--output', blockedPackageOutput], f.cwd, f.environment);
-    expect(blockedPackage.status).toBe(1);
-    expect(blockedPackage.stdout).toBe('');
-    expect(blockedPackage.stderr).toContain('Stage 2 profile export does not support package references.');
-    await expect(lstat(blockedPackageOutput)).rejects.toMatchObject({ code: 'ENOENT' });
-    const blockedJsonOutput = `${f.root}/exports/package-json`;
-    const blockedJson = run(['profile', 'export', 'portable', '--output', blockedJsonOutput, '--json'], f.cwd, f.environment);
-    expect(blockedJson.status).toBe(1);
-    expect(blockedJson.stderr).toBe('');
-    expect(JSON.parse(blockedJson.stdout)).toMatchObject({
-      ok: false,
+    const packageOutput = `${f.root}/exports/package`;
+    const packageExport = run(['profile', 'export', 'portable', '--output', packageOutput], f.cwd, f.environment);
+    expect(packageExport.status, JSON.stringify(packageExport)).toBe(0);
+    expect(packageExport.stdout).toContain('Local-mapping packages:\n  - local-package');
+    expect(packageExport.stdout).not.toContain('package-skill');
+    const packageManifestText = await readFile(`${packageOutput}/bazframe-profile.json`, 'utf8');
+    expect(JSON.parse(packageManifestText)).toMatchObject({
+      profile: { skills: [], packages: ['local-package'] },
+      resources: [{ kind: 'package', id: 'local-package', source: { type: 'localMapping' } }]
+    });
+    for (const forbidden of [packageRoot, process.execPath, 'build.mjs', 'artifactRoot', 'skillsRoot', 'digest', 'argv', 'transport']) {
+      expect(packageManifestText).not.toContain(forbidden);
+    }
+
+    const packageJsonOutput = `${f.root}/exports/package-json`;
+    const packageJson = run(['profile', 'export', 'portable', '--output', packageJsonOutput, '--json'], f.cwd, f.environment);
+    expect(packageJson.status, JSON.stringify(packageJson)).toBe(0);
+    expect(packageJson.stderr).toBe('');
+    const packageDocument = JSON.parse(packageJson.stdout);
+    expect(packageDocument).toMatchObject({
+      ok: true,
       command: 'profile.export',
-      error: {
-        code: 'PROFILE_EXPORT_STAGE2_UNSUPPORTED',
-        message: 'Stage 2 profile export does not support package references.'
+      result: {
+        skills: [],
+        packages: ['local-package'],
+        resources: [{ kind: 'package', id: 'local-package', sourceType: 'localMapping' }]
       }
     });
-    await expect(lstat(blockedJsonOutput)).rejects.toMatchObject({ code: 'ENOENT' });
+    const packageDocumentText = JSON.stringify(packageDocument);
+    for (const forbidden of [packageRoot, process.execPath, 'build.mjs', 'artifactRoot', 'skillsRoot', 'argv', 'transport', 'device', 'inode', 'snapshot']) {
+      expect(packageDocumentText).not.toContain(forbidden);
+    }
+    expect(JSON.stringify(packageDocument.result.resources)).not.toContain('digest');
   });
 });

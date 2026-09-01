@@ -109,6 +109,37 @@ posixDescribe('imported profile publication', () => {
     expect(await stagingNames(entered.profiles)).toEqual([]);
   });
 
+  it('publishes exact package reference files without package-child links', async () => {
+    const entered = await fixture();
+    await publishImportedProfile(options(entered, {
+      packageIds: ['alpha-package', 'zeta-package']
+    }));
+    const destination = join(entered.profiles, 'focused');
+    expect(await readdir(destination)).toEqual(['AGENTS.md', 'libraries', 'packages', 'skills']);
+    expect(await readdir(join(destination, 'packages'))).toEqual(['alpha-package.json', 'zeta-package.json']);
+    expect(await readFile(join(destination, 'packages/alpha-package.json'), 'utf8'))
+      .toBe(encodeProfileCollectionReference({ schemaVersion: 1, package: 'alpha-package' }));
+    expect(await readFile(join(destination, 'packages/zeta-package.json'), 'utf8'))
+      .toBe(encodeProfileCollectionReference({ schemaVersion: 1, package: 'zeta-package' }));
+    await expect(lstat(join(destination, 'skills', 'package-child'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('defensively copies package IDs and validates their lexical uniqueness', async () => {
+    const entered = await fixture();
+    const packageIds = ['alpha-package'];
+    await publishImportedProfile(options(entered, { packageIds }), {
+      atPhase: (phase) => {
+        if (phase === 'after-staging-created') packageIds[0] = 'changed';
+      }
+    });
+    expect(await readdir(join(entered.profiles, 'focused/packages'))).toEqual(['alpha-package.json']);
+
+    const invalid = await fixture();
+    await expect(publishImportedProfile(options(invalid, { packageIds: ['zeta', 'alpha'] })))
+      .rejects.toMatchObject({ code: 'PROFILE_IMPORT_PUBLICATION_INVALID' });
+    expect(await stagingNames(invalid.profiles)).toEqual([]);
+  });
+
   it('omits collection directories when the artifact has no libraries', async () => {
     const entered = await fixture();
     await publishImportedProfile(options(entered, { libraryIds: [] }));

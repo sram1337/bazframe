@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   assertStage1ProfileArtifactCapabilities,
   assertStage2ProfileArtifactCapabilities,
+  assertStage3ProfileArtifactCapabilities,
   decodeProfileArtifactBytes,
   decodeProfileArtifactObject,
   encodeProfileArtifact,
@@ -243,7 +244,7 @@ describe('profile artifact object codec', () => {
       .toThrow(/source type is invalid/u);
   });
 
-  it('recognizes future local library and remote Git/local package variants', () => {
+  it('canonically round-trips schema-v1 local libraries and both package source variants', () => {
     const localLibrary = remoteGitFixture();
     localLibrary.resources[1]!.source = { type: 'localMapping' };
     expect(decode(localLibrary).resources[1]!.source).toEqual({ type: 'localMapping' });
@@ -252,7 +253,11 @@ describe('profile artifact object codec', () => {
       const withPackage = remoteGitFixture();
       withPackage.profile.packages = ['automation'];
       withPackage.resources.push(packageResource(packageSource));
-      expect(decode(withPackage).resources[2]!.source).toEqual(packageSource);
+      const policy = testPolicyFor(withPackage);
+      const encoded = encodeProfileArtifact(withPackage, policy);
+      expect(JSON.parse(encoded)).toMatchObject({ schemaVersion: 1 });
+      expect(decodeProfileArtifactBytes(Buffer.from(encoded), policy)).toEqual(withPackage);
+      expect(() => assertStage3ProfileArtifactCapabilities(decode(withPackage))).not.toThrow();
     }
   });
 
@@ -284,10 +289,43 @@ describe('profile artifact object codec', () => {
     localLibrary.resources[1]!.source = { type: 'localMapping' };
     expect(() => assertStage2ProfileArtifactCapabilities(decode(localLibrary))).not.toThrow();
 
-    const withPackage = clone(remoteGitFixture());
-    withPackage.profile.packages = ['automation'];
-    withPackage.resources.push({ kind: 'package', id: 'automation', source: remoteGitSource('automation') });
-    expect(() => assertStage2ProfileArtifactCapabilities(decode(withPackage))).toThrow(/packages/u);
+    for (const source of [remoteGitSource('automation'), { type: 'localMapping' as const }]) {
+      const withPackage = clone(remoteGitFixture());
+      withPackage.profile.packages = ['automation'];
+      withPackage.resources.push(packageResource(source));
+      expect(() => assertStage2ProfileArtifactCapabilities(decode(withPackage))).toThrow(/packages/u);
+    }
+  });
+
+  it('enforces package closure, ordering, uniqueness, and source validity without changing schema v1', () => {
+    const fixture = remoteGitFixture();
+    fixture.profile.packages = ['automation'];
+    fixture.resources.push(packageResource({ type: 'localMapping' }));
+    expect(decode(fixture).schemaVersion).toBe(1);
+
+    const missing = clone(fixture);
+    missing.resources.pop();
+    expect(() => decode(missing)).toThrow(/exactly match/u);
+
+    const orphan = clone(fixture);
+    orphan.profile.packages = [];
+    expect(() => decode(orphan)).toThrow(/exactly match/u);
+
+    const duplicate = clone(fixture);
+    duplicate.profile.packages = ['automation', 'automation'];
+    expect(() => decode(duplicate)).toThrow(/lexical order/u);
+
+    const wrongOrder = clone(fixture);
+    wrongOrder.resources = [wrongOrder.resources[2]!, wrongOrder.resources[0]!, wrongOrder.resources[1]!];
+    expect(() => decode(wrongOrder)).toThrow(/unique and ordered/u);
+
+    const wrongSource = clone(fixture) as unknown as { resources: Array<{ source: Record<string, unknown> }> };
+    wrongSource.resources[2]!.source = { type: 'localPackagePath', root: '/private/package' };
+    expect(() => decodeProfileArtifactObject(wrongSource, testPolicyFor(fixture))).toThrow(/source type is invalid/u);
+
+    const leakedLocalPath = clone(fixture) as unknown as { resources: Array<{ source: Record<string, unknown> }> };
+    leakedLocalPath.resources[2]!.source.root = '/private/package';
+    expect(() => decodeProfileArtifactObject(leakedLocalPath, testPolicyFor(fixture))).toThrow(/exactly/u);
   });
 
   it('enforces fixture-derived below, at, and above canonical manifest byte ceilings', () => {

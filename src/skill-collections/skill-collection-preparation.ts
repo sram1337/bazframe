@@ -1,8 +1,14 @@
 import { lstat, realpath } from 'node:fs/promises';
-import { join } from 'node:path';
-import { spawnInheritedChild, type ChildOutputPolicy } from '../core/child-process.js';
+import { basename, join } from 'node:path';
+import {
+  spawnBoundedPackageProcess,
+  type BoundedPackageProcessOptions,
+  type BoundedPackageProcessResult,
+  type ChildOutputPolicy
+} from '../core/child-process.js';
 import { BazframeError, errorCode } from '../core/errors.js';
 import { PACKAGE_MANIFEST, readPackageManifest, samePackageManifestSnapshot, type PackageManifestSnapshot } from '../packages/package-manifest.js';
+import { packageLimitPolicy, type PackageLimitPolicy } from '../profile-portability/profile-portability-policy.js';
 import { publishSkillSnapshot, resolvePhysicalRelativeDirectory, type PublishedSnapshot, type SkillSnapshotDependencies } from './skill-snapshot.js';
 
 export interface PreparedLibrary { kind: 'library'; snapshot: PublishedSnapshot; skillsRoot: '.' }
@@ -14,6 +20,65 @@ export interface PreparedPackage {
   manifestSnapshot: PackageManifestSnapshot;
 }
 export type PreparedSkillCollection = PreparedLibrary | PreparedPackage;
+
+export interface CanonicalPackageRootIdentity {
+  readonly root: string;
+  readonly device: bigint;
+  readonly inode: bigint;
+}
+
+export interface BeforePackageBuildContext {
+  readonly packageId: string;
+  readonly rootIdentity: CanonicalPackageRootIdentity;
+  readonly manifestSnapshot: PackageManifestSnapshot;
+}
+
+export class PackageBuildTerminationUncertainError extends BazframeError {
+  constructor(message = 'Package build termination could not be proven.', options?: ErrorOptions) {
+    super('PACKAGE_BUILD_TERMINATION_UNCERTAIN', message, options);
+    this.name = 'PackageBuildTerminationUncertainError';
+  }
+}
+
+export class PackageBuildInterruptedError extends BazframeError {
+  readonly signal: Extract<NodeJS.Signals, 'SIGHUP' | 'SIGINT' | 'SIGTERM'>;
+
+  constructor(signal: Extract<NodeJS.Signals, 'SIGHUP' | 'SIGINT' | 'SIGTERM'>) {
+    super('PACKAGE_BUILD_INTERRUPTED', `Package build was interrupted by parent signal ${signal}.`);
+    this.name = 'PackageBuildInterruptedError';
+    this.signal = signal;
+  }
+}
+
+export function packageBuildInterruptionSignal(error: unknown): NodeJS.Signals | undefined {
+  if (error instanceof PackageBuildInterruptedError) return error.signal;
+  if (error instanceof AggregateError) {
+    for (const item of error.errors) {
+      const signal = packageBuildInterruptionSignal(item);
+      if (signal !== undefined) return signal;
+    }
+  }
+  return error instanceof Error && error.cause !== undefined
+    ? packageBuildInterruptionSignal(error.cause)
+    : undefined;
+}
+
+export function isUncertainPackageBuildError(error: unknown): boolean {
+  if (error instanceof PackageBuildTerminationUncertainError) return true;
+  if (error instanceof Error && error.cause !== undefined && isUncertainPackageBuildError(error.cause)) return true;
+  return error instanceof AggregateError && error.errors.some(isUncertainPackageBuildError);
+}
+
+export interface PackagePreparationDependencies {
+  beforePackageBuild?: (context: BeforePackageBuildContext) => void | Promise<void>;
+  expectedRootIdentity?: CanonicalPackageRootIdentity;
+  limitPolicy?: Partial<PackageLimitPolicy>;
+  packageProcessRunner?: (
+    executable: string,
+    args: readonly string[],
+    options: BoundedPackageProcessOptions
+  ) => Promise<BoundedPackageProcessResult>;
+}
 
 export async function prepareLibrary(
   bazframeHome: string,
@@ -40,16 +105,37 @@ export async function preparePackage(
   environment: NodeJS.ProcessEnv = process.env,
   afterSnapshot?: () => Promise<void>,
   expectedManifest?: PackageManifestSnapshot,
-  childOutputPolicy: ChildOutputPolicy = 'inherit'
+  childOutputPolicy: ChildOutputPolicy = 'inherit',
+  dependencies: PackagePreparationDependencies = {}
 ): Promise<PreparedPackage> {
+  const policy = packageLimitPolicy(dependencies.limitPolicy);
   const rootIdentity = await physicalRootIdentity(packageRoot);
-  const initial = await readPackageManifest(packageRoot);
+  assertExpectedPackageRootIdentity(rootIdentity, dependencies.expectedRootIdentity);
+  const initial = await readPackageManifest(packageRoot, policy);
   if (expectedManifest !== undefined && !samePackageManifestSnapshot(expectedManifest, initial)) {
     throw new BazframeError('PACKAGE_MANIFEST_CHANGED', 'Package manifest changed after build authorization.');
   }
-  await executeBuild(initial.manifest.build, packageRoot, environment, childOutputPolicy);
   await assertPhysicalRootIdentity(packageRoot, rootIdentity);
-  const revalidated = await readPackageManifest(packageRoot);
+  const adjacentManifest = await readPackageManifest(packageRoot, policy);
+  if (!samePackageManifestSnapshot(initial, adjacentManifest)) {
+    throw new BazframeError('PACKAGE_MANIFEST_CHANGED', 'Package manifest changed before build.');
+  }
+  freezePackageManifestSnapshot(initial);
+  await dependencies.beforePackageBuild?.(Object.freeze({
+    packageId: basename(rootIdentity.root),
+    rootIdentity: Object.freeze({ root: rootIdentity.root, device: rootIdentity.device, inode: rootIdentity.inode }),
+    manifestSnapshot: initial
+  }));
+  await executeBuild(
+    initial.manifest.build,
+    packageRoot,
+    environment,
+    childOutputPolicy,
+    policy,
+    dependencies.packageProcessRunner ?? spawnBoundedPackageProcess
+  );
+  await assertPhysicalRootIdentity(packageRoot, rootIdentity);
+  const revalidated = await readPackageManifest(packageRoot, policy);
   if (!samePackageManifestSnapshot(initial, revalidated)) throw new BazframeError('PACKAGE_MANIFEST_CHANGED', 'Package manifest changed during build.');
   const artifactPath = await resolvePhysicalRelativeDirectory(packageRoot, initial.manifest.artifactRoot);
   await resolvePhysicalRelativeDirectory(artifactPath, initial.manifest.skillsRoot);
@@ -57,7 +143,7 @@ export async function preparePackage(
   await resolvePhysicalRelativeDirectory(snapshot.artifactPath, initial.manifest.skillsRoot);
   await afterSnapshot?.();
   await assertPhysicalRootIdentity(packageRoot, rootIdentity);
-  const finalManifest = await readPackageManifest(packageRoot);
+  const finalManifest = await readPackageManifest(packageRoot, policy);
   if (!samePackageManifestSnapshot(initial, finalManifest)) throw new BazframeError('PACKAGE_MANIFEST_CHANGED', 'Package manifest changed before activation.');
   return {
     kind: 'package', snapshot, artifactRoot: initial.manifest.artifactRoot,
@@ -92,31 +178,71 @@ async function assertLibraryManifestAbsent(libraryRoot: string): Promise<void> {
   }
 }
 
-interface RootIdentity { device: bigint; inode: bigint; canonicalPath: string }
+interface RootIdentity { device: bigint; inode: bigint; root: string }
 
 async function physicalRootIdentity(root: string): Promise<RootIdentity> {
   const metadata = await lstat(root, { bigint: true });
   if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new BazframeError('PACKAGE_ROOT_CHANGED', `Package root must remain a physical directory: ${root}`);
-  return { device: metadata.dev, inode: metadata.ino, canonicalPath: await realpath(root) };
+  return { device: metadata.dev, inode: metadata.ino, root: await realpath(root) };
+}
+
+function freezePackageManifestSnapshot(snapshot: PackageManifestSnapshot): void {
+  Object.freeze(snapshot.manifest.build);
+  Object.freeze(snapshot.manifest);
+  Object.freeze(snapshot);
+}
+
+function assertExpectedPackageRootIdentity(current: RootIdentity, expected: CanonicalPackageRootIdentity | undefined): void {
+  if (expected !== undefined
+    && (current.root !== expected.root || current.device !== expected.device || current.inode !== expected.inode)) {
+    throw new BazframeError('SKILL_COLLECTION_ROOT_CHANGED', `Package root does not match the caller's expected physical identity: ${current.root}`);
+  }
 }
 
 async function assertPhysicalRootIdentity(root: string, expected: RootIdentity): Promise<void> {
   const current = await physicalRootIdentity(root);
-  if (current.device !== expected.device || current.inode !== expected.inode || current.canonicalPath !== expected.canonicalPath) {
+  if (current.device !== expected.device || current.inode !== expected.inode || current.root !== expected.root) {
     throw new BazframeError('PACKAGE_ROOT_CHANGED', `Package root changed during build: ${root}`);
   }
 }
 
-async function executeBuild(argv: readonly string[], cwd: string, environment: NodeJS.ProcessEnv, outputPolicy: ChildOutputPolicy): Promise<void> {
-  let result;
+async function executeBuild(
+  argv: readonly string[],
+  cwd: string,
+  environment: NodeJS.ProcessEnv,
+  outputPolicy: ChildOutputPolicy,
+  policy: Readonly<PackageLimitPolicy>,
+  runner: NonNullable<PackagePreparationDependencies['packageProcessRunner']>
+): Promise<void> {
+  let result: BoundedPackageProcessResult;
   try {
-    result = await spawnInheritedChild(argv[0]!, argv.slice(1), {
+    result = await runner(argv[0]!, argv.slice(1), {
       cwd,
       environment,
-      ...(outputPolicy === 'inherit' ? {} : { outputPolicy })
+      ...(outputPolicy === 'inherit' ? {} : { outputPolicy }),
+      timeoutMilliseconds: policy.maxBuildMilliseconds,
+      terminationGraceMilliseconds: policy.terminationGraceMilliseconds
     });
   } catch (error) {
     throw new BazframeError('PACKAGE_BUILD_FAILED', `Could not start package build: ${argv[0]}`, { cause: error });
+  }
+  if (result.failure !== undefined) {
+    if (result.uncertainTermination === true || result.failure === 'termination-uncertain') {
+      throw new PackageBuildTerminationUncertainError(
+        'Package build termination could not be proven.',
+        { ...(result.error === undefined ? {} : { cause: result.error }) }
+      );
+    }
+    if (result.failure === 'parent-signal'
+      && (result.signal === 'SIGHUP' || result.signal === 'SIGINT' || result.signal === 'SIGTERM')) {
+      throw new PackageBuildInterruptedError(result.signal);
+    }
+    const detail = result.failure === 'timeout'
+      ? 'Package build timed out.'
+      : result.failure === 'process-tree-survived'
+        ? 'Package build leader exited while descendant processes remained.'
+        : `Could not start package build: ${argv[0]}.`;
+    throw new BazframeError('PACKAGE_BUILD_FAILED', detail, { ...(result.error === undefined ? {} : { cause: result.error }) });
   }
   if (result.exitCode === 0 && result.signal === null) return;
   throw new BazframeError(

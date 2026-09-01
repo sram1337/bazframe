@@ -40,8 +40,9 @@ import {
   type FlatSkillIdentity
 } from '../skill-collections/skill-collection-resolver.js';
 import {
-  readLibrarySnapshot,
-  type LibraryRecord,
+  readCollectionSnapshot,
+  sameCollectionSnapshot,
+  type SkillCollectionKind,
   type SkillCollectionRecordSnapshot
 } from '../skill-collections/skill-collection-store.js';
 import {
@@ -93,10 +94,11 @@ export interface ProfileExportResult {
   skills: string[];
   omittedLocalSkills: string[];
   libraries: string[];
-  packages: [];
+  packages: string[];
   resources: Array<
     | { kind: 'skill'; id: string; source: RemoteGitArtifactSource }
     | { kind: 'library'; id: string; source: RemoteGitArtifactSource | LocalMappingArtifactSource }
+    | { kind: 'package'; id: string; source: RemoteGitArtifactSource | LocalMappingArtifactSource }
   >;
   warnings: ProfileExportWarning[];
 }
@@ -143,10 +145,11 @@ interface ProfileSkillLinkSnapshot {
   managed?: ManagedGitExportHealthSnapshot;
   identity: FlatSkillIdentity;
 }
-interface LibraryCapture {
+interface CollectionCapture {
+  kind: SkillCollectionKind;
   id: string;
   reference: ProfileSkillCollectionReferenceSnapshot;
-  record: SkillCollectionRecordSnapshot<LibraryRecord>;
+  record: SkillCollectionRecordSnapshot;
   managed?: ManagedGitExportHealthSnapshot;
   children: DerivedSkill[];
 }
@@ -386,59 +389,39 @@ async function captureSource(
       skillLinks[index]!.identity = flatSkills[index]!;
     }
 
-    if (packageNames.length > 0) {
-      for (const name of packageNames) {
-        await validateReferenceNameAndSnapshot(
-          home,
-          profileId,
-          'package',
-          name,
-          dependencies.limitPolicy.maxManifestBytes
-        );
-      }
-      throw new BazframeError(
-        'PROFILE_EXPORT_STAGE2_UNSUPPORTED',
-        'Stage 2 profile export does not support package references.'
-      );
-    }
-
-    const libraries: LibraryCapture[] = [];
+    const libraries: CollectionCapture[] = [];
     for (const name of libraryNames) {
-      const id = referenceId(name);
-      const reference = await readProfileCollectionReferenceSnapshot(
+      const captured = await captureCollection(
         home,
         profileId,
-        { kind: 'library', id },
-        { maxBytes: dependencies.limitPolicy.maxManifestBytes }
+        'library',
+        name,
+        environment,
+        dependencies
       );
-      const record = await readLibrarySnapshot(home, id, {
-        maxBytes: dependencies.limitPolicy.maxManifestBytes
-      });
-      const provenance = await optionalProvenance(home, 'library', id);
-      let managed: ManagedGitExportHealthSnapshot | undefined;
-      let resource: ProfileArtifactResource;
-      if (provenance === undefined) {
-        if (isWithin(managedGitCheckoutsRoot(home), record.record.root)
-          || await classifyManagedGitProviderOccupancy(home, 'library', id) !== 'absent') {
-          throw invalidSource(`library ${JSON.stringify(id)} has managed Git checkout or provider state without matching provenance`);
-        }
-        resource = { kind: 'library', id, source: { type: 'localMapping' } };
-      } else {
-        if (provenance.record.root !== record.record.root) {
-          throw invalidSource(`remote Git provenance does not match library ${JSON.stringify(id)}`);
-        }
-        managed = await dependencies.captureManagedGitHealth(home, 'library', id, environment);
-        resource = resourceFromManaged('library', id, managed);
-      }
-      const children = await resolveGlobalSkillCollection(home, record.record);
-      libraries.push({ id, reference, record, ...(managed === undefined ? {} : { managed }), children });
-      resources.push(resource);
+      libraries.push(captured.capture);
+      resources.push(captured.resource);
+      assertResourceLimit(resources.length, dependencies.limitPolicy.maxResources);
+    }
+
+    const packages: CollectionCapture[] = [];
+    for (const name of packageNames) {
+      const captured = await captureCollection(
+        home,
+        profileId,
+        'package',
+        name,
+        environment,
+        dependencies
+      );
+      packages.push(captured.capture);
+      resources.push(captured.resource);
       assertResourceLimit(resources.length, dependencies.limitPolicy.maxResources);
     }
 
     const compositionDiagnostics = validateCapturedSkillComposition(
       flatSkills,
-      libraries.flatMap((library) => library.children)
+      [...libraries, ...packages].flatMap((collection) => collection.children)
     );
     if (compositionDiagnostics.length > 0) {
       throw new BazframeError(
@@ -457,7 +440,8 @@ async function captureSource(
     includedSkills.sort(compare);
     omittedSkills.sort(compare);
     libraries.sort((left, right) => compare(left.id, right.id));
-    resources.sort((left, right) => compare(`${left.kind === 'skill' ? '0' : '1'}:${left.id}`, `${right.kind === 'skill' ? '0' : '1'}:${right.id}`));
+    packages.sort((left, right) => compare(left.id, right.id));
+    resources.sort((left, right) => compare(resourceOrderKey(left), resourceOrderKey(right)));
     const artifact: ProfileArtifact = {
       schemaVersion: 1,
       kind: 'bazframe-profile-export',
@@ -467,7 +451,7 @@ async function captureSource(
         skills: includedSkills,
         omittedLocalSkills: omittedSkills,
         libraries: libraries.map((library) => library.id),
-        packages: []
+        packages: packages.map((item) => item.id)
       },
       resources
     };
@@ -476,7 +460,17 @@ async function captureSource(
     capture = {
       artifact,
       instructions,
-      evidence: evidenceFor(profilesDirectory, root, skillsDirectory, librariesDirectory, packagesDirectory, instructions, skillLinks, libraries)
+      evidence: evidenceFor(
+        profilesDirectory,
+        root,
+        skillsDirectory,
+        librariesDirectory,
+        packagesDirectory,
+        instructions,
+        skillLinks,
+        libraries,
+        packages
+      )
     };
   } catch (error) {
     operationError = error;
@@ -543,15 +537,53 @@ async function optionalProvenance(
   return optionalManagedGitRecord(home, kind, id);
 }
 
-async function validateReferenceNameAndSnapshot(
+async function captureCollection(
   home: string,
   profileId: string,
-  kind: 'package',
+  kind: SkillCollectionKind,
   name: string,
-  maxBytes: number
-): Promise<void> {
+  environment: NodeJS.ProcessEnv,
+  dependencies: ReturnType<typeof copyDependencies>
+): Promise<{ capture: CollectionCapture; resource: ProfileArtifactResource }> {
   const id = referenceId(name);
-  await readProfileCollectionReferenceSnapshot(home, profileId, { kind, id }, { maxBytes });
+  const reference = await readProfileCollectionReferenceSnapshot(
+    home,
+    profileId,
+    { kind, id },
+    { maxBytes: dependencies.limitPolicy.maxManifestBytes }
+  );
+  const record = await readCollectionSnapshot(
+    home,
+    { kind, id },
+    { maxBytes: dependencies.limitPolicy.maxManifestBytes }
+  );
+  const provenance = await optionalProvenance(home, kind, id);
+  let managed: ManagedGitExportHealthSnapshot | undefined;
+  let resource: ProfileArtifactResource;
+  if (provenance === undefined) {
+    if (isWithin(managedGitCheckoutsRoot(home), record.record.root)
+      || await classifyManagedGitProviderOccupancy(home, kind, id) !== 'absent') {
+      throw invalidSource(`${kind} ${JSON.stringify(id)} has managed Git checkout or provider state without matching provenance`);
+    }
+    resource = kind === 'library'
+      ? { kind: 'library', id, source: { type: 'localMapping' } }
+      : { kind: 'package', id, source: { type: 'localMapping' } };
+  } else {
+    if (provenance.record.root !== record.record.root) {
+      throw invalidSource(`remote Git provenance does not match ${kind} ${JSON.stringify(id)}`);
+    }
+    managed = await dependencies.captureManagedGitHealth(home, kind, id, environment);
+    if (managed.collectionSnapshot === undefined
+      || !sameCollectionSnapshot(record, managed.collectionSnapshot)) {
+      throw changedSource();
+    }
+    resource = resourceFromManaged(kind, id, managed);
+  }
+  const children = await resolveGlobalSkillCollection(home, record.record);
+  return {
+    capture: { kind, id, reference, record, ...(managed === undefined ? {} : { managed }), children },
+    resource
+  };
 }
 
 function referenceId(name: string): string {
@@ -562,7 +594,7 @@ function referenceId(name: string): string {
 }
 
 function resourceFromManaged(
-  kind: 'skill' | 'library',
+  kind: ManagedGitResourceKind,
   id: string,
   managed: ManagedGitExportHealthSnapshot
 ): ProfileArtifactResource {
@@ -570,9 +602,15 @@ function resourceFromManaged(
     type: 'remoteGit',
     ...pathFreeManagedGitIdentityFromRecord(managed.recordSnapshot.record)
   };
-  return kind === 'skill'
-    ? { kind: 'skill', id, source }
-    : { kind: 'library', id, source };
+  if (kind === 'skill') return { kind: 'skill', id, source };
+  return kind === 'library'
+    ? { kind: 'library', id, source }
+    : { kind: 'package', id, source };
+}
+
+function resourceOrderKey(resource: ProfileArtifactResource): string {
+  const kindOrder = resource.kind === 'skill' ? '0' : resource.kind === 'library' ? '1' : '2';
+  return `${kindOrder}:${resource.id}`;
 }
 
 function assertResourceLimit(count: number, maximum: number): void {
@@ -699,7 +737,8 @@ function evidenceFor(
   packagesDirectory: HeldDirectory | undefined,
   instructions: PhysicalInstructionSnapshot,
   links: readonly ProfileSkillLinkSnapshot[],
-  libraries: readonly LibraryCapture[]
+  libraries: readonly CollectionCapture[],
+  packages: readonly CollectionCapture[]
 ): string {
   return JSON.stringify({
     profilesDirectory: directoryEvidence(profilesDirectory),
@@ -718,21 +757,8 @@ function evidenceFor(
       identity: link.identity,
       managed: link.managed === undefined ? null : managedEvidence(link.managed)
     })),
-    libraries: libraries.map((library) => ({
-      id: library.id,
-      reference: referenceEvidence(library.reference),
-      record: collectionEvidence(library.record),
-      managed: library.managed === undefined ? null : managedEvidence(library.managed),
-      children: library.children.map((child) => ({
-        name: child.name,
-        baseDir: child.baseDir,
-        definitionPath: child.definitionPath,
-        collectionKind: child.collectionKind,
-        collectionId: child.collectionId,
-        collectionRoot: child.collectionRoot,
-        relativePath: child.relativePath
-      }))
-    }))
+    libraries: libraries.map(collectionCaptureEvidence),
+    packages: packages.map(collectionCaptureEvidence)
   });
 }
 
@@ -757,6 +783,24 @@ function collectionEvidence(value: SkillCollectionRecordSnapshot): object {
   return {
     record: value.record, path: value.path, device: String(value.device),
     inode: String(value.inode), contentSha256: value.contentSha256
+  };
+}
+function collectionCaptureEvidence(collection: CollectionCapture): object {
+  return {
+    kind: collection.kind,
+    id: collection.id,
+    reference: referenceEvidence(collection.reference),
+    record: collectionEvidence(collection.record),
+    managed: collection.managed === undefined ? null : managedEvidence(collection.managed),
+    children: collection.children.map((child) => ({
+      name: child.name,
+      baseDir: child.baseDir,
+      definitionPath: child.definitionPath,
+      collectionKind: child.collectionKind,
+      collectionId: child.collectionId,
+      collectionRoot: child.collectionRoot,
+      relativePath: child.relativePath
+    }))
   };
 }
 function managedEvidence(value: ManagedGitExportHealthSnapshot): object {
@@ -798,13 +842,16 @@ function resultFromCapture(
     skills: [...artifact.profile.skills],
     omittedLocalSkills: omitted,
     libraries: [...artifact.profile.libraries],
-    packages: [],
+    packages: [...artifact.profile.packages],
     resources: artifact.resources.map((resource) => {
       if (resource.kind === 'skill' && resource.source.type === 'remoteGit') {
         return { kind: 'skill' as const, id: resource.id, source: { ...resource.source } };
       }
       if (resource.kind === 'library') {
         return { kind: 'library' as const, id: resource.id, source: { ...resource.source } };
+      }
+      if (resource.kind === 'package') {
+        return { kind: 'package' as const, id: resource.id, source: { ...resource.source } };
       }
       throw invalidSource('captured artifact contains an unsupported resource');
     }),

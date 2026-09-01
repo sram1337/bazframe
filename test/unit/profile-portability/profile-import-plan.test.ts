@@ -10,6 +10,10 @@ import {
 } from '../../../src/profile-portability/profile-import-plan.js';
 import type { ManagedGitExportHealthSnapshot } from '../../../src/providers/managed-git.js';
 import type { ManagedGitRecord } from '../../../src/providers/managed-git-record.js';
+import {
+  classifyLocalPackageImportResource,
+  type LocalPackageMappingSnapshot
+} from '../../../src/profile-portability/profile-import-local-library.js';
 import { encodeProfileCollectionReference } from '../../../src/profiles/profile-skill-collection-reference.js';
 import type { DerivedSkill } from '../../../src/skill-collections/skill-collection-resolver.js';
 import { snapshotFilesystem } from '../../helpers/filesystem-snapshot.js';
@@ -79,7 +83,7 @@ function remote(kind: 'skill' | 'library' | 'package', id: string): ProfileArtif
 
 function fakeHealth(
   home: string,
-  kind: 'skill' | 'library',
+  kind: 'skill' | 'library' | 'package',
   id: string
 ): ManagedGitExportHealthSnapshot {
   const resource = remote(kind, id);
@@ -114,6 +118,21 @@ function fakeHealth(
         inode: 6n,
         contentSha256: 'b'.repeat(64)
       }
+    } : kind === 'package' ? {
+      collectionSnapshot: {
+        record: {
+          schemaVersion: 1,
+          package: id,
+          root,
+          digest: 'a'.repeat(64),
+          artifactRoot: 'dist',
+          skillsRoot: 'skills'
+        },
+        path: join(home, 'packages', `${id}.json`),
+        device: 5n,
+        inode: 6n,
+        contentSha256: 'b'.repeat(64)
+      }
     } : {})
   };
 }
@@ -136,19 +155,33 @@ function createClassifier(home: string, actions: Record<string, 'create' | 'reus
   });
 }
 
-function loadedSkill(name: string, collectionId = 'toolkit'): DerivedSkill {
+function loadedSkill(
+  name: string,
+  collectionId = 'toolkit',
+  collectionKind: 'library' | 'package' = 'library'
+): DerivedSkill {
   return {
     name,
     baseDir: `/snapshot/${collectionId}/${name}`,
     definitionPath: `/snapshot/${collectionId}/${name}/SKILL.md`,
-    collectionKind: 'library',
+    collectionKind,
     collectionId,
     collectionRoot: `/snapshot/${collectionId}`,
     relativePath: `${name}/SKILL.md`
   };
 }
 
-describe('Stage 1 profile import planner', () => {
+async function writePackageSource(root: string): Promise<void> {
+  await mkdir(root, { recursive: true });
+  await writeFile(join(root, 'bazframe-package.json'), `${JSON.stringify({
+    schemaVersion: 1,
+    build: [process.execPath, '-e', 'void 0'],
+    artifactRoot: 'dist',
+    skillsRoot: 'skills'
+  }, null, 2)}\n`);
+}
+
+describe('profile import planner', () => {
   it.each([
     ['equal', (f: Fixture) => f.artifact],
     ['artifact contains missing home', (f: Fixture) => join(f.artifact, 'missing-home')],
@@ -222,26 +255,37 @@ describe('Stage 1 profile import planner', () => {
     expect(result.plan.resources[0]?.source).toEqual(resource.source);
   });
 
-  it('rejects package capability before every target classifier', async () => {
+  it('accepts Stage 3 remote packages and plans unresolved unsandboxed builds without manifest fabrication', async () => {
     const resources = [remote('package', 'automation')];
     const f = await fixture(resources);
-    const classifyResource = vi.fn();
-    const readActiveSelection = vi.fn();
-    const classifyActiveProfilePresence = vi.fn();
-    const classifyDestination = vi.fn();
-    const resolveLibrary = vi.fn();
+    const classifyResource = createClassifier(f.home, { 'package:automation': 'create' });
     const hook = vi.fn();
 
-    await expect(planProfileImport(
+    const result = await planProfileImport(
       { bazframeHome: f.home, artifactDirectory: f.artifact },
-      { classifyResource, readActiveSelection, classifyActiveProfilePresence, classifyDestination, resolveLibrary, testHooks: { afterCapabilityValidation: hook } }
-    )).rejects.toMatchObject({ code: 'PROFILE_ARTIFACT_STAGE2_UNSUPPORTED' });
-    expect(classifyResource).not.toHaveBeenCalled();
-    expect(readActiveSelection).not.toHaveBeenCalled();
-    expect(classifyActiveProfilePresence).not.toHaveBeenCalled();
-    expect(classifyDestination).not.toHaveBeenCalled();
-    expect(resolveLibrary).not.toHaveBeenCalled();
-    expect(hook).not.toHaveBeenCalled();
+      { classifyResource, testHooks: { afterCapabilityValidation: hook } }
+    );
+
+    expect(hook).toHaveBeenCalledTimes(1);
+    expect(classifyResource).toHaveBeenCalledTimes(2);
+    expect(result.plan.packages).toEqual(['automation']);
+    expect(result.plan.resources).toEqual([expect.objectContaining({
+      kind: 'package', id: 'automation', action: 'create', networkRequired: true, buildRequired: true
+    })]);
+    expect(result.plan.composition).toMatchObject({ status: 'deferred', deferredPackages: ['automation'] });
+    expect(result.plan.packageBuilds).toMatchObject({
+      total: 1,
+      remote: 1,
+      local: 0,
+      unresolvedRemotePackageIds: ['automation']
+    });
+    expect(result.plan.packageBuilds.warnings).toEqual([
+      'Package builds execute with shell:false and inherit the parent environment.',
+      'Package builds execute unsandboxed with current-process-user authority and may access credentials, networks, and user files.',
+      'Each package build uses the package source root as its working directory.',
+      'Arbitrary package-build side effects cannot be rolled back.'
+    ]);
+    expect(JSON.stringify(result.plan)).not.toMatch(/manifestSnapshot|bazframe-package\.json|argv|device|inode/u);
   });
 
   it('precomputes missing mapping blockers before remote classification and still returns the complete plan', async () => {
@@ -290,6 +334,236 @@ describe('Stage 1 profile import planner', () => {
     await expect(planProfileImport(
       { bazframeHome: f.home, artifactDirectory: f.artifact, mappings: [{ kind: 'library', id: 'extra', root }] }
     )).rejects.toMatchObject({ code: 'PROFILE_IMPORT_MAPPING_INVALID' });
+  });
+
+  it('plans local package creation with private exact manifest evidence and intentional public root only', async () => {
+    const resource = { kind: 'package', id: 'automation', source: { type: 'localMapping' } } satisfies ProfileArtifactResource;
+    const f = await fixture([resource]);
+    const root = join(f.root, 'sources', 'automation');
+    await writePackageSource(root);
+    const classifyResource = vi.fn();
+    const classifyLocalPackage = vi.fn(async () => ({ action: 'create' as const }));
+
+    const result = await planProfileImport(
+      { bazframeHome: f.home, artifactDirectory: f.artifact, mappings: [{ kind: 'package', id: 'automation', root }] },
+      { classifyResource, classifyLocalPackage }
+    );
+
+    expect(result.plan.resources).toEqual([expect.objectContaining({
+      kind: 'package', id: 'automation', source: { type: 'localMapping', root: await realpath(root) },
+      action: 'create', networkRequired: false, buildRequired: true
+    })]);
+    expect(result.plan.packageBuilds).toMatchObject({ total: 1, remote: 0, local: 1, unresolvedRemotePackageIds: [] });
+    expect(result.plan.composition.deferredPackages).toEqual(['automation']);
+    expect(result.mappingSnapshots).toEqual([expect.objectContaining({
+      kind: 'package', id: 'automation', root: await realpath(root), manifestSnapshot: expect.any(Object)
+    })]);
+    expect(classifyResource).not.toHaveBeenCalled();
+    expect(classifyLocalPackage).toHaveBeenCalledTimes(2);
+    const serialized = JSON.stringify(result.plan);
+    expect(serialized).toContain(await realpath(root));
+    expect(serialized).not.toMatch(/manifest|argv|device|inode|contentSha256|artifactRoot|skillsRoot/u);
+  });
+
+  it('reuses exact remote and local packages build-free while resolving their known children', async () => {
+    const remoteFixture = await fixture([remote('package', 'automation')]);
+    const resolveRemotePackage = vi.fn(async () => [loadedSkill('remote-child', 'automation', 'package')]);
+    const remoteResult = await planProfileImport(
+      { bazframeHome: remoteFixture.home, artifactDirectory: remoteFixture.artifact },
+      {
+        classifyResource: createClassifier(remoteFixture.home, { 'package:automation': 'reuse' }),
+        resolvePackage: resolveRemotePackage,
+        classifyDestination: async () => ({ action: 'publish' })
+      }
+    );
+    expect(remoteResult.plan.resources).toEqual([expect.objectContaining({
+      kind: 'package', action: 'reuse', networkRequired: false, buildRequired: false
+    })]);
+    expect(remoteResult.plan.packageBuilds).toEqual({ total: 0, remote: 0, local: 0, unresolvedRemotePackageIds: [], warnings: [] });
+    expect(remoteResult.plan.composition).toMatchObject({
+      status: 'ready', deferredPackages: [], knownCollectionSkillPreview: ['remote-child']
+    });
+    expect(resolveRemotePackage).toHaveBeenCalledTimes(1);
+
+    const localResource = { kind: 'package', id: 'local-tools', source: { type: 'localMapping' } } satisfies ProfileArtifactResource;
+    const localFixture = await fixture([localResource]);
+    const localRoot = join(localFixture.root, 'sources', 'local-tools');
+    await writePackageSource(localRoot);
+    const classifyLocalPackage = vi.fn(async (_home: string, _id: string, mapping: LocalPackageMappingSnapshot) => ({
+      action: 'reuse' as const,
+      health: {
+        mapping,
+        collectionSnapshot: {
+          record: {
+            schemaVersion: 1 as const,
+            package: mapping.id,
+            root: mapping.root,
+            digest: 'a'.repeat(64),
+            artifactRoot: 'dist',
+            skillsRoot: 'skills'
+          },
+          path: join(localFixture.home, 'packages', `${mapping.id}.json`),
+          device: 7n,
+          inode: 8n,
+          contentSha256: 'b'.repeat(64)
+        }
+      }
+    }));
+    const resolveLocalPackage = vi.fn(async () => [loadedSkill('local-child', 'local-tools', 'package')]);
+    const localResult = await planProfileImport(
+      {
+        bazframeHome: localFixture.home,
+        artifactDirectory: localFixture.artifact,
+        mappings: [{ kind: 'package', id: 'local-tools', root: localRoot }]
+      },
+      { classifyLocalPackage, resolvePackage: resolveLocalPackage, classifyDestination: async () => ({ action: 'publish' }) }
+    );
+    expect(localResult.plan.resources).toEqual([expect.objectContaining({ action: 'reuse', buildRequired: false })]);
+    expect(localResult.plan.packageBuilds.total).toBe(0);
+    expect(classifyLocalPackage).toHaveBeenCalledTimes(2);
+    expect(resolveLocalPackage).toHaveBeenCalledTimes(1);
+  });
+
+  it('validates typed mapping closure and keeps same-ID library/package mappings independent', async () => {
+    const resources = [
+      { kind: 'library', id: 'shared', source: { type: 'localMapping' } },
+      { kind: 'package', id: 'shared', source: { type: 'localMapping' } }
+    ] satisfies ProfileArtifactResource[];
+    const f = await fixture(resources);
+    const libraryRoot = join(f.root, 'libraries', 'shared');
+    const packageRoot = join(f.root, 'packages', 'shared');
+    await mkdir(libraryRoot, { recursive: true });
+    await writePackageSource(packageRoot);
+    const classifyLocalCollection = vi.fn(async () => ({ action: 'create' as const }));
+    const result = await planProfileImport(
+      {
+        bazframeHome: f.home,
+        artifactDirectory: f.artifact,
+        mappings: [
+          { kind: 'package', id: 'shared', root: packageRoot },
+          { kind: 'library', id: 'shared', root: libraryRoot }
+        ]
+      },
+      { classifyLocalCollection }
+    );
+    expect(result.plan.resources.map((item) => `${item.kind}:${item.id}`)).toEqual(['library:shared', 'package:shared']);
+    expect(result.mappingSnapshots.map((item) => `${item.kind}:${item.id}`)).toEqual(['library:shared', 'package:shared']);
+    expect(result.plan.composition).toMatchObject({ deferredLibraries: ['shared'], deferredPackages: ['shared'] });
+
+    const missing = await planProfileImport(
+      {
+        bazframeHome: f.home,
+        artifactDirectory: f.artifact,
+        mappings: [{ kind: 'library', id: 'shared', root: libraryRoot }]
+      },
+      { classifyLocalCollection }
+    );
+    expect(missing.plan.blockers).toContainEqual(expect.objectContaining({
+      code: 'PROFILE_IMPORT_MAPPING_REQUIRED', key: 'package:shared'
+    }));
+
+    await expect(planProfileImport({
+      bazframeHome: f.home,
+      artifactDirectory: f.artifact,
+      mappings: [
+        { kind: 'library', id: 'shared', root: libraryRoot },
+        { kind: 'library', id: 'shared', root: libraryRoot }
+      ]
+    })).rejects.toMatchObject({ code: 'PROFILE_IMPORT_MAPPING_INVALID' });
+    await expect(planProfileImport({
+      bazframeHome: f.home,
+      artifactDirectory: f.artifact,
+      mappings: [{ kind: 'package', id: 'other', root: packageRoot }]
+    })).rejects.toMatchObject({ code: 'PROFILE_IMPORT_MAPPING_INVALID' });
+
+    const libraryOnly = await fixture([{ kind: 'library', id: 'shared', source: { type: 'localMapping' } }]);
+    await expect(planProfileImport({
+      bazframeHome: libraryOnly.home,
+      artifactDirectory: libraryOnly.artifact,
+      mappings: [{ kind: 'package', id: 'shared', root: packageRoot }]
+    })).rejects.toMatchObject({ code: 'PROFILE_IMPORT_MAPPING_INVALID' });
+  });
+
+  it('blocks package provider occupancy, different-root state, and manifest drift without build work', async () => {
+    const resource = { kind: 'package', id: 'automation', source: { type: 'localMapping' } } satisfies ProfileArtifactResource;
+    for (const reason of ['Package automation has remote Git provider occupancy.', 'Local package automation is registered at another root.']) {
+      const f = await fixture([resource]);
+      const root = join(f.root, 'sources', 'automation');
+      await writePackageSource(root);
+      const result = await planProfileImport(
+        { bazframeHome: f.home, artifactDirectory: f.artifact, mappings: [{ kind: 'package', id: 'automation', root }] },
+        { classifyLocalPackage: async () => ({ action: 'blocked', reason }) }
+      );
+      expect(result.plan.resources).toEqual([expect.objectContaining({ action: 'blocked', networkRequired: false, buildRequired: false })]);
+      expect(result.plan.profileAction).toBe('blocked');
+      expect(result.plan.packageBuilds.total).toBe(0);
+    }
+
+    const drift = await fixture([resource]);
+    const driftRoot = join(drift.root, 'sources', 'automation');
+    await writePackageSource(driftRoot);
+    let calls = 0;
+    const classifyLocalPackage = vi.fn(async (home: string, id: string, mapping: LocalPackageMappingSnapshot) => {
+      calls += 1;
+      if (calls === 1) {
+        const initial = await classifyLocalPackageImportResource(home, id, mapping);
+        await writeFile(join(driftRoot, 'bazframe-package.json'), `${JSON.stringify({
+          schemaVersion: 1, build: [process.execPath, '-e', 'void 1'], artifactRoot: 'dist', skillsRoot: 'skills'
+        }, null, 2)}\n`);
+        return initial;
+      }
+      return await classifyLocalPackageImportResource(home, id, mapping);
+    });
+    const changed = await planProfileImport(
+      { bazframeHome: drift.home, artifactDirectory: drift.artifact, mappings: [{ kind: 'package', id: 'automation', root: driftRoot }] },
+      { classifyLocalPackage, classifyDestination: async () => ({ action: 'publish' }) }
+    );
+    expect(changed.plan.resources).toEqual([expect.objectContaining({ action: 'blocked', buildRequired: false })]);
+    expect(changed.plan.blockers).toContainEqual(expect.objectContaining({ code: 'PROFILE_IMPORT_RESOURCE_CHANGED' }));
+    expect(changed.plan.packageBuilds.total).toBe(0);
+
+    const rootDrift = await fixture([resource]);
+    const rootDriftPath = join(rootDrift.root, 'sources', 'automation');
+    const movedRoot = join(rootDrift.root, 'sources', 'moved-automation');
+    await writePackageSource(rootDriftPath);
+    let rootCalls = 0;
+    const classifyRootDrift = vi.fn(async (home: string, id: string, mapping: LocalPackageMappingSnapshot) => {
+      rootCalls += 1;
+      if (rootCalls === 1) {
+        const initial = await classifyLocalPackageImportResource(home, id, mapping);
+        await rename(rootDriftPath, movedRoot);
+        await writePackageSource(rootDriftPath);
+        return initial;
+      }
+      return await classifyLocalPackageImportResource(home, id, mapping);
+    });
+    const rootChanged = await planProfileImport(
+      {
+        bazframeHome: rootDrift.home,
+        artifactDirectory: rootDrift.artifact,
+        mappings: [{ kind: 'package', id: 'automation', root: rootDriftPath }]
+      },
+      { classifyLocalPackage: classifyRootDrift, classifyDestination: async () => ({ action: 'publish' }) }
+    );
+    expect(rootChanged.plan.resources).toEqual([expect.objectContaining({ action: 'blocked', buildRequired: false })]);
+    expect(rootChanged.plan.blockers).toContainEqual(expect.objectContaining({ code: 'PROFILE_IMPORT_RESOURCE_CHANGED' }));
+  });
+
+  it('rejects cross-kind mapping overlap', async () => {
+    const f = await fixture([
+      { kind: 'library', id: 'shared', source: { type: 'localMapping' } },
+      { kind: 'package', id: 'shared', source: { type: 'localMapping' } }
+    ]);
+    const sharedRoot = join(f.root, 'sources', 'shared');
+    await writePackageSource(sharedRoot);
+    await expect(planProfileImport({
+      bazframeHome: f.home,
+      artifactDirectory: f.artifact,
+      mappings: [
+        { kind: 'library', id: 'shared', root: sharedRoot },
+        { kind: 'package', id: 'shared', root: sharedRoot }
+      ]
+    })).rejects.toMatchObject({ code: 'PROFILE_IMPORT_MAPPING_OVERLAP' });
   });
 
   it('rejects mapped-root overlap with BAZFRAME_HOME and other mappings', async () => {
@@ -349,6 +623,72 @@ describe('Stage 1 profile import planner', () => {
       },
       { classifyLocalLibrary: async () => ({ action: 'create' }) }
     )).resolves.toMatchObject({ plan: { resources: [expect.objectContaining({ action: 'create' })] } });
+  });
+
+  it('preserves canonical mixed resource/action order across Skill, library, and package namespaces', async () => {
+    const resources = [
+      remote('skill', 'alpha'),
+      remote('skill', 'zeta'),
+      remote('library', 'alpha'),
+      remote('library', 'zeta'),
+      remote('package', 'alpha'),
+      remote('package', 'zeta')
+    ];
+    const f = await fixture(resources);
+    const result = await planProfileImport(
+      { bazframeHome: f.home, artifactDirectory: f.artifact },
+      {
+        classifyResource: createClassifier(f.home, {
+          'skill:alpha': 'reuse',
+          'skill:zeta': 'create',
+          'library:alpha': 'blocked',
+          'library:zeta': 'reuse',
+          'package:alpha': 'create',
+          'package:zeta': 'reuse'
+        }),
+        resolveLibrary: async () => [],
+        resolvePackage: async () => [],
+        classifyDestination: async () => ({ action: 'publish' })
+      }
+    );
+    expect(result.plan.resources.map((resource) => `${resource.kind}:${resource.id}:${resource.action}`)).toEqual([
+      'skill:alpha:reuse',
+      'skill:zeta:create',
+      'library:alpha:blocked',
+      'library:zeta:reuse',
+      'package:alpha:create',
+      'package:zeta:reuse'
+    ]);
+    expect(result.plan.packageBuilds).toMatchObject({ total: 1, remote: 1, local: 0 });
+  });
+
+  it('keeps package-aware advisory planning read-only while reporting future network/build work', async () => {
+    const localPackage = { kind: 'package', id: 'local-tools', source: { type: 'localMapping' } } satisfies ProfileArtifactResource;
+    const f = await fixture([remote('package', 'automation'), localPackage]);
+    const localRoot = join(f.root, 'sources', 'local-tools');
+    await writePackageSource(localRoot);
+    const before = await snapshotFilesystem(f.root);
+    const classifyResource = createClassifier(f.home, { 'package:automation': 'create' });
+    const classifyLocalPackage = vi.fn(async () => ({ action: 'create' as const }));
+
+    const result = await planProfileImport(
+      {
+        bazframeHome: f.home,
+        artifactDirectory: f.artifact,
+        mappings: [{ kind: 'package', id: 'local-tools', root: localRoot }]
+      },
+      { classifyResource, classifyLocalPackage }
+    );
+
+    expect(result.plan.packageBuilds).toMatchObject({ total: 2, remote: 1, local: 1 });
+    expect(result.plan.resources).toEqual([
+      expect.objectContaining({ id: 'automation', networkRequired: true, buildRequired: true }),
+      expect.objectContaining({ id: 'local-tools', networkRequired: false, buildRequired: true })
+    ]);
+    expect(await snapshotFilesystem(f.root)).toEqual(before);
+    await expect(lstat(f.home)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(classifyResource).toHaveBeenCalledTimes(2);
+    expect(classifyLocalPackage).toHaveBeenCalledTimes(2);
   });
 
   it('returns sorted escaped resource blockers and computes the profile action last', async () => {
@@ -447,6 +787,7 @@ describe('Stage 1 profile import planner', () => {
     expect(result.plan.composition).toEqual({
       status: 'ready',
       deferredLibraries: [],
+      deferredPackages: [],
       knownCollectionSkillCount: 1,
       knownCollectionSkillPreview: ['toolkit-child']
     });
@@ -462,6 +803,28 @@ describe('Stage 1 profile import planner', () => {
     expect(JSON.stringify(result.plan)).not.toContain('collectionSnapshot');
   });
 
+  it('reuses an exact destination with package references and package children kept out of direct Skills', async () => {
+    const f = await fixture([remote('package', 'automation')]);
+    await mkdir(join(f.home, 'profiles', 'focused', 'skills'), { recursive: true });
+    await mkdir(join(f.home, 'profiles', 'focused', 'packages'));
+    await writeFile(join(f.home, 'profiles', 'focused', 'AGENTS.md'), f.instructions);
+    await writeFile(
+      join(f.home, 'profiles', 'focused', 'packages', 'automation.json'),
+      encodeProfileCollectionReference({ schemaVersion: 1, package: 'automation' })
+    );
+    const result = await planProfileImport(
+      { bazframeHome: f.home, artifactDirectory: f.artifact },
+      {
+        classifyResource: createClassifier(f.home, { 'package:automation': 'reuse' }),
+        resolvePackage: async () => [loadedSkill('package-child', 'automation', 'package')]
+      }
+    );
+    expect(result.plan.profileAction).toBe('reuse');
+    expect(result.plan.skills).toEqual([]);
+    expect(result.plan.packages).toEqual(['automation']);
+    expect(result.plan.composition).toMatchObject({ status: 'ready', knownCollectionSkillPreview: ['package-child'] });
+  });
+
   it('marks unavailable libraries deferred and blocks known direct or omitted collisions', async () => {
     const deferredFixture = await fixture([remote('library', 'toolkit')]);
     const deferred = await planProfileImport(
@@ -471,6 +834,7 @@ describe('Stage 1 profile import planner', () => {
     expect(deferred.plan.composition).toEqual({
       status: 'deferred',
       deferredLibraries: ['toolkit'],
+      deferredPackages: [],
       knownCollectionSkillCount: 0,
       knownCollectionSkillPreview: []
     });
@@ -582,13 +946,14 @@ describe('Stage 1 profile import planner', () => {
       .toHaveLength(count > 2 ? 1 : 0);
   });
 
-  it('blocks collisions between two referenced libraries', async () => {
-    const f = await fixture([remote('library', 'alpha'), remote('library', 'beta')]);
+  it('blocks collisions between referenced library and package children', async () => {
+    const f = await fixture([remote('library', 'alpha'), remote('package', 'beta')]);
     const result = await planProfileImport(
       { bazframeHome: f.home, artifactDirectory: f.artifact },
       {
-        classifyResource: createClassifier(f.home, { 'library:alpha': 'reuse', 'library:beta': 'reuse' }),
+        classifyResource: createClassifier(f.home, { 'library:alpha': 'reuse', 'package:beta': 'reuse' }),
         resolveLibrary: async (_home, id) => [loadedSkill('shared-child', id)],
+        resolvePackage: async (_home, id) => [loadedSkill('shared-child', id, 'package')],
         classifyDestination: async () => ({ action: 'publish' })
       }
     );

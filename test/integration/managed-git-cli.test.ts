@@ -40,7 +40,7 @@ describe('remote Git source CLI', () => {
     const added = await run(['package', 'add', source, '--yes'], cwd, environment);
     expect(added).toMatchObject({ status: 0, stderr: '' });
     expect(added.stdout).toContain('Remote package build authorization');
-    expect(added.stdout).toContain('without a shell or sandbox with ordinary user authority');
+    expect(added.stdout).toContain('without a shell or sandbox with current-process-user authority');
     expect(added.stdout).toContain('\\u009b31m');
     expect(added.stdout).toContain('\\u202e');
     expect(added.stdout).not.toContain(c1BuildArgument);

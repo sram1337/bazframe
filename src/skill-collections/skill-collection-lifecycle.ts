@@ -3,14 +3,25 @@ import { constants } from 'node:fs';
 import { link, lstat, open, unlink, type FileHandle } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { BazframeError, errorCode } from '../core/errors.js';
-import type { ChildOutputPolicy } from '../core/child-process.js';
+import type {
+  BoundedPackageProcessOptions,
+  BoundedPackageProcessResult,
+  ChildOutputPolicy
+} from '../core/child-process.js';
 import type { PackageManifestSnapshot } from '../packages/package-manifest.js';
+import type { PackageLimitPolicy } from '../profile-portability/profile-portability-policy.js';
 import { captureProfileCollectionReferenceIndex, sameProfileCollectionReferenceIndex, type ProfileSkillCollectionReferenceIndex } from '../profiles/profile-skill-collection-reference.js';
 import { discoverSkillDirectories, profileDirectory } from '../profiles/profile-store.js';
 import { assertSafeSkillId, isSafeSkillId } from '../skills/skill-id.js';
 import { ensureManagedDirectory, writeFileAtomic } from '../state/atomic-file.js';
 import { withStateLock } from '../state/lock.js';
-import { prepareLibrary, preparePackage, revalidatePreparedCollectionDeclaration, type PreparedSkillCollection } from './skill-collection-preparation.js';
+import {
+  prepareLibrary,
+  preparePackage,
+  revalidatePreparedCollectionDeclaration,
+  type BeforePackageBuildContext,
+  type PreparedSkillCollection
+} from './skill-collection-preparation.js';
 import { loadFlatSkillIdentities, resolveGlobalSkillCollection, validateProspectiveSkillCollection, type DirectSkillCollection } from './skill-collection-resolver.js';
 import {
   canonicalPhysicalCollectionRoot, encodeSkillCollection, globalCollectionDirectory, globalCollectionPath,
@@ -39,6 +50,16 @@ export interface SkillCollectionLifecycleDependencies {
   afterPackageSnapshot?: () => Promise<void>;
   /** Exact remote manifest whose build was authorized before this lifecycle began. */
   expectedPackageManifest?: PackageManifestSnapshot;
+  /** Adjacent authorization/source revalidation immediately before a package spawn. */
+  beforePackageBuild?: (context: BeforePackageBuildContext) => void | Promise<void>;
+  /** Lower-only package input/process limits for deterministic tests. */
+  packageLimitPolicy?: Partial<PackageLimitPolicy>;
+  /** Internal deterministic package-process seam. */
+  packageProcessRunner?: (
+    executable: string,
+    args: readonly string[],
+    options: BoundedPackageProcessOptions
+  ) => Promise<BoundedPackageProcessResult>;
 }
 export type SkillCollectionLifecycleAction = 'added' | 'updated' | 'built' | 'removed';
 export type SkillCollectionLifecycleResult = SkillCollectionRecord & { action: SkillCollectionLifecycleAction; path: string };
@@ -64,7 +85,7 @@ async function replace(options:SkillCollectionLifecycleOptions,key:SkillCollecti
   assertSafeSkillId(key.id);const path=globalCollectionPath(options.bazframeHome,key.kind,key.id);const verb=key.kind==='library'?'update':'build';
   return withGlobalLock(options,`bazframe ${key.kind} ${verb}`,path,async()=>{
     const initial=await requiredSnapshot(options.bazframeHome,key);const canonical=await canonicalPhysicalCollectionRoot(initial.record.root,key.kind);if(canonical!==initial.record.root||basename(canonical)!==key.id)throw occupied(key.kind,path,`${key.kind} root no longer has its recorded canonical identity`);
-    const rootIdentity=await lstat(canonical,{bigint:true});const prepared=await prepare(options,key.kind,canonical,deps);const candidate=makeRecord(key.kind,key.id,canonical,prepared);await validateIndependent(options.bazframeHome,candidate);const index=await captureValidatedIndex(options.bazframeHome,key);await validateDependents(options.bazframeHome,candidate,path,index);const current=await requiredSnapshot(options.bazframeHome,key);if(!sameCollectionSnapshot(initial,current))throw occupied(key.kind,path,'changed during activation');await assertIndexUnchanged(options.bazframeHome,key,index,deps);await assertRootUnchanged(canonical,key.kind,key.id,rootIdentity.dev,rootIdentity.ino);await revalidatePreparedCollectionDeclaration(canonical,prepared);await writeFileAtomic(path,encodeSkillCollection(candidate),{managedRoot:options.bazframeHome,mode:0o600,commitOnRename:true});return result(candidate,path,key.kind==='library'?'updated':'built');
+    const rootIdentity=await lstat(canonical,{bigint:true});assertExpectedRootIdentity(key.kind,canonical,rootIdentity.dev,rootIdentity.ino,deps.expectedRootIdentity);const prepared=await prepare(options,key.kind,canonical,deps);const candidate=makeRecord(key.kind,key.id,canonical,prepared);await validateIndependent(options.bazframeHome,candidate);const index=await captureValidatedIndex(options.bazframeHome,key);await validateDependents(options.bazframeHome,candidate,path,index);const current=await requiredSnapshot(options.bazframeHome,key);if(!sameCollectionSnapshot(initial,current))throw occupied(key.kind,path,'changed during activation');await assertIndexUnchanged(options.bazframeHome,key,index,deps);await assertRootUnchanged(canonical,key.kind,key.id,rootIdentity.dev,rootIdentity.ino);await revalidatePreparedCollectionDeclaration(canonical,prepared);await writeFileAtomic(path,encodeSkillCollection(candidate),{managedRoot:options.bazframeHome,mode:0o600,commitOnRename:true});return result(candidate,path,key.kind==='library'?'updated':'built');
   },deps);
 }
 async function remove(options:SkillCollectionLifecycleOptions,key:SkillCollectionKey,deps:SkillCollectionLifecycleDependencies):Promise<SkillCollectionLifecycleResult>{
@@ -74,8 +95,21 @@ async function remove(options:SkillCollectionLifecycleOptions,key:SkillCollectio
 async function prepare(options:SkillCollectionLifecycleOptions,kind:SkillCollectionKind,root:string,deps:SkillCollectionLifecycleDependencies):Promise<PreparedSkillCollection>{return kind==='library'?prepareLibrary(options.bazframeHome,root,{
   ...(deps.expectedRootIdentity===undefined?{}:{expectedInputRootIdentity:{canonicalPath:deps.expectedRootIdentity.root,device:deps.expectedRootIdentity.device,inode:deps.expectedRootIdentity.inode}}),
   ...(deps.beforeLibrarySnapshotInputCapture===undefined?{}:{beforeInputRootIdentityCapture:deps.beforeLibrarySnapshotInputCapture})
-}):preparePackage(options.bazframeHome,root,options.environment,deps.afterPackageSnapshot,deps.expectedPackageManifest,options.childOutputPolicy);}
-function assertExpectedRootIdentity(kind:SkillCollectionKind,root:string,device:bigint,inode:bigint,expected:ExpectedCollectionRootIdentity|undefined):void{if(expected===undefined)return;if(kind!=='library'||expected.root!==root||expected.device!==device||expected.inode!==inode)throw new BazframeError('SKILL_COLLECTION_ROOT_CHANGED',`Library root does not match the caller's expected physical identity: ${root}`);}
+}):preparePackage(
+  options.bazframeHome,
+  root,
+  options.environment,
+  deps.afterPackageSnapshot,
+  deps.expectedPackageManifest,
+  options.childOutputPolicy,
+  {
+    ...(deps.beforePackageBuild===undefined?{}:{beforePackageBuild:deps.beforePackageBuild}),
+    ...(deps.expectedRootIdentity===undefined?{}:{expectedRootIdentity:deps.expectedRootIdentity}),
+    ...(deps.packageLimitPolicy===undefined?{}:{limitPolicy:deps.packageLimitPolicy}),
+    ...(deps.packageProcessRunner===undefined?{}:{packageProcessRunner:deps.packageProcessRunner})
+  }
+);}
+function assertExpectedRootIdentity(kind:SkillCollectionKind,root:string,device:bigint,inode:bigint,expected:ExpectedCollectionRootIdentity|undefined):void{if(expected===undefined)return;if(expected.root!==root||expected.device!==device||expected.inode!==inode)throw new BazframeError('SKILL_COLLECTION_ROOT_CHANGED',`${kind==='library'?'Library':'Package'} root does not match the caller's expected physical identity: ${root}`);}
 async function assertRootUnchanged(root:string,kind:SkillCollectionKind,id:string,device:bigint,inode:bigint):Promise<void>{const [current,metadata]=await Promise.all([canonicalPhysicalCollectionRoot(root,kind),lstat(root,{bigint:true})]);if(current!==root||basename(current)!==id||metadata.dev!==device||metadata.ino!==inode)throw new BazframeError('SKILL_COLLECTION_ROOT_CHANGED',`${kind==='library'?'Library':'Package'} root changed before activation: ${root}`);}
 function makeRecord(kind:SkillCollectionKind,id:string,root:string,prepared:PreparedSkillCollection):SkillCollectionRecord{if(kind==='library'){return{schemaVersion:1,library:id,root,digest:prepared.snapshot.digest} as LibraryRecord;}if(prepared.kind!=='package')throw new Error('package preparation kind mismatch');return{schemaVersion:1,package:id,root,digest:prepared.snapshot.digest,artifactRoot:prepared.artifactRoot,skillsRoot:prepared.skillsRoot} as PackageRecord;}
 function direct(record:SkillCollectionRecord,path:string):DirectSkillCollection{return{schemaVersion:1,collectionKind:kindForRecord(record),collectionId:idForRecord(record),collectionRoot:record.root,snapshotDigest:record.digest,skillsRoot:skillsRootForRecord(record),descriptorPath:path,relativeDescriptorPath:`${idForRecord(record)}.json`,preparationState:'ready',rebuildAvailability:'available'};}

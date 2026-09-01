@@ -179,7 +179,7 @@ describe('remote Git source and provenance', () => {
     };
     expect(decodeManagedGitJournal(JSON.parse(encodeManagedGitJournal(journal)))).toEqual(journal);
     expect(() => decodeManagedGitJournal({ ...journal, kind: 'skill', operation: 'build' })).toThrow(/build operation requires package kind/);
-    expect(() => decodeManagedGitJournal({ ...journal, operation: 'add-exact' })).toThrow(/only Skill and library/u);
+    expect(decodeManagedGitJournal({ ...journal, operation: 'add-exact' })).toMatchObject({ kind: 'package', operation: 'add-exact' });
     await mkdir(join(home, 'providers/git/recovery'), { recursive: true });
     const recoveries = [
       { ...journal, operation: 'add' as const, kind: 'skill' as const, id: 'root-skill', previousRevision: null, remote: 'example.test/team/root-skill', fetchUrl: 'https://example.test/team/root-skill.git', root: managedGitCheckoutRoot(await realpath(home), 'skill', 'root-skill') },
@@ -416,6 +416,10 @@ describe('remote Git source and provenance', () => {
       .resolves.toEqual({ state: 'absent' });
     await expect(classifyManagedGitImportResource(home, 'skill', 'toolkit', identity))
       .resolves.toEqual({ action: 'create' });
+    await expect(classifyManagedGitImportOutcome(home, 'package', 'toolkit', identity))
+      .resolves.toEqual({ state: 'absent' });
+    await expect(classifyManagedGitImportResource(home, 'package', 'toolkit', identity))
+      .resolves.toEqual({ action: 'create' });
     await expect(lstat(home)).rejects.toMatchObject({ code: 'ENOENT' });
 
     await mkdir(join(home, 'skills'), { recursive: true });
@@ -434,7 +438,7 @@ describe('remote Git source and provenance', () => {
       .resolves.toMatchObject({ action: 'blocked', reason: expect.stringContaining('recovery') });
   });
 
-  it('classifies provider-only library occupancy without writes and fails closed on drift', async () => {
+  it('classifies typed provider occupancy without writes, preserves same-ID independence, and fails closed on drift', async () => {
     const root = await mkdtemp(join(tmpdir(), 'bazframe-managed-git-provider-occupancy-')); roots.push(root);
     const missingHome = join(root, 'missing-home');
     const before = await snapshotFilesystem(root);
@@ -468,6 +472,15 @@ describe('remote Git source and provenance', () => {
     await mkdir(managedGitCheckoutRoot(packageHome, 'package', 'toolkit'), { recursive: true });
     await expect(classifyManagedGitProviderOccupancy(packageHome, 'library', 'toolkit'))
       .resolves.toBe('absent');
+    await expect(classifyManagedGitProviderOccupancy(packageHome, 'package', 'toolkit'))
+      .resolves.toBe('occupied');
+
+    const libraryHome = join(root, 'library-home');
+    await mkdir(managedGitCheckoutRoot(libraryHome, 'library', 'toolkit'), { recursive: true });
+    await expect(classifyManagedGitProviderOccupancy(libraryHome, 'package', 'toolkit'))
+      .resolves.toBe('absent');
+    await expect(classifyManagedGitProviderOccupancy(libraryHome, 'library', 'toolkit'))
+      .resolves.toBe('occupied');
 
     const changingHome = join(root, 'changing-home');
     await expect(classifyManagedGitProviderOccupancy(changingHome, 'library', 'toolkit', {

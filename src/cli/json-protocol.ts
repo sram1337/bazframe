@@ -1,7 +1,11 @@
 import { BazframeError } from '../core/errors.js';
 import { boundedTextForDisplay } from '../core/safe-text.js';
 import { ProfileExportError, type ProfileExportCommitState } from '../profile-portability/profile-export.js';
-import { ProfileImportBlockedError, ProfileImportExecutionError } from '../profile-portability/profile-import.js';
+import {
+  ProfileImportBlockedError,
+  ProfileImportExecutionError,
+  ProfileImportPackageBuildAuthorizationRequiredError
+} from '../profile-portability/profile-import.js';
 import { profileImportPartialResult, profileImportPlanResult } from './command-results.js';
 import type { Command } from './parse-argv.js';
 
@@ -51,7 +55,7 @@ export function errorDocument(command: string, error: unknown, diagnostics: Json
     return { schemaVersion:1, ok:false, command, error:{ category, code:error.code, message:safeMessage(error.message), ...(error.topic === undefined ? {} : { topic:error.topic }) }, diagnostics:safe };
   }
   if (error instanceof ProfileExportError) return { schemaVersion:1, ok:false, command, error:{ category:'operational', code:error.code, message:safeMessage(error.message), commitState:error.commitState, outputPath:error.outputPath }, diagnostics:safe };
-  if (error instanceof ProfileImportBlockedError) return { schemaVersion:1, ok:false, command, error:{ category:'operational', code:error.code, message:safeMessage(error.message), plan:profileImportPlanResult(error.plan) }, diagnostics:safe };
+  if (error instanceof ProfileImportBlockedError || error instanceof ProfileImportPackageBuildAuthorizationRequiredError) return { schemaVersion:1, ok:false, command, error:{ category:'operational', code:error.code, message:safeMessage(error.message), plan:profileImportPlanResult(error.plan) }, diagnostics:safe };
   if (error instanceof ProfileImportExecutionError) return { schemaVersion:1, ok:false, command, error:{ category:'operational', code:error.code, message:safeMessage(error.message), partialResult:profileImportPartialResult(error.result) }, diagnostics:safe };
   if (error instanceof BazframeError) return { schemaVersion:1, ok:false, command, error:{ category:'operational', code:error.code, message:safeMessage(error.message) }, diagnostics:safe };
   return { schemaVersion:1, ok:false, command, error:{ category:'internal', code:'INTERNAL_ERROR', message:'Bazframe encountered an unexpected internal error.' }, diagnostics:safe };

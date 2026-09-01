@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   boundedStateJsonBytes,
   managedGitAcquisitionLimitPolicy,
+  packageLimitPolicy,
   profileArtifactLimitPolicy,
   PROFILE_PORTABILITY_PRODUCTION_LIMITS,
   PRODUCTION_MANAGED_GIT_ACQUISITION_LIMIT_POLICY,
+  PRODUCTION_PACKAGE_LIMIT_POLICY,
   PRODUCTION_PROFILE_ARTIFACT_LIMIT_POLICY
 } from '../../../src/profile-portability/profile-portability-policy.js';
 
@@ -46,6 +48,16 @@ describe('profile portability production policy', () => {
       maxResources: 256
     });
     expect(Object.isFrozen(PRODUCTION_PROFILE_ARTIFACT_LIMIT_POLICY)).toBe(true);
+    expect(PRODUCTION_PACKAGE_LIMIT_POLICY).toEqual({
+      maxManifestBytes: 65_536,
+      maxArgvEntries: 64,
+      maxArgumentBytes: 4096,
+      maxArgvAggregateBytes: 16_384,
+      maxPathBytes: 4096,
+      maxBuildMilliseconds: 1_800_000,
+      terminationGraceMilliseconds: 5000
+    });
+    expect(Object.isFrozen(PRODUCTION_PACKAGE_LIMIT_POLICY)).toBe(true);
     expect(PRODUCTION_MANAGED_GIT_ACQUISITION_LIMIT_POLICY).toEqual({
       maxGitObjectBytes: 1_073_741_824,
       maxCheckoutEntries: 8192,
@@ -78,5 +90,33 @@ describe('profile portability production policy', () => {
     expect(() => managedGitAcquisitionLimitPolicy({ maxCheckoutDepth: -1 })).toThrow(/nonnegative/u);
     expect(() => managedGitAcquisitionLimitPolicy({ maxCheckoutDepth: 1.5 })).toThrow(/nonnegative/u);
     expect(() => managedGitAcquisitionLimitPolicy({ unknown: 1 } as never)).toThrow(/unknown/u);
+
+    const packagePolicy = packageLimitPolicy({
+      maxManifestBytes: 100,
+      maxArgvEntries: 2,
+      maxArgumentBytes: 10,
+      maxArgvAggregateBytes: 12,
+      maxPathBytes: 20,
+      maxBuildMilliseconds: 30,
+      terminationGraceMilliseconds: 4
+    });
+    expect(packagePolicy).toEqual({
+      maxManifestBytes: 100,
+      maxArgvEntries: 2,
+      maxArgumentBytes: 10,
+      maxArgvAggregateBytes: 12,
+      maxPathBytes: 20,
+      maxBuildMilliseconds: 30,
+      terminationGraceMilliseconds: 4
+    });
+    expect(Object.isFrozen(packagePolicy)).toBe(true);
+    for (const raised of [
+      { maxManifestBytes: 65_537 }, { maxArgvEntries: 65 }, { maxArgumentBytes: 4097 },
+      { maxArgvAggregateBytes: 16_385 }, { maxPathBytes: 4097 },
+      { maxBuildMilliseconds: 1_800_001 }, { terminationGraceMilliseconds: 5001 }
+    ]) expect(() => packageLimitPolicy(raised)).toThrow(/must not raise/u);
+    expect(() => packageLimitPolicy({ maxArgvEntries: -1 })).toThrow(/nonnegative/u);
+    expect(() => packageLimitPolicy({ maxBuildMilliseconds: 1.5 })).toThrow(/nonnegative/u);
+    expect(() => packageLimitPolicy({ unknown: 1 } as never)).toThrow(/unknown/u);
   });
 });

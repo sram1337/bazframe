@@ -43,33 +43,39 @@ You should see all your profiles added skills.
 - (optional) [Git](https://git-scm.com/) only for remote Git sources. Basic profile use does not require Git.
 
 
-### Export and import a profile (Stage 2)
+### Export and import a profile (Stage 3)
 
-Publish a reviewable directory for an explicit profile without changing the active profile:
+Stage 3 package portability is live on macOS and Linux. It is not a claim of Windows support or full profile portability. Publish a reviewable directory for an explicit profile without changing the active profile:
 
 ```bash
 bazframe profile export my-coding-harness --output ./my-coding-harness.bazframe-profile
 ```
 
-Review `./my-coding-harness.bazframe-profile/profile/AGENTS.md` before sharing because Bazframe does not redact user-authored instructions. On the destination machine, inspect first, then import. For an artifact with no local libraries:
+Review `./my-coding-harness.bazframe-profile/profile/AGENTS.md` before sharing: Bazframe does not redact secrets from user-authored instructions. Exports are path-free declarations, not copied source trees or snapshots. Remote Git resources record normalized credential-free identity, branch, and exact revision. Healthy local libraries and packages export only `{ "type": "localMapping" }`, without a source-machine path or snapshot digest.
+
+On the destination machine, inspect first. `--map` is repeatable and typed; provide one absolute physical, basename-matching source directory for every declared local library or package:
 
 ```bash
-bazframe profile import --dry-run ./my-coding-harness.bazframe-profile
-bazframe profile import ./my-coding-harness.bazframe-profile
-```
-
-If the artifact comes from the Quick Start profile above, it declares local library `my-skills-folder`. Supply the same mapping during inspection and execution; the absolute physical source directory basename must equal the library ID:
-
-```bash
-bazframe profile import --map library:my-skills-folder=/srv/skill-libraries/my-skills-folder --dry-run ./my-coding-harness.bazframe-profile
-bazframe profile import --map library:my-skills-folder=/srv/skill-libraries/my-skills-folder ./my-coding-harness.bazframe-profile
+bazframe profile import \
+  --map library:my-skills-folder=/srv/skill-libraries/my-skills-folder \
+  --map package:my-package=/srv/skill-packages/my-package \
+  --dry-run ./my-coding-harness.bazframe-profile
+bazframe profile import \
+  --map library:my-skills-folder=/srv/skill-libraries/my-skills-folder \
+  --map package:my-package=/srv/skill-packages/my-package \
+  --yes ./my-coding-harness.bazframe-profile
 # Or choose only the destination profile ID:
-bazframe profile import --as imported-harness --map library:my-skills-folder=/srv/skill-libraries/my-skills-folder ./my-coding-harness.bazframe-profile
+bazframe profile import --as imported-harness \
+  --map library:my-skills-folder=/srv/skill-libraries/my-skills-folder \
+  --map package:my-package=/srv/skill-packages/my-package \
+  --yes ./my-coding-harness.bazframe-profile
 ```
 
-Stage 2 supports direct Skills from recorded exact remote Git revisions and libraries from either exact remote Git revisions or explicit local mappings. Healthy local libraries export only `{ "type": "localMapping" }`, without their source-machine path or snapshot digest. Mapping inspection is read-only; a missing mapping blocks the plan. Import creates an absent mapped library through the ordinary build-free lifecycle or exactly reuses the same canonical root, never overwriting, updating, or repointing it.
+Dry-run takes no Bazframe write lock and performs no Bazframe writes, network access, builds, prompts, or active-profile mutation. It reports exact historical remote Git revisions and prospective work. Execution creates or exactly reuses branch-reachable historical remote Skills, libraries, and packages, processes packages last, and never substitutes current branch HEAD. An exact healthy package reuse is offline and needs no build, authorization report, prompt, or consent.
 
-Import reports the complete plan before effects. Dry-run performs no network access, build, Bazframe write, or active-profile mutation. A newly published profile remains inactive; an exact existing destination, including one already active, may be reused without changing active selection. Execution never promotes library children into `(default)`; earlier committed resources remain after later failure and exact retry converges through reuse. Healthy local direct Skills remain explicit omissions and cannot be mapped. Packages and `--yes` remain unsupported until Stage 3. Windows publication and full profile portability remain unavailable.
+Each new package build receives an exact report covering package/source identity, candidate root and working directory, literal argv, manifest path and SHA-256, artifact/Skills roots, `shell: false`, inherited environment, and unsandboxed `current-process-user` authority with possible credential, network, and user-file access. Arbitrary package effects are not rollbackable. Interactive approval accepts only literal `y` and otherwise declines by default; noninteractive execution uses `--yes`. `--yes` is invalid with `--dry-run`.
+
+Import is forward-resumable, not globally atomic: earlier committed resources remain after later failure, recovery/ambiguous outcomes must be inspected, and retry converges through exact reuse. A newly published profile remains inactive; exact reuse of an existing active destination does not change selection. Healthy local direct Skills remain named omissions and have no mapping. Collection children never enter `(default)`. JSON reports omit environment names/values and private filesystem identities, but mapped local roots are intentionally reported. Windows publication and the broader hostile/full-portability acceptance gate remain open.
 
 ### Terminal interface
 

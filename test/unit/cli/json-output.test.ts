@@ -19,17 +19,33 @@ import {
   type ProfileImportResult
 } from '../../../src/profile-portability/profile-import.js';
 import { addLibrary } from '../../../src/skill-collections/skill-collection-lifecycle.js';
+import { PackageBuildInterruptedError } from '../../../src/skill-collections/skill-collection-preparation.js';
 import { readLibrary } from '../../../src/skill-collections/skill-collection-store.js';
 
 const roots:string[]=[];const execFileAsync=promisify(execFile);
 const importPlan:ProfileImportPlan={
  artifactPath:'/artifact',schemaVersion:1,exportedProfileId:'portable',destinationProfileId:'portable',instructions:{path:'profile/AGENTS.md',sha256:'a'.repeat(64)},
  skills:[],omittedLocalSkills:['local-only'],libraries:[],packages:[],resources:[],
- activeSelection:{state:'absent',willChange:false},composition:{status:'ready',deferredLibraries:[],knownCollectionSkillCount:0,knownCollectionSkillPreview:[]},
+ packageBuilds:{total:0,remote:0,local:0,unresolvedRemotePackageIds:[],warnings:[]},
+ activeSelection:{state:'absent',willChange:false},composition:{status:'ready',deferredLibraries:[],deferredPackages:[],knownCollectionSkillCount:0,knownCollectionSkillPreview:[]},
  exclusions:{activeSelectionWillChange:false,policyWillChange:false,collectionChildrenEnterDefault:false},profileAction:'publish',blockers:[]
 };
 const planning=(plan:ProfileImportPlan):ProfileImportPlanningResult=>({plan} as ProfileImportPlanningResult);
 const imported=(plan:ProfileImportPlan=importPlan):ProfileImportResult=>({plan,resources:[],profileOutcome:'published',destinationPath:'/home/profiles/portable',activeSelectionChanged:false});
+const packagePlan:ProfileImportPlan={
+ ...importPlan,packages:['automation'],resources:[{
+  kind:'package',id:'automation',source:{type:'remoteGit',remote:'example.test/team/automation',fetchUrl:'https://example.test/team/automation.git',branch:'main',revision:'b'.repeat(40)},
+  action:'create',networkRequired:true,buildRequired:true
+ }],packageBuilds:{total:1,remote:1,local:0,unresolvedRemotePackageIds:['automation'],warnings:[]},
+ composition:{...importPlan.composition,status:'deferred',deferredPackages:['automation']}
+};
+const packageReport={
+ packageId:'automation',source:{type:'remoteGit' as const,remote:'example.test/team/automation',fetchUrl:'https://example.test/team/automation.git',branch:'main',revision:'b'.repeat(40)},
+ candidateRoot:'/private/internal/checkouts/package/automation',cwd:'/private/internal/checkouts/package/automation',
+ argv:['node','build.mjs','--literal=value'],manifest:{path:'bazframe-package.json' as const,sha256:'c'.repeat(64)},artifactRoot:'dist',skillsRoot:'skills',shell:false as const,
+ environment:{inherited:true as const,namesAndValuesExposed:false as const},authority:{sandboxed:false as const,user:'current-process-user' as const,access:['credentials','network','user-files'] as const},
+ warning:'Package build side effects are not rollbackable.' as const
+};
 async function localArtifact(root:string,id='toolkit'){
  const artifact=join(root,'artifact');const instructions=Buffer.from('local mapping fixture\n','utf8');await mkdir(join(artifact,'profile'),{recursive:true});await writeFile(join(artifact,'profile','AGENTS.md'),instructions);
  const manifest:ProfileArtifact={schemaVersion:1,kind:'bazframe-profile-export',profile:{id:'portable',instructions:{path:'profile/AGENTS.md',sha256:createHash('sha256').update(instructions).digest('hex')},skills:[],omittedLocalSkills:[],libraries:[id],packages:[]},resources:[{kind:'library',id,source:{type:'localMapping'}}]};
@@ -86,8 +102,8 @@ describe('CLI JSON protocol',()=>{
  it('passes ordered defensive mapping copies to dry-run and execution without CLI path inspection',async()=>{
   const argv=['profile','import','artifact','--map','library:alpha=/entered/alpha=one','--map=library:beta=/entered/beta'];
   const expected=[{kind:'library' as const,id:'alpha',root:'/entered/alpha=one'},{kind:'library' as const,id:'beta',root:'/entered/beta'}];
-  const received:Array<readonly {kind:'library';id:string;root:string}[]>=[];
-  const planProfileImport=vi.fn(async(options:{mappings?:readonly {kind:'library';id:string;root:string}[]})=>{
+  const received:Array<readonly {kind:'library'|'package';id:string;root:string}[]>=[];
+  const planProfileImport=vi.fn(async(options:{mappings?:readonly {kind:'library'|'package';id:string;root:string}[]})=>{
     expect(options.mappings).toEqual(expected);received.push(options.mappings!);
     (options.mappings![0] as {root:string}).root='/mutated';
     return planning(importPlan);
@@ -105,7 +121,7 @@ describe('CLI JSON protocol',()=>{
  });
  it('rejects malformed mappings before services or Bazframe-home creation',async()=>{
   const planProfileImport=vi.fn();const executeProfileImport=vi.fn();
-  const result=await invoke(['profile','import','artifact','--map','package:x=/tmp/x','--json'],{planProfileImport,executeProfileImport});
+  const result=await invoke(['profile','import','artifact','--map','skill:x=/tmp/x','--json'],{planProfileImport,executeProfileImport});
   expect(result).toMatchObject({status:2,stderr:'',document:{ok:false,command:'profile.import',error:{code:'CLI_USAGE'}}});
   expect(planProfileImport).not.toHaveBeenCalled();expect(executeProfileImport).not.toHaveBeenCalled();
   await expect(stat(join(result.root,'home'))).rejects.toMatchObject({code:'ENOENT'});
@@ -115,10 +131,12 @@ describe('CLI JSON protocol',()=>{
   ['as',['--as','--json','review']]
  ] as const)('does not let global --json satisfy a missing %s value',async(_label,tokens)=>{
   const planProfileImport=vi.fn();const executeProfileImport=vi.fn();
-  const result=await invoke(['--json','profile','import','artifact',...tokens],{planProfileImport,executeProfileImport});
-  expect(result).toMatchObject({status:2,stderr:'',document:{ok:false,command:'profile.import',error:{code:'CLI_USAGE'}}});
-  expect(planProfileImport).not.toHaveBeenCalled();expect(executeProfileImport).not.toHaveBeenCalled();
-  await expect(stat(join(result.root,'home'))).rejects.toMatchObject({code:'ENOENT'});
+  for(const prefix of [[],['--json']]){
+   const result=await invoke([...prefix,'profile','import','artifact',...tokens],{planProfileImport,executeProfileImport});
+   expect(result).toMatchObject({status:2,stderr:'',document:{ok:false,command:'profile.import',error:{code:'CLI_USAGE'}}});
+   expect(planProfileImport).not.toHaveBeenCalled();expect(executeProfileImport).not.toHaveBeenCalled();
+   await expect(stat(join(result.root,'home'))).rejects.toMatchObject({code:'ENOENT'});
+  }
  });
  it('keeps invalid physical mapping paths out of JSON errors',async()=>{
   const root=await realpath(await mkdtemp(join(tmpdir(),'bazframe-json-mapping-invalid-')));roots.push(root);const artifact=await localArtifact(root);
@@ -151,6 +169,88 @@ describe('CLI JSON protocol',()=>{
   expect(serialized).not.toContain('/entered/toolkit');
   for(const forbidden of ['device','inode','snapshot','evidence'])expect(serialized).not.toContain(forbidden);
  });
+ it('rejects --yes with --dry-run before services or home access',async()=>{
+  const planProfileImport=vi.fn();const executeProfileImport=vi.fn();
+  const result=await invoke(['profile','import','artifact','--yes','--dry-run','--json'],{planProfileImport,executeProfileImport});
+  expect(result).toMatchObject({status:2,stderr:'',document:{ok:false,error:{code:'CLI_USAGE'}}});
+  expect(planProfileImport).not.toHaveBeenCalled();expect(executeProfileImport).not.toHaveBeenCalled();
+  await expect(stat(join(result.root,'home'))).rejects.toMatchObject({code:'ENOENT'});
+ });
+ it('reports the plan and refuses JSON package creation before acquisition without --yes',async()=>{
+  let acquisitionStarted=false;
+  const executeProfileImport=vi.fn(async(options:ExecuteProfileImportOptions):Promise<ProfileImportResult>=>{
+   await options.reportPlan(packagePlan);
+   acquisitionStarted=true;
+   throw new Error('must not acquire');
+  });
+  const result=await invoke(['profile','import','artifact','--json'],{executeProfileImport});
+  expect(result).toMatchObject({status:1,stderr:'',document:{ok:false,error:{code:'PROFILE_IMPORT_PACKAGE_BUILD_AUTHORIZATION_REQUIRED',plan:{packages:['automation']}}}});
+  expect(acquisitionStarted).toBe(false);expect(executeProfileImport).toHaveBeenCalledOnce();
+  expect(result.stdout.trim().split('\n')).toHaveLength(1);
+ });
+ it('allows exact package reuse without --yes, report, or prompt',async()=>{
+  const reusePlan:ProfileImportPlan={...packagePlan,resources:[{...packagePlan.resources[0]!,action:'reuse',networkRequired:false,buildRequired:false}],packageBuilds:{total:0,remote:0,local:0,unresolvedRemotePackageIds:[],warnings:[]},composition:{...packagePlan.composition,status:'ready',deferredPackages:[]}};
+  const confirmProfileImportPackageBuild=vi.fn();
+  const executeProfileImport=vi.fn(async(options:ExecuteProfileImportOptions):Promise<ProfileImportResult>=>{
+   await options.reportPlan(reusePlan);
+   return {...imported(reusePlan),resources:[{kind:'package',id:'automation',outcome:'reused'}],packageBuildReports:[],possibleNonrollbackablePackageEffects:[]};
+  });
+  const result=await invoke(['profile','import','artifact','--json'],{executeProfileImport,confirmProfileImportPackageBuild});
+  expect(result).toMatchObject({status:0,stderr:'',document:{ok:true,result:{packageBuildReports:[],possibleNonrollbackablePackageEffects:[]}}});
+  expect(confirmProfileImportPackageBuild).not.toHaveBeenCalled();
+ });
+ it('uses --yes for each exact report without prompting and returns a private-path-free JSON projection',async()=>{
+  const confirmProfileImportPackageBuild=vi.fn();
+  const executeProfileImport=vi.fn(async(options:ExecuteProfileImportOptions):Promise<ProfileImportResult>=>{
+   await options.reportPlan(packagePlan);
+   expect(await options.authorizePackageBuild?.(packageReport)).toBe(true);
+   return {...imported(packagePlan),resources:[{kind:'package',id:'automation',outcome:'created'}],packageBuildReports:[packageReport],possibleNonrollbackablePackageEffects:['automation']};
+  });
+  const result=await invoke(['profile','import','artifact','--yes','--json'],{executeProfileImport,confirmProfileImportPackageBuild});
+  expect(result).toMatchObject({status:0,stderr:'',document:{ok:true,result:{
+   packageBuildReports:[{packageId:'automation',source:{type:'remoteGit'},argv:['node','build.mjs','--literal=value'],manifest:{path:'bazframe-package.json',sha256:'c'.repeat(64)},shell:false,inheritedEnvironment:true}],
+   possibleNonrollbackablePackageEffects:['automation']
+  }}});
+  expect(confirmProfileImportPackageBuild).not.toHaveBeenCalled();
+  const serialized=JSON.stringify(result.document);
+  expect(serialized).not.toContain(packageReport.candidateRoot);
+  for(const forbidden of ['candidateRoot','cwd','device','inode','snapshot','cause','stack'])expect(serialized).not.toContain(forbidden);
+ });
+ it('prints every exact prose report before interactive literal approval and defaults to decline',async()=>{
+  for(const approved of [false,true]){
+   const root=await realpath(await mkdtemp(join(tmpdir(),`bazframe-import-consent-${approved}-`)));roots.push(root);let stdout='',stderr='';
+   const confirmProfileImportPackageBuild=vi.fn(()=>{expect(stdout).toContain('Package build authorization report');expect(stdout).toContain(`Candidate root: ${packageReport.candidateRoot}`);return approved;});
+   const executeProfileImport=vi.fn(async(options:ExecuteProfileImportOptions):Promise<ProfileImportResult>=>{
+    await options.reportPlan(packagePlan);
+    const accepted=await options.authorizePackageBuild!(packageReport);
+    if(!accepted)throw new ProfileImportExecutionError({...imported(packagePlan),resources:[{kind:'package',id:'automation',outcome:'not-created'}],profileOutcome:'not-published',packageBuildReports:[packageReport],possibleNonrollbackablePackageEffects:[]},new BazframeError('PROFILE_IMPORT_PACKAGE_BUILD_DECLINED','Package build was not authorized for automation.'));
+    return {...imported(packagePlan),resources:[{kind:'package',id:'automation',outcome:'created'}],packageBuildReports:[packageReport],possibleNonrollbackablePackageEffects:['automation']};
+   });
+   const status=await runCli(['profile','import','artifact'],{environment:{...process.env,BAZFRAME_HOME:join(root,'home'),NO_COLOR:'1'},userHome:root,stdinIsTty:true,stdoutIsTty:true,writeStdout:(text)=>{stdout+=text;},writeStderr:(text)=>{stderr+=text;},executeProfileImport,confirmProfileImportPackageBuild});
+   expect(status).toBe(approved?0:1);expect(confirmProfileImportPackageBuild).toHaveBeenCalledOnce();
+   expect(stdout.indexOf('Profile import plan')).toBeLessThan(stdout.indexOf('Package build authorization report'));
+   expect(stdout).toContain('Literal argv: ["node","build.mjs","--literal=value"]');
+   if(approved)expect(stdout).toContain('Possible nonrollbackable package-build effects:\n  - automation');
+   else expect(stderr).toContain('PROFILE_IMPORT_PACKAGE_BUILD_DECLINED');
+  }
+ });
+ it('returns safe package reports and possible effects in JSON partial failures',async()=>{
+  const executeProfileImport=async(options:ExecuteProfileImportOptions):Promise<ProfileImportResult>=>{
+   await options.reportPlan(packagePlan);expect(await options.authorizePackageBuild?.(packageReport)).toBe(true);
+   throw new ProfileImportExecutionError({...imported(packagePlan),resources:[{kind:'package',id:'automation',outcome:'not-created'}],profileOutcome:'not-published',packageBuildReports:[packageReport],possibleNonrollbackablePackageEffects:['automation']},new BazframeError('PACKAGE_BUILD_FAILED','noisy failure'));
+  };
+  const result=await invoke(['profile','import','artifact','--yes','--json'],{executeProfileImport});
+  expect(result.document).toMatchObject({ok:false,error:{partialResult:{packageBuildReports:[{packageId:'automation'}],possibleNonrollbackablePackageEffects:['automation']}}});
+  const serialized=JSON.stringify(result.document);expect(serialized).not.toContain(packageReport.candidateRoot);expect(serialized).not.toContain('cause');expect(serialized).not.toContain('stack');
+ });
+ it.each([['SIGHUP',129],['SIGINT',130],['SIGTERM',143]] as const)('returns signal-derived status for parent %s after emitting the JSON failure',async(signal,status)=>{
+  const executeProfileImport=async(options:ExecuteProfileImportOptions):Promise<ProfileImportResult>=>{
+   await options.reportPlan(packagePlan);
+   throw new ProfileImportExecutionError({...imported(packagePlan),resources:[{kind:'package',id:'automation',outcome:'not-created'}],profileOutcome:'not-published',packageBuildReports:[packageReport],possibleNonrollbackablePackageEffects:['automation']},new PackageBuildInterruptedError(signal));
+  };
+  const result=await invoke(['profile','import','artifact','--yes','--json'],{executeProfileImport});
+  expect(result).toMatchObject({status,stderr:'',document:{ok:false,error:{code:'PROFILE_IMPORT_FAILED'}}});
+ });
  it('returns blocked dry-run plans as one successful document without streaming the plan',async()=>{
   const blocked:ProfileImportPlan={...importPlan,profileAction:'blocked',composition:{...importPlan.composition,status:'blocked'},blockers:[{code:'DESTINATION_OCCUPIED',key:'profile:portable',message:'destination is occupied'}]};
   const planProfileImport=vi.fn(async()=>planning(blocked));
@@ -172,6 +272,9 @@ describe('CLI JSON protocol',()=>{
   const partialResult=await invoke(['profile','import','artifact','--json'],{executeProfileImport:partialExecution});
   expect(partialResult.document).toMatchObject({ok:false,command:'profile.import',error:{code:'PROFILE_IMPORT_FAILED',partialResult:{mode:'partial',resources:[{outcome:'created'},{outcome:'commit-ambiguous'}],profileOutcome:'commit-ambiguous'}},diagnostics:[{code:'PROFILE_IMPORT_PARTIAL_RESOURCES_RETAINED'},{code:'PROFILE_IMPORT_COMMIT_AMBIGUOUS'},{code:'PROFILE_IMPORT_INSPECT_DESTINATION'},{code:'PROFILE_IMPORT_FAILURE_DETAIL',message:'MANAGED_GIT_CHANGED: resource changed\\u000awhile importing'}]});
   const serialized=JSON.stringify(partialResult.document);for(const forbidden of ['cause','health','snapshot','device','inode','artifactSnapshot','resourceSnapshots'])expect(serialized).not.toContain(forbidden);
+  for(const diagnostic of partialResult.document.diagnostics as Array<Record<string, unknown>>){
+   expect(Buffer.byteLength(JSON.stringify(diagnostic),'utf8')).toBeLessThanOrEqual(1_024);
+  }
  });
  it('preserves the underlying import failure code below, at, and above the diagnostic boundary',async()=>{
   const code='MANAGED_GIT_CHANGED';const prefix=`${code}: `;const exactMessageBytes=768-Buffer.byteLength(prefix,'utf8');
@@ -208,7 +311,33 @@ describe('CLI JSON protocol',()=>{
   const executeProfileImport=async(options:ExecuteProfileImportOptions):Promise<ProfileImportResult>=>{await options.reportPlan(localPlan);return imported(localPlan);};
   const status=await runCli(['profile','import','artifact','--map','library:toolkit=/entered/toolkit'],{environment:{...process.env,BAZFRAME_HOME:join(root,'home'),NO_COLOR:'1'},userHome:root,writeStdout:(text)=>{stdout+=text;},writeStderr:(text)=>{stderr+=text;},executeProfileImport});
   expect(status).toBe(0);expect(stderr).toBe('');
-  expect(stdout).toContain('Local-mapping libraries:\n  - toolkit');expect(stdout).toContain('local mapping: /canonical/toolkit');expect(stdout).toContain('Packages: absent (Stage 2)');
+  expect(stdout).toContain('Local-mapping libraries:\n  - toolkit');expect(stdout).toContain('local mapping: /canonical/toolkit');expect(stdout).toContain('network required: no; build required: no');
+  expect(stdout).toContain('Remote Git packages:\n  (none)');expect(stdout).toContain('Local-mapping packages:\n  (none)');
+  expect(stdout).toContain('Package builds: total 0; remote 0; local 0');expect(stdout).not.toContain('Packages: absent (Stage 2)');
+ });
+ it('renders package actions, build summary, warnings, and deferred package IDs in prose',async()=>{
+  const root=await realpath(await mkdtemp(join(tmpdir(),'bazframe-import-package-prose-')));roots.push(root);let stdout='',stderr='';
+  const warnings=[
+   'Package builds execute with shell:false and inherit the parent environment.',
+   'Package builds execute unsandboxed with current-process-user authority and may access credentials, networks, and user files.',
+   'Each package build uses the package source root as its working directory.',
+   'Arbitrary package-build side effects cannot be rolled back.'
+  ];
+  const packagePlan:ProfileImportPlan={
+   ...importPlan,packages:['automation','local-tools'],resources:[
+    {kind:'package',id:'automation',source:{type:'remoteGit',remote:'example.test/team/automation',fetchUrl:'https://example.test/team/automation.git',branch:'main',revision:'b'.repeat(40)},action:'create',networkRequired:true,buildRequired:true},
+    {kind:'package',id:'local-tools',source:{type:'localMapping',root:'/intentional/local-tools'},action:'create',networkRequired:false,buildRequired:true}
+   ],packageBuilds:{total:2,remote:1,local:1,unresolvedRemotePackageIds:['automation'],warnings},
+   composition:{...importPlan.composition,status:'deferred',deferredPackages:['automation','local-tools']}
+  };
+  const executeProfileImport=async(options:ExecuteProfileImportOptions):Promise<ProfileImportResult>=>{await options.reportPlan(packagePlan);return imported(packagePlan);};
+  const status=await runCli(['profile','import','artifact','--yes'],{environment:{...process.env,BAZFRAME_HOME:join(root,'home'),NO_COLOR:'1'},userHome:root,writeStdout:(text)=>{stdout+=text;},writeStderr:(text)=>{stderr+=text;},executeProfileImport});
+  expect(status).toBe(0);expect(stderr).toBe('');
+  expect(stdout).toContain('Remote Git packages:\n  - automation');expect(stdout).toContain('Local-mapping packages:\n  - local-tools');
+  expect(stdout).toContain('network required: yes; build required: yes');expect(stdout).toContain('network required: no; build required: yes');
+  expect(stdout).toContain('Package builds: total 2; remote 1; local 1');expect(stdout).toContain('Unresolved remote package builds:\n  - automation');
+  expect(stdout).toContain('Deferred packages:\n  - automation\n  - local-tools');for(const warning of warnings)expect(stdout).toContain(`  - ${warning}`);
+  expect(stdout).not.toContain('Packages: absent (Stage 2)');expect(stdout).not.toMatch(/bazframe-package\.json|argv|manifest/u);
  });
  it('reports published import truth when post-execution result capture fails',async()=>{
   const root=await realpath(await mkdtemp(join(tmpdir(),'bazframe-import-reporting-')));roots.push(root);let stdout='',stderr='';

@@ -1,10 +1,12 @@
 import { join, resolve } from 'node:path';
 import type { ChildOutputPolicy } from '../core/child-process.js';
 import { BazframeError } from '../core/errors.js';
+import type { PackageManifestSnapshot } from '../packages/package-manifest.js';
 import { profileDirectory } from '../profiles/profile-store.js';
-import { addLibrary, type SkillCollectionLifecycleResult } from '../skill-collections/skill-collection-lifecycle.js';
+import { addLibrary, addPackage, type SkillCollectionLifecycleResult } from '../skill-collections/skill-collection-lifecycle.js';
 import {
   addManagedGitLibraryAtRevision,
+  addManagedGitPackageAtRevision,
   addManagedGitSkillAtRevision,
   classifyManagedGitImportOutcome,
   sameManagedGitExportHealth,
@@ -16,13 +18,16 @@ import type { PathFreeManagedGitIdentity } from '../providers/managed-git-record
 import { ensureManagedDirectory } from '../state/atomic-file.js';
 import { withStateLock } from '../state/lock.js';
 import {
+  assertLocalCollectionMappingSnapshot,
   assertLocalLibraryMappingSnapshot,
+  classifyLocalCollectionImportOutcome,
   classifyLocalLibraryImportOutcome,
-  sameLocalLibraryHealth,
-  sameLocalLibraryMappingSnapshot,
-  type LocalLibraryHealthSnapshot,
-  type LocalLibraryMappingSnapshot,
-  type ProfileImportMappingInput
+  sameLocalCollectionHealth,
+  sameLocalCollectionMappingSnapshot,
+  type LocalCollectionHealthSnapshot,
+  type LocalCollectionMappingInput,
+  type LocalCollectionMappingSnapshot,
+  type LocalPackageMappingSnapshot
 } from './profile-import-local-library.js';
 import {
   sameProfileArtifactDirectorySnapshot
@@ -40,6 +45,14 @@ import {
   type ProfileImportPublicationOptions
 } from './profile-import-publication.js';
 import type { ManagedGitAcquisitionLimitPolicy } from './profile-portability-policy.js';
+import {
+  PackageBuildReportAccumulator,
+  copyPackageBuildReport,
+  createPackageBuildAuthorizationReport,
+  sameAuthorizedPackageInputs,
+  type AuthorizePackageBuild,
+  type PackageBuildAuthorizationReport
+} from './profile-import-package-build.js';
 
 export type ProfileImportResourceOutcome =
   | 'created'
@@ -55,7 +68,7 @@ export type ProfileImportProfileOutcome =
   | 'commit-ambiguous';
 
 export interface ProfileImportResourceResult {
-  kind: 'skill' | 'library';
+  kind: 'skill' | 'library' | 'package';
   id: string;
   outcome: ProfileImportResourceOutcome;
 }
@@ -66,6 +79,8 @@ export interface ProfileImportResult {
   profileOutcome: 'published' | 'reused';
   destinationPath: string;
   activeSelectionChanged: false;
+  packageBuildReports?: PackageBuildAuthorizationReport[];
+  possibleNonrollbackablePackageEffects?: string[];
 }
 
 export interface ProfileImportPartialResult {
@@ -74,16 +89,19 @@ export interface ProfileImportPartialResult {
   profileOutcome: ProfileImportProfileOutcome;
   destinationPath: string;
   activeSelectionChanged: false;
+  packageBuildReports?: PackageBuildAuthorizationReport[];
+  possibleNonrollbackablePackageEffects?: string[];
 }
 
 export interface ExecuteProfileImportOptions {
   bazframeHome: string;
   artifactDirectory: string;
   destinationProfileId?: string;
-  mappings?: readonly ProfileImportMappingInput[];
+  mappings?: readonly LocalCollectionMappingInput[];
   environment?: NodeJS.ProcessEnv;
   acquisitionLimits?: Partial<ManagedGitAcquisitionLimitPolicy>;
   childOutputPolicy?: ChildOutputPolicy;
+  authorizePackageBuild?: AuthorizePackageBuild;
   reportPlan: (plan: ProfileImportPlan) => void | Promise<void>;
 }
 
@@ -91,9 +109,15 @@ export interface ProfileImportExecutionDependencies {
   planImport?: typeof planProfileImport;
   addSkillAtRevision?: typeof addManagedGitSkillAtRevision;
   addLibraryAtRevision?: typeof addManagedGitLibraryAtRevision;
+  addPackageAtRevision?: typeof addManagedGitPackageAtRevision;
   classifyResourceOutcome?: typeof classifyManagedGitImportOutcome;
+  classifyLocalCollectionOutcome?: typeof classifyLocalCollectionImportOutcome;
+  /** Stage 2 compatibility seam. */
   classifyLocalLibraryOutcome?: typeof classifyLocalLibraryImportOutcome;
   addLocalLibrary?: typeof addLibrary;
+  addLocalPackage?: typeof addPackage;
+  assertLocalCollectionMapping?: typeof assertLocalCollectionMappingSnapshot;
+  /** Stage 2 compatibility seam. */
   assertLocalMapping?: typeof assertLocalLibraryMappingSnapshot;
   publishProfile?: (options: ProfileImportPublicationOptions) => ReturnType<typeof publishImportedProfile>;
   stateLock?: typeof withStateLock;
@@ -106,6 +130,19 @@ export class ProfileImportBlockedError extends BazframeError {
   constructor(plan: ProfileImportPlan) {
     super('PROFILE_IMPORT_BLOCKED', 'Profile import is blocked by the reported inspection plan.');
     this.name = 'ProfileImportBlockedError';
+    this.plan = copyPlan(plan);
+  }
+}
+
+export class ProfileImportPackageBuildAuthorizationRequiredError extends BazframeError {
+  readonly plan: ProfileImportPlan;
+
+  constructor(plan: ProfileImportPlan) {
+    super(
+      'PROFILE_IMPORT_PACKAGE_BUILD_AUTHORIZATION_REQUIRED',
+      'The reported profile import plan requires package builds; noninteractive input requires --yes.'
+    );
+    this.name = 'ProfileImportPackageBuildAuthorizationRequiredError';
     this.plan = copyPlan(plan);
   }
 }
@@ -130,10 +167,11 @@ interface PreparedExecution {
   acquisitionLimits?: Partial<ManagedGitAcquisitionLimitPolicy>;
   childOutputPolicy?: ChildOutputPolicy;
   reportPlan: ExecuteProfileImportOptions['reportPlan'];
+  authorizePackageBuild?: AuthorizePackageBuild;
 }
 
 interface ResourceProgressBase {
-  kind: 'skill' | 'library';
+  kind: 'skill' | 'library' | 'package';
   id: string;
   initialAction: 'create' | 'reuse';
   attempted: boolean;
@@ -146,10 +184,10 @@ type ResourceProgress =
     reuseRequirement?: ManagedGitExactRevisionReuseRequirement;
   })
   | (ResourceProgressBase & {
-    kind: 'library';
+    kind: 'library' | 'package';
     sourceType: 'localMapping';
-    mapping: LocalLibraryMappingSnapshot;
-    expectedHealth?: LocalLibraryHealthSnapshot;
+    mapping: LocalCollectionMappingSnapshot;
+    expectedHealth?: LocalCollectionHealthSnapshot;
   });
 
 export async function executeProfileImport(
@@ -161,15 +199,24 @@ export async function executeProfileImport(
     plan: dependencies.planImport ?? planProfileImport,
     addSkill: dependencies.addSkillAtRevision ?? addManagedGitSkillAtRevision,
     addLibrary: dependencies.addLibraryAtRevision ?? addManagedGitLibraryAtRevision,
+    addPackage: dependencies.addPackageAtRevision ?? addManagedGitPackageAtRevision,
     classifyOutcome: dependencies.classifyResourceOutcome ?? classifyManagedGitImportOutcome,
-    classifyLocalOutcome: dependencies.classifyLocalLibraryOutcome ?? classifyLocalLibraryImportOutcome,
+    classifyLocalOutcome: dependencies.classifyLocalCollectionOutcome
+      ?? (async (home, id, mapping) => mapping.kind === 'library'
+        ? await (dependencies.classifyLocalLibraryOutcome ?? classifyLocalLibraryImportOutcome)(home, id, mapping)
+        : await classifyLocalCollectionImportOutcome(home, id, mapping)) as typeof classifyLocalCollectionImportOutcome,
     addLocalLibrary: dependencies.addLocalLibrary ?? addLibrary,
-    assertLocalMapping: dependencies.assertLocalMapping ?? assertLocalLibraryMappingSnapshot,
+    addLocalPackage: dependencies.addLocalPackage ?? addPackage,
+    assertLocalMapping: dependencies.assertLocalCollectionMapping
+      ?? (async (mapping) => mapping.kind === 'library'
+        ? await (dependencies.assertLocalMapping ?? assertLocalLibraryMappingSnapshot)(mapping)
+        : await assertLocalCollectionMappingSnapshot(mapping)) as typeof assertLocalCollectionMappingSnapshot,
     publish: dependencies.publishProfile ?? publishImportedProfile,
     lock: dependencies.stateLock ?? withStateLock,
     ensureDirectory: dependencies.ensureDirectory ?? ensureManagedDirectory
   };
 
+  const packageBuilds = new PackageBuildReportAccumulator();
   const initial = await services.plan(prepared.planOptions);
   const displayedPlan = copyPlan(initial.plan);
   await prepared.reportPlan(copyPlan(displayedPlan));
@@ -196,6 +243,7 @@ export async function executeProfileImport(
       prepared.environment,
       services.classifyOutcome,
       services.classifyLocalOutcome,
+      packageBuilds,
       'not-published',
       cause
     );
@@ -216,41 +264,120 @@ export async function executeProfileImport(
           await services.assertLocalMapping(resource.mapping);
           const exact = await services.classifyLocalOutcome(initial.homePath, resource.id, resource.mapping);
           if (exact.state !== 'exact' || resource.expectedHealth === undefined
-            || !sameLocalLibraryHealth(resource.expectedHealth, exact.health)) {
-            throw new BazframeError('PROFILE_IMPORT_DEPENDENCY_CHANGED', `Mapped local library ${resource.id} is no longer an exact reuse.`);
+            || !sameLocalCollectionHealth(resource.expectedHealth, exact.health)) {
+            throw new BazframeError('PROFILE_IMPORT_DEPENDENCY_CHANGED', `Mapped local ${resource.kind} ${resource.id} is no longer an exact reuse.`);
           }
           resource.successfulOutcome = 'reused';
         } else {
-          const result = await pathFreeLocalLibraryCreate(resource.id, () => services.lock(
+          const result = await pathFreeLocalCollectionCreate(resource.kind, resource.id, () => services.lock(
             join(initial.homePath, 'locks', 'state.lock'),
-            { command: 'bazframe profile import local library', target: join(initial.homePath, 'libraries', `${resource.id}.json`) },
+            {
+              command: `bazframe profile import local ${resource.kind}`,
+              target: join(initial.homePath, resource.kind === 'library' ? 'libraries' : 'packages', `${resource.id}.json`)
+            },
             async () => {
               const currentMapping = await services.assertLocalMapping(resource.mapping);
-              if (!sameLocalLibraryMappingSnapshot(resource.mapping, currentMapping)) {
-                throw new BazframeError('PROFILE_IMPORT_MAPPING_CHANGED', `Mapped library ${resource.id} root changed before creation.`);
+              if (!sameLocalCollectionMappingSnapshot(resource.mapping, currentMapping)) {
+                throw new BazframeError('PROFILE_IMPORT_MAPPING_CHANGED', `Mapped ${resource.kind} ${resource.id} root changed before creation.`);
               }
               const current = await services.classifyLocalOutcome(initial.homePath, resource.id, resource.mapping);
               if (current.state !== 'absent') {
-                throw new BazframeError('PROFILE_IMPORT_DEPENDENCY_CHANGED', `Mapped local library ${resource.id} is no longer absent at the create boundary.`);
+                throw new BazframeError('PROFILE_IMPORT_DEPENDENCY_CHANGED', `Mapped local ${resource.kind} ${resource.id} is no longer absent at the create boundary.`);
               }
-              return services.addLocalLibrary(lifecycleOptions, resource.mapping.root, {
+              const expectedRootIdentity = {
+                root: resource.mapping.root,
+                device: resource.mapping.device,
+                inode: resource.mapping.inode
+              };
+              if (resource.kind === 'library') {
+                return services.addLocalLibrary(lifecycleOptions, resource.mapping.root, {
+                  stateLockHeld: true,
+                  expectedRootIdentity
+                });
+              }
+              const mapping = resource.mapping as LocalPackageMappingSnapshot;
+              return services.addLocalPackage(lifecycleOptions, mapping.root, {
                 stateLockHeld: true,
-                expectedRootIdentity: {
-                  root: resource.mapping.root,
-                  device: resource.mapping.device,
-                  inode: resource.mapping.inode
+                expectedRootIdentity,
+                expectedPackageManifest: mapping.manifestSnapshot,
+                beforePackageBuild: async (context) => {
+                  const before = await services.assertLocalMapping(mapping) as LocalPackageMappingSnapshot;
+                  if (!sameLocalCollectionMappingSnapshot(mapping, before)
+                    || !sameAuthorizedPackageInputs(resource.id, expectedRootIdentity, mapping.manifestSnapshot, context)) {
+                    throw new BazframeError('PROFILE_IMPORT_MAPPING_CHANGED', `Mapped package ${resource.id} changed before build authorization.`);
+                  }
+                  const report = packageBuilds.add(createPackageBuildAuthorizationReport(
+                    resource.id,
+                    { type: 'localMapping', root: mapping.root },
+                    context
+                  ));
+                  const approved = await prepared.authorizePackageBuild?.(copyPackageBuildReport(report)) ?? false;
+                  if (approved !== true) {
+                    throw new BazframeError('PROFILE_IMPORT_PACKAGE_BUILD_DECLINED', `Package build was not authorized for ${resource.id}.`);
+                  }
+                  const after = await services.assertLocalMapping(mapping) as LocalPackageMappingSnapshot;
+                  if (!sameLocalCollectionMappingSnapshot(mapping, after)
+                    || !sameAuthorizedPackageInputs(resource.id, expectedRootIdentity, mapping.manifestSnapshot, context)) {
+                    throw new BazframeError('PROFILE_IMPORT_MAPPING_CHANGED', `Mapped package ${resource.id} changed during build authorization.`);
+                  }
+                  packageBuilds.markPossibleEffect(resource.id);
                 }
               });
             },
             { managedRoot: initial.homePath }
           ));
           // Record success only after lock release so a post-commit release failure remains ambiguous.
-          resource.successfulOutcome = localLifecycleOutcome(result);
+          resource.successfulOutcome = localLifecycleOutcome(resource.kind, result);
         }
       } else {
-        const result = resource.kind === 'skill'
-          ? await services.addSkill(lifecycleOptions, resource.id, resource.identity, resource.reuseRequirement)
-          : await services.addLibrary(lifecycleOptions, resource.id, resource.identity, resource.reuseRequirement);
+        let result: ManagedGitLifecycleResult;
+        if (resource.kind === 'skill') {
+          result = await services.addSkill(lifecycleOptions, resource.id, resource.identity, resource.reuseRequirement);
+        } else if (resource.kind === 'library') {
+          result = await services.addLibrary(lifecycleOptions, resource.id, resource.identity, resource.reuseRequirement);
+        } else {
+          let approvedInputs: {
+            rootIdentity: { root: string; device: bigint; inode: bigint };
+            manifestSnapshot: PackageManifestSnapshot;
+          } | undefined;
+          result = await services.addPackage({
+            ...lifecycleOptions,
+            // Import authorization is performed only by the adjacent callback below.
+            yes: true,
+            beforePackageBuild: async (context) => {
+              const report = packageBuilds.add(createPackageBuildAuthorizationReport(
+                resource.id,
+                { type: 'remoteGit', ...resource.identity },
+                context
+              ));
+              const approved = await prepared.authorizePackageBuild?.(copyPackageBuildReport(report)) ?? false;
+              if (approved !== true) {
+                throw new BazframeError('PROFILE_IMPORT_PACKAGE_BUILD_DECLINED', `Package build was not authorized for ${resource.id}.`);
+              }
+              approvedInputs = {
+                rootIdentity: { ...context.rootIdentity },
+                manifestSnapshot: {
+                  ...context.manifestSnapshot,
+                  manifest: {
+                    ...context.manifestSnapshot.manifest,
+                    build: [...context.manifestSnapshot.manifest.build]
+                  }
+                }
+              };
+            },
+            onPackageBuildReady: (context) => {
+              if (approvedInputs === undefined || !sameAuthorizedPackageInputs(
+                resource.id,
+                approvedInputs.rootIdentity,
+                approvedInputs.manifestSnapshot,
+                context
+              )) {
+                throw new BazframeError('PROFILE_IMPORT_PACKAGE_CHANGED', `Package build authorization changed for ${resource.id}.`);
+              }
+              packageBuilds.markPossibleEffect(resource.id);
+            }
+          }, resource.id, resource.identity, resource.reuseRequirement);
+        }
         resource.successfulOutcome = lifecycleOutcome(result);
       }
     }
@@ -259,7 +386,9 @@ export async function executeProfileImport(
     throw new ProfileImportExecutionError({
       ...profileBase,
       resources,
-      profileOutcome: 'not-published'
+      profileOutcome: 'not-published',
+      packageBuildReports: packageBuilds.reports(),
+      possibleNonrollbackablePackageEffects: packageBuilds.possibleEffects()
     }, cause);
   }
 
@@ -274,7 +403,7 @@ export async function executeProfileImport(
       false
     );
   } catch (cause) {
-    throw await executionFailure(profileBase, initial.homePath, progress, prepared.environment, services.classifyOutcome, services.classifyLocalOutcome, 'not-published', cause);
+    throw await executionFailure(profileBase, initial.homePath, progress, prepared.environment, services.classifyOutcome, services.classifyLocalOutcome, packageBuilds, 'not-published', cause);
   }
 
   if (authoritative.plan.profileAction === 'reuse') {
@@ -290,7 +419,7 @@ export async function executeProfileImport(
         },
         { managedRoot: initial.homePath }
       );
-      return successResult(profileBase, progress, 'reused');
+      return successResult(profileBase, progress, packageBuilds, 'reused');
     } catch (cause) {
       throw await executionFailure(
         profileBase,
@@ -299,6 +428,7 @@ export async function executeProfileImport(
         prepared.environment,
         services.classifyOutcome,
         services.classifyLocalOutcome,
+        packageBuilds,
         reuseProved ? 'reused' : 'commit-ambiguous',
         cause
       );
@@ -315,7 +445,7 @@ export async function executeProfileImport(
       { managedRoot: initial.homePath }
     );
   } catch (cause) {
-    throw await executionFailure(profileBase, initial.homePath, progress, prepared.environment, services.classifyOutcome, services.classifyLocalOutcome, 'not-published', cause);
+    throw await executionFailure(profileBase, initial.homePath, progress, prepared.environment, services.classifyOutcome, services.classifyLocalOutcome, packageBuilds, 'not-published', cause);
   }
 
   const skills = authoritative.plan.skills.map((id) => {
@@ -330,6 +460,7 @@ export async function executeProfileImport(
       instructionBytes: initial.artifactSnapshot.instructions.bytes,
       skills,
       libraryIds: [...authoritative.plan.libraries],
+      packageIds: [...authoritative.plan.packages],
       commit: (publish) => services.lock(
         join(initial.homePath, 'locks', 'state.lock'),
         { command: 'bazframe profile import', target: destinationPath },
@@ -351,7 +482,7 @@ export async function executeProfileImport(
     if (outcome !== 'published' && outcome !== 'reused') {
       throw new BazframeError('PROFILE_IMPORT_PUBLICATION_INVALID', 'Imported-profile publisher returned without a proven profile outcome.');
     }
-    return successResult(profileBase, progress, outcome);
+    return successResult(profileBase, progress, packageBuilds, outcome);
   } catch (cause) {
     let profileOutcome: ProfileImportProfileOutcome = lockedProfileOutcome ?? 'not-published';
     if (cause instanceof ProfileImportPublicationError) {
@@ -368,6 +499,7 @@ export async function executeProfileImport(
       prepared.environment,
       services.classifyOutcome,
       services.classifyLocalOutcome,
+      packageBuilds,
       profileOutcome,
       cause
     );
@@ -387,9 +519,8 @@ function prepareExecution(options: ExecuteProfileImportOptions): PreparedExecuti
   }
   const destinationProfileId = options.destinationProfileId;
   const acquisitionLimits = options.acquisitionLimits === undefined ? undefined : { ...options.acquisitionLimits };
-  const mappings = options.mappings === undefined
-    ? []
-    : options.mappings.map((mapping) => ({ kind: mapping.kind, id: mapping.id, root: mapping.root }));
+  const mappings = (options.mappings ?? [])
+    .map((mapping) => ({ kind: mapping.kind, id: mapping.id, root: mapping.root }));
   return {
     planOptions: {
       bazframeHome: resolve(options.bazframeHome),
@@ -401,35 +532,37 @@ function prepareExecution(options: ExecuteProfileImportOptions): PreparedExecuti
     environment: { ...(options.environment ?? process.env) },
     ...(acquisitionLimits === undefined ? {} : { acquisitionLimits }),
     ...(options.childOutputPolicy === undefined ? {} : { childOutputPolicy: options.childOutputPolicy }),
-    reportPlan: options.reportPlan
+    reportPlan: options.reportPlan,
+    ...(options.authorizePackageBuild === undefined ? {} : { authorizePackageBuild: options.authorizePackageBuild })
   };
 }
 
 function orderedResources(initial: ProfileImportPlanningResult): ResourceProgress[] {
   const plans = new Map(initial.plan.resources.map((resource) => [`${resource.kind}:${resource.id}`, resource]));
-  const resources = initial.artifactSnapshot.artifact.resources
-    .filter((resource) => resource.kind !== 'package')
-    .sort((left, right) => compare(`${left.kind === 'skill' ? '0' : '1'}:${left.id}`, `${right.kind === 'skill' ? '0' : '1'}:${right.id}`));
+  const resources = [...initial.artifactSnapshot.artifact.resources]
+    .sort((left, right) => compare(`${resourceOrder(left.kind)}:${left.id}`, `${resourceOrder(right.kind)}:${right.id}`));
   return resources.map((resource): ResourceProgress => {
     const plan = plans.get(`${resource.kind}:${resource.id}`);
     if (plan === undefined || plan.action === 'blocked') {
       throw new BazframeError('PROFILE_IMPORT_PLAN_INVALID', `Reported resource plan is incomplete for ${resource.kind}:${resource.id}.`);
     }
-    if (resource.source.type === 'localMapping' && resource.kind === 'library') {
-      const mapping = initial.mappingSnapshots.find((item) => item.id === resource.id);
+    if (resource.source.type === 'localMapping' && resource.kind !== 'skill') {
+      const mapping = initial.mappingSnapshots.find(
+        (item) => item.kind === resource.kind && item.id === resource.id
+      );
       const snapshot = initial.resourceSnapshots.find(
         (item): item is Extract<ProfileImportResourceSnapshot, { sourceType: 'localMapping' }> => (
-          item.kind === 'library' && item.id === resource.id && item.sourceType === 'localMapping'
+          item.kind === resource.kind && item.id === resource.id && item.sourceType === 'localMapping'
         )
       );
       if (mapping === undefined || (plan.action === 'reuse' && snapshot === undefined)) {
-        throw new BazframeError('PROFILE_IMPORT_PLAN_INVALID', `Mapped library evidence is missing for library:${resource.id}.`);
+        throw new BazframeError('PROFILE_IMPORT_PLAN_INVALID', `Mapped ${resource.kind} evidence is missing for ${resource.kind}:${resource.id}.`);
       }
       return {
-        kind: 'library',
+        kind: resource.kind,
         id: resource.id,
         sourceType: 'localMapping',
-        mapping: { ...mapping },
+        mapping: copyLocalMapping(mapping),
         initialAction: plan.action,
         attempted: false,
         ...(snapshot === undefined ? {} : { expectedHealth: snapshot.health })
@@ -464,21 +597,25 @@ function orderedResources(initial: ProfileImportPlanningResult): ResourceProgres
   });
 }
 
-async function pathFreeLocalLibraryCreate<T>(id: string, operation: () => Promise<T>): Promise<T> {
+async function pathFreeLocalCollectionCreate<T>(
+  kind: 'library' | 'package',
+  id: string,
+  operation: () => Promise<T>
+): Promise<T> {
   try {
     return await operation();
   } catch (cause) {
     throw new BazframeError(
-      cause instanceof BazframeError ? cause.code : 'PROFILE_IMPORT_LOCAL_LIBRARY_FAILED',
-      `Mapped local library ${id} creation did not complete safely.`,
+      cause instanceof BazframeError ? cause.code : `PROFILE_IMPORT_LOCAL_${kind.toUpperCase()}_FAILED`,
+      `Mapped local ${kind} ${id} creation did not complete safely.`,
       { cause }
     );
   }
 }
 
-function localLifecycleOutcome(result: SkillCollectionLifecycleResult): 'created' {
+function localLifecycleOutcome(kind: 'library' | 'package', result: SkillCollectionLifecycleResult): 'created' {
   if (result.action === 'added') return 'created';
-  throw new BazframeError('PROFILE_IMPORT_RESOURCE_RESULT_INVALID', 'Local library lifecycle returned an unsupported action.');
+  throw new BazframeError('PROFILE_IMPORT_RESOURCE_RESULT_INVALID', `Local ${kind} lifecycle returned an unsupported action.`);
 }
 
 function lifecycleOutcome(result: ManagedGitLifecycleResult): 'created' | 'reused' {
@@ -600,7 +737,7 @@ async function classifyResourceResults(
   progress: readonly ResourceProgress[],
   environment: NodeJS.ProcessEnv,
   classify: typeof classifyManagedGitImportOutcome,
-  classifyLocal: typeof classifyLocalLibraryImportOutcome
+  classifyLocal: typeof classifyLocalCollectionImportOutcome
 ): Promise<ProfileImportResourceResult[]> {
   const results: ProfileImportResourceResult[] = [];
   for (const resource of progress) {
@@ -633,20 +770,24 @@ async function executionFailure(
   progress: readonly ResourceProgress[],
   environment: NodeJS.ProcessEnv,
   classify: typeof classifyManagedGitImportOutcome,
-  classifyLocal: typeof classifyLocalLibraryImportOutcome,
+  classifyLocal: typeof classifyLocalCollectionImportOutcome,
+  packageBuilds: PackageBuildReportAccumulator,
   profileOutcome: ProfileImportProfileOutcome,
   cause: unknown
 ): Promise<ProfileImportExecutionError> {
   return new ProfileImportExecutionError({
     ...base,
     resources: await classifyResourceResults(home, progress, environment, classify, classifyLocal),
-    profileOutcome
+    profileOutcome,
+    packageBuildReports: packageBuilds.reports(),
+    possibleNonrollbackablePackageEffects: packageBuilds.possibleEffects()
   }, cause);
 }
 
 function successResult(
   base: Pick<ProfileImportResult, 'plan' | 'destinationPath' | 'activeSelectionChanged'>,
   progress: readonly ResourceProgress[],
+  packageBuilds: PackageBuildReportAccumulator,
   profileOutcome: 'published' | 'reused'
 ): ProfileImportResult {
   return {
@@ -657,7 +798,9 @@ function successResult(
       id: resource.id,
       outcome: resource.successfulOutcome ?? 'reused'
     })),
-    profileOutcome
+    profileOutcome,
+    packageBuildReports: packageBuilds.reports(),
+    possibleNonrollbackablePackageEffects: packageBuilds.possibleEffects()
   };
 }
 
@@ -668,18 +811,19 @@ function samePlanningSnapshot(
 ): boolean {
   if (sourceType === 'localMapping') {
     return left.sourceType === 'localMapping' && right.sourceType === 'localMapping'
-      && sameLocalLibraryHealth(left.health, right.health);
+      && left.kind === right.kind
+      && sameLocalCollectionHealth(left.health, right.health);
   }
   return left.sourceType === 'remoteGit' && right.sourceType === 'remoteGit'
     && sameManagedGitExportHealth(left.health, right.health);
 }
 
 function sameMappingSnapshots(
-  left: readonly LocalLibraryMappingSnapshot[],
-  right: readonly LocalLibraryMappingSnapshot[]
+  left: readonly LocalCollectionMappingSnapshot[],
+  right: readonly LocalCollectionMappingSnapshot[]
 ): boolean {
   return left.length === right.length && left.every((mapping, index) => (
-    right[index] !== undefined && sameLocalLibraryMappingSnapshot(mapping, right[index]!)
+    right[index] !== undefined && sameLocalCollectionMappingSnapshot(mapping, right[index]!)
   ));
 }
 
@@ -689,7 +833,9 @@ function copyPartialResult(result: ProfileImportPartialResult): ProfileImportPar
     resources: result.resources.map((resource) => ({ ...resource })),
     profileOutcome: result.profileOutcome,
     destinationPath: result.destinationPath,
-    activeSelectionChanged: false
+    activeSelectionChanged: false,
+    packageBuildReports: (result.packageBuildReports ?? []).map(copyPackageBuildReport),
+    possibleNonrollbackablePackageEffects: [...(result.possibleNonrollbackablePackageEffects ?? [])]
   };
 }
 
@@ -703,29 +849,41 @@ function copyPlan(plan: ProfileImportPlan): ProfileImportPlan {
     skills: [...plan.skills],
     omittedLocalSkills: [...plan.omittedLocalSkills],
     libraries: [...plan.libraries],
-    packages: [],
-    resources: plan.resources.map((resource) => {
-      if (resource.source.type === 'remoteGit') return { ...resource, source: { ...resource.source } };
-      return {
-        kind: 'library' as const,
-        id: resource.id,
+    packages: [...plan.packages],
+    resources: plan.resources.map((resource) => resource.source.type === 'remoteGit'
+      ? { ...resource, source: { ...resource.source } }
+      : {
+        ...resource,
+        kind: resource.kind as 'library' | 'package',
         source: { ...resource.source },
-        action: resource.action,
-        ...(resource.reason === undefined ? {} : { reason: resource.reason }),
-        networkRequired: false as const,
-        buildRequired: false as const
-      };
-    }),
+        networkRequired: false as const
+      }),
+    packageBuilds: {
+      ...plan.packageBuilds,
+      unresolvedRemotePackageIds: [...plan.packageBuilds.unresolvedRemotePackageIds],
+      warnings: [...plan.packageBuilds.warnings]
+    },
     activeSelection: { ...plan.activeSelection },
     composition: {
       ...plan.composition,
       deferredLibraries: [...plan.composition.deferredLibraries],
+      deferredPackages: [...plan.composition.deferredPackages],
       knownCollectionSkillPreview: [...plan.composition.knownCollectionSkillPreview]
     },
     exclusions: { ...plan.exclusions },
     profileAction: plan.profileAction,
     blockers: plan.blockers.map((blocker) => ({ ...blocker }))
   };
+}
+
+function copyLocalMapping(mapping: LocalCollectionMappingSnapshot): LocalCollectionMappingSnapshot {
+  return mapping.kind === 'library'
+    ? { ...mapping }
+    : { ...mapping, manifestSnapshot: mapping.manifestSnapshot };
+}
+
+function resourceOrder(kind: 'skill' | 'library' | 'package'): string {
+  return kind === 'skill' ? '0' : kind === 'library' ? '1' : '2';
 }
 
 function compare(left: string, right: string): number {

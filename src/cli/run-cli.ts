@@ -60,9 +60,12 @@ import {
   executeProfileImport,
   ProfileImportBlockedError,
   ProfileImportExecutionError,
+  ProfileImportPackageBuildAuthorizationRequiredError,
   type ProfileImportPartialResult,
   type ProfileImportResult
 } from '../profile-portability/profile-import.js';
+import type { PackageBuildAuthorizationReport } from '../profile-portability/profile-import-package-build.js';
+import { PROFILE_PORTABILITY_PRODUCTION_LIMITS } from '../profile-portability/profile-portability-policy.js';
 import { findGitRoot } from '../project/git-root.js';
 import {
   disableRepository,
@@ -80,6 +83,7 @@ import {
   type DefaultSkillCatalogResult
 } from '../skills/default-skill-catalog.js';
 import { editSkillDefinition } from '../skills/skill-definition-editor.js';
+import { packageBuildInterruptionSignal } from '../skill-collections/skill-collection-preparation.js';
 import {
   formatSkillCollectionDiagnostic,
   inspectGlobalSkillCollections,
@@ -168,6 +172,7 @@ export interface CliDependencies {
   terminateProcess?: (status: number) => void;
   editorChildRunner?: InheritedChildRunner;
   confirmManagedGitPackageBuild?: (details: ManagedGitBuildAuthorization) => boolean | Promise<boolean>;
+  confirmProfileImportPackageBuild?: (report: PackageBuildAuthorizationReport) => boolean | Promise<boolean>;
   /** Internal deterministic CLI test seams; production dispatch uses the portability services. */
   planProfileImport?: typeof planProfileImport;
   executeProfileImport?: typeof executeProfileImport;
@@ -269,7 +274,7 @@ export async function runCli(
     } catch (error) {
       if (parsed.command.name === 'profile-import') diagnostics.push(...profileImportFailureDiagnostics(error));
       writeStdout(serializeJsonDocument(errorDocument(id, error, diagnostics)));
-      return EXIT_STATUS.failure;
+      return interruptionExitStatus(error) ?? EXIT_STATUS.failure;
     }
   }
 
@@ -282,8 +287,13 @@ export async function runCli(
         ? formatProfileImportFailure(error)
         : error instanceof Error ? error.message : String(error);
     writeStderr(`${stderrColors.error('error:')} ${message}\n`);
-    return EXIT_STATUS.failure;
+    return interruptionExitStatus(error) ?? EXIT_STATUS.failure;
   }
+}
+
+function interruptionExitStatus(error: unknown): number | undefined {
+  const signal = packageBuildInterruptionSignal(error);
+  return signal === undefined ? undefined : childExitStatus({ exitCode: null, signal });
 }
 
 async function runCommand(
@@ -470,6 +480,9 @@ async function runCommand(
       writeStdout(formatProfileImportPlan(planning.plan, 'dry-run'));
       return EXIT_STATUS.success;
     }
+    const interactive = dependencies.jsonMode !== true
+      && (dependencies.stdinIsTty ?? process.stdin.isTTY === true)
+      && (dependencies.stdoutIsTty ?? process.stdout.isTTY === true);
     const result = await (dependencies.executeProfileImport ?? executeProfileImport)({
       bazframeHome,
       artifactDirectory: command.artifactDirectory,
@@ -479,6 +492,17 @@ async function runCommand(
       ...(dependencies.jsonMode === true ? { childOutputPolicy: 'stdout-and-stderr-to-parent-stderr' as const } : {}),
       reportPlan: async (plan) => {
         if (dependencies.jsonMode !== true) writeStdout(formatProfileImportPlan(plan, 'execute'));
+        const requiresBuild = plan.blockers.length === 0 && plan.profileAction !== 'blocked'
+          && plan.resources.some((resource) => resource.action === 'create' && resource.buildRequired);
+        if (requiresBuild && !command.yes && !interactive) {
+          throw new ProfileImportPackageBuildAuthorizationRequiredError(plan);
+        }
+      },
+      authorizePackageBuild: async (report) => {
+        if (dependencies.jsonMode !== true) writeStdout(formatProfileImportPackageBuildAuthorization(report));
+        if (command.yes) return true;
+        return (dependencies.confirmProfileImportPackageBuild
+          ?? (() => confirmProfileImportPackageBuild()))(report);
       }
     });
     try {
@@ -1056,7 +1080,7 @@ function formatProfileImportPlan(plan: ProfileImportPlan, mode: 'dry-run' | 'exe
         ] : [
           `    local mapping: ${resource.source.root === undefined ? '(required)' : boundedPathForDisplay(resource.source.root)}`
         ]),
-        `    network required: ${resource.networkRequired ? 'yes' : 'no'}; build required: no`,
+        `    network required: ${resource.networkRequired ? 'yes' : 'no'}; build required: ${resource.buildRequired ? 'yes' : 'no'}`,
         ...(resource.reason === undefined ? [] : [`    reason: ${boundedTextForDisplay(resource.reason)}`])
       ].join('\n'));
   const blockers = plan.blockers.length === 0
@@ -1067,6 +1091,12 @@ function formatProfileImportPlan(plan: ProfileImportPlan, mode: 'dry-run' | 'exe
     .map((resource) => resource.id);
   const localLibraries = plan.resources
     .filter((resource) => resource.kind === 'library' && resource.source.type === 'localMapping')
+    .map((resource) => resource.id);
+  const remotePackages = plan.resources
+    .filter((resource) => resource.kind === 'package' && resource.source.type === 'remoteGit')
+    .map((resource) => resource.id);
+  const localPackages = plan.resources
+    .filter((resource) => resource.kind === 'package' && resource.source.type === 'localMapping')
     .map((resource) => resource.id);
   return [
     `Profile import plan (${mode === 'dry-run' ? 'dry-run inspection only' : 'execution inspection'}):`,
@@ -1079,13 +1109,18 @@ function formatProfileImportPlan(plan: ProfileImportPlan, mode: 'dry-run' | 'exe
     ...list('Omitted local Skills:', plan.omittedLocalSkills),
     ...list('Remote Git libraries:', remoteLibraries),
     ...list('Local-mapping libraries:', localLibraries),
-    'Packages: absent (Stage 2)',
+    ...list('Remote Git packages:', remotePackages),
+    ...list('Local-mapping packages:', localPackages),
+    `Package builds: total ${plan.packageBuilds.total}; remote ${plan.packageBuilds.remote}; local ${plan.packageBuilds.local}`,
+    ...list('Unresolved remote package builds:', plan.packageBuilds.unresolvedRemotePackageIds),
+    ...list('Package build warnings:', plan.packageBuilds.warnings),
     'Resources:',
     ...resources,
     `Active selection: ${plan.activeSelection.state}${plan.activeSelection.profileId === undefined ? '' : ` (${boundedTextForDisplay(plan.activeSelection.profileId)})`}; will change: no`,
     ...(plan.activeSelection.reason === undefined ? [] : [`Active-selection reason: ${boundedTextForDisplay(plan.activeSelection.reason)}`]),
     `Composition: ${plan.composition.status}; known collection Skills: ${plan.composition.knownCollectionSkillCount}`,
     ...list('Deferred libraries:', plan.composition.deferredLibraries),
+    ...list('Deferred packages:', plan.composition.deferredPackages),
     ...list('Known collection Skill preview:', plan.composition.knownCollectionSkillPreview),
     `Profile action: ${plan.profileAction}`,
     'Blockers:',
@@ -1098,6 +1133,49 @@ function formatProfileImportPlan(plan: ProfileImportPlan, mode: 'dry-run' | 'exe
   ].join('\n');
 }
 
+function formatProfileImportPackageBuildAuthorization(report: PackageBuildAuthorizationReport): string {
+  const source = report.source.type === 'remoteGit'
+    ? [
+        'Source: remote Git',
+        `Remote: ${boundedTextForDisplay(report.source.remote)}`,
+        `Fetch URL: ${boundedTextForDisplay(report.source.fetchUrl)}`,
+        `Branch: ${boundedTextForDisplay(report.source.branch)}`,
+        `Revision: ${boundedTextForDisplay(report.source.revision)}`
+      ]
+    : ['Source: local mapping', `Mapped root: ${boundedPathForDisplay(report.source.root)}`];
+  return [
+    'Package build authorization report',
+    `Package: ${boundedTextForDisplay(report.packageId)}`,
+    ...source,
+    `Candidate root: ${boundedPathForDisplay(report.candidateRoot)}`,
+    `Working directory: ${boundedPathForDisplay(report.cwd)}`,
+    `Literal argv: ${stringifyForTerminal(report.argv)}`,
+    `Manifest: ${report.manifest.path} (sha256:${boundedTextForDisplay(report.manifest.sha256)})`,
+    `Artifact root: ${boundedTextForDisplay(report.artifactRoot)}`,
+    `Skills root: ${boundedTextForDisplay(report.skillsRoot)}`,
+    'Shell: false',
+    'Inherited environment: yes (names and values are not displayed)',
+    `Authority: unsandboxed ${report.authority.user}; possible access to ${report.authority.access.join(', ')}`,
+    `Warning: ${report.warning}`,
+    ''
+  ].join('\n');
+}
+
+async function confirmProfileImportPackageBuild(): Promise<boolean> {
+  const prompt = createInterface({ input: process.stdin, output: process.stdout });
+  try { return await prompt.question('Run this exact package build? [y/N] ') === 'y'; }
+  finally { prompt.close(); }
+}
+
+function formatPossiblePackageEffects(packageIds: readonly string[]): string[] {
+  return [
+    'Possible nonrollbackable package-build effects:',
+    ...(packageIds.length === 0
+      ? ['  (none)']
+      : packageIds.map((id) => `  - ${boundedTextForDisplay(id)}`))
+  ];
+}
+
 function formatProfileImportSuccess(result: ProfileImportResult): string {
   return [
     'Profile import: completed',
@@ -1107,6 +1185,7 @@ function formatProfileImportSuccess(result: ProfileImportResult): string {
     ...(result.resources.length === 0
       ? ['  (none)']
       : result.resources.map((resource) => `  - ${resource.kind}:${boundedTextForDisplay(resource.id)} — ${resource.outcome}`)),
+    ...formatPossiblePackageEffects(result.possibleNonrollbackablePackageEffects ?? []),
     'Active selection changed: no',
     'Collection children added to (default): no',
     ''
@@ -1135,6 +1214,7 @@ function formatProfileImportPartial(result: ProfileImportPartialResult): string 
     ...(result.resources.length === 0
       ? ['  (none)']
       : result.resources.map((resource) => `  - ${resource.kind}:${boundedTextForDisplay(resource.id)} — ${resource.outcome}`)),
+    ...formatPossiblePackageEffects(result.possibleNonrollbackablePackageEffects ?? []),
     'Active selection changed: no',
     ...guidance
   ].join('\n');
@@ -1143,6 +1223,9 @@ function formatProfileImportPartial(result: ProfileImportPartialResult): string 
 function formatProfileImportFailure(error: unknown): string {
   if (error instanceof ProfileImportBlockedError) {
     return 'Profile import is blocked by the already reported plan. No acquisition or profile publication was attempted.';
+  }
+  if (error instanceof ProfileImportPackageBuildAuthorizationRequiredError) {
+    return 'The reported profile import plan requires package builds. Noninteractive input must use --yes; no acquisition or profile publication was attempted.';
   }
   if (error instanceof ProfileImportExecutionError) {
     const detail = profileImportFailureDetail(error);
@@ -1171,7 +1254,17 @@ function profileImportFailureDiagnostics(error: unknown): ProtocolDiagnostic[] {
   if (detail !== undefined) {
     diagnostics.push({ level: 'info', code: 'PROFILE_IMPORT_FAILURE_DETAIL', message: boundedPrefixedTextForDisplay(`${detail.code}: `, detail.message) });
   }
-  return diagnostics;
+  return diagnostics.map(boundGeneratedProfileImportDiagnostic);
+}
+
+function boundGeneratedProfileImportDiagnostic(diagnostic: ProtocolDiagnostic): ProtocolDiagnostic {
+  const projected = { ...diagnostic, message: boundedTextForDisplay(diagnostic.message) };
+  if (Buffer.byteLength(JSON.stringify(projected), 'utf8')
+    <= PROFILE_PORTABILITY_PRODUCTION_LIMITS.diagnosticBytes) return projected;
+  return {
+    ...diagnostic,
+    message: 'Profile import diagnostic omitted because it exceeded the generated-diagnostic limit.'
+  };
 }
 
 function profileImportFailureDetail(error: ProfileImportExecutionError): { code: string; message: string } | undefined {
@@ -1205,6 +1298,12 @@ function formatProfileExport(result: ProfileExportResult): string {
   const localLibraries = result.resources
     .filter((resource) => resource.kind === 'library' && resource.source.type === 'localMapping')
     .map((resource) => resource.id);
+  const remotePackages = result.resources
+    .filter((resource) => resource.kind === 'package' && resource.source.type === 'remoteGit')
+    .map((resource) => resource.id);
+  const localPackages = result.resources
+    .filter((resource) => resource.kind === 'package' && resource.source.type === 'localMapping')
+    .map((resource) => resource.id);
   return [
     `Profile export: ${result.action}`,
     `Profile: ${escapeUnsafeDisplayCharacters(result.exportedProfileId)}`,
@@ -1213,8 +1312,9 @@ function formatProfileExport(result: ProfileExportResult): string {
     ...itemLines('Remote Git Skills:', result.skills),
     ...itemLines('Remote Git libraries:', remoteLibraries),
     ...itemLines('Local-mapping libraries:', localLibraries),
+    ...itemLines('Remote Git packages:', remotePackages),
+    ...itemLines('Local-mapping packages:', localPackages),
     ...itemLines('Omitted local Skills:', result.omittedLocalSkills),
-    'Packages: absent (Stage 2)',
     ''
   ].join('\n');
 }
@@ -1295,7 +1395,7 @@ function formatManagedPackageBuildAuthorization(details: ManagedGitBuildAuthoriz
     `Revision: ${escapeUnsafeDisplayCharacters(details.revision)}`,
     `Bazframe-managed checkout: ${escapeUnsafeDisplayCharacters(details.root)}`,
     `Build argv: ${stringifyForTerminal(details.build)}`,
-    'The declared build runs without a shell or sandbox with ordinary user authority.',
+    'The declared build runs without a shell or sandbox with current-process-user authority.',
     ''
   ].join('\n');
 }

@@ -13,7 +13,7 @@ You need:
 - macOS or Linux.
 - Access to a Pi-supported model provider.
 
-Git is not required for basic profile use. It is required when Bazframe identifies a Git worktree for a project override or acquires a Skill, library, or package from a remote Git source.
+Git is not required for basic profile use. It is required when Bazframe identifies a Git worktree for a project override or acquires a Skill, library, or package from a remote Git source. Profile import requires each recorded remote revision to remain reachable from its recorded branch and never substitutes current branch HEAD.
 
 After installing Pi, start it and enter `/login` to choose and authenticate with a model provider. Pi supports selected subscriptions and API keys; see [Pi's provider and authentication documentation](https://github.com/earendil-works/pi#readme).
 
@@ -165,7 +165,7 @@ export PI_CODING_AGENT_DIR=/absolute/path/to/pi-agent-state
 
 Set these before running Bazframe setup commands. Changing either value points the tools at different state; it does not copy or migrate existing state.
 
-> **Do not copy `BAZFRAME_HOME` between machines.** Use the supported Stage 2 artifact workflow instead: `bazframe profile export <profile> --output <directory>`, review the exported `profile/AGENTS.md`, and transfer the artifact directory. Run `bazframe profile import --dry-run <directory>`, then repeat without `--dry-run`. If the artifact declares local library `toolkit`, use `bazframe profile import --map library:toolkit=/srv/skill-libraries/toolkit --dry-run <directory>` and the same mapping for execution; provide one mapping for every artifact-declared local library. Stage 2 imports exact remote Git Skills/libraries and read-only inspects absolute, basename-matching local-library roots before ordinary build-free creation or exact same-root reuse. It publishes an inactive profile without promoting library children. Local direct-Skill mappings, packages and `--yes`, Windows publication, and full portability remain unavailable.
+> **Do not copy `BAZFRAME_HOME` between machines.** Stage 3 package portability is live on macOS and Linux, but Windows support and full portability are not. Use `bazframe profile export <profile> --output <directory>`, review exported `profile/AGENTS.md` for secrets because Bazframe does not redact user-authored instructions, and transfer the path-free declaration directory—not source trees or snapshots. Inspect with `bazframe profile import --map library:toolkit=/srv/skill-libraries/toolkit --map package:automation=/srv/skill-packages/automation --dry-run <directory>`, then execute with the same repeatable typed maps and `--yes` if new package builds are required. Each mapped root must be absolute, physical, and basename-matching. Dry-run takes no Bazframe write lock and performs no writes, network access, builds, prompts, or active-selection mutation; `--yes` is invalid with it. Execution acquires exact branch-reachable historical remote revisions, processes packages last, and publishes an inactive profile without promoting collection children. Exact healthy packages are reused offline without builds, authorization reports, or consent. Local direct Skills remain named omissions and have no mapping.
 
 ## Diagnose setup with status
 

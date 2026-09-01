@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { chmod, lstat, mkdir, readFile, readlink, readdir, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readFile, readlink, readdir, realpath, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -12,7 +12,7 @@ import { profileArtifactLimitPolicy } from '../../src/profile-portability/profil
 import { addProfile } from '../../src/profiles/profile-management.js';
 import { readActiveProfile, writeActiveProfile } from '../../src/profiles/profile-store.js';
 import { readManagedGitRecord } from '../../src/providers/managed-git-record.js';
-import { readLibrary } from '../../src/skill-collections/skill-collection-store.js';
+import { readLibrary, readPackage } from '../../src/skill-collections/skill-collection-store.js';
 import { createTempDirectory, type TempDirectory } from '../helpers/temp-directory.js';
 
 const directories: TempDirectory[] = [];
@@ -88,6 +88,59 @@ describe('profile-import execution integration', () => {
     expect(await readFile(join(fixture.home, 'profiles/renamed/AGENTS.md'))).toEqual(await readFile(join(profile, 'AGENTS.md')));
     expect(await readlink(join(fixture.home, 'profiles/renamed/skills/alpha'))).toBe(skillRecord.root);
     expect(await readActiveProfile(fixture.home)).toBe('existing');
+  }, 90_000);
+
+  it('builds authorized remote and mapped packages last, publishes references, and retries without build or network', async () => {
+    const fixture = await packageFixture();
+    const reports: Array<{ packageId: string; source: { type: string } }> = [];
+    const first = await executeProfileImport({
+      bazframeHome: fixture.home,
+      artifactDirectory: fixture.artifact,
+      mappings: [{ kind: 'package', id: 'local-package', root: fixture.localPackage }],
+      environment: fixture.environment,
+      reportPlan: () => undefined,
+      authorizePackageBuild: (report) => {
+        reports.push({ packageId: report.packageId, source: { type: report.source.type } });
+        return true;
+      }
+    });
+    expect(first.resources).toEqual([
+      { kind: 'package', id: 'local-package', outcome: 'created' },
+      { kind: 'package', id: 'remote-package', outcome: 'created' }
+    ]);
+    expect(reports).toEqual([
+      { packageId: 'local-package', source: { type: 'localMapping' } },
+      { packageId: 'remote-package', source: { type: 'remoteGit' } }
+    ]);
+    expect(first.possibleNonrollbackablePackageEffects).toEqual(['local-package', 'remote-package']);
+    expect(await readFile(join(fixture.localPackage, 'build-count'), 'utf8')).toBe('x');
+    expect((await readPackage(fixture.home, 'local-package')).root).toBe(await realpath(fixture.localPackage));
+    const remoteRecord = (await readManagedGitRecord(fixture.home, 'package', 'remote-package')).record;
+    expect((await readPackage(fixture.home, 'remote-package')).root).toBe(remoteRecord.root);
+    const profile = join(fixture.home, 'profiles/package-profile');
+    expect(JSON.parse(await readFile(join(profile, 'packages/local-package.json'), 'utf8')))
+      .toEqual({ schemaVersion: 1, package: 'local-package' });
+    expect(JSON.parse(await readFile(join(profile, 'packages/remote-package.json'), 'utf8')))
+      .toEqual({ schemaVersion: 1, package: 'remote-package' });
+    expect(await readdir(join(profile, 'skills'))).toEqual([]);
+    await expect(lstat(join(profile, 'skills/local-child'))).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(lstat(join(fixture.home, 'skills/remote-child'))).rejects.toMatchObject({ code: 'ENOENT' });
+
+    const authorization = { calls: 0 };
+    const retry = await executeProfileImport({
+      bazframeHome: fixture.home,
+      artifactDirectory: fixture.artifact,
+      mappings: [{ kind: 'package', id: 'local-package', root: fixture.localPackage }],
+      environment: { ...fixture.environment, TEST_FAIL_CLONE: '1' },
+      reportPlan: () => undefined,
+      authorizePackageBuild: () => { authorization.calls += 1; return false; }
+    });
+    expect(retry.profileOutcome).toBe('reused');
+    expect(retry.resources.map((resource) => resource.outcome)).toEqual(['reused', 'reused']);
+    expect(retry.packageBuildReports).toEqual([]);
+    expect(retry.possibleNonrollbackablePackageEffects).toEqual([]);
+    expect(authorization.calls).toBe(0);
+    expect(await readFile(join(fixture.localPackage, 'build-count'), 'utf8')).toBe('x');
   }, 90_000);
 
   it('retains earlier exact resources on later failure, retries forward, and blocks deferred child collisions', async () => {
@@ -209,6 +262,89 @@ function initialize(remote: string): void {
   git(['config', 'user.email', 'test@example.com'], remote);
   git(['add', '.'], remote);
   git(['commit', '-m', 'initial'], remote);
+}
+
+async function packageFixture(): Promise<{
+  directory: TempDirectory;
+  home: string;
+  artifact: string;
+  localPackage: string;
+  environment: NodeJS.ProcessEnv;
+}> {
+  const directory = await createTempDirectory('bazframe-profile-import-packages-');
+  directories.push(directory);
+  const remotePackage = await directory.mkdir('packages/remote/remote-package');
+  const buildScript = (child: string, count: boolean) => [
+    "const{mkdirSync,writeFileSync,appendFileSync}=require('node:fs')",
+    `mkdirSync('dist/skills/${child}',{recursive:true})`,
+    `writeFileSync('dist/skills/${child}/SKILL.md',${JSON.stringify(skillDefinition(child))})`,
+    ...(count ? ["appendFileSync('build-count','x')"] : [])
+  ].join(';');
+  await directory.write('packages/remote/remote-package/bazframe-package.json', JSON.stringify({
+    schemaVersion: 1,
+    build: [process.execPath, '-e', buildScript('remote-child', false)],
+    artifactRoot: 'dist',
+    skillsRoot: 'skills'
+  }));
+  initialize(remotePackage);
+  const remoteRevision = git(['rev-parse', 'HEAD'], remotePackage).trim();
+
+  const localPackage = await directory.mkdir('packages/local/local-package');
+  await directory.write('packages/local/local-package/bazframe-package.json', JSON.stringify({
+    schemaVersion: 1,
+    build: [process.execPath, '-e', buildScript('local-child', true)],
+    artifactRoot: 'dist',
+    skillsRoot: 'skills'
+  }));
+
+  const artifact = directory.path('packages/artifact');
+  await mkdir(join(artifact, 'profile'), { recursive: true });
+  const instructions = Buffer.from('package profile\n', 'utf8');
+  await writeFile(join(artifact, 'profile/AGENTS.md'), instructions);
+  const manifest: ProfileArtifact = {
+    schemaVersion: 1,
+    kind: 'bazframe-profile-export',
+    profile: {
+      id: 'package-profile',
+      instructions: { path: 'profile/AGENTS.md', sha256: createHash('sha256').update(instructions).digest('hex') },
+      skills: [], omittedLocalSkills: [], libraries: [],
+      packages: ['local-package', 'remote-package']
+    },
+    resources: [
+      { kind: 'package', id: 'local-package', source: { type: 'localMapping' } },
+      { kind: 'package', id: 'remote-package', source: identity('remote-package', remoteRevision) }
+    ]
+  };
+  await writeFile(join(artifact, 'bazframe-profile.json'), encodeProfileArtifact(manifest, profileArtifactLimitPolicy()));
+
+  const wrapperName = 'packages/git-wrapper.mjs';
+  const wrapper = directory.path(wrapperName);
+  await directory.write(wrapperName, `#!/usr/bin/env node
+import{spawnSync}from'node:child_process';
+const args=process.argv.slice(2);const real=process.env.REAL_GIT;let original;
+if(args.includes('clone')){
+  if(process.env.TEST_FAIL_CLONE==='1')process.exit(87);
+  const index=args.findIndex(value=>/^https?:|^ssh:/.test(value));if(index<0)process.exit(88);
+  original=args[index];args[index]=process.env.TEST_PACKAGE_REMOTE;
+  const protocol=args.indexOf('protocol.file.allow=never');if(protocol>=0)args[protocol]='protocol.file.allow=always';
+}
+const result=spawnSync(real,args,{stdio:'inherit',env:process.env});if(result.status!==0)process.exit(result.status??1);
+if(original){const destination=args.at(-1);const changed=spawnSync(real,['-C',destination,'remote','set-url','origin',original],{stdio:'inherit',env:process.env});process.exit(changed.status??1);}
+`);
+  await chmod(wrapper, 0o755);
+  return {
+    directory,
+    home: directory.path('packages/home'),
+    artifact,
+    localPackage,
+    environment: {
+      ...process.env,
+      BAZFRAME_GIT_COMMAND: wrapper,
+      BAZFRAME_GH_COMMAND: directory.path('packages/missing-gh'),
+      REAL_GIT: gitExecutable(),
+      TEST_PACKAGE_REMOTE: remotePackage
+    }
+  };
 }
 
 async function managedEnvironment(

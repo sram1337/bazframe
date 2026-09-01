@@ -1,6 +1,6 @@
 # Profile Portability Design
 
-> Status: Stage 2 remote-Git plus explicitly mapped local build-free library export/import is live on macOS and Linux; Stage 3 packages and full portability remain pending
+> Status: Stage 3 remote-Git and explicitly mapped local library/package export/import is live on macOS and Linux; Windows support and full portability remain pending
 >
 > `docs/design.md` remains the product source of truth. This document defines the implementation contract for profile export and import.
 
@@ -28,7 +28,7 @@ Import never changes the current active profile. That remains an explicit `bazfr
 1. An export is declarative and reviewable, not an offline bundle.
 2. The artifact contains no source checkout, library/package snapshot, cache, adapter state, policy, favorite, recovery state, current active profile, credential, project state, or Pi state.
 3. Remote Git source identity is locked to normalized remote identity, credential-free fetch URL, branch, and exact revision copied from existing remote Git provenance. Export performs no network lookup, and import never substitutes the branch's current head for the exported revision.
-4. Healthy local direct Skills whose profile links exactly match their added Skills are omitted with a deterministic warning and recorded permanently in `profile.omittedLocalSkills`; there is no local Skill mapping. Local library and future package source directories are machine-specific. Stage 2 requires one explicit typed mapping per artifact-declared local library; Stage 3 will define package mappings and consent.
+4. Healthy local direct Skills whose profile links exactly match their added Skills are omitted with a deterministic warning and recorded permanently in `profile.omittedLocalSkills`; there is no local Skill mapping. Local library and package source directories are machine-specific. Stage 3 requires one explicit typed mapping per artifact-declared local library or package, and every new package build retains exact report-bound consent.
 5. Resource IDs do not change during import. `--as` may change only the destination profile ID.
 6. Exact healthy target state is reusable. Occupied mismatched state fails; import never intentionally overwrites, merges, updates, repoints, or implicitly renames resources or profiles.
 7. Global resources commit independently. If a later step fails, earlier healthy resources remain globally available and possibly unreferenced.
@@ -77,7 +77,9 @@ In this design, a **physical** file or directory is the filesystem entry itself,
     "libraries": [
       "toolkit"
     ],
-    "packages": []
+    "packages": [
+      "automation"
+    ]
   },
   "resources": [
     {
@@ -97,12 +99,19 @@ In this design, a **physical** file or directory is the filesystem entry itself,
       "source": {
         "type": "localMapping"
       }
+    },
+    {
+      "kind": "package",
+      "id": "automation",
+      "source": {
+        "type": "localMapping"
+      }
     }
   ]
 }
 ```
 
-The remote Git source fields come from the resource's existing remote Git provenance record. They are not reconstructed from a library record and export does not contact the remote. Stage 2 also emits the path-free local-library source shown above after verifying the healthy local record and immutable snapshot; it never exports that machine's root or snapshot digest. Every package reference still blocks export.
+The remote Git source fields come from the resource's existing remote Git provenance record. They are not reconstructed from a library/package record and export does not contact the remote. Stage 3 emits the path-free local library and package sources shown above after verifying each healthy local record and immutable snapshot; it never exports that machine's root or snapshot digest.
 
 Schema rules:
 
@@ -118,11 +127,11 @@ Schema rules:
 - Remote Git source keys are exactly `type`, `remote`, `fetchUrl`, `branch`, and `revision`.
 - Remote Git identities use the existing credential-free source and provenance-record validators. Embedded credentials, query strings, fragments, local/file sources, option-shaped values, and ambiguous forms remain invalid.
 - Remote Git entries omit checkout roots, transport preference, authentication, environment, and timestamps.
-- A local library or future package source is exactly `{ "type": "localMapping" }`. Its containing `(kind,id)` is the mapping key. Stage 2 accepts this source only for libraries; a `skill` resource with `localMapping` is invalid in every stage.
+- A local library or package source is exactly `{ "type": "localMapping" }`. Its containing typed `(kind,id)` is the mapping key. A `skill` resource with `localMapping` is invalid.
 - Unknown keys are rejected rather than ignored or preserved.
 - The encoder uses fixed object-key order, two-space indentation, and one final LF. Import requires equality with canonical re-encoding. This also rejects duplicate keys and alternate JSON encodings.
 
-The artifact binds source identity, not publisher trust. Healthy local direct Skills whose profile links exactly match their added Skills are not portable resources: export emits a deterministic terminal-safe warning, omits them from the exported profile state, and records their IDs in `omittedLocalSkills`. There is no local Skill mapping. A local library or future package mapping records less reproducibility than a remote Git exact revision because the importer explicitly chooses the source directory on the destination machine. Package builds can also produce environment-dependent bytes. Exported snapshot digests are therefore not portable identity and are omitted.
+The artifact binds source identity, not publisher trust. Healthy local direct Skills whose profile links exactly match their added Skills are not portable resources: export emits a deterministic terminal-safe warning, omits them from the exported profile state, and records their IDs in `omittedLocalSkills`. There is no local Skill mapping. A local library or package mapping records less reproducibility than a remote Git exact revision because the importer explicitly chooses the source directory on the destination machine. Package builds can also produce environment-dependent bytes. Exported snapshot digests are therefore not portable identity and are omitted.
 
 ## Export
 
@@ -161,7 +170,7 @@ Export rejects:
 
 For each direct Skill, export checks the same-ID added Skill in `(default)`. A Skill acquired from a remote Git source is included with its existing normalized, credential-free provenance identity. A Skill from a healthy local source directory is omitted, its ID is recorded in `profile.omittedLocalSkills`, and export emits a deterministic terminal-safe warning naming the sorted omissions. A broken or mismatched link, or a Skill under a Bazframe-managed checkout path without matching provenance, causes export to fail without publishing an artifact. No local Skill mapping is emitted.
 
-A profile's library or package reference names a global library or package. Export verifies that the matching global record and activated immutable snapshot are both present and healthy. For a resource acquired from a remote Git source, export copies source identity from its existing remote Git provenance; the library/package record itself supplies only its source directory and snapshot digest. In Stage 2, a healthy local library emits exactly `{ "type": "localMapping" }`, with no source-machine path or snapshot digest. Any package reference still causes export to fail without publishing an artifact; Stage 3 may emit `localMapping` for local packages.
+A profile's library or package reference names a global library or package. Export verifies that the matching global record and activated immutable snapshot are both present and healthy. For a resource acquired from a remote Git source, export copies source identity from its existing remote Git provenance; the library/package record itself supplies only its source directory and snapshot digest. In Stage 3, a healthy local library or package emits exactly `{ "type": "localMapping" }`, with no source-machine path or snapshot digest. Remote Git package requirements are likewise path-free and carry only normalized credential-free identity, branch, and exact revision. Export copies no source tree or activated snapshot.
 
 The **children of a collection** are the individual Skills discovered inside a library or produced by a package. They are intentionally absent from `profile.skills`, `profile.omittedLocalSkills`, and `resources`: the profile references the library or package as one unit rather than adding each child to `(default)`.
 
@@ -182,20 +191,20 @@ Portable Node directory rename has no conditional no-replace primitive. On some 
 ### Commands
 
 ```text
-bazframe profile import [--json] [--as <profile>] [--map library:<id>=<absolute-source-directory>]... [--dry-run] <directory>
+bazframe profile import [--json] [--as <profile>] [--map (library|package):<id>=<absolute-source-directory>]... [--dry-run | --yes] <directory>
 ```
 
-This is the live Stage 2 grammar. `--map` is repeatable for libraries. Packages and `--yes` remain rejected until Stage 3.
+This is the live Stage 3 grammar. `--map` is repeatable and typed for libraries and packages. `--yes` cannot be combined with `--dry-run`.
 
-Import always begins with inspection and displays the resulting plan before it does anything else. By default it then executes that plan. `--dry-run` stops after inspection, with no DNS, clone, fetch, build, package-declared process execution, Bazframe-home write, artifact write, active-profile change, or policy/adapter/cache mutation. Inspection may perform bounded local reads and isolated non-network Git health checks for resources already present. Package execution retains its separate interactive confirmation or exact `--yes` authorization.
+Import always begins with inspection and displays the resulting plan before it does anything else. By default it then executes that plan. `--dry-run` stops after inspection without taking a Bazframe write lock and performs no DNS, clone, fetch, build, package-declared process execution, prompt, Bazframe-home or artifact write, active-profile change, or policy/adapter/cache mutation. Inspection may perform bounded local reads and isolated non-network Git health checks for resources already present. Package execution retains its separate literal-`y` interactive confirmation or exact `--yes` authorization.
 
-A local library or future package export deliberately omits the old machine's path. A typed mapping such as `--map library:toolkit=/srv/skill-libraries/toolkit` tells import which existing source directory on this machine should satisfy that named resource.
+A local library or package export deliberately omits the old machine's path. Typed mappings such as `--map library:toolkit=/srv/skill-libraries/toolkit --map package:automation=/srv/skill-packages/automation` tell import which existing source directories on this machine satisfy those named resources.
 
 `--as` changes only the destination profile ID. Resource IDs remain exact.
 
 Inspection reads the current active profile from `active-profile` without changing it. If there is no current active profile, the import remains inactive. If the destination profile already exists exactly and is the current active profile, import may reuse it and reports that pre-existing state. If the destination is absent while `active-profile` already stores its ID, import blocks and directs the user to repair the current active profile or choose `--as`; otherwise publication would activate the new profile implicitly. Malformed or unreadable `active-profile` state fails this inactivity check closed. Execution repeats the check under the final global state lock.
 
-Stage 2 capability validation accepts `localMapping` only for libraries and rejects every package membership/resource before planning mutation. It performs no local direct-Skill mapping and executes no package build.
+Stage 3 capability validation accepts `localMapping` for libraries and packages, rejects it for direct Skills, and validates all mapping closure before planning mutation. Inspection executes no package build.
 
 ### Artifact validation
 
@@ -227,11 +236,11 @@ For example:
 --map library:toolkit=/srv/skill-libraries/toolkit
 ```
 
-In Stage 2, `kind` is exactly `library`; Stage 3 extends this grammar to packages. The typed key must identify a `localMapping` resource. Direct Skills never use this grammar. The value must be a non-NUL absolute path to an existing source directory whose canonical basename equals the resource ID. A file, link, special entry, or missing path fails validation. The mapped directory is read-only input: import never writes to or replaces it. Each local library requires exactly one explicit mapping, even if an existing target resource appears reusable. Missing mappings are reported as blockers. Duplicate or extra mappings, mappings for resources from remote Git sources, and wrong-kind, unsafe-ID, relative, or conflicting mappings fail before mutation. Any occupied Bazframe destination that is not an exact healthy same-root reuse also fails rather than being overwritten, updated, or repointed.
+`kind` is exactly `library` or `package`. The typed key must identify a `localMapping` resource; same-ID library and package mappings remain independent. Direct Skills never use this grammar. The value must be a non-NUL absolute path to an existing source directory whose canonical basename equals the resource ID. A file, link, special entry, or missing path fails validation. The mapped directory is read-only input except that an explicitly authorized package build may modify source-owned output under its package root; import never copies, replaces, or repoints the mapped root. Each local library or package requires exactly one explicit mapping, even if an existing target resource appears reusable. Missing mappings are reported as blockers. Duplicate or extra mappings, mappings for remote Git resources, and wrong-kind, unsafe-ID, relative, or conflicting mappings fail before mutation. Any occupied Bazframe destination that is not an exact healthy same-root reuse also fails rather than being overwritten, updated, or repointed.
 
 Inspection captures each mapped source directory's canonical path and physical identity. Execution re-resolves and compares both immediately before its resource lifecycle and again during final dependency validation. Conflicting mappings include duplicate canonical directories and ancestor/descendant overlap among mapped resources or between a mapped source directory and the artifact root or `BAZFRAME_HOME`; this also keeps package builds away from import input and Bazframe staging. A platform that cannot prove the required physical identity fails closed.
 
-Mappings authorize the source directory to use on the destination machine. They neither rename IDs nor become portability state. Ordinary library validation still applies: an absent local library is created through the ordinary build-free `addLibrary` lifecycle, while an exact healthy registration at the same canonical root is reused. Stage 3 retains ordinary package declaration and build-consent validation.
+Mappings authorize the source directory to use on the destination machine. They neither rename IDs nor become portability state. Ordinary validation still applies: an absent local library is created through the build-free library lifecycle; an absent local package is created through the report- and consent-bound package lifecycle. Exact healthy same-root libraries or packages are reused without lifecycle writes. Package reuse is offline, build-free, report-free, prompt-free, and consent-free.
 
 ### Plan output
 
@@ -250,7 +259,7 @@ The report is deterministic and terminal-safe. It shows:
 
 All user-controlled values are escaped and bounded in diagnostics.
 
-Dry-run reports are advisory point-in-time observations from stable per-object reads. A completed Stage 2 dry-run exits successfully even when its plan is blocked, because inspection itself completed; execute-by-default reports the same plan and then fails before side effects. Execution recomputes inspection and performs its authoritative rechecks under the final global state lock. JSON writes one document: dry-run and successful execution place the complete plan under `result`, blocked execution places it under `error.plan`, and later execution failure places exact resource/profile outcomes under `error.partialResult` with retry diagnostics.
+Dry-run reports are advisory point-in-time observations from stable per-object reads. A completed Stage 3 dry-run exits successfully even when its plan is blocked, because inspection itself completed; execute-by-default reports the same plan and then fails before side effects. Execution recomputes inspection and performs its authoritative rechecks under the final global state lock. JSON writes one document: dry-run and successful execution place the complete plan under `result`, blocked execution places it under `error.plan`, and later execution failure places exact resource/profile outcomes under `error.partialResult` with retry diagnostics.
 
 ## Import execution
 
@@ -292,18 +301,20 @@ This requires factoring remote Git acquisition so ordinary add retains branch-he
 
 ### Package builds
 
-A new package must be acquired or mapped and its exact physical `bazframe-package.json` inspected before build authorization. Before each build, import reports:
+A new package must be acquired or mapped and its exact physical `bazframe-package.json` inspected before build authorization. Before each build, import reports these exact public fields:
 
-- package ID and remote Git source identity or local mapped root;
-- candidate root and working directory;
-- literal build argv;
-- package-manifest identity;
-- artifact and Skills relative roots;
-- `shell: false` execution with inherited environment;
-- unsandboxed ordinary-user authority, including possible credential, network, and user-file access;
-- the fact that arbitrary process side effects cannot be rolled back.
+- `packageId` and `source` (remote, fetch URL, branch, and revision for remote Git; mapped root for a local package);
+- `candidateRoot` and `cwd`;
+- literal `argv`;
+- `manifest.path` and `manifest.sha256`;
+- `artifactRoot` and `skillsRoot`;
+- `shell: false` and inherited environment, without exposing environment names or values;
+- unsandboxed `current-process-user` authority with possible `credentials`, `network`, and `user-files` access;
+- the warning that package-build side effects are not rollbackable.
 
-Interactive confirmation is a literal approval that defaults to decline. `--yes` is accepted only when `--dry-run` is absent; it authorizes each exact revalidated package report noninteractively but does not suppress the report. Consent is bound to package ID, candidate-root identity, remote Git revision or local mapping, and exact manifest snapshot. A declined build cleans identity-proven Bazframe staging and executes nothing. An exact reused package does not rebuild and needs no build consent.
+Interactive confirmation accepts only literal `y`; every other response, including `Y` or an empty response, declines by default. `--yes` is accepted only when `--dry-run` is absent; it authorizes each exact revalidated package report noninteractively but does not suppress the report. Consent is bound to package ID, candidate-root physical identity, remote Git revision or local mapping, and exact manifest snapshot. A declined build cleans identity-proven Bazframe staging and executes nothing. An exact reused package is offline, does not rebuild, emits no authorization report or prompt, and needs no consent.
+
+JSON reports preserve exact source, argv, manifest digest, root declarations, shell, authority, and warning fields while omitting environment names/values and private device/inode evidence. They also omit Bazframe-managed candidate checkout/cwd paths for remote packages; explicitly supplied local mapping roots and their candidate/cwd paths remain visible.
 
 The package preparation lifecycle gains a `beforePackageBuild` callback invoked inside preparation immediately before `executeBuild`. For packages acquired from remote Git sources it revalidates the canonical root identity, clean checkout, detached `HEAD`, origin, `refs/remotes/origin/<branch>`, revision, and authorized manifest. For local mappings it revalidates the canonical path/physical root identity and authorized manifest. The callback and spawn remain adjacent inside the lifecycle; the accepted final race against a non-cooperating same-user writer still applies.
 
@@ -371,13 +382,13 @@ Implementation reuses the existing safe-ID, instruction-byte, traversal, Skill-d
 - use private staging and identity-checked cleanup preparation with a fresh root identity check before recursive removal;
 - avoid printing instruction bodies during ordinary inspection and errors.
 
-Existing authoritative limits apply where their semantics match, including the current effective-instruction and Skill traversal limits. Live Stage 2 export enforces a 1 MiB canonical manifest, 1,024 total profile entries across included Skills, omitted local Skills, libraries, and packages, 256 resources, and 1,024 entries in each streamed profile namespace inspection through its export-specific capture scanner.
+Existing authoritative limits apply where their semantics match, including the current effective-instruction and Skill traversal limits. Live Stage 3 export enforces a 1 MiB canonical manifest, 1,024 total profile entries across included Skills, omitted local Skills, libraries, and packages, 256 resources, and 1,024 entries in each streamed profile namespace inspection through its export-specific capture scanner.
 
 Skill snapshot publication and verification enforce a 4 MiB raw and canonical manifest, 8,192 physical entries including the root, depth 32 with the root at depth zero, 4,096 UTF-8 bytes per relative path, 64 MiB logical bytes per regular file, and 512 MiB aggregate logical regular-file bytes. Directory enumeration and file copy/hash are streamed; per-file and aggregate budgets reconcile actual streamed bytes and stop concurrent growth after reading at most one byte beyond the applicable ceiling. Verification performs two bounded manifest/tree comparisons while retaining stable no-follow per-file reads and held root-directory identities. Cleanup preparation uses the same ceilings, makes only identity-checked physical directories writable through held handles, and refuses linked, special, unknown, or substituted entries. It freshly revalidates the cleanup root's physical identity immediately before recursive removal. Portable Node lacks handle-relative recursive deletion, so a non-cooperating same-user process can still substitute the root between that last check and `rm`; this residual final-pathname race is not claimed as identity-proven deletion. Test-only policy injection may lower but never raise these production limits.
 
 The owner approved the remaining production ceilings: 64 KiB package manifests; package argv of at most 64 entries, 4 KiB per argument, and 16 KiB aggregate UTF-8; 4,096 UTF-8 bytes per package path; 30 seconds for Git metadata commands; 10 minutes for clone/fetch; 30 minutes for builds; a 5-second termination grace; 1 GiB of Git objects; checkout ceilings of 8,192 entries, depth 32, 4,096 UTF-8 path bytes, 64 MiB per file, and 512 MiB aggregate; total staging ceilings of 32,768 entries, depth 64, 8,192 UTF-8 path bytes, and 1.5 GiB logical regular-file bytes; 1 MiB for each Git stdout/stderr stream; 1 KiB per diagnostic and 1 MiB per diagnostic report; and 16 KiB provenance. The artifact-manifest 1 MiB ceiling also bounds each captured typed profile reference and global collection record; no separate numeric JSON-record limit is introduced.
 
-There is no claimed hard wire-byte cap. Enforcement combines wall time, monitoring, and post-transfer/post-build validation. Any breach prevents activation. Children receive bounded termination followed by the approved grace, and cleanup removes only identity-proven state. Uncertain cleanup or outcome enters existing recovery or quarantine state rather than claiming absence. Managed Git commands enforce the approved metadata versus clone/fetch durations, independent stdout/stderr ceilings, graceful-to-force termination grace, live acquisition-storage monitoring, and authoritative post-command Git-object/checkout validation. Remaining package-manifest/argv/build-duration and diagnostic-report enforcement must still be implemented and tested below, at, and above each approved value before the stages that use them are released. An unbounded untrusted package manifest or build duration remains a release blocker for package import.
+There is no claimed hard wire-byte cap. Enforcement combines wall time, monitoring, and post-transfer/post-build validation. Any breach prevents activation. Children receive bounded termination followed by the approved grace, and cleanup removes only identity-proven state. Uncertain cleanup or outcome enters existing recovery or quarantine state rather than claiming absence. Managed Git commands enforce the approved metadata versus clone/fetch durations, independent stdout/stderr ceilings, graceful-to-force termination grace, live acquisition-storage monitoring, and authoritative post-command Git-object/checkout validation. Stage 3 enforces the package-manifest, argv, package-path, build-duration, termination-grace, and aggregate diagnostic-report limits before package activation. Focused below/at/above package input and process tests pass. The broader hostile-input and cross-platform boundary gate remains open.
 
 Windows validation must cover junctions/reparse points, UNC paths, case-insensitive basename identity, no-follow fallback behavior, destination collision behavior, and ACL/privacy behavior where POSIX modes are unavailable. Private staging is claimed only when platform permissions or inherited ACLs establish it.
 
@@ -441,9 +452,10 @@ Add:
 - `src/profile-portability/profile-artifact.ts`: exact object schema and canonical object codec behind explicit approved-limit injection;
 - `src/profile-portability/profile-artifact-io.ts` and `profile-artifact-publication.ts`: bounded physical artifact I/O and exclusive export publication;
 - `src/profile-portability/profile-export.ts`: live locked profile/dependency capture and revalidation;
-- `src/profile-portability/profile-import-local-library.ts`: live read-only local-library mapping identity and exact create/reuse classification;
-- `src/profile-portability/profile-import-plan.ts`: live no-write Stage 2 planning, mapping closure/overlap checks, and collision classification;
-- `src/profile-portability/profile-import.ts`: live Stage 2 remote Git/local-library orchestration and final profile publication.
+- `src/profile-portability/profile-import-local-library.ts`: live local library/package mapping identity, exact manifest capture for packages, and exact create/reuse classification;
+- `src/profile-portability/profile-import-package-build.ts`: bounded exact package-build report, consent identity, and possible-effect accounting;
+- `src/profile-portability/profile-import-plan.ts`: live no-write Stage 3 planning, typed mapping closure/overlap checks, and collision classification;
+- `src/profile-portability/profile-import.ts`: live Stage 3 remote Git/local library/package orchestration and final profile publication.
 
 Required factoring:
 
@@ -465,22 +477,21 @@ CLI parsing/reporting remains separate from portability orchestration. TUI suppo
 
 Stage 1 shipped the first production CLI slice on macOS and Linux. At that delivery boundary, export wrote direct Skills and libraries from remote Git sources, warned, omitted, and permanently recorded healthy matching local direct Skill IDs, blocked local libraries and every package reference, published an inactive reviewable artifact, and required review of exported `profile/AGENTS.md` before sharing.
 
-Stage 1 import provided exact-revision remote Git acquisition, no-write inspection and collision/reuse planning, inactive atomic profile publication, partial-success outcomes and forward retry, and rejected local mappings and packages before mutation. It reported the plan before work, left active selection unchanged, and never promoted collection children into `(default)`. Stage 2 extended this historical boundary; Stage 3 packages, Windows publication validation, and full portability remain pending.
+Stage 1 import provided exact-revision remote Git acquisition, no-write inspection and collision/reuse planning, inactive atomic profile publication, partial-success outcomes and forward retry, and rejected local mappings and packages before mutation. It reported the plan before work, left active selection unchanged, and never promoted collection children into `(default)`. Stages 2 and 3 extended this historical boundary; Windows publication validation and full portability remain pending.
 
 ### Stage 2: local build-free libraries
 
-Stage 2 is live in the production CLI on macOS and Linux. Healthy local libraries export path-free as `localMapping`; import accepts repeatable typed `--map library:<id>=<absolute-source-directory>` entries, performs no-write canonical physical-identity and overlap inspection, blocks missing mappings, and revalidates the mapping before ordinary build-free `addLibrary` creation and final publication. Exact healthy same-root resources are reused without lifecycle writes; mismatches never overwrite, update, or repoint. Active selection stays unchanged, children never enter `(default)`, partial resource success is retained, and retry converges through exact reuse.
+Stage 2 shipped in the production CLI on macOS and Linux. Healthy local libraries export path-free as `localMapping`; import accepts repeatable typed `--map library:<id>=<absolute-source-directory>` entries, performs no-write canonical physical-identity and overlap inspection, blocks missing mappings, and revalidates the mapping before ordinary build-free `addLibrary` creation and final publication. Exact healthy same-root resources are reused without lifecycle writes; mismatches never overwrite, update, or repoint. Active selection stays unchanged, children never enter `(default)`, partial resource success is retained, and retry converges through exact reuse.
 
 Focused core, lifecycle-race, CLI/JSON, separate-home integration, and installed-tarball acceptance pass. The constrained aggregate `npm test`, real-Pi, and final 99-file pack-content gates also pass. Independent security, product/contract, validation/pack, and final evidence-gap rereviews are clean.
 
 ### Stage 3: packages
 
-- add packages from remote Git sources and locally mapped packages;
-- retain exact manifest reporting and bound authorization;
-- order packages last and report nonrollbackable side effects;
-- test decline, manifest drift, build failure, partial success, and retry.
+Stage 3 is live in the production CLI on macOS and Linux. Exports include path-free remote Git and `localMapping` package requirements. Import accepts typed repeatable library/package maps, acquires branch-reachable historical remote package revisions exactly, processes packages last, and creates mapped or remote packages through the ordinary bounded lifecycle. Exact healthy packages are reused offline without build, report, prompt, or consent.
 
-Portability is not described as complete until direct Skills from remote Git sources, explicit local direct-Skill omissions, libraries from remote Git and local sources, packages, and all approved resource/acquisition bounds ship.
+Every new build receives an exact manifest/argv/source/root report immediately before literal-`y` default-decline or `--yes` authorization, followed by adjacent root/manifest/Git revalidation. Reports state inherited `shell: false` execution, unsandboxed `current-process-user` credential/network/user-file risk, and nonrollbackable effects; partial results retain possible-effect package IDs. The 64 KiB manifest, 64-argument, 4 KiB per-argument, 16 KiB aggregate-argv, 4,096-byte package-path, 30-minute build, and 5-second termination-grace bounds are enforced.
+
+Focused package policy/manifest/process, planning/execution, CLI/JSON/prose, exact-revision, export/publication, partial-retry, and installed packed-package acceptance pass. The aggregate passes build, typecheck, lint, 892 unit tests with 1 skipped, 79 integration tests, and packed-package acceptance. Real-Pi passes against Pi 0.84.4; final pack inspection reports 100 clean files; independent security, product/contract, and evidence reviews are clean. Windows filesystem/privacy and the broad hostile/full-portability gate remain open. Package portability is live, but Bazframe does not describe portability as complete until those remaining approved platform and full-acceptance gates ship.
 
 ## Validation gates
 

@@ -1,6 +1,7 @@
 import type { ProfileExportResult } from '../profile-portability/profile-export.js';
 import type { ProfileImportPlan } from '../profile-portability/profile-import-plan.js';
 import type { ProfileImportPartialResult, ProfileImportResult } from '../profile-portability/profile-import.js';
+import type { PackageBuildAuthorizationReport } from '../profile-portability/profile-import-package-build.js';
 import type { RepositoryProjectState } from '../project/registration.js';
 import type { GlobalPolicy } from '../policy/global-policy.js';
 import type { StatusInspection } from '../status/status.js';
@@ -32,11 +33,12 @@ export function profileImportPlanResult(plan: ProfileImportPlan): Record<string,
   }:{
    kind:resource.kind,id:resource.id,sourceType:'localMapping',
    ...(resource.source.root===undefined?{}:{root:resource.source.root}),
-   action:resource.action,networkRequired:false,buildRequired:false,
+   action:resource.action,networkRequired:false,buildRequired:resource.buildRequired,
    ...(resource.reason===undefined?{}:{reason:resource.reason})
   }),
+  packageBuilds:{...plan.packageBuilds,unresolvedRemotePackageIds:[...plan.packageBuilds.unresolvedRemotePackageIds],warnings:[...plan.packageBuilds.warnings]},
   activeSelection:{...plan.activeSelection},
-  composition:{...plan.composition,deferredLibraries:[...plan.composition.deferredLibraries],knownCollectionSkillPreview:[...plan.composition.knownCollectionSkillPreview]},
+  composition:{...plan.composition,deferredLibraries:[...plan.composition.deferredLibraries],deferredPackages:[...plan.composition.deferredPackages],knownCollectionSkillPreview:[...plan.composition.knownCollectionSkillPreview]},
   exclusions:{...plan.exclusions},
   profileAction:plan.profileAction,
   blockers:plan.blockers.map((blocker)=>({...blocker}))
@@ -52,7 +54,9 @@ export function profileImportExecutionResult(result: ProfileImportResult): Recor
   mode:'executed',plan:profileImportPlanResult(result.plan),
   resources:result.resources.map((resource)=>({...resource})),
   profileOutcome:result.profileOutcome,destinationPath:result.destinationPath,
-  activeSelectionChanged:result.activeSelectionChanged
+  activeSelectionChanged:result.activeSelectionChanged,
+  packageBuildReports:(result.packageBuildReports??[]).map(packageBuildReportResult),
+  possibleNonrollbackablePackageEffects:[...(result.possibleNonrollbackablePackageEffects??[])]
  };
 }
 
@@ -61,7 +65,33 @@ export function profileImportPartialResult(result: ProfileImportPartialResult): 
   mode:'partial',plan:profileImportPlanResult(result.plan),
   resources:result.resources.map((resource)=>({...resource})),
   profileOutcome:result.profileOutcome,destinationPath:result.destinationPath,
-  activeSelectionChanged:result.activeSelectionChanged
+  activeSelectionChanged:result.activeSelectionChanged,
+  packageBuildReports:(result.packageBuildReports??[]).map(packageBuildReportResult),
+  possibleNonrollbackablePackageEffects:[...(result.possibleNonrollbackablePackageEffects??[])]
+ };
+}
+
+function packageBuildReportResult(report: PackageBuildAuthorizationReport): Record<string, unknown> {
+ const source=report.source.type==='remoteGit'?{
+  type:'remoteGit',remote:report.source.remote,fetchUrl:report.source.fetchUrl,
+  branch:report.source.branch,revision:report.source.revision
+ }:{type:'localMapping',root:report.source.root};
+ return {
+  packageId:report.packageId,
+  source,
+  ...(report.source.type==='localMapping'?{candidateRoot:report.candidateRoot,cwd:report.cwd}:{}),
+  argv:[...report.argv],
+  manifest:{path:report.manifest.path,sha256:report.manifest.sha256},
+  artifactRoot:report.artifactRoot,
+  skillsRoot:report.skillsRoot,
+  shell:false,
+  inheritedEnvironment:true,
+  authority:{
+   sandboxed:false,
+   user:'current-process-user',
+   access:['credentials','network','user-files']
+  },
+  warning:'Package build side effects are not rollbackable.'
  };
 }
 

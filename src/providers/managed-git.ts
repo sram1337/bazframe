@@ -3,7 +3,11 @@ import { constants } from 'node:fs';
 import { lstat, mkdtemp, open, realpath, rename, rm, unlink, type FileHandle } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { BazframeError, errorCode } from '../core/errors.js';
-import type { ChildOutputPolicy } from '../core/child-process.js';
+import type {
+  BoundedPackageProcessOptions,
+  BoundedPackageProcessResult,
+  ChildOutputPolicy
+} from '../core/child-process.js';
 import { boundedPathForDisplay, boundedTextForDisplay, replaceUnsafeDisplayCharacters } from '../core/safe-text.js';
 import {
   PROFILE_PORTABILITY_PRODUCTION_LIMITS,
@@ -25,6 +29,10 @@ import {
   globalCollectionPath, readCollectionSnapshot, readLibrary, readLibrarySnapshot, readPackage, readPackageSnapshot,
   sameCollectionSnapshot, type SkillCollectionRecordSnapshot
 } from '../skill-collections/skill-collection-store.js';
+import {
+  isUncertainPackageBuildError,
+  type BeforePackageBuildContext
+} from '../skill-collections/skill-collection-preparation.js';
 import { verifySkillSnapshot } from '../skill-collections/skill-snapshot.js';
 import { ensureManagedDirectory, writeFileAtomic } from '../state/atomic-file.js';
 import { withStateLock } from '../state/lock.js';
@@ -74,6 +82,10 @@ export interface ManagedGitOptions {
   acquisitionLimits?: Partial<ManagedGitAcquisitionLimitPolicy>;
   reportPackageBuild?: (details: ManagedGitBuildAuthorization) => void | Promise<void>;
   confirmPackageBuild?: (details: ManagedGitBuildAuthorization) => boolean | Promise<boolean>;
+  /** Additional authorization/revalidation invoked within the adjacent managed-package callback. */
+  beforePackageBuild?: (context: BeforePackageBuildContext) => void | Promise<void>;
+  /** Import-only accounting after managed pre-spawn revalidation succeeds. Must not await. */
+  onPackageBuildReady?: (context: BeforePackageBuildContext) => void;
   /** Internal deterministic fault-injection seams used only by lifecycle tests. */
   testHooks?: {
     afterRemoveResource?: () => void | Promise<void>;
@@ -81,8 +93,12 @@ export interface ManagedGitOptions {
     afterCloneOriginValidated?: () => void | Promise<void>;
     beforeExactRefUpdate?: () => void | Promise<void>;
     afterPublishedCheckout?: () => void | Promise<void>;
+    /** Deterministic preflight drift seam used only by managed-package tests. */
+    beforePackageBuildPreflight?: () => void | Promise<void>;
     /** Deterministic process-tree uncertainty seam used only by acquisition tests. */
     injectUncertainAcquisitionFailure?: boolean;
+    /** Deterministic uncertain package-process seam used only by recovery tests. */
+    injectUncertainPackageBuildFailure?: boolean;
   };
 }
 export interface ManagedGitExactRevisionReuseRequirement {
@@ -172,6 +188,14 @@ export async function addManagedGitLibraryAtRevision(
   requirement?: ManagedGitExactRevisionReuseRequirement
 ): Promise<ManagedGitLifecycleResult> {
   return addManagedAtRevision(options, 'library', id, enteredIdentity, requirement);
+}
+export async function addManagedGitPackageAtRevision(
+  options: ManagedGitOptions,
+  id: string,
+  enteredIdentity: PathFreeManagedGitIdentity,
+  requirement?: ManagedGitExactRevisionReuseRequirement
+): Promise<ManagedGitLifecycleResult> {
+  return addManagedAtRevision(options, 'package', id, enteredIdentity, requirement);
 }
 export async function updateManagedGitSkill(options: ManagedGitOptions, id: string): Promise<ManagedGitLifecycleResult> { return updateManaged(options, 'skill', id); }
 export async function updateManagedGitLibrary(options: ManagedGitOptions, id: string): Promise<ManagedGitLifecycleResult> { return updateManaged(options, 'library', id); }
@@ -283,7 +307,7 @@ function copyExactReuseRequirement(requirement: ManagedGitExactRevisionReuseRequ
 
 function assertExpectedExactReuseHealth(
   home: string,
-  kind: 'skill' | 'library',
+  kind: ManagedGitResourceKind,
   id: string,
   identity: PathFreeManagedGitIdentity,
   health: ManagedGitExportHealthSnapshot
@@ -318,7 +342,7 @@ export type ManagedGitImportOutcomeClassification =
 /** Read-only exact-state classification for post-error import accounting. */
 export async function classifyManagedGitImportOutcome(
   home: string,
-  kind: 'skill' | 'library',
+  kind: ManagedGitResourceKind,
   id: string,
   enteredExpected: PathFreeManagedGitIdentity,
   environment: NodeJS.ProcessEnv = process.env,
@@ -352,7 +376,7 @@ export async function classifyManagedGitImportOutcome(
 /** Read-only provider-only occupancy probe for local profile-import classification. */
 export async function classifyManagedGitProviderOccupancy(
   home: string,
-  kind: 'library',
+  kind: 'library' | 'package',
   id: string,
   testHooks: ManagedGitImportResourceTestHooks = {}
 ): Promise<'absent' | 'occupied'> {
@@ -380,7 +404,7 @@ export async function classifyManagedGitProviderOccupancy(
 /** Read-only exact-state classification for profile-import planning. */
 export async function classifyManagedGitImportResource(
   home: string,
-  kind: 'skill' | 'library',
+  kind: ManagedGitResourceKind,
   id: string,
   expected: PathFreeManagedGitIdentity,
   environment: NodeJS.ProcessEnv = process.env,
@@ -397,7 +421,7 @@ export async function classifyManagedGitImportResource(
 
 async function classifyManagedGitImportOutcomeAtHome(
   canonicalHome: string,
-  kind: 'skill' | 'library',
+  kind: ManagedGitResourceKind,
   id: string,
   expected: PathFreeManagedGitIdentity,
   environment: NodeJS.ProcessEnv,
@@ -457,7 +481,7 @@ interface HeldImportDirectory {
   ctimeNs: bigint;
 }
 
-function importResourcePaths(home: string, kind: 'skill' | 'library', id: string): {
+function importResourcePaths(home: string, kind: ManagedGitResourceKind, id: string): {
   record: string;
   journal: string;
   root: string;
@@ -681,6 +705,7 @@ export async function buildManagedGitPackage(options: ManagedGitOptions, id: str
         await verifyProvider(record, options.environment ?? process.env);
         await verifyResourceRegistration(record);
         const rootIdentity = await directoryIdentity(record.root);
+        const expectedManifest = await readPackageManifest(record.root);
         transaction.journalState = await createJournal(home, journalFor(record, 'build', 'building', record.revision, record.revision));
         try {
           const built = await buildPackage(
@@ -688,7 +713,9 @@ export async function buildManagedGitPackage(options: ManagedGitOptions, id: str
             id,
             {
               stateLockHeld: true,
-              afterPackageSnapshot: () => cleanManagedCheckout(record, options.environment ?? process.env, rootIdentity)
+              afterPackageSnapshot: () => cleanManagedCheckout(record, options.environment ?? process.env, rootIdentity),
+              ...managedPackageActivationDependencies(options, record, rootIdentity, expectedManifest),
+              ...packageProcessTestDependency(options)
             }
           );
           transaction.resourceCommitted = true;
@@ -696,6 +723,10 @@ export async function buildManagedGitPackage(options: ManagedGitOptions, id: str
           return built;
         } catch (error) {
           if (transaction.resourceCommitted) throw recoveryError(error, home, 'package', id, 'build activation committed before journal finalization');
+          if (isUncertainPackageBuildError(error)) {
+            transaction.journalState = await updateJournal(home, journalFor(record, 'build', 'cleanup-required', record.revision, record.revision), transaction.journalState).catch(() => transaction.journalState);
+            throw recoveryError(error, home, 'package', id, 'package build termination was uncertain; retained checkout and recovery state');
+          }
           try {
             await cleanManagedCheckout(record, options.environment ?? process.env, rootIdentity);
             if (transaction.journalState !== undefined) await removeOwnedFile(managedGitJournalPath(home, 'package', id), transaction.journalState);
@@ -729,7 +760,7 @@ export async function inspectManagedGitRecordHealth(record: ManagedGitRecord, en
 
 async function addManagedAtRevision(
   options: ManagedGitOptions,
-  kind: 'skill' | 'library',
+  kind: ManagedGitResourceKind,
   id: string,
   enteredIdentity: PathFreeManagedGitIdentity,
   requirement?: ManagedGitExactRevisionReuseRequirement
@@ -941,8 +972,9 @@ async function commitAdd(
       { bazframeHome: home, environment: options.environment, childOutputPolicy: options.childOutputPolicy }, expectedRoot,
       {
         stateLockHeld: true,
-        expectedPackageManifest: authorizedManifest,
-        afterPackageSnapshot: () => cleanManagedCheckout(record, options.environment ?? process.env, acquired.identity)
+        afterPackageSnapshot: () => cleanManagedCheckout(record, options.environment ?? process.env, acquired.identity),
+        ...managedPackageActivationDependencies(options, record, acquired.identity, requiredAuthorizedManifest(authorizedManifest)),
+        ...packageProcessTestDependency(options)
       }
     );
     transaction.resourceCommitted = true;
@@ -953,6 +985,14 @@ async function commitAdd(
     return { ...lifecycleResult('added', record), resourceAction: collection?.action ?? 'added' };
   } catch (error) {
     if (transaction.resourceCommitted) throw recoveryError(error, home, kind, source.id, 'activation committed before cleanup completed');
+    if (isUncertainPackageBuildError(error)) {
+      transaction.journalState = await updateJournal(
+        home,
+        journalFor(record, addOperation, 'cleanup-required', null, record.revision, acquired.container),
+        transaction.journalState
+      ).catch(() => transaction.journalState);
+      throw recoveryError(error, home, kind, source.id, 'package build termination was uncertain; retained checkout, staging, provenance, and recovery state');
+    }
     const recovery: unknown[] = [];
     if (recordSnapshot !== undefined) await removeOwnedRecord(home, recordSnapshot).catch((cause) => recovery.push(cause));
     if (published) await removeOwnedTree(expectedRoot, acquired.identity).catch((cause) => recovery.push(cause));
@@ -1085,7 +1125,12 @@ async function commitUpdate(
     } else if (initial.kind === 'library') resourceAction = (await updateLibrary({ bazframeHome: home, environment }, initial.id, { stateLockHeld: true })).action;
     else resourceAction = (await buildPackage(
       { bazframeHome: home, environment, childOutputPolicy: options.childOutputPolicy }, initial.id,
-      { stateLockHeld: true, expectedPackageManifest: authorizedManifest, afterPackageSnapshot: () => cleanManagedCheckout(next, environment, acquired.identity) }
+      {
+        stateLockHeld: true,
+        afterPackageSnapshot: () => cleanManagedCheckout(next, environment, acquired.identity),
+        ...managedPackageActivationDependencies(options, next, acquired.identity, requiredAuthorizedManifest(authorizedManifest)),
+        ...packageProcessTestDependency(options)
+      }
     )).action;
     transaction.resourceCommitted = true;
     await removeOwnedTree(backup, previousIdentity);
@@ -1094,6 +1139,14 @@ async function commitUpdate(
     return { ...lifecycleResult('updated', next), resourceAction };
   } catch (error) {
     if (transaction.resourceCommitted) throw recoveryError(error, home, initial.kind, initial.id, 'updated resource activated before cleanup completed');
+    if (isUncertainPackageBuildError(error)) {
+      transaction.journalState = await updateJournal(
+        home,
+        journalFor(next, 'update', 'cleanup-required', initial.revision, next.revision, acquired.container, backup),
+        transaction.journalState
+      ).catch(() => transaction.journalState);
+      throw recoveryError(error, home, initial.kind, initial.id, 'package build termination was uncertain; retained checkout, backup, staging, provenance, and recovery state');
+    }
     const recoveryErrors: unknown[] = [];
     if (provenanceWritten) {
       if (updatedRecordSnapshot === undefined) recoveryErrors.push(new BazframeError('MANAGED_GIT_OWNERSHIP_CHANGED', `Updated provenance ownership could not be proven before rollback: ${managedGitRecordPath(home, initial.kind, initial.id)}`));
@@ -1750,6 +1803,72 @@ async function assertIdentity(path: string, expected: DirectoryIdentity, message
 async function removeOwnedTree(path: string, expected: DirectoryIdentity): Promise<void> { await assertIdentity(path, expected, 'Bazframe-managed directory ownership changed before cleanup'); await rm(path, { recursive: true }); }
 async function removeOwnedContainer(path: string, expected: DirectoryIdentity): Promise<void> { const metadata = await lstat(path, { bigint: true }).catch((error) => errorCode(error) === 'ENOENT' ? undefined : Promise.reject(error)); if (metadata === undefined) return; if (metadata.isSymbolicLink() || !metadata.isDirectory() || metadata.dev !== expected.device || metadata.ino !== expected.inode) throw new BazframeError('MANAGED_GIT_OWNERSHIP_CHANGED', `Bazframe-managed staging container ownership changed: ${path}`); await rm(path, { recursive: true }); }
 async function clearPartialClone(container: string, expected: DirectoryIdentity, root: string): Promise<void> { await assertIdentity(container, expected, 'staging container changed before GitHub fallback'); await rm(root, { recursive: true, force: true }); }
+
+function requiredAuthorizedManifest(manifest: PackageManifestSnapshot | undefined): PackageManifestSnapshot {
+  if (manifest === undefined) {
+    throw new BazframeError('MANAGED_GIT_BUILD_AUTHORIZATION_MISSING', 'Remote package build is missing its authorized manifest snapshot.');
+  }
+  return manifest;
+}
+
+function managedPackageActivationDependencies(
+  options: ManagedGitOptions,
+  record: ManagedGitRecord,
+  expectedIdentity: DirectoryIdentity,
+  expectedManifest: PackageManifestSnapshot
+): {
+  expectedRootIdentity: { root: string; device: bigint; inode: bigint };
+  expectedPackageManifest: PackageManifestSnapshot;
+  beforePackageBuild: (context: BeforePackageBuildContext) => Promise<void>;
+} {
+  const revalidateBuildInputs = async (context: BeforePackageBuildContext): Promise<void> => {
+    if (context.packageId !== record.id
+      || context.rootIdentity.root !== record.root
+      || context.rootIdentity.device !== expectedIdentity.device
+      || context.rootIdentity.inode !== expectedIdentity.inode
+      || !samePackageManifestSnapshot(context.manifestSnapshot, expectedManifest)) {
+      throw new BazframeError('MANAGED_GIT_CHANGED', `Remote Git package ${record.id} no longer matches its authorized build inputs.`);
+    }
+    await assertIdentity(record.root, expectedIdentity, 'Bazframe-managed package checkout changed before build');
+    await canonicalManagedGitRoot(record);
+    await verifyProvider(record, options.environment ?? process.env);
+    const currentManifest = await readPackageManifest(record.root);
+    if (!samePackageManifestSnapshot(expectedManifest, currentManifest)
+      || !samePackageManifestSnapshot(context.manifestSnapshot, currentManifest)) {
+      throw new BazframeError('PACKAGE_MANIFEST_CHANGED', 'Package manifest changed after build authorization.');
+    }
+  };
+  return {
+    expectedRootIdentity: { root: record.root, ...expectedIdentity },
+    expectedPackageManifest: expectedManifest,
+    beforePackageBuild: async (context) => {
+      await options.testHooks?.beforePackageBuildPreflight?.();
+      await revalidateBuildInputs(context);
+      await options.beforePackageBuild?.(context);
+      await revalidateBuildInputs(context);
+      options.onPackageBuildReady?.(context);
+    }
+  };
+}
+
+function packageProcessTestDependency(options: ManagedGitOptions): {
+  packageProcessRunner?: (
+    executable: string,
+    args: readonly string[],
+    processOptions: BoundedPackageProcessOptions
+  ) => Promise<BoundedPackageProcessResult>;
+} {
+  if (options.testHooks?.injectUncertainPackageBuildFailure !== true) return {};
+  return {
+    packageProcessRunner: async () => ({
+      exitCode: null,
+      signal: null,
+      failure: 'termination-uncertain',
+      uncertainTermination: true
+    })
+  };
+}
+
 async function throwAfterAcquiredTransactionFailure(
   error: unknown,
   transaction: TransactionState,

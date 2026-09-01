@@ -1,8 +1,13 @@
 import { createHash } from 'node:crypto';
-import { constants } from 'node:fs';
+import { constants, type BigIntStats } from 'node:fs';
 import { lstat, open, type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 import { BazframeError, errorCode } from '../core/errors.js';
+import {
+  packageLimitPolicy,
+  type PackageLimitPolicy
+} from '../profile-portability/profile-portability-policy.js';
+import { readAtMostOneBeyond } from '../state/bounded-file-read.js';
 import { isPortableRelativePath } from '../skill-collections/portable-relative-path.js';
 
 const KEYS = ['artifactRoot', 'build', 'schemaVersion', 'skillsRoot'] as const;
@@ -23,7 +28,11 @@ export interface PackageManifestSnapshot {
   contentSha256: string;
 }
 
-export function decodePackageManifest(value: unknown): PackageManifest {
+export function decodePackageManifest(
+  value: unknown,
+  lowerLimits: Partial<PackageLimitPolicy> = {}
+): PackageManifest {
+  const policy = packageLimitPolicy(lowerLimits);
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw invalid('manifest must be a JSON object');
   const candidate = value as Record<string, unknown>;
   const keys = Object.keys(candidate).sort();
@@ -33,24 +42,40 @@ export function decodePackageManifest(value: unknown): PackageManifest {
     || !candidate.build.every((item) => typeof item === 'string' && item.length > 0 && !item.includes('\0'))) {
     throw invalid('build must be a nonempty literal argv array of nonempty strings');
   }
+  if (candidate.build.length > policy.maxArgvEntries) throw invalid('build exceeds the argv entry limit');
+  let aggregateBytes = 0;
+  for (const argument of candidate.build as string[]) {
+    const bytes = Buffer.byteLength(argument, 'utf8');
+    if (bytes > policy.maxArgumentBytes) throw invalid('build argument exceeds the UTF-8 byte limit');
+    aggregateBytes += bytes;
+    if (aggregateBytes > policy.maxArgvAggregateBytes) throw invalid('build exceeds the aggregate argv UTF-8 byte limit');
+  }
   if (!isPortableRelativePath(candidate.artifactRoot)) throw invalid('artifactRoot is invalid');
   if (!isPortableRelativePath(candidate.skillsRoot)) throw invalid('skillsRoot is invalid');
+  if (Buffer.byteLength(candidate.artifactRoot, 'utf8') > policy.maxPathBytes) throw invalid('artifactRoot exceeds the UTF-8 byte limit');
+  if (Buffer.byteLength(candidate.skillsRoot, 'utf8') > policy.maxPathBytes) throw invalid('skillsRoot exceeds the UTF-8 byte limit');
   return { schemaVersion: 1, build: [...candidate.build] as string[], artifactRoot: candidate.artifactRoot, skillsRoot: candidate.skillsRoot };
 }
 
-export async function readPackageManifest(packageRoot: string): Promise<PackageManifestSnapshot> {
+export async function readPackageManifest(
+  packageRoot: string,
+  lowerLimits: Partial<PackageLimitPolicy> = {}
+): Promise<PackageManifestSnapshot> {
+  const policy = packageLimitPolicy(lowerLimits);
   const path = join(packageRoot, PACKAGE_MANIFEST);
   let handle: FileHandle | undefined;
   try {
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const before = await handle.stat({ bigint: true });
     if (!before.isFile()) throw invalid('manifest must be a physical regular file');
-    const bytes = await handle.readFile();
+    if (before.size > BigInt(policy.maxManifestBytes)) throw invalid('manifest exceeds the UTF-8 byte limit');
+    const bytes = await readAtMostOneBeyond(handle, policy.maxManifestBytes);
     const after = await handle.stat({ bigint: true });
     const pathMetadata = await lstat(path, { bigint: true });
-    if (!after.isFile() || pathMetadata.isSymbolicLink() || !pathMetadata.isFile()
-      || before.dev !== after.dev || before.ino !== after.ino
-      || after.dev !== pathMetadata.dev || after.ino !== pathMetadata.ino) throw invalid('manifest identity changed while reading');
+    if (bytes.byteLength > policy.maxManifestBytes) throw invalid('manifest exceeds the UTF-8 byte limit');
+    if (!stablePhysicalFile(before, after, pathMetadata) || BigInt(bytes.byteLength) !== after.size) {
+      throw invalid('manifest identity or content changed while reading');
+    }
     let text: string;
     try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
     catch (error) { throw new BazframeError('PACKAGE_MANIFEST_INVALID', 'Package manifest is not valid UTF-8.', { cause: error }); }
@@ -58,7 +83,7 @@ export async function readPackageManifest(packageRoot: string): Promise<PackageM
     try { value = JSON.parse(text); }
     catch (error) { throw new BazframeError('PACKAGE_MANIFEST_INVALID', 'Package manifest is not valid JSON.', { cause: error }); }
     return {
-      manifest: decodePackageManifest(value), path, device: before.dev, inode: before.ino,
+      manifest: decodePackageManifest(value, policy), path, device: before.dev, inode: before.ino,
       contentSha256: createHash('sha256').update(bytes).digest('hex')
     };
   } catch (error) {
@@ -71,5 +96,14 @@ export async function readPackageManifest(packageRoot: string): Promise<PackageM
 export function samePackageManifestSnapshot(left: PackageManifestSnapshot, right: PackageManifestSnapshot): boolean {
   return left.device === right.device && left.inode === right.inode && left.contentSha256 === right.contentSha256;
 }
+
+function stablePhysicalFile(before: BigIntStats, after: BigIntStats, pathMetadata: BigIntStats): boolean {
+  return after.isFile() && !pathMetadata.isSymbolicLink() && pathMetadata.isFile()
+    && before.dev === after.dev && before.ino === after.ino
+    && after.dev === pathMetadata.dev && after.ino === pathMetadata.ino
+    && before.size === after.size && before.mtimeNs === after.mtimeNs && before.ctimeNs === after.ctimeNs
+    && after.size === pathMetadata.size && after.mtimeNs === pathMetadata.mtimeNs && after.ctimeNs === pathMetadata.ctimeNs;
+}
+
 function invalid(detail: string): BazframeError { return new BazframeError('PACKAGE_MANIFEST_INVALID', `Invalid package manifest: ${detail}.`); }
 function formatCode(error: unknown): string { const code = errorCode(error); return code === undefined ? '' : ` (${code})`; }

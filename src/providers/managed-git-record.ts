@@ -159,7 +159,6 @@ export function decodeManagedGitJournal(value: unknown, expected?: { kind: Manag
   if (typeof candidate.phase !== 'string' || candidate.phase.length === 0 || candidate.phase.length > 64 || !/^[a-z][a-z-]*$/u.test(candidate.phase)) throw invalidJournal('phase is invalid');
   const kind = decodeKind(candidate.kind);
   if (candidate.operation === 'build' && kind !== 'package') throw invalidJournal('build operation requires package kind');
-  if (candidate.operation === 'add-exact' && kind === 'package') throw invalidJournal('add-exact operation supports only Skill and library kinds');
   if (typeof candidate.id !== 'string' || !isSafeSkillId(candidate.id)) throw invalidJournal('id is invalid');
   if (expected !== undefined && (kind !== expected.kind || candidate.id !== expected.id)) throw invalidJournal('identity does not match its path');
   const root = decodeRoot(candidate.root);

@@ -36,6 +36,16 @@ export interface ProfileArtifactLimitPolicy {
   maxResources: number;
 }
 
+export interface PackageLimitPolicy {
+  maxManifestBytes: number;
+  maxArgvEntries: number;
+  maxArgumentBytes: number;
+  maxArgvAggregateBytes: number;
+  maxPathBytes: number;
+  maxBuildMilliseconds: number;
+  terminationGraceMilliseconds: number;
+}
+
 export interface ManagedGitAcquisitionLimitPolicy {
   maxGitObjectBytes: number;
   maxCheckoutEntries: number;
@@ -47,6 +57,22 @@ export interface ManagedGitAcquisitionLimitPolicy {
   maxStagingDepth: number;
   maxStagingPathBytes: number;
   maxStagingBytes: number;
+}
+
+export const PRODUCTION_PACKAGE_LIMIT_POLICY: Readonly<PackageLimitPolicy> = Object.freeze({
+  maxManifestBytes: PROFILE_PORTABILITY_PRODUCTION_LIMITS.packageManifestBytes,
+  maxArgvEntries: PROFILE_PORTABILITY_PRODUCTION_LIMITS.packageArgvEntries,
+  maxArgumentBytes: PROFILE_PORTABILITY_PRODUCTION_LIMITS.packageArgumentBytes,
+  maxArgvAggregateBytes: PROFILE_PORTABILITY_PRODUCTION_LIMITS.packageArgvAggregateBytes,
+  maxPathBytes: PROFILE_PORTABILITY_PRODUCTION_LIMITS.packagePathBytes,
+  maxBuildMilliseconds: PROFILE_PORTABILITY_PRODUCTION_LIMITS.packageBuildMilliseconds,
+  terminationGraceMilliseconds: PROFILE_PORTABILITY_PRODUCTION_LIMITS.processTerminationGraceMilliseconds
+});
+
+export function packageLimitPolicy(
+  lowerLimits: Partial<PackageLimitPolicy> = {}
+): Readonly<PackageLimitPolicy> {
+  return lowerOnlyPolicy(PRODUCTION_PACKAGE_LIMIT_POLICY, lowerLimits);
 }
 
 export const PRODUCTION_MANAGED_GIT_ACQUISITION_LIMIT_POLICY: Readonly<ManagedGitAcquisitionLimitPolicy> = Object.freeze({
@@ -65,16 +91,7 @@ export const PRODUCTION_MANAGED_GIT_ACQUISITION_LIMIT_POLICY: Readonly<ManagedGi
 export function managedGitAcquisitionLimitPolicy(
   lowerLimits: Partial<ManagedGitAcquisitionLimitPolicy> = {}
 ): Readonly<ManagedGitAcquisitionLimitPolicy> {
-  const policy = { ...PRODUCTION_MANAGED_GIT_ACQUISITION_LIMIT_POLICY, ...lowerLimits };
-  for (const key of Object.keys(lowerLimits)) {
-    if (!(key in PRODUCTION_MANAGED_GIT_ACQUISITION_LIMIT_POLICY)) throw invalidPolicy(`${key} is unknown`);
-  }
-  for (const key of Object.keys(PRODUCTION_MANAGED_GIT_ACQUISITION_LIMIT_POLICY) as Array<keyof ManagedGitAcquisitionLimitPolicy>) {
-    const value = policy[key];
-    if (!Number.isSafeInteger(value) || value < 0) throw invalidPolicy(`${key} must be a finite nonnegative integer`);
-    if (value > PRODUCTION_MANAGED_GIT_ACQUISITION_LIMIT_POLICY[key]) throw invalidPolicy(`${key} may lower but must not raise the production limit`);
-  }
-  return Object.freeze(policy);
+  return lowerOnlyPolicy(PRODUCTION_MANAGED_GIT_ACQUISITION_LIMIT_POLICY, lowerLimits);
 }
 
 export const PRODUCTION_PROFILE_ARTIFACT_LIMIT_POLICY: Readonly<ProfileArtifactLimitPolicy> = Object.freeze({
@@ -86,23 +103,7 @@ export const PRODUCTION_PROFILE_ARTIFACT_LIMIT_POLICY: Readonly<ProfileArtifactL
 export function profileArtifactLimitPolicy(
   lowerLimits: Partial<ProfileArtifactLimitPolicy> = {}
 ): Readonly<ProfileArtifactLimitPolicy> {
-  const policy = {
-    ...PRODUCTION_PROFILE_ARTIFACT_LIMIT_POLICY,
-    ...lowerLimits
-  };
-  for (const key of Object.keys(lowerLimits)) {
-    if (!(key in PRODUCTION_PROFILE_ARTIFACT_LIMIT_POLICY)) throw invalidPolicy(`${key} is unknown`);
-  }
-  for (const key of Object.keys(PRODUCTION_PROFILE_ARTIFACT_LIMIT_POLICY) as Array<keyof ProfileArtifactLimitPolicy>) {
-    const value = policy[key];
-    if (!Number.isSafeInteger(value) || value < 0) {
-      throw invalidPolicy(`${key} must be a finite nonnegative integer`);
-    }
-    if (value > PRODUCTION_PROFILE_ARTIFACT_LIMIT_POLICY[key]) {
-      throw invalidPolicy(`${key} may lower but must not raise the production limit`);
-    }
-  }
-  return Object.freeze(policy);
+  return lowerOnlyPolicy(PRODUCTION_PROFILE_ARTIFACT_LIMIT_POLICY, lowerLimits);
 }
 
 export function boundedStateJsonBytes(maximum = PROFILE_PORTABILITY_PRODUCTION_LIMITS.artifactManifestBytes): number {
@@ -113,6 +114,27 @@ export function boundedStateJsonBytes(maximum = PROFILE_PORTABILITY_PRODUCTION_L
     throw invalidPolicy('state JSON byte limit may lower but must not raise the production limit');
   }
   return maximum;
+}
+
+function lowerOnlyPolicy<T extends object>(
+  production: Readonly<T>,
+  lowerLimits: Partial<T>
+): Readonly<T> {
+  const policy = { ...production, ...lowerLimits };
+  for (const key of Object.keys(lowerLimits)) {
+    if (!(key in production)) throw invalidPolicy(`${key} is unknown`);
+  }
+  for (const key of Object.keys(production) as Array<keyof T>) {
+    const value = policy[key];
+    const productionValue = production[key];
+    if (!Number.isSafeInteger(value) || Number(value) < 0) {
+      throw invalidPolicy(`${String(key)} must be a finite nonnegative integer`);
+    }
+    if (Number(value) > Number(productionValue)) {
+      throw invalidPolicy(`${String(key)} may lower but must not raise the production limit`);
+    }
+  }
+  return Object.freeze(policy);
 }
 
 function invalidPolicy(detail: string): BazframeError {

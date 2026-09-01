@@ -237,6 +237,17 @@ export function assertStage2ProfileArtifactCapabilities(artifact: ProfileArtifac
   }
 }
 
+export function assertStage3ProfileArtifactCapabilities(artifact: ProfileArtifact): void {
+  // Schema v1 already limits local mappings to libraries/packages and universally
+  // rejects direct-Skill local mappings. Stage 3 supports every decoded variant.
+  if (artifact.resources.some((resource) => resource.source.type === 'localMapping' && resource.kind === 'skill')) {
+    throw new BazframeError(
+      'PROFILE_ARTIFACT_STAGE3_UNSUPPORTED',
+      'Stage 3 profile portability does not support local direct-Skill mappings.'
+    );
+  }
+}
+
 function decodeArtifactSource(value: unknown, resourceId: string): RemoteGitArtifactSource | LocalMappingArtifactSource {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw invalid('resource source must be a JSON object');

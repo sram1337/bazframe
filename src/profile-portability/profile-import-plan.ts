@@ -32,7 +32,7 @@ import {
   type FlatSkillIdentity,
   type SkillCollectionDiagnostic
 } from '../skill-collections/skill-collection-resolver.js';
-import type { LibraryRecord } from '../skill-collections/skill-collection-store.js';
+import type { LibraryRecord, PackageRecord } from '../skill-collections/skill-collection-store.js';
 import { assertSafeProfileId } from '../profiles/profile-id.js';
 import { assertSafeSkillId } from '../skills/skill-id.js';
 import {
@@ -41,19 +41,22 @@ import {
   holdReadOnlyPathAnchor
 } from '../state/read-only-path-anchor.js';
 import {
-  assertStage2ProfileArtifactCapabilities,
+  assertStage3ProfileArtifactCapabilities,
   type LocalMappingArtifactSource,
   type ProfileArtifactResource,
   type RemoteGitArtifactSource
 } from './profile-artifact.js';
 import {
-  captureLocalLibraryMapping,
+  captureLocalCollectionMapping,
+  classifyLocalCollectionImportResource,
   classifyLocalLibraryImportResource,
-  sameLocalLibraryHealth,
+  classifyLocalPackageImportResource,
+  sameLocalCollectionHealth,
+  type LocalCollectionImportResourceClassification,
+  type LocalCollectionMappingInput,
+  type LocalCollectionMappingSnapshot,
   type LocalLibraryHealthSnapshot,
-  type LocalLibraryImportResourceClassification,
-  type LocalLibraryMappingSnapshot,
-  type ProfileImportMappingInput
+  type LocalPackageHealthSnapshot
 } from './profile-import-local-library.js';
 import {
   readProfileArtifactDirectory,
@@ -77,23 +80,32 @@ export interface ProfileImportBlocker {
 
 export type ResourceImportPlan =
   | {
-    kind: 'skill' | 'library';
+    kind: 'skill' | 'library' | 'package';
     id: string;
     source: RemoteGitArtifactSource;
     action: ResourceImportAction;
     reason?: string;
     networkRequired: boolean;
-    buildRequired: false;
+    buildRequired: boolean;
   }
   | {
-    kind: 'library';
+    kind: 'library' | 'package';
     id: string;
     source: LocalMappingArtifactSource & { root?: string };
     action: ResourceImportAction;
     reason?: string;
     networkRequired: false;
-    buildRequired: false;
+    buildRequired: boolean;
   };
+
+export interface PackageBuildPlanSummary {
+  total: number;
+  remote: number;
+  local: number;
+  /** Remote manifests and argv remain unknown until exact-revision acquisition. */
+  unresolvedRemotePackageIds: string[];
+  warnings: string[];
+}
 
 export interface ActiveSelectionImportPlan {
   state: 'absent' | 'selected' | 'blocked';
@@ -111,12 +123,14 @@ export interface ProfileImportPlan {
   skills: string[];
   omittedLocalSkills: string[];
   libraries: string[];
-  packages: [];
+  packages: string[];
   resources: ResourceImportPlan[];
+  packageBuilds: PackageBuildPlanSummary;
   activeSelection: ActiveSelectionImportPlan;
   composition: {
     status: CompositionPlanStatus;
     deferredLibraries: string[];
+    deferredPackages: string[];
     knownCollectionSkillCount: number;
     knownCollectionSkillPreview: string[];
   };
@@ -131,22 +145,23 @@ export interface ProfileImportPlan {
 
 /** Internal execution handoff. Only plan is suitable for later CLI projection. */
 export type ProfileImportResourceSnapshot =
-  | { kind: 'skill' | 'library'; id: string; sourceType: 'remoteGit'; health: ManagedGitExportHealthSnapshot }
-  | { kind: 'library'; id: string; sourceType: 'localMapping'; health: LocalLibraryHealthSnapshot };
+  | { kind: 'skill' | 'library' | 'package'; id: string; sourceType: 'remoteGit'; health: ManagedGitExportHealthSnapshot }
+  | { kind: 'library'; id: string; sourceType: 'localMapping'; health: LocalLibraryHealthSnapshot }
+  | { kind: 'package'; id: string; sourceType: 'localMapping'; health: LocalPackageHealthSnapshot };
 
 export interface ProfileImportPlanningResult {
   plan: ProfileImportPlan;
   homePath: string;
   artifactSnapshot: ProfileArtifactDirectorySnapshot;
   resourceSnapshots: ProfileImportResourceSnapshot[];
-  mappingSnapshots: LocalLibraryMappingSnapshot[];
+  mappingSnapshots: LocalCollectionMappingSnapshot[];
 }
 
 export interface PlanProfileImportOptions {
   bazframeHome: string;
   artifactDirectory: string;
   destinationProfileId?: string;
-  mappings?: readonly ProfileImportMappingInput[];
+  mappings?: readonly LocalCollectionMappingInput[];
   environment?: NodeJS.ProcessEnv;
 }
 
@@ -154,14 +169,22 @@ export interface ProfileImportPlanDependencies {
   limitPolicy?: Partial<ProfileArtifactLimitPolicy>;
   readArtifact?: typeof readProfileArtifactDirectory;
   classifyResource?: typeof classifyManagedGitImportResource;
-  captureMapping?: typeof captureLocalLibraryMapping;
+  captureMapping?: typeof captureLocalCollectionMapping;
+  classifyLocalCollection?: typeof classifyLocalCollectionImportResource;
+  /** Stage 2 compatibility seams retained for existing callers and tests. */
   classifyLocalLibrary?: typeof classifyLocalLibraryImportResource;
+  classifyLocalPackage?: typeof classifyLocalPackageImportResource;
   readActiveSelection?: typeof readOptionalActiveProfileSnapshot;
   classifyActiveProfilePresence?: typeof classifyActiveProfilePresence;
   resolveLibrary?: (
     bazframeHome: string,
     libraryId: string,
     capturedRecord: LibraryRecord
+  ) => Promise<DerivedSkill[]>;
+  resolvePackage?: (
+    bazframeHome: string,
+    packageId: string,
+    capturedRecord: PackageRecord
   ) => Promise<DerivedSkill[]>;
   /** Internal lower-only seams for bounded planning tests. */
   maxKnownCollectionSkills?: number;
@@ -174,19 +197,17 @@ export interface ProfileImportPlanDependencies {
   };
 }
 
-type ImportableRemoteResource =
-  | { kind: 'skill'; id: string; source: RemoteGitArtifactSource }
-  | { kind: 'library'; id: string; source: RemoteGitArtifactSource };
-type LocalLibraryResource = { kind: 'library'; id: string; source: LocalMappingArtifactSource };
+type ImportableRemoteResource = Extract<ProfileArtifactResource, { source: RemoteGitArtifactSource }>;
+type LocalCollectionResource = Extract<ProfileArtifactResource, { source: LocalMappingArtifactSource }>;
 type ClassifiedResource =
   | { sourceType: 'remoteGit'; resource: ImportableRemoteResource; classification: ManagedGitImportResourceClassification }
-  | { sourceType: 'localMapping'; resource: LocalLibraryResource; mapping?: LocalLibraryMappingSnapshot; classification: LocalLibraryImportResourceClassification };
+  | { sourceType: 'localMapping'; resource: LocalCollectionResource; mapping?: LocalCollectionMappingSnapshot; classification: LocalCollectionImportResourceClassification };
 
 function isImportableRemoteResource(resource: ProfileArtifactResource): resource is ImportableRemoteResource {
-  return resource.source.type === 'remoteGit' && resource.kind !== 'package';
+  return resource.source.type === 'remoteGit';
 }
-function isLocalLibraryResource(resource: ProfileArtifactResource): resource is LocalLibraryResource {
-  return resource.kind === 'library' && resource.source.type === 'localMapping';
+function isLocalCollectionResource(resource: ProfileArtifactResource): resource is LocalCollectionResource {
+  return resource.kind !== 'skill' && resource.source.type === 'localMapping';
 }
 
 interface DestinationClassification {
@@ -213,7 +234,7 @@ export async function planProfileImport(
   const artifactSnapshot = await readArtifact(options.artifactDirectory, policy);
 
   // Capability rejection is intentionally before every target-side classifier.
-  assertStage2ProfileArtifactCapabilities(artifactSnapshot.artifact);
+  assertStage3ProfileArtifactCapabilities(artifactSnapshot.artifact);
   await dependencies.testHooks?.afterCapabilityValidation?.();
 
   const artifact = artifactSnapshot.artifact;
@@ -229,12 +250,18 @@ export async function planProfileImport(
       );
     }
     const classifyResource = dependencies.classifyResource ?? classifyManagedGitImportResource;
-    const captureMapping = dependencies.captureMapping ?? captureLocalLibraryMapping;
-    const classifyLocalLibrary = dependencies.classifyLocalLibrary ?? classifyLocalLibraryImportResource;
+    const captureMapping = dependencies.captureMapping ?? captureLocalCollectionMapping;
+    const classifyLocalCollection: typeof classifyLocalCollectionImportResource = dependencies.classifyLocalCollection
+      ?? (async (bazframeHome, id, mapping) => mapping.kind === 'library'
+        ? await (dependencies.classifyLocalLibrary ?? classifyLocalLibraryImportResource)(bazframeHome, id, mapping)
+        : await (dependencies.classifyLocalPackage ?? classifyLocalPackageImportResource)(bazframeHome, id, mapping)) as typeof classifyLocalCollectionImportResource;
     const readActiveSelection = dependencies.readActiveSelection ?? readOptionalActiveProfileSnapshot;
     const classifyActiveProfile = dependencies.classifyActiveProfilePresence ?? classifyActiveProfilePresence;
     const classifyDestination = dependencies.classifyDestination ?? classifyDestinationProfile;
     const resolveLibrary = dependencies.resolveLibrary ?? (async (bazframeHome, _libraryId, capturedRecord) => (
+      resolveGlobalSkillCollection(bazframeHome, capturedRecord)
+    ));
+    const resolvePackage = dependencies.resolvePackage ?? (async (bazframeHome, _packageId, capturedRecord) => (
       resolveGlobalSkillCollection(bazframeHome, capturedRecord)
     ));
     const maxKnownCollectionSkills = boundedKnownCollectionSkills(dependencies.maxKnownCollectionSkills);
@@ -242,26 +269,29 @@ export async function planProfileImport(
     const blockers: ProfileImportBlocker[] = [];
     const classifiedResources: ClassifiedResource[] = [];
     const mappingInputs = validateMappingInputs(options.mappings ?? [], artifact.resources);
-    const mappingSnapshots: LocalLibraryMappingSnapshot[] = [];
+    const mappingSnapshots: LocalCollectionMappingSnapshot[] = [];
     for (const mapping of mappingInputs) {
       const snapshot = await captureMapping(mapping);
       if (pathsOverlap(snapshot.root, home) || pathsOverlap(snapshot.root, artifactSnapshot.root.path)) {
-        throw new BazframeError('PROFILE_IMPORT_MAPPING_OVERLAP', `Mapped library ${mapping.id} overlaps the artifact root or BAZFRAME_HOME.`);
+        throw new BazframeError('PROFILE_IMPORT_MAPPING_OVERLAP', `Mapped ${mapping.kind} ${mapping.id} overlaps the artifact root or BAZFRAME_HOME.`);
       }
       for (const existing of mappingSnapshots) {
         if (pathsOverlap(snapshot.root, existing.root)) {
-          throw new BazframeError('PROFILE_IMPORT_MAPPING_OVERLAP', `Mapped libraries ${existing.id} and ${mapping.id} overlap.`);
+          throw new BazframeError(
+            'PROFILE_IMPORT_MAPPING_OVERLAP',
+            `Mapped resources ${existing.kind}:${existing.id} and ${mapping.kind}:${mapping.id} overlap.`
+          );
         }
       }
       mappingSnapshots.push(snapshot);
     }
-    const mappingById = new Map(mappingSnapshots.map((mapping) => [mapping.id, mapping]));
+    const mappingByKey = new Map(mappingSnapshots.map((mapping) => [`${mapping.kind}:${mapping.id}`, mapping]));
     for (const resource of artifact.resources) {
-      if (isLocalLibraryResource(resource) && !mappingById.has(resource.id)) {
+      if (isLocalCollectionResource(resource) && !mappingByKey.has(`${resource.kind}:${resource.id}`)) {
         blockers.push(blocker(
           'PROFILE_IMPORT_MAPPING_REQUIRED',
-          `library:${resource.id}`,
-          `Local library ${resource.id} requires --map library:${resource.id}=<absolute-source-directory>.`
+          `${resource.kind}:${resource.id}`,
+          `Local ${resource.kind} ${resource.id} requires --map ${resource.kind}:${resource.id}=<absolute-source-directory>.`
         ));
       }
     }
@@ -286,22 +316,22 @@ export async function planProfileImport(
         }
         continue;
       }
-      if (isLocalLibraryResource(resource)) {
-        const mapping = mappingById.get(resource.id);
-        const classification: LocalLibraryImportResourceClassification = mapping === undefined
-          ? { action: 'blocked', reason: `Local library ${resource.id} requires an explicit mapping.` }
-          : await classifyLocalLibrary(home, resource.id, mapping);
+      if (isLocalCollectionResource(resource)) {
+        const mapping = mappingByKey.get(`${resource.kind}:${resource.id}`);
+        const classification: LocalCollectionImportResourceClassification = mapping === undefined
+          ? { action: 'blocked', reason: `Local ${resource.kind} ${resource.id} requires an explicit mapping.` }
+          : await classifyLocalCollection(home, resource.id, mapping);
         classifiedResources.push({ sourceType: 'localMapping', resource, ...(mapping === undefined ? {} : { mapping }), classification });
         if (classification.action === 'blocked' && mapping !== undefined) {
           blockers.push(blocker(
             'PROFILE_IMPORT_RESOURCE_BLOCKED',
-            `library:${resource.id}`,
+            `${resource.kind}:${resource.id}`,
             classification.reason
           ));
         }
         continue;
       }
-      throw new BazframeError('PROFILE_ARTIFACT_STAGE2_UNSUPPORTED', 'Stage 2 profile import encountered an unsupported resource after capability validation.');
+      throw new BazframeError('PROFILE_ARTIFACT_STAGE3_UNSUPPORTED', 'Stage 3 profile import encountered an unsupported resource after capability validation.');
     }
 
     let activeSelectionState = await classifyActiveSelection(home, readActiveSelection, classifyActiveProfile);
@@ -318,6 +348,7 @@ export async function planProfileImport(
       artifact.profile.omittedLocalSkills,
       classifiedResources,
       resolveLibrary,
+      resolvePackage,
       maxKnownCollectionSkills,
       blockers
     );
@@ -342,15 +373,18 @@ export async function planProfileImport(
       home,
       classifiedResources,
       classifyResource,
-      classifyLocalLibrary,
+      classifyLocalCollection,
       environment,
       blockers
     );
-    if (classifiedResources.some((item) => item.resource.kind === 'library' && item.classification.action === 'blocked')) {
+    if (classifiedResources.some((item) => item.resource.kind !== 'skill' && item.classification.action === 'blocked')) {
       composition.status = 'blocked';
     }
     composition.deferredLibraries = composition.deferredLibraries.filter((id) => classifiedResources.some(
       (item) => item.resource.kind === 'library' && item.resource.id === id && item.classification.action === 'create'
+    ));
+    composition.deferredPackages = composition.deferredPackages.filter((id) => classifiedResources.some(
+      (item) => item.resource.kind === 'package' && item.resource.id === id && item.classification.action === 'create'
     ));
 
     if (destination.action !== 'blocked') {
@@ -406,18 +440,19 @@ export async function planProfileImport(
       ? 'blocked'
       : destination.action;
     const resources: ResourceImportPlan[] = classifiedResources.map((item) => {
+      const buildRequired = item.resource.kind === 'package' && item.classification.action === 'create';
       const common = {
         id: item.resource.id,
         action: item.classification.action,
         ...(!('reason' in item.classification) || item.classification.reason === undefined
           ? {}
           : { reason: boundedTextForDisplay(item.classification.reason) }),
-        buildRequired: false as const
+        buildRequired
       };
       if (item.sourceType === 'localMapping') {
         return {
           ...common,
-          kind: 'library' as const,
+          kind: item.resource.kind,
           source: { type: 'localMapping' as const, ...(item.mapping === undefined ? {} : { root: item.mapping.root }) },
           networkRequired: false as const
         };
@@ -429,6 +464,7 @@ export async function planProfileImport(
         networkRequired: item.classification.action === 'create'
       };
     });
+    const packageBuilds = packageBuildSummary(resources);
 
     return {
       plan: {
@@ -440,8 +476,9 @@ export async function planProfileImport(
         skills: [...artifact.profile.skills],
         omittedLocalSkills: [...artifact.profile.omittedLocalSkills],
         libraries: [...artifact.profile.libraries],
-        packages: [],
+        packages: [...artifact.profile.packages],
         resources,
+        packageBuilds,
         activeSelection: activeSelectionState.plan,
         composition,
         exclusions: {
@@ -456,9 +493,12 @@ export async function planProfileImport(
       artifactSnapshot,
       resourceSnapshots: classifiedResources.flatMap((item): ProfileImportResourceSnapshot[] => {
         if (item.classification.action !== 'reuse' || item.classification.health === undefined) return [];
-        return item.sourceType === 'localMapping'
-          ? [{ kind: 'library', id: item.resource.id, sourceType: 'localMapping', health: item.classification.health }]
-          : [{ kind: item.resource.kind, id: item.resource.id, sourceType: 'remoteGit', health: item.classification.health }];
+        if (item.sourceType === 'remoteGit') {
+          return [{ kind: item.resource.kind, id: item.resource.id, sourceType: 'remoteGit', health: item.classification.health }];
+        }
+        return item.resource.kind === 'library'
+          ? [{ kind: 'library', id: item.resource.id, sourceType: 'localMapping', health: item.classification.health as LocalLibraryHealthSnapshot }]
+          : [{ kind: 'package', id: item.resource.id, sourceType: 'localMapping', health: item.classification.health as LocalPackageHealthSnapshot }];
       }),
       mappingSnapshots: mappingSnapshots.map((mapping) => ({ ...mapping }))
     };
@@ -567,6 +607,7 @@ async function classifyComposition(
   omittedLocalSkills: readonly string[],
   resources: readonly ClassifiedResource[],
   resolveLibrary: NonNullable<ProfileImportPlanDependencies['resolveLibrary']>,
+  resolvePackage: NonNullable<ProfileImportPlanDependencies['resolvePackage']>,
   maxKnownCollectionSkills: number,
   blockers: ProfileImportBlocker[]
 ): Promise<ProfileImportPlan['composition']> {
@@ -578,26 +619,32 @@ async function classifyComposition(
     .filter((item) => item.resource.kind === 'library' && item.classification.action === 'create')
     .map((item) => item.resource.id)
     .sort(compare);
+  const deferredPackages = resources
+    .filter((item) => item.resource.kind === 'package' && item.classification.action === 'create')
+    .map((item) => item.resource.id)
+    .sort(compare);
   let compositionBlocked = resources.some(
-    (item) => item.resource.kind === 'library' && item.classification.action === 'blocked'
+    (item) => item.resource.kind !== 'skill' && item.classification.action === 'blocked'
   );
   let aggregateLimitReached = false;
   for (const item of resources) {
-    if (item.resource.kind !== 'library' || item.classification.action !== 'reuse') continue;
-    const captured = item.classification.action === 'reuse'
-      ? item.classification.health?.collectionSnapshot?.record
-      : undefined;
-    if (captured === undefined || !('library' in captured)) {
+    if (item.resource.kind === 'skill' || item.classification.action !== 'reuse') continue;
+    const captured = item.classification.health?.collectionSnapshot?.record;
+    const capturedMatchesKind = captured !== undefined
+      && (item.resource.kind === 'library' ? 'library' in captured : 'package' in captured);
+    if (!capturedMatchesKind) {
       compositionBlocked = true;
       blockers.push(blocker(
         'PROFILE_IMPORT_COMPOSITION_BLOCKED',
-        `library:${item.resource.id}`,
-        `Reusable library ${item.resource.id} lacks captured collection evidence.`
+        `${item.resource.kind}:${item.resource.id}`,
+        `Reusable ${item.resource.kind} ${item.resource.id} lacks captured collection evidence.`
       ));
       continue;
     }
     try {
-      const derived = await resolveLibrary(home, item.resource.id, captured);
+      const derived = item.resource.kind === 'library'
+        ? await resolveLibrary(home, item.resource.id, captured as LibraryRecord)
+        : await resolvePackage(home, item.resource.id, captured as PackageRecord);
       if (collectionSkills.length + derived.length > maxKnownCollectionSkills) {
         aggregateLimitReached = true;
         compositionBlocked = true;
@@ -613,7 +660,7 @@ async function classifyComposition(
       compositionBlocked = true;
       blockers.push(blocker(
         'PROFILE_IMPORT_COMPOSITION_BLOCKED',
-        `library:${item.resource.id}`,
+        `${item.resource.kind}:${item.resource.id}`,
         safeReason(error)
       ));
     }
@@ -633,8 +680,13 @@ async function classifyComposition(
   }
   const knownNames = [...new Set(collectionSkills.map((skill) => skill.name))].sort(compare);
   return {
-    status: compositionBlocked ? 'blocked' : deferredLibraries.length > 0 ? 'deferred' : 'ready',
+    status: compositionBlocked
+      ? 'blocked'
+      : deferredLibraries.length > 0 || deferredPackages.length > 0
+        ? 'deferred'
+        : 'ready',
     deferredLibraries,
+    deferredPackages,
     knownCollectionSkillCount: knownNames.length,
     knownCollectionSkillPreview: knownNames.slice(0, KNOWN_COLLECTION_SKILL_PREVIEW_LIMIT)
   };
@@ -668,7 +720,7 @@ async function revalidateResourceClassifications(
   home: string,
   resources: ClassifiedResource[],
   classifyResource: typeof classifyManagedGitImportResource,
-  classifyLocalLibrary: typeof classifyLocalLibraryImportResource,
+  classifyLocalCollection: typeof classifyLocalCollectionImportResource,
   environment: NodeJS.ProcessEnv,
   blockers: ProfileImportBlocker[]
 ): Promise<void> {
@@ -676,12 +728,12 @@ async function revalidateResourceClassifications(
     if (item.sourceType === 'localMapping') {
       const initial = item.classification;
       if (initial.action === 'blocked') continue;
-      if (item.mapping === undefined) throw new BazframeError('PROFILE_IMPORT_PLAN_INVALID', `Mapped library evidence is missing for ${item.resource.id}.`);
-      const current = await classifyLocalLibrary(home, item.resource.id, item.mapping);
+      if (item.mapping === undefined) throw new BazframeError('PROFILE_IMPORT_PLAN_INVALID', `Mapped ${item.resource.kind} evidence is missing for ${item.resource.id}.`);
+      const current = await classifyLocalCollection(home, item.resource.id, item.mapping);
       const unchanged = initial.action === current.action
         && (initial.action === 'create'
           || (initial.health !== undefined && current.action === 'reuse'
-            && sameLocalLibraryHealth(initial.health, current.health)));
+            && sameLocalCollectionHealth(initial.health, current.health)));
       if (unchanged) {
         item.classification = current;
         continue;
@@ -712,7 +764,7 @@ async function revalidateResourceClassifications(
 
 function blockChangedResource(
   item: ClassifiedResource,
-  current: ManagedGitImportResourceClassification | LocalLibraryImportResourceClassification,
+  current: ManagedGitImportResourceClassification | LocalCollectionImportResourceClassification,
   label: 'Local' | 'Remote Git',
   blockers: ProfileImportBlocker[]
 ): void {
@@ -793,7 +845,13 @@ async function classifyDestinationProfile(
       artifactSnapshot.artifact.profile.libraries,
       maxProfileNamespaceEntries
     );
-    await assertReferenceNamespace(home, profileId, 'package', [], maxProfileNamespaceEntries);
+    await assertReferenceNamespace(
+      home,
+      profileId,
+      'package',
+      artifactSnapshot.artifact.profile.packages,
+      maxProfileNamespaceEntries
+    );
     await testHooks.beforeDestinationFinalCheck?.();
     const finalInstructions = await readPhysicalInstructionSnapshot(
       join(directory, 'AGENTS.md'),
@@ -819,7 +877,7 @@ async function classifyDestinationProfile(
       home,
       profileId,
       'package',
-      [],
+      artifactSnapshot.artifact.profile.packages,
       maxProfileNamespaceEntries
     );
     if (!sameStrings(await stableDirectoryNames(root, maxProfileNamespaceEntries), names)) {
@@ -1120,34 +1178,62 @@ function safeReason(error: unknown): string {
 }
 
 function validateMappingInputs(
-  entered: readonly ProfileImportMappingInput[],
+  entered: readonly LocalCollectionMappingInput[],
   resources: readonly ProfileArtifactResource[]
-): ProfileImportMappingInput[] {
+): LocalCollectionMappingInput[] {
   if (!Array.isArray(entered)) {
     throw new BazframeError('PROFILE_IMPORT_MAPPING_INVALID', 'Profile import mappings must be an array.');
   }
   const expected = new Set(resources
-    .filter((resource) => resource.kind === 'library' && resource.source.type === 'localMapping')
-    .map((resource) => `library:${resource.id}`));
+    .filter(isLocalCollectionResource)
+    .map((resource) => `${resource.kind}:${resource.id}`));
   const seen = new Set<string>();
-  const result: ProfileImportMappingInput[] = [];
+  const result: LocalCollectionMappingInput[] = [];
   for (const raw of entered) {
-    if (raw === null || typeof raw !== 'object' || raw.kind !== 'library'
+    if (raw === null || typeof raw !== 'object'
+      || (raw.kind !== 'library' && raw.kind !== 'package')
       || typeof raw.id !== 'string' || typeof raw.root !== 'string') {
-      throw new BazframeError('PROFILE_IMPORT_MAPPING_INVALID', 'Each profile import mapping must identify one local library and absolute source root.');
+      throw new BazframeError(
+        'PROFILE_IMPORT_MAPPING_INVALID',
+        'Each profile import mapping must identify one local library or package and absolute source root.'
+      );
     }
     try { assertSafeSkillId(raw.id); }
-    catch (error) { throw new BazframeError('PROFILE_IMPORT_MAPPING_INVALID', `Mapped library ID is invalid: ${raw.id}`, { cause: error }); }
-    if (!isAbsolute(raw.root) || raw.root.length === 0 || raw.root.includes('\0')) {
-      throw new BazframeError('PROFILE_IMPORT_MAPPING_INVALID', 'Mapped library root must be a non-NUL absolute path.');
+    catch (error) {
+      throw new BazframeError('PROFILE_IMPORT_MAPPING_INVALID', `Mapped ${raw.kind} ID is invalid: ${raw.id}`, { cause: error });
     }
-    const key = `library:${raw.id}`;
+    if (!isAbsolute(raw.root) || raw.root.length === 0 || raw.root.includes('\0')) {
+      throw new BazframeError('PROFILE_IMPORT_MAPPING_INVALID', `Mapped ${raw.kind} root must be a non-NUL absolute path.`);
+    }
+    const key = `${raw.kind}:${raw.id}`;
     if (seen.has(key)) throw new BazframeError('PROFILE_IMPORT_MAPPING_INVALID', `Duplicate profile import mapping: ${key}`);
     if (!expected.has(key)) throw new BazframeError('PROFILE_IMPORT_MAPPING_INVALID', `Profile artifact does not require local mapping ${key}.`);
     seen.add(key);
-    result.push({ kind: 'library', id: raw.id, root: raw.root });
+    result.push(raw.kind === 'library'
+      ? { kind: 'library', id: raw.id, root: raw.root }
+      : { kind: 'package', id: raw.id, root: raw.root });
   }
-  return result.sort((left, right) => compare(left.id, right.id));
+  return result.sort((left, right) => compare(`${left.kind}:${left.id}`, `${right.kind}:${right.id}`));
+}
+
+const PACKAGE_BUILD_WARNINGS = Object.freeze([
+  'Package builds execute with shell:false and inherit the parent environment.',
+  'Package builds execute unsandboxed with current-process-user authority and may access credentials, networks, and user files.',
+  'Each package build uses the package source root as its working directory.',
+  'Arbitrary package-build side effects cannot be rolled back.'
+]);
+
+function packageBuildSummary(resources: readonly ResourceImportPlan[]): PackageBuildPlanSummary {
+  const builds = resources.filter((resource) => resource.kind === 'package' && resource.buildRequired);
+  const remoteBuilds = builds.filter((resource) => resource.source.type === 'remoteGit');
+  const localBuilds = builds.filter((resource) => resource.source.type === 'localMapping');
+  return {
+    total: builds.length,
+    remote: remoteBuilds.length,
+    local: localBuilds.length,
+    unresolvedRemotePackageIds: remoteBuilds.map((resource) => resource.id),
+    warnings: builds.length === 0 ? [] : [...PACKAGE_BUILD_WARNINGS]
+  };
 }
 
 function pathsOverlap(left: string, right: string): boolean {

@@ -5,11 +5,15 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   addManagedGitLibrary,
   addManagedGitLibraryAtRevision,
+  addManagedGitPackage,
+  addManagedGitPackageAtRevision,
   addManagedGitSkillAtRevision,
+  buildManagedGitPackage,
   captureManagedGitExportHealth,
-  classifyManagedGitImportOutcome
+  classifyManagedGitImportOutcome,
+  updateManagedGitPackage
 } from '../../src/providers/managed-git.js';
-import { readManagedGitJournal, readManagedGitRecord, scanManagedGitRecords, type PathFreeManagedGitIdentity } from '../../src/providers/managed-git-record.js';
+import { managedGitCheckoutRoot, readManagedGitJournal, readManagedGitRecord, scanManagedGitRecords, type PathFreeManagedGitIdentity } from '../../src/providers/managed-git-record.js';
 import { createTempDirectory, type TempDirectory } from '../helpers/temp-directory.js';
 
 const directories: TempDirectory[] = [];
@@ -17,6 +21,251 @@ afterEach(async () => Promise.all(directories.splice(0).map((directory) => direc
 const skill = (name: string) => `---\nname: ${name}\ndescription: ${name} Skill\n---\n# ${name}\n`;
 
 describe('unexposed exact-revision remote Git lifecycle', () => {
+  it('materializes and reuses an exact historical package without network, build, report, or consent', async () => {
+    const directory = await createTempDirectory('bazframe-exact-package-history-'); directories.push(directory);
+    const remote = await packageRemote(directory, 'toolkit');
+    const first = git(['rev-parse', 'HEAD'], remote).trim();
+    await directory.write('remote/toolkit/revision-marker', 'advanced\n');
+    git(['add', '.'], remote); git(['commit', '-m', 'advance package'], remote);
+    const head = git(['rev-parse', 'HEAD'], remote).trim();
+    const buildMarker = directory.path('package-builds.log');
+    const environment = { ...(await managedEnvironment(directory, remote)), PACKAGE_BUILD_MARKER: buildMarker };
+    const home = directory.path('home');
+    const callbacks: string[] = [];
+    let callbackRoot: string | undefined;
+
+    const added = await addManagedGitPackageAtRevision({
+      bazframeHome: home,
+      environment,
+      yes: true,
+      reportPackageBuild: (details) => { callbacks.push(`report:${details.revision}`); },
+      beforePackageBuild: (context) => {
+        callbacks.push(`before:${context.packageId}:${context.manifestSnapshot.contentSha256}`);
+        callbackRoot = context.rootIdentity.root;
+        expect(context.manifestSnapshot.manifest.build).toEqual(['node', 'build.mjs']);
+      }
+    }, 'toolkit', identity('toolkit', first));
+    expect(added).toMatchObject({ action: 'added', kind: 'package', revision: first, branch: 'main', resourceAction: 'added' });
+    expect(callbacks).toEqual([
+      `report:${first}`,
+      expect.stringMatching(/^before:toolkit:[a-f0-9]{64}$/u)
+    ]);
+    const record = (await readManagedGitRecord(home, 'package', 'toolkit')).record;
+    expect(callbackRoot).toBe(record.root);
+    expect(git(['rev-parse', 'HEAD'], record.root).trim()).toBe(first);
+    expect(git(['rev-parse', 'refs/remotes/origin/main'], record.root).trim()).toBe(first);
+    expect(spawnSync(gitExecutable(), ['symbolic-ref', '-q', 'HEAD'], { cwd: record.root }).status).toBe(1);
+    expect(head).not.toBe(first);
+    expect(await readFile(buildMarker, 'utf8')).toBe('build\n');
+
+    const expectedHealth = await captureManagedGitExportHealth(home, 'package', 'toolkit', environment);
+    await expect(classifyManagedGitImportOutcome(home, 'package', 'toolkit', identity('toolkit', first), environment))
+      .resolves.toMatchObject({ state: 'exact', health: { collectionSnapshot: { record: { package: 'toolkit' } } } });
+    const reused = await addManagedGitPackageAtRevision({
+      bazframeHome: home,
+      environment: { ...environment, TEST_FAIL_CLONE: '1' },
+      reportPackageBuild: () => { throw new Error('reuse reported a build'); },
+      confirmPackageBuild: () => { throw new Error('reuse requested consent'); },
+      beforePackageBuild: () => { throw new Error('reuse attempted a build'); }
+    }, 'toolkit', identity('toolkit', first), { mode: 'must-reuse', expectedHealth });
+    expect(reused).toMatchObject({ action: 'current', revision: first });
+    expect(await readFile(buildMarker, 'utf8')).toBe('build\n');
+
+    const missingHome = directory.path('missing-home');
+    await expect(addManagedGitPackageAtRevision({
+      bazframeHome: missingHome,
+      environment,
+      yes: true,
+      acceptRewrite: true
+    }, 'toolkit', identity('toolkit', 'f'.repeat(40)))).rejects.toBeDefined();
+    await expect(readManagedGitRecord(missingHome, 'package', 'toolkit')).rejects.toBeDefined();
+    await expect(readManagedGitJournal(missingHome, 'package', 'toolkit')).rejects.toBeDefined();
+    expect(await readFile(buildMarker, 'utf8')).toBe('build\n');
+
+    await buildManagedGitPackage({
+      bazframeHome: home,
+      environment,
+      beforePackageBuild: (context) => { callbacks.push(`build:${context.packageId}`); }
+    }, 'toolkit');
+    expect(callbacks.at(-1)).toBe('build:toolkit');
+    expect(await readFile(buildMarker, 'utf8')).toBe('build\nbuild\n');
+
+    await updateManagedGitPackage({
+      bazframeHome: home,
+      environment,
+      yes: true,
+      beforePackageBuild: (context) => { callbacks.push(`update:${context.packageId}`); }
+    }, 'toolkit');
+    expect(callbacks.at(-1)).toBe('update:toolkit');
+    expect(await readFile(buildMarker, 'utf8')).toBe('build\nbuild\nbuild\n');
+    expect((await readManagedGitRecord(home, 'package', 'toolkit')).record.revision).toBe(head);
+  }, 60_000);
+
+  it.each(['refusal', 'manifest', 'dirty', 'origin', 'attached-head', 'branch-ref', 'root'] as const)(
+    'keeps exact package %s drift or refusal pre-spawn',
+    async (variant) => {
+      const directory = await createTempDirectory(`bazframe-exact-package-${variant}-`); directories.push(directory);
+      const remote = await packageRemote(directory, 'toolkit');
+      const revision = git(['rev-parse', 'HEAD'], remote).trim();
+      const buildMarker = directory.path('package-builds.log');
+      const environment = { ...(await managedEnvironment(directory, remote)), PACKAGE_BUILD_MARKER: buildMarker };
+      const home = directory.path('home');
+      await expect(addManagedGitPackageAtRevision({
+        bazframeHome: home,
+        environment,
+        yes: true,
+        beforePackageBuild: async (context) => {
+          if (variant === 'refusal') throw new Error('prebuild refused');
+          if (variant === 'manifest') await writeFile(join(context.rootIdentity.root, 'bazframe-package.json'), '{}\n');
+          if (variant === 'dirty') await writeFile(join(context.rootIdentity.root, 'untracked'), 'dirty\n');
+          if (variant === 'origin') git(['remote', 'set-url', 'origin', 'https://example.test/other/toolkit.git'], context.rootIdentity.root);
+          if (variant === 'attached-head') git(['checkout', 'main'], context.rootIdentity.root);
+          if (variant === 'branch-ref') git(['update-ref', '-d', 'refs/remotes/origin/main'], context.rootIdentity.root);
+          if (variant === 'root') {
+            await rename(context.rootIdentity.root, `${context.rootIdentity.root}.moved`);
+            await mkdir(context.rootIdentity.root);
+          }
+        }
+      }, 'toolkit', identity('toolkit', revision))).rejects.toBeDefined();
+      await expect(readFile(buildMarker, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(readManagedGitRecord(home, 'package', 'toolkit')).rejects.toBeDefined();
+      if (variant === 'root') {
+        await expect(readManagedGitJournal(home, 'package', 'toolkit')).resolves.toBeDefined();
+        await expect(classifyManagedGitImportOutcome(home, 'package', 'toolkit', identity('toolkit', revision), environment))
+          .resolves.toEqual({ state: 'recovery-required' });
+      } else {
+        await expect(readManagedGitJournal(home, 'package', 'toolkit')).rejects.toBeDefined();
+      }
+    },
+    30_000
+  );
+
+  it.each(['git', 'manifest'] as const)(
+    'rejects pre-callback managed package %s drift without invoking the authorization callback',
+    async (variant) => {
+      const directory = await createTempDirectory(`bazframe-exact-package-preflight-${variant}-`); directories.push(directory);
+      const remote = await packageRemote(directory, 'toolkit');
+      const revision = git(['rev-parse', 'HEAD'], remote).trim();
+      const buildMarker = directory.path('package-builds.log');
+      const environment = { ...(await managedEnvironment(directory, remote)), PACKAGE_BUILD_MARKER: buildMarker };
+      const home = directory.path('home');
+      const checkout = managedGitCheckoutRoot(home, 'package', 'toolkit');
+      let callbackCount = 0;
+
+      await expect(addManagedGitPackageAtRevision({
+        bazframeHome: home,
+        environment,
+        yes: true,
+        beforePackageBuild: () => { callbackCount += 1; },
+        testHooks: {
+          beforePackageBuildPreflight: async () => {
+            if (variant === 'git') {
+              await writeFile(join(checkout, 'untracked-before-callback'), 'dirty\n');
+              return;
+            }
+            const manifestPath = join(checkout, 'bazframe-package.json');
+            const bytes = await readFile(manifestPath);
+            await rename(manifestPath, directory.path('authorized-manifest-replaced'));
+            await writeFile(manifestPath, bytes);
+            expect(git(['status', '--porcelain=v1', '--untracked-files=all'], checkout)).toBe('');
+          }
+        }
+      }, 'toolkit', identity('toolkit', revision))).rejects.toMatchObject({
+        code: variant === 'git' ? 'MANAGED_GIT_DIRTY' : 'PACKAGE_MANIFEST_CHANGED'
+      });
+
+      expect(callbackCount).toBe(0);
+      await expect(readFile(buildMarker, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(readManagedGitRecord(home, 'package', 'toolkit')).rejects.toBeDefined();
+    },
+    30_000
+  );
+
+  it('retains managed package add/build/update state and recovery journals after uncertain build termination', async () => {
+    const directory = await createTempDirectory('bazframe-package-uncertain-'); directories.push(directory);
+    const remote = await packageRemote(directory, 'toolkit');
+    const environment = await managedEnvironment(directory, remote);
+
+    const addHome = directory.path('add-home');
+    let addError: unknown;
+    try {
+      await addManagedGitPackage({
+        bazframeHome: addHome,
+        environment,
+        yes: true,
+        testHooks: { injectUncertainPackageBuildFailure: true }
+      }, 'https://example.test/team/toolkit.git');
+    } catch (error) { addError = error; }
+    expect(addError).toMatchObject({
+      name: 'ManagedGitRecoveryError',
+      cause: { code: 'PACKAGE_BUILD_TERMINATION_UNCERTAIN' }
+    });
+    const addJournal = await readManagedGitJournal(addHome, 'package', 'toolkit');
+    expect(addJournal.journal.phase).toBe('cleanup-required');
+    await expect(lstat(addJournal.journal.root)).resolves.toBeDefined();
+    await expect(lstat(addJournal.journal.staging!)).resolves.toBeDefined();
+    await expect(readManagedGitRecord(addHome, 'package', 'toolkit')).resolves.toBeDefined();
+
+    const exactHome = directory.path('exact-add-home');
+    const exactRevision = git(['rev-parse', 'HEAD'], remote).trim();
+    await expect(addManagedGitPackageAtRevision({
+      bazframeHome: exactHome,
+      environment,
+      yes: true,
+      testHooks: { injectUncertainPackageBuildFailure: true }
+    }, 'toolkit', identity('toolkit', exactRevision))).rejects.toMatchObject({
+      name: 'ManagedGitRecoveryError',
+      cause: { code: 'PACKAGE_BUILD_TERMINATION_UNCERTAIN' }
+    });
+    const exactJournal = await readManagedGitJournal(exactHome, 'package', 'toolkit');
+    expect(exactJournal.journal).toMatchObject({ operation: 'add-exact', phase: 'cleanup-required' });
+    await expect(classifyManagedGitImportOutcome(exactHome, 'package', 'toolkit', identity('toolkit', exactRevision), environment))
+      .resolves.toEqual({ state: 'recovery-required' });
+
+    const buildHome = directory.path('build-home');
+    await addManagedGitPackage({ bazframeHome: buildHome, environment, yes: true }, 'https://example.test/team/toolkit.git');
+    let buildError: unknown;
+    try {
+      await buildManagedGitPackage({
+        bazframeHome: buildHome,
+        environment,
+        testHooks: { injectUncertainPackageBuildFailure: true }
+      }, 'toolkit');
+    } catch (error) { buildError = error; }
+    expect(buildError).toMatchObject({
+      name: 'ManagedGitRecoveryError',
+      cause: { code: 'PACKAGE_BUILD_TERMINATION_UNCERTAIN' }
+    });
+    const buildJournal = await readManagedGitJournal(buildHome, 'package', 'toolkit');
+    expect(buildJournal.journal.phase).toBe('cleanup-required');
+    await expect(lstat(buildJournal.journal.root)).resolves.toBeDefined();
+    await expect(readManagedGitRecord(buildHome, 'package', 'toolkit')).resolves.toBeDefined();
+
+    const updateHome = directory.path('update-home');
+    await addManagedGitPackage({ bazframeHome: updateHome, environment, yes: true }, 'https://example.test/team/toolkit.git');
+    await directory.write('remote/toolkit/revision-marker', 'next\n');
+    git(['add', '.'], remote); git(['commit', '-m', 'advance package'], remote);
+    let updateError: unknown;
+    try {
+      await updateManagedGitPackage({
+        bazframeHome: updateHome,
+        environment,
+        yes: true,
+        testHooks: { injectUncertainPackageBuildFailure: true }
+      }, 'toolkit');
+    } catch (error) { updateError = error; }
+    expect(updateError).toMatchObject({
+      name: 'ManagedGitRecoveryError',
+      cause: { code: 'PACKAGE_BUILD_TERMINATION_UNCERTAIN' }
+    });
+    const updateJournal = await readManagedGitJournal(updateHome, 'package', 'toolkit');
+    expect(updateJournal.journal.phase).toBe('cleanup-required');
+    await expect(lstat(updateJournal.journal.root)).resolves.toBeDefined();
+    await expect(lstat(updateJournal.journal.staging!)).resolves.toBeDefined();
+    await expect(lstat(updateJournal.journal.backup!)).resolves.toBeDefined();
+    await expect(readManagedGitRecord(updateHome, 'package', 'toolkit')).resolves.toBeDefined();
+  }, 60_000);
+
   it('materializes a historical reachable library revision and reuses it without network', async () => {
     const directory = await createTempDirectory('bazframe-exact-git-history-'); directories.push(directory);
     const remote = await libraryRemote(directory, 'toolkit');
@@ -431,6 +680,19 @@ function identity(id: string, revision: string): PathFreeManagedGitIdentity {
     branch: 'main',
     revision
   };
+}
+
+async function packageRemote(directory: TempDirectory, id: string): Promise<string> {
+  const remote = await directory.mkdir(`remote/${id}`);
+  await directory.write(`remote/${id}/build.mjs`, "import{appendFileSync,mkdirSync}from'node:fs';mkdirSync('dist/skills',{recursive:true});if(process.env.PACKAGE_BUILD_MARKER)appendFileSync(process.env.PACKAGE_BUILD_MARKER,'build\\n');\n");
+  await directory.write(`remote/${id}/bazframe-package.json`, JSON.stringify({
+    schemaVersion: 1,
+    build: ['node', 'build.mjs'],
+    artifactRoot: 'dist',
+    skillsRoot: 'skills'
+  }));
+  initialize(remote);
+  return remote;
 }
 
 async function libraryRemote(directory: TempDirectory, id: string): Promise<string> {
