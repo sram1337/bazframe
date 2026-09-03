@@ -19,7 +19,7 @@ The replacement is now the public CLI authority for this lifecycle. Its archive,
 - `publish`, `export`, `update`, and neutral `profile version` operations accept `--profile <name>` for an inactive profile; without it they target the active profile.
 - A newly imported profile remains inactive. Activation remains the explicit `profile use` operation.
 - Bazframe continues to manage profile instructions and Skill resources. Pi, model, provider, and runtime settings; credentials; adapter installation; and global/project policy remain machine-local and outside this redesign.
-- The supported portability boundary remains macOS and Linux. Windows and full-portability acceptance remain existing open gates.
+- The supported portability boundary remains macOS and Linux. [`win32-filesystem-backend-requirements.md`](win32-filesystem-backend-requirements.md) defines an approved but unimplemented outcome-parity native-Windows x64/local-NTFS path. Windows remains unsupported until ZIP overwrite, Git import/export/publish/update/versioning, the complete current CLI/runtime/resource/adapter/editor lifecycle, ordinary owned-state reclamation, and the existing TUI all pass one installed-package acceptance gate through both entrypoints where applicable. Network-backed Bazframe home/staging and full-portability acceptance remain open; bounded ZIP copy and Git transport into proved private local staging are allowed.
 
 ### GitHub publication
 
