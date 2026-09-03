@@ -21,7 +21,10 @@ import { dirname, join, resolve } from 'node:path';
 const projectRoot = process.cwd();
 const npmExecPath = process.env.npm_execpath;
 const piExecutable = process.env.PI_BIN ?? 'pi';
-const temporaryRoot = mkdtempSync(join(tmpdir(), 'bazframe-2-real-pi-'));
+const temporaryRoot = mkdtempSync(join(
+  process.platform === 'darwin' ? '/tmp' : tmpdir(),
+  process.platform === 'darwin' ? 'bzfrp-' : 'bazframe-2-real-pi-'
+));
 let tarballPath;
 let rpcClient;
 

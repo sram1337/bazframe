@@ -24,7 +24,8 @@ async function makeWritable(path: string): Promise<void> {
 }
 
 export async function createTempDirectory(prefix = 'bazframe-2-test-'): Promise<TempDirectory> {
-  const root = await mkdtemp(join(tmpdir(), prefix));
+  const effectivePrefix=process.platform==='darwin'&&!prefix.startsWith('/')?'bzft-':prefix;
+  const root = await mkdtemp(effectivePrefix.startsWith('/') ? effectivePrefix : join(process.platform==='darwin'?'/tmp':tmpdir(), effectivePrefix));
   return {
     root,
     path: (...segments) => join(root, ...segments),

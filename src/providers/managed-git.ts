@@ -1327,6 +1327,7 @@ async function acquireRepository(
     let clone = await runAcquisition(invocation.transport === 'gh' ? gh : git, invocation.args, home, authEnvironment);
     if (clone.failure !== undefined) throw processFailure('clone', source.remote, clone);
     if (clone.status !== 0 && invocation.transport === 'gh') {
+      if (environment.BAZFRAME_STRICT_GIT_ENVIRONMENT === '1') throw processFailure('clone', source.remote, clone);
       await clearPartialClone(container, containerIdentity, root);
       invocation = managedGitCloneInvocation(source, root, false);
       clone = await runAcquisition(git, invocation.args, home, authEnvironment);
@@ -1699,19 +1700,43 @@ function recoveryAbsenceError(path: string, cause?: unknown): BazframeError {
 }
 
 function gitEnvironment(environment: NodeJS.ProcessEnv, isolated: boolean): NodeJS.ProcessEnv {
-  const result = { ...environment };
-  for (const key of Object.keys(result)) {
-    if (/^GIT_(?:DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|CONFIG_COUNT|CONFIG_KEY_.*|CONFIG_VALUE_.*|CONFIG_PARAMETERS|CEILING_DIRECTORIES|COMMON_DIR|NAMESPACE|PREFIX|SSH|SSH_COMMAND|PROXY_COMMAND|EXEC_PATH|TEMPLATE_DIR|EXTERNAL_DIFF|DIFF_OPTS|PAGER|EDITOR)$/u.test(key)) delete result[key];
+  const strict = environment.BAZFRAME_STRICT_GIT_ENVIRONMENT === '1';
+  const result: NodeJS.ProcessEnv = strict ? {} : { ...environment };
+  if (strict) {
+    for (const key of ['PATH', 'TMPDIR', 'TMP', 'TEMP', 'GH_CONFIG_DIR', 'BAZFRAME_GIT_COMMAND', 'BAZFRAME_GH_COMMAND'] as const) {
+      if (environment[key] !== undefined) result[key] = environment[key];
+    }
+    result.HOME = requiredStrictEnvironmentValue(environment, 'BAZFRAME_STRICT_GIT_HOME');
+    result.XDG_CONFIG_HOME = requiredStrictEnvironmentValue(environment, 'BAZFRAME_STRICT_GIT_XDG_HOME');
+    result.GIT_CONFIG_GLOBAL = requiredStrictEnvironmentValue(environment, 'BAZFRAME_STRICT_GIT_GLOBAL_CONFIG');
+    result.GIT_CONFIG_NOSYSTEM = '1';
+    result.GIT_TERMINAL_PROMPT = '0';
+    result.LANG = 'C';
+    result.LC_ALL = 'C';
+    result.GIT_CONFIG_COUNT = '4';
+    result.GIT_CONFIG_KEY_0 = 'credential.helper'; result.GIT_CONFIG_VALUE_0 = '';
+    result.GIT_CONFIG_KEY_1 = 'core.hooksPath'; result.GIT_CONFIG_VALUE_1 = requiredStrictEnvironmentValue(environment, 'BAZFRAME_STRICT_GIT_HOOKS');
+    result.GIT_CONFIG_KEY_2 = 'protocol.allow'; result.GIT_CONFIG_VALUE_2 = 'never';
+    result.GIT_CONFIG_KEY_3 = 'protocol.https.allow'; result.GIT_CONFIG_VALUE_3 = 'always';
+  } else {
+    for (const key of Object.keys(result)) {
+      if (/^GIT_(?:DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|CONFIG_COUNT|CONFIG_KEY_.*|CONFIG_VALUE_.*|CONFIG_PARAMETERS|CEILING_DIRECTORIES|COMMON_DIR|NAMESPACE|PREFIX|SSH|SSH_COMMAND|PROXY_COMMAND|EXEC_PATH|TEMPLATE_DIR|EXTERNAL_DIFF|DIFF_OPTS|PAGER|EDITOR)$/u.test(key)) delete result[key];
+    }
+    delete result.GIT_CONFIG_GLOBAL;
+    delete result.GIT_CONFIG_SYSTEM;
+    delete result.GIT_CONFIG_NOSYSTEM;
   }
-  delete result.GIT_CONFIG_GLOBAL;
-  delete result.GIT_CONFIG_SYSTEM;
-  delete result.GIT_CONFIG_NOSYSTEM;
   result.GIT_OPTIONAL_LOCKS = '0';
   result.GIT_ATTR_NOSYSTEM = '1';
   result.GIT_NO_REPLACE_OBJECTS = '1';
   result.GIT_GRAFT_FILE = process.platform === 'win32' ? 'NUL' : '/dev/null';
-  if (isolated) { result.GIT_CONFIG_NOSYSTEM = '1'; result.GIT_CONFIG_GLOBAL = process.platform === 'win32' ? 'NUL' : '/dev/null'; }
+  if (isolated) { result.GIT_CONFIG_NOSYSTEM = '1'; result.GIT_CONFIG_GLOBAL = strict ? result.GIT_CONFIG_GLOBAL : process.platform === 'win32' ? 'NUL' : '/dev/null'; }
   return result;
+}
+function requiredStrictEnvironmentValue(environment: NodeJS.ProcessEnv, key: string): string {
+  const value = environment[key];
+  if (value === undefined || value.length === 0) throw new BazframeError('MANAGED_GIT_ENVIRONMENT_INVALID', `Strict Git environment is missing ${key}.`);
+  return value;
 }
 function run(
   executable: string,
@@ -1733,7 +1758,10 @@ async function required(executable: string, args: readonly string[], cwd: string
 async function requiredWithMonitor(executable: string, args: readonly string[], cwd: string, environment: NodeJS.ProcessEnv, label: string, monitor: () => void | Promise<void>): Promise<void> { const result = await run(executable, args, cwd, environment, monitor); if (result.status !== 0 || result.failure !== undefined) throw processFailure(label, executable, result); }
 async function requiredOutput(executable: string, args: readonly string[], cwd: string, environment: NodeJS.ProcessEnv, label: string): Promise<string> { const result = await run(executable, args, cwd, environment); if (result.status !== 0 || result.failure !== undefined) throw processFailure(label, executable, result); return result.stdout; }
 class ManagedGitProcessError extends BazframeError {
+  readonly operation: string;
+  readonly status: number | null;
   readonly processFailure: ManagedGitProcessResult['failure'];
+  readonly definiteNetworkUnavailable: boolean;
   readonly uncertainTermination: boolean;
   readonly monitorError?: Error;
   constructor(label: string, target: string, result: ManagedGitProcessResult) {
@@ -1748,7 +1776,10 @@ class ManagedGitProcessError extends BazframeError {
       cause: result.monitorError ?? result.error
     });
     this.name = 'ManagedGitProcessError';
+    this.operation = label;
+    this.status = result.status;
     this.processFailure = result.failure;
+    this.definiteNetworkUnavailable = /(?:could not resolve host|failed to connect|network is unreachable|connection (?:timed out|refused)|couldn't connect)/iu.test(result.stderr || result.error?.message || '');
     this.uncertainTermination = result.uncertainTermination === true;
     this.monitorError = result.monitorError;
   }
@@ -1792,6 +1823,32 @@ function isUncertainManagedGitProcessError(error: unknown): boolean {
   if (error instanceof AggregateError) return error.errors.some(isUncertainManagedGitProcessError);
   return error instanceof Error && isUncertainManagedGitProcessError(error.cause);
 }
+
+/** True only when a clone/fetch process settled unsuccessfully with confirmed termination. */
+export function isDefiniteManagedGitAcquisitionUnavailable(error: unknown): boolean {
+  return error instanceof ManagedGitProcessError
+    && error.operation === 'clone'
+    && error.status !== null
+    && error.status !== 0
+    && error.processFailure === undefined
+    && error.monitorError === undefined
+    && error.definiteNetworkUnavailable
+    && !error.uncertainTermination;
+}
+
+/** Retain an isolated home whenever managed-Git/package cleanup or process settlement is uncertain. */
+export function isUncertainManagedGitOperation(error: unknown): boolean {
+  if (isUncertainManagedGitProcessError(error) || isUncertainPackageBuildError(error)) return true;
+  if (error instanceof BazframeError && [
+    'MANAGED_GIT_ACQUISITION_CLEANUP_UNPROVEN',
+    'MANAGED_GIT_ACQUISITION_QUARANTINED',
+    'MANAGED_GIT_RECOVERY_REQUIRED',
+    'PACKAGE_BUILD_TERMINATION_UNCERTAIN'
+  ].includes(error.code)) return true;
+  if (error instanceof AggregateError && error.errors.some(isUncertainManagedGitOperation)) return true;
+  return error instanceof Error && error.cause !== undefined && isUncertainManagedGitOperation(error.cause);
+}
+
 export function safeDiagnostic(value: string): string {
   let redacted = value.replace(/(https?:\/\/)[^/@\s]+@/giu, '$1[redacted]@').replace(/\b(authorization|token|access[_-]?token|oauth[_-]?token|password)\s*[:=]\s*[^\s]+/giu, '$1=[redacted]');
   redacted = replaceUnsafeDisplayCharacters(redacted, ' ').replace(/\s+/gu, ' ').trim();

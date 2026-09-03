@@ -1,110 +1,147 @@
-# Bazframe - _Take your harness with you._
+# Bazframe — _Take your harness with you._
 
-Move, package, and distribute [Agent Skills](https://agentskills.io/) and AGENTS.md files between projects and dev environments.
+Compose standard [Agent Skills](https://agentskills.io/) and personal `AGENTS.md` instructions into reusable profiles, then apply them to [Pi](https://github.com/earendil-works/pi) across projects and development environments.
 
-![bazframe TUI](bazframe_tui.png)
+![Bazframe TUI](https://raw.githubusercontent.com/sram1337/bazframe/main/bazframe_tui.png)
 
-## Quick Start
-### Install
+## What Bazframe does
+
+- Keeps personal instructions and selected Skills together in one active profile.
+- Adds that profile to Pi without replacing native global, ancestor, or repository instructions.
+- Supports live added Skills, prepared immutable Skill libraries, and explicitly built Skill packages.
+- Switches profiles globally, with optional Git-worktree project enable/disable overrides.
+- Shares ready profiles through deterministic ZIP exports or versioned GitHub repositories.
+- Provides a scriptable CLI, setup diagnostics, and a keyboard-first terminal UI.
+
+Bazframe is currently a beta for Pi 0.84.4 or newer on macOS and Linux.
+
+## Requirements
+
+- [Node.js](https://nodejs.org/) 22.19.0 or newer, including npm.
+- Pi 0.84.4 or newer.
+- macOS or Linux.
+- A model provider configured for Pi; see [Pi's authentication documentation](https://github.com/earendil-works/pi#readme).
+- Git for remote resources and Git profile imports; [GitHub CLI](https://cli.github.com/) (`gh`) for publishing and private Git imports. Neither is required for basic profile use or ZIP sharing.
+
+## Quick start
+
 ```bash
-npm i -g bazframe@next
-```
+npm install --global --ignore-scripts @earendil-works/pi-coding-agent
+npm install --global bazframe@next
 
-### Setup
-```bash
-# add your skills to bazframe
-bazframe library add /path/to/my-skills-folder
+# Create a profile. `profile edit` uses VISUAL, then EDITOR.
+bazframe profile add personal
+bazframe profile edit personal
 
-# setup your _local_ bazframe profile
-bazframe profile add my-coding-harness
-bazframe profile edit my-coding-harness
-bazframe profile library add my-skills-folder
-bazframe profile use my-coding-harness
+# Add a standard Agent Skill and attach it to this profile.
+bazframe skill add /absolute/path/to/review
+bazframe profile skill add --profile personal review
 
-# connect bazframe to your preferred harness*
+# Select the profile and connect Bazframe to Pi.
+bazframe profile use personal
 bazframe adapter install pi
-```
-### Running bazframe
-Then start your harness like normal:
-```bash
+bazframe status
+
+# Start Pi normally.
 pi
 ```
 
-You should see all your profiles added skills.
+Inside Pi, run `/bazframe info` to inspect the effective profile and `/bazframe reload` after changing profile instructions or resources. `bzf` is an equivalent short alias for `bazframe`.
 
- > * The current beta version supports only Pi 0.84.4 or newer on macOS and Linux.
+## Skills, libraries, and packages
 
-### Requirements
+Bazframe keeps resource ownership explicit:
 
-- [Node.js](https://nodejs.org/) 22.19.0 or newer.
-- Pi 0.84.4 or newer.
-- macOS or Linux.
-- A model provider supported by Pi; see [Pi's authentication documentation](https://github.com/earendil-works/pi#readme).
-- (optional) [Git](https://git-scm.com/) only for remote Git sources. Basic profile use does not require Git.
-
-
-### Export and import a profile (Stage 3)
-
-Stage 3 package portability is live on macOS and Linux. It is not a claim of Windows support or full profile portability. Publish a reviewable directory for an explicit profile without changing the active profile:
+| Resource | Behavior |
+| --- | --- |
+| **Added Skill** | A live local or remote Git Skill registered individually in `(default)`. Local source edits are visible after reload. |
+| **Skill library** | An already-prepared directory captured as an immutable snapshot. Adding or updating a library executes no source code. |
+| **Skill package** | A source project with `bazframe-package.json`. Bazframe runs its declared build command, then snapshots the resulting artifact. |
+| **Profile** | Personal `AGENTS.md` instructions plus individual Skills and whole-library/package references. |
 
 ```bash
-bazframe profile export my-coding-harness --output ./my-coding-harness.bazframe-profile
+# Individual local or remote Skills
+bazframe skill add /absolute/path/to/a-skill
+bazframe skill add git:owner/repository
+bazframe profile skill add a-skill
+
+# Prepared libraries
+bazframe library add /absolute/path/to/a-library
+bazframe profile library add a-library
+
+# Buildable packages
+bazframe package add /absolute/path/to/a-package
+bazframe profile package add a-package
 ```
 
-Review `./my-coding-harness.bazframe-profile/profile/AGENTS.md` before sharing: Bazframe does not redact secrets from user-authored instructions. Exports are path-free declarations, not copied source trees or snapshots. Remote Git resources record normalized credential-free identity, branch, and exact revision. Healthy local libraries and packages export only `{ "type": "localMapping" }`, without a source-machine path or snapshot digest.
+Acquisition and profile membership are separate: adding a resource never silently attaches it to a profile. See [Using Skills with Bazframe](docs/skills.md) for updates, immutable snapshots, package manifests, remote Git sources, editing, and recovery.
 
-On the destination machine, inspect first. `--map` is repeatable and typed; provide one absolute physical, basename-matching source directory for every declared local library or package:
+## Profiles and policy
+
+One profile is selected globally and applies in every directory by default. A Git worktree can explicitly disable Bazframe or override a global disable:
 
 ```bash
-bazframe profile import \
-  --map library:my-skills-folder=/srv/skill-libraries/my-skills-folder \
-  --map package:my-package=/srv/skill-packages/my-package \
-  --dry-run ./my-coding-harness.bazframe-profile
-bazframe profile import \
-  --map library:my-skills-folder=/srv/skill-libraries/my-skills-folder \
-  --map package:my-package=/srv/skill-packages/my-package \
-  --yes ./my-coding-harness.bazframe-profile
-# Or choose only the destination profile ID:
-bazframe profile import --as imported-harness \
-  --map library:my-skills-folder=/srv/skill-libraries/my-skills-folder \
-  --map package:my-package=/srv/skill-packages/my-package \
-  --yes ./my-coding-harness.bazframe-profile
+bazframe profile list
+bazframe profile use personal
+bazframe global show
+bazframe project disable   # current Git worktree only
+bazframe project enable
 ```
 
-Dry-run takes no Bazframe write lock and performs no Bazframe writes, network access, builds, prompts, or active-profile mutation. It reports exact historical remote Git revisions and prospective work. Execution creates or exactly reuses branch-reachable historical remote Skills, libraries, and packages, processes packages last, and never substitutes current branch HEAD. An exact healthy package reuse is offline and needs no build, authorization report, prompt, or consent.
+Repository instructions remain a separate Pi-owned layer; selecting a profile does not rewrite or merge project files.
 
-Each new package build receives an exact report covering package/source identity, candidate root and working directory, literal argv, manifest path and SHA-256, artifact/Skills roots, `shell: false`, inherited environment, and unsandboxed `current-process-user` authority with possible credential, network, and user-file access. Arbitrary package effects are not rollbackable. Interactive approval accepts only literal `y` and otherwise declines by default; noninteractive execution uses `--yes`. `--yes` is invalid with `--dry-run`.
+## Share profiles
 
-Import is forward-resumable, not globally atomic: earlier committed resources remain after later failure, recovery/ambiguous outcomes must be inspected, and retry converges through exact reuse. A newly published profile remains inactive; exact reuse of an existing active destination does not change selection. Healthy local direct Skills remain named omissions and have no mapping. Collection children never enter `(default)`. JSON reports omit environment names/values and private filesystem identities, but mapped local roots are intentionally reported. Windows publication and the broader hostile/full-portability acceptance gate remain open.
+Export an independent deterministic ZIP, or publish a linked private GitHub repository:
 
-### Terminal interface
+```bash
+bazframe profile export --profile personal --output ./personal.bazframe-profile.zip
+bazframe profile publish --profile personal
+```
+
+Inspect before importing. A newly imported profile remains inactive until explicitly selected:
+
+```bash
+bazframe profile import --dry-run ./personal.bazframe-profile.zip
+bazframe profile import ./personal.bazframe-profile.zip
+
+bazframe profile import --dry-run git:owner/personal
+bazframe profile import git:owner/personal
+bazframe profile use personal
+```
+
+ZIP imports are independent. Git imports stay linked for `profile update` and `profile version list|use`. Export and publish capture ready-to-use content and never build packages. Bazframe excludes defined credential filenames but does not scan file contents or instructions for secrets—review the exact preview before sharing.
+
+See [Portable profile sharing](docs/skills.md#portable-profile-sharing) for collisions, overwrite authorization, package consent, incomplete initial imports, version selection, and JSON behavior.
+
+## Terminal UI and diagnostics
 
 ```bash
 bazframe tui
+bazframe status
 ```
+
+The beta TUI browses Skills and manages profiles; operations with broader execution or recovery implications remain CLI-only. `status` reports adapter, policy, profile, resource, snapshot, and recovery health without updating or building resources.
 
 ## Safety
 
-Profiles and Skills become trusted input to an agent with filesystem and shell authority. Libraries execute no source code. Package add, build, and update operations execute declared argv without a shell or sandbox and inherit your user authority. Review remote instructions and package build declarations before activation.
+Profiles and Skills become trusted input to an agent with filesystem and shell authority. Review remote instructions before activation. Libraries execute no source code, but package operations—and some profile imports—may execute declared build commands without a shell or sandbox after an exact report and consent. Those commands inherit your user authority.
 
-See [Using Skills with Bazframe](docs/skills.md#editing-and-ownership) for ownership and [its troubleshooting section](docs/skills.md#troubleshooting) for recovery details.
+See [editing and ownership](docs/skills.md#editing-and-ownership) and [troubleshooting](docs/skills.md#troubleshooting) for the operational boundaries.
 
 ## Documentation
 
-1. [Getting started](docs/getting-started.md) — installation, first profile, policy, and configuration.
-2. [Using Skills with Bazframe](docs/skills.md) — Skills, libraries, packages, remote Git sources, and Bazify.
-3. [Terminal UI design](docs/tui-design.md) — implemented TUI boundary and remaining gates.
-4. [Fresh-machine setup recipe](examples/setup-fresh-machine.sh) — bootstrap commands for a new machine.
+1. [Getting started](docs/getting-started.md) — installation, profiles, policy, and Pi setup.
+2. [Using Skills with Bazframe](docs/skills.md) — Skills, libraries, packages, sharing, remote Git sources, and Bazify.
+3. [Fresh-machine setup recipe](examples/setup-fresh-machine.sh) — bootstrap commands for a new machine.
+4. [Terminal UI design](docs/tui-design.md) — implemented TUI behavior and remaining gates.
 5. [Product design](docs/design.md) — product contracts for contributors.
-6. [Release process](docs/releasing.md) — release validation and publication.
+6. [Release process](docs/releasing.md) — validation and npm publication.
+7. [Contributing](CONTRIBUTING.md) — development setup, validation, and pull requests.
 
 ## Support
 
 Report bugs and ask usage questions in [GitHub issues](https://github.com/sram1337/bazframe/issues).
-
-## Contributing
-
-Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, validation, safety guidance, and pull request expectations.
 
 ## License
 

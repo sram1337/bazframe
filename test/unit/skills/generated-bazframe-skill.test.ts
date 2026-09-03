@@ -21,12 +21,13 @@ describe('generated Bazframe Skill source', () => {
       'bazframe profile library add [--profile <profile>] <library>',
       'bazframe package add /absolute/path/to/package',
       'bazframe profile package add [--profile <profile>] <package>',
-      'bazframe profile import --dry-run <directory>',
-      'bazframe profile import --map library:toolkit=/srv/libraries/toolkit --map package:automation=/srv/packages/automation --dry-run <directory>',
-      'bazframe profile import [--json] [--as <profile>] [--map (library|package):<id>=<absolute-source-directory>]... [--dry-run | --yes] <directory>',
-      'Stage 3 package portability is live on macOS and Linux',
-      'Healthy local libraries/packages export only `{ "type": "localMapping" }`',
-      'Exact healthy package reuse is offline, build/report/prompt/consent-free.',
+      'bazframe profile publish [--profile <profile>]',
+      'bazframe profile export [--profile <profile>] [--output <zip>]',
+      'bazframe profile import --dry-run <zip|git:user/repository>',
+      'bazframe profile version use <commit> [--profile <profile>]',
+      'direct physical profile-local Skill directories',
+      '`--yes` chooses the safe suffix',
+      'Schema-v2 JSON applies only to publish, export, import, update, and version commands.',
       'bazframe adapter install pi',
       'bazframe status',
       'bazframe tui'
@@ -38,7 +39,11 @@ describe('generated Bazframe Skill source', () => {
     for (const stale of [
       'Stage 1 accepts no `--map`',
       'blocks local libraries',
-      'Local-library portability, package portability'
+      'Local-library portability, package portability',
+      '--map library:',
+      '--as <profile>',
+      'omittedLocalSkills',
+      'localMapping'
     ]) expect(text).not.toContain(stale);
   });
 });

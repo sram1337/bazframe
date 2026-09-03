@@ -13,6 +13,30 @@ export function resolveBazframeHome(
   );
 }
 
+export function profilePublishingRoot(bazframeHome: string): string {
+  return join(bazframeHome, 'profile-publishing');
+}
+
+export function profilePublishingBlobRoot(bazframeHome: string): string {
+  return join(profilePublishingRoot(bazframeHome), 'blobs');
+}
+
+export function profilePublishingTreeRoot(bazframeHome: string): string {
+  return join(profilePublishingRoot(bazframeHome), 'trees');
+}
+
+export function profilePublishingTransactionRoot(bazframeHome: string): string {
+  return join(profilePublishingRoot(bazframeHome), 'transactions');
+}
+
+export function profilePublishingStagingRoot(bazframeHome: string): string {
+  return join(profilePublishingRoot(bazframeHome), 'staging');
+}
+
+export function profilePublishingOperationLockRoot(bazframeHome: string): string {
+  return join(profilePublishingRoot(bazframeHome), 'operation-locks');
+}
+
 export function resolvePiAgentDirectory(
   environment: NodeJS.ProcessEnv,
   userHome = homedir()

@@ -2,43 +2,23 @@ import { readFileSync } from 'node:fs';
 const metadata: unknown = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
 if (metadata === null || typeof metadata !== 'object' || !('version' in metadata) || typeof metadata.version !== 'string') throw new Error('Bazframe package metadata has no valid version.');
 export const VERSION = metadata.version;
-const json = 'With --json, write exactly one newline-terminated schema-v1 JSON document to stdout.';
+const json = 'With --json, publishing lifecycle commands emit schema v2; unrelated commands retain schema v1.';
 const help = (...lines:string[]):string => [...lines, ''].join('\n');
-export const ROOT_HELP=help('Bazframe','','Usage: bazframe [--json] <resource> <command>','','Resources:','  profile   Manage, export, and import profiles','  skill     Manage added Skills','  library   Manage prepared Skill libraries','  package   Manage buildable Skill packages','  project   Manage per-project policy overrides','  global    Manage global policy','  adapter   Manage coding-agent adapters','  status    Check setup health','  tui       Open the interactive interface','','Queries:','  bazframe profile list','  bazframe profile export <profile> --output <directory>','  bazframe profile import [--map (library|package):<id>=<absolute-source-directory>]... [--yes] <directory>','  bazframe skill list','  bazframe library list','  bazframe package list','  bazframe project list','  bazframe global show','  bazframe adapter list','  bazframe status --json','','Options:','  --json          Emit the CLI-only schema-v1 JSON protocol','  -h, --help      Show help','  -v, --version   Show version');
-export const PROFILE_HELP=help('Usage:','  bazframe profile list [--json]','  bazframe profile current [--json]','  bazframe profile add [--json] <profile>','  bazframe profile duplicate [--json] <source> <new>','  bazframe profile remove [--force] [--json] <profile>','  bazframe profile rename [--json] <old> <new>','  bazframe profile use [--json] <profile>','  bazframe profile edit <profile>','  bazframe profile export [--json] <profile> --output <directory>','  bazframe profile import [--json] [--as <profile>] [--map (library|package):<id>=<absolute-source-directory>]... [--dry-run | --yes] <directory>','  bazframe profile skill list [--json]','  bazframe profile library list [--json]','  bazframe profile package list [--json]',json);
+export const ROOT_HELP=help('Bazframe','','Usage: bazframe [--json] <resource> <command>','','Resources:','  profile   Manage, publish, export, import, and update profiles','  skill     Manage added Skills','  library   Manage prepared Skill libraries','  package   Manage buildable Skill packages','  project   Manage per-project policy overrides','  global    Manage global policy','  adapter   Manage coding-agent adapters','  status    Check setup health','  tui       Open the interactive interface','','Profile sharing:','  bazframe profile export [--profile <profile>] [--output <zip>] [--overwrite] [--bundle-remote]','  bazframe profile publish [--profile <profile>] [--public|--private] [--bundle-remote] [-y|--yes]','  bazframe profile import [--commit <commit>] [--dry-run] [--overwrite] [-y|--yes] <zip|git:user/repository>','  bazframe profile update [--profile <profile>] [--overwrite]','  bazframe profile version list [--profile <profile>]','  bazframe profile version use <commit> [--profile <profile>] [--overwrite]','','Options:','  --json          Emit the CLI-only JSON protocol','  -h, --help      Show help','  -v, --version   Show version');
+export const PROFILE_HELP=help('Usage:','  bazframe profile list [--json]','  bazframe profile current [--json]','  bazframe profile add [--json] <profile>','  bazframe profile duplicate [--json] <source> <new>','  bazframe profile remove [--force] [--json] <profile>','  bazframe profile rename [--json] <old> <new>','  bazframe profile use [--json] <profile>','  bazframe profile edit <profile>','  bazframe profile export [--profile <profile>] [--output <zip>] [--overwrite] [--bundle-remote] [--json]','  bazframe profile publish [--profile <profile>] [--public|--private] [--bundle-remote] [-y|--yes] [--json]','  bazframe profile import [--commit <commit>] [--dry-run] [--overwrite] [-y|--yes] [--json] <zip|git:user/repository>','  bazframe profile update [--profile <profile>] [--overwrite] [--json]','  bazframe profile version list [--profile <profile>] [--json]','  bazframe profile version use <commit> [--profile <profile>] [--overwrite] [--json]','  bazframe profile skill list [--json]','  bazframe profile library list [--json]','  bazframe profile package list [--json]',json);
 export const PROFILE_ADD_HELP=help('Usage: bazframe profile add [--json] <profile>','Create an inactive physical profile.');
 export const PROFILE_DUPLICATE_HELP=help('Usage: bazframe profile duplicate [--json] <source> <new>','Copy a physical profile without following symlinks.');
 export const PROFILE_REMOVE_HELP=help('Usage: bazframe profile remove [--force] [--json] <profile>','The active profile cannot be removed.');
 export const PROFILE_RENAME_HELP=help('Usage: bazframe profile rename [--json] <old> <new>');
 export const PROFILE_USE_HELP=help('Usage: bazframe profile use [--json] <profile>');
 export const PROFILE_EDIT_HELP=help('Usage: bazframe profile edit <profile>','Open AGENTS.md with the first nonblank VISUAL, then EDITOR. Use a wrapper executable when fixed editor flags are required. JSON is not supported.');
-export const PROFILE_EXPORT_HELP=help(
-  'Usage: bazframe profile export [--json] <profile> --output <directory>',
-  'Publish a reviewable Stage 3 export directory without changing the active profile.',
-  '',
-  'Stage 3 includes direct Skills and whole libraries/packages from exact remote Git revisions.',
-  'Healthy local libraries and packages are exported as typed path-free localMapping requirements without roots or snapshot digests.',
-  'Healthy local direct Skills are omitted, recorded, and reported by ID; direct local Skills have no mapping.',
-  'Review <output>/profile/AGENTS.md before sharing; Bazframe does not redact it.',
-  'Stage 3 import supports exact remote Git resources and explicit local library/package mappings on macOS/Linux; Windows support remains unavailable and full portability remains unavailable.',
-  json
-);
-export const PROFILE_IMPORT_HELP=help(
-  'Usage: bazframe profile import [--json] [--as <profile>] [--map (library|package):<id>=<absolute-source-directory>]... [--dry-run | --yes] <directory>',
-  'Inspect a Stage 3 profile artifact first, then execute the displayed plan by default.',
-  '',
-  '--dry-run performs bounded local inspection only and exits successfully even when the returned plan is blocked.',
-  '--as changes only the destination profile ID; resource IDs remain exact.',
-  '--map is repeatable for local libraries and packages. Bazframe read-only inspects each source and requires an exact basename.',
-  'Mapped libraries are build-free. New mapped and remote Git packages run their declared builds only after an exact report.',
-  '--yes approves every exact revalidated package-build report and cannot be combined with --dry-run.',
-  'Without --yes, interactive input requires literal y for each build; noninteractive and JSON input decline before acquisition.',
-  'Exact healthy package reuse performs no build and needs neither a report nor --yes.',
-  'A missing required mapping blocks the plan. Omitted local Skills remain omitted; collection children never enter (default).',
-  'Import never changes the active profile and never overwrites, updates, repoints, or substitutes branch HEAD.',
-  'Failures report retained partial resources, recovery-required or commit-ambiguous outcomes, and possible nonrollbackable package effects.',
-  json
-);
+export const PROFILE_EXPORT_HELP=help('Usage: bazframe profile export [--profile <profile>] [--output <zip>] [--overwrite] [--bundle-remote] [--json]','Write a deterministic captured-profile ZIP. Existing output requires --overwrite. Export never builds.',json);
+export const PROFILE_PUBLISH_HELP=help('Usage: bazframe profile publish [--profile <profile>] [--public|--private] [--bundle-remote] [-y|--yes] [--json]','Publish the exact preview to GitHub refs/heads/main. New repositories are private by default. Publishing never builds.',json);
+export const PROFILE_IMPORT_HELP=help('Usage: bazframe profile import [--commit <commit>] [--dry-run] [--overwrite] [-y|--yes] [--json] <zip|git:user/repository>','ZIP imports are independent; Git imports remain linked. --yes chooses the safe suffix and approves package builds; only --overwrite replaces or discards.',json);
+export const PROFILE_UPDATE_HELP=help('Usage: bazframe profile update [--profile <profile>] [--overwrite] [--json]','Update a linked profile to refs/heads/main. Only --overwrite discards local changes.',json);
+export const PROFILE_VERSION_HELP=help('Usage:','  bazframe profile version list [--profile <profile>] [--json]','  bazframe profile version use <commit> [--profile <profile>] [--overwrite] [--json]');
+export const PROFILE_VERSION_LIST_HELP=help('Usage: bazframe profile version list [--profile <profile>] [--json]');
+export const PROFILE_VERSION_USE_HELP=help('Usage: bazframe profile version use <commit> [--profile <profile>] [--overwrite] [--json]');
 export const PROFILE_LIST_HELP=help('Usage: bazframe profile list [--json]','List profiles, active flags, and selected/unselected/missing active state.',json);
 export const PROFILE_CURRENT_HELP=help('Usage: bazframe profile current [--json]','Print the selected profile ID.',json);
 export const SKILLS_HELP=help('Usage:','  bazframe skill list [--json]','  bazframe skill add [--json] <absolute-root-or-git-source>','  bazframe skill remove [--json] <skill>','  bazframe skill update [--accept-rewrite] [--json] <skill>','  bazframe skill edit <skill>','','Acquisition is separate from profile attachment.',json);

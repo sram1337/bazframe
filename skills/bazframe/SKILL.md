@@ -80,29 +80,26 @@ bazframe profile add <profile>
 bazframe profile edit <profile>
 bazframe profile use <profile>
 bazframe profile current
-bazframe profile export <profile> --output <directory>
-bazframe profile import --dry-run <directory>
-bazframe profile import <directory>
+bazframe profile publish [--profile <profile>]
+bazframe profile export [--profile <profile>] [--output <zip>]
+bazframe profile import --dry-run <zip|git:user/repository>
+bazframe profile import <zip|git:user/repository>
+bazframe profile update [--profile <profile>]
+bazframe profile version list [--profile <profile>]
+bazframe profile version use <commit> [--profile <profile>]
 bazframe global show
 bazframe project list
 ```
 
 `profile edit` opens the named profile's `AGENTS.md` without changing selection. Use an executable wrapper for editor flags or GUI wait behavior, and run `/bazframe reload` in an existing Pi session afterward.
 
-Stage 3 package portability is live on macOS and Linux; Windows publication and full portability are not. `profile export` publishes path-free canonical `bazframe-profile.json` plus exact `profile/AGENTS.md` bytes without changing active selection. It includes direct Skills and whole libraries/packages from exact remote Git revisions. Healthy local libraries/packages export only `{ "type": "localMapping" }`, without source-machine paths, snapshots, or copied source. Healthy local direct Skills remain named omissions and have no mapping. Review exported `profile/AGENTS.md` for secrets because Bazframe does not redact user-authored instructions.
+`profile publish` creates or updates a linked GitHub repository from a ready capture; `profile export` writes the same canonical content to a deterministic ZIP without publication linkage or local ownership IDs. Both preserve direct physical profile-local Skill directories. Publishing and export never build. Review the exact preview: Bazframe excludes defined credential filenames but does not scan content for secrets.
 
-`profile import` always reports an inspection plan first. Its canonical grammar is `bazframe profile import [--json] [--as <profile>] [--map (library|package):<id>=<absolute-source-directory>]... [--dry-run | --yes] <directory>`. Supply one repeatable typed map for each declared local library/package; each root must be absolute, physical, and basename-matching:
+`profile import` accepts a ZIP or `git:user/repository`. Git imports remain linked; ZIP imports are independent. Name collisions offer safe suffix, overwrite, or cancel. `--yes` chooses the safe suffix and approves exact package-build reports, while only `--overwrite` authorizes replacement or profile-local discard. New profiles remain inactive. Only settled clone/fetch unavailability may make an initial import incomplete; other failures stop.
 
-```bash
-bazframe profile import --map library:toolkit=/srv/libraries/toolkit --map package:automation=/srv/packages/automation --dry-run <directory>
-bazframe profile import --as <profile> --map library:toolkit=/srv/libraries/toolkit --map package:automation=/srv/packages/automation --yes <directory>
-```
+Updates and version selection accept only exact commits reachable from the recorded `refs/heads/main`. Exact healthy resources are reused offline. Package builds run last, without a shell or sandbox, and require report-bound consent. Ordinary updates preserve excluded profile-local files unless `--overwrite` explicitly discards them.
 
-Dry-run takes no Bazframe write lock and performs no Bazframe writes, network access, builds, prompts, or active-selection mutation. `--yes` is invalid with it. Execution creates or exactly reuses branch-reachable historical remote revisions, never substitutes current branch HEAD, and processes packages last. Exact healthy package reuse is offline, build/report/prompt/consent-free.
-
-Before each new package build, inspect the exact package/source, candidate-root/cwd, literal argv, manifest path/SHA-256, artifact/Skills roots, `shell: false`, inherited-environment, and authority report. Builds are unsandboxed as `current-process-user`, may access credentials, networks, and user files, and can have nonrollbackable effects. Interactive consent accepts only literal `y` and defaults to decline; `--yes` authorizes exact revalidated reports. Limits are 64 KiB manifest; 64 argv entries, 4 KiB each and 16 KiB aggregate; 4,096-byte package paths; 30-minute builds; and 5-second termination grace.
-
-Import retains earlier resources on partial failure; inspect recovery-required/commit-ambiguous outcomes and retry for exact reuse. JSON hides environment names/values and private physical identity fields but reports explicit local mapping roots. A newly published profile remains inactive; exact reuse of an already-active destination leaves that selection unchanged. Active selection never changes, and collection children never enter `(default)`.
+Schema-v2 JSON applies only to publish, export, import, update, and version commands. JSON and dry-run never start login. Dry-run performs no Bazframe, cache, build, repository, ref, visibility, or authentication mutation. Profile list, status, activation, and the TUI show shared publication/completeness state.
 
 ## Pi adapter and diagnosis
 

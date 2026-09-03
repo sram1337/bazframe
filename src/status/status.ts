@@ -24,6 +24,10 @@ import {
 import { resolvePiAgentDirectory } from '../state/paths.js';
 import { inspectManagedGitRecordHealth } from '../providers/managed-git.js';
 import { scanManagedGitRecords, type ManagedGitRecord } from '../providers/managed-git-record.js';
+import { readProfileSystemView } from '../profile-publishing/profile-view.js';
+import { projectStatusProfileApplication } from '../profile-publishing/profile-application-projection.js';
+import type { JsonProfileStateV1OptionalExtension } from '../profile-publishing/profile-command-presentation.js';
+import { readOptionalManagedProfileState } from '../profile-publishing/managed-profile-state.js';
 
 export interface AdapterStatusOptions {
   bazframeHome: string;
@@ -81,6 +85,9 @@ export type StatusProfile =
       derivedSkillCount?: number;
       derivedSkills?: DerivedSkill[];
       collectionDiagnostics?: SkillCollectionDiagnostic[];
+      completeness?: JsonProfileStateV1OptionalExtension['completeness'];
+      missingResources?: JsonProfileStateV1OptionalExtension['missingResources'];
+      publication?: JsonProfileStateV1OptionalExtension['publication'];
     };
 
 export interface StatusCorrectiveAction {
@@ -195,6 +202,8 @@ export async function inspectStatus(options: StatusOptions): Promise<StatusInspe
         const loaded = await loadProfile(options.bazframeHome, profileId);
         const flatSkills = loadFlatSkillIdentities(loaded.skillDirectories);
         const collections = await resolveProfileSkillCollections(loaded.directory, flatSkills);
+        const managedState=await readOptionalManagedProfileState(options.bazframeHome,profileId);
+        const applicationExtension:JsonProfileStateV1OptionalExtension=managedState===undefined?{}:projectStatusProfileApplication(await readProfileSystemView(options.bazframeHome),profileId).extension;
         profile = {
           state: 'ready',
           id: profileId,
@@ -205,7 +214,8 @@ export async function inspectStatus(options: StatusOptions): Promise<StatusInspe
           collections: collections.directCollections,
           derivedSkillCount: collections.derivedSkills.length,
           derivedSkills: collections.derivedSkills,
-          collectionDiagnostics: collections.diagnostics
+          collectionDiagnostics: collections.diagnostics,
+          ...applicationExtension
         };
         if (collections.diagnostics.length > 0) {
           const buildRequired = collections.directCollections
@@ -340,6 +350,11 @@ export function formatStatus(status: StatusInspection): string {
     `Project state: ${projectState}`,
     `Effective behavior: ${behavior}`,
     `Active profile: ${activeProfile}`,
+    ...(status.profile.state==='ready'&&status.profile.completeness!==undefined?[
+      `Profile completeness: ${status.profile.completeness}`,
+      `Profile publication: ${status.profile.publication===undefined?'unpublished':`${status.profile.publication.repository} @ ${status.profile.publication.installedCommit} (${status.profile.publication.visibility})`}`,
+      ...(status.profile.missingResources??[]).map((item)=>`  - missing ${item.kind} ${item.name}: ${item.code}`)
+    ]:[]),
     `Profile instructions: ${instructionSource}`,
     `Flat direct skills: ${flatSkillCount}`,
     `Profile library/package references: ${collectionReferenceCount}`,

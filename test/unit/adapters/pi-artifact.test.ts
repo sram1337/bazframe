@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmod, readFile, readdir, realpath, rename, symlink, unlink } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
@@ -9,6 +10,7 @@ import { createTempDirectory, type TempDirectory } from '../../helpers/temp-dire
 import { publishSkillSnapshot } from '../../../src/skill-collections/skill-snapshot.js';
 import { encodeLibrary, encodePackage } from '../../../src/skill-collections/skill-collection-store.js';
 import { encodeProfileCollectionReference } from '../../../src/profiles/profile-skill-collection-reference.js';
+import { importedResourceIdentity, resourceIdentityDigest } from '../../../src/profile-publishing/captured-profile.js';
 
 const temporaryDirectories: TempDirectory[] = [];
 const execFileAsync = promisify(execFile);
@@ -279,6 +281,40 @@ describe('packaged Pi adapter command', () => {
     expect(beforeAgent.systemPrompt).toContain(fixture.profileInstructions);
     expect((await runCommand(required(harness.commands, 'bazframe'), 'info', ['/pi/AGENTS.md'])).message)
       .toContain('Profile: focused');
+  });
+
+  it('accepts an imported artifact Skill manifest path with 64 total components', async () => {
+    const { fixture, harness, treeId, skillPath } = await managedImportedArtifactFixture(64);
+    const notifications: string[] = [];
+    await required(harness.events, 'session_start')({}, {
+      cwd: fixture.repository,
+      hasUI: true,
+      ui: { notify: (message: string) => { notifications.push(message); } }
+    });
+    const resources = await required(harness.events, 'resources_discover')(
+      { cwd: fixture.repository }, { hasUI: false, ui: { notify: () => undefined } }
+    );
+    expect(notifications).toEqual([]);
+    expect(resources).toEqual({
+      skillPaths: [fixture.directory.path(`bazframe-home/profile-publishing/trees/${treeId}/root/${skillPath}`)]
+    });
+  });
+
+  it('rejects an imported artifact Skill manifest path with 65 total components', async () => {
+    const { fixture, harness } = await managedImportedArtifactFixture(65);
+    const notifications: string[] = [];
+    await required(harness.events, 'session_start')({}, {
+      cwd: fixture.repository,
+      hasUI: true,
+      ui: { notify: (message: string) => { notifications.push(message); } }
+    });
+    const resources = await required(harness.events, 'resources_discover')(
+      { cwd: fixture.repository }, { hasUI: false, ui: { notify: () => undefined } }
+    );
+    expect(resources).toBeUndefined();
+    expect(notifications).toEqual([
+      'Bazframe profile failed to load: Invalid managed artifact file'
+    ]);
   });
 
   it('rejects symlinked profile ancestors before loading external instructions or flat skills', async () => {
@@ -1031,6 +1067,51 @@ describe('packaged Pi adapter command', () => {
   });
 });
 
+
+async function managedImportedArtifactFixture(componentCount: 64 | 65): Promise<{
+  fixture: Awaited<ReturnType<typeof activeFixture>>;
+  harness: Harness;
+  treeId: string;
+  skillPath: string;
+}> {
+  const fixture = await activeFixture(`managed-imported-library-${componentCount}`);
+  const definition = Buffer.from('---\nname: imported-skill\ndescription: Imported.\n---\n');
+  const skillPath = `${Array.from({ length: componentCount - 2 }, (_, index) => `d${index}`).join('/')}/imported-skill/SKILL.md`;
+  expect(skillPath.split('/')).toHaveLength(componentCount);
+  const manifest = `${JSON.stringify({
+    schemaVersion: 1,
+    kind: 'bazframe-artifact-tree',
+    role: 'library',
+    files: [{
+      path: skillPath,
+      sha256: createHash('sha256').update(definition).digest('hex'),
+      bytes: definition.byteLength,
+      executable: false
+    }]
+  }, null, 2)}\n`;
+  const treeId = createHash('sha256').update(manifest).digest('hex');
+  await fixture.directory.write(`bazframe-home/profile-publishing/trees/${treeId}/root/${skillPath}`, definition);
+  await fixture.directory.write(`bazframe-home/profile-publishing/trees/${treeId}/manifest.json`, manifest);
+  await fixture.directory.write(`bazframe-home/profile-publishing/trees/${treeId}/COMMITTED`, `${treeId}\n`);
+  await fixture.directory.write('bazframe-home/profiles/focused/.bazframe-profile-state.json', `${JSON.stringify({
+    schemaVersion: 1,
+    profileInstanceId: '00000000-0000-4000-8000-000000000001',
+    publication: null,
+    capturedResourceIds: [{
+      resourceIdentityDigest: resourceIdentityDigest(importedResourceIdentity('00000000-0000-4000-8000-000000000002')),
+      capturedResourceId: '0'.repeat(64),
+      identityKind: 'imported',
+      instanceId: '00000000-0000-4000-8000-000000000002'
+    }],
+    importedResources: [{
+      instanceId: '00000000-0000-4000-8000-000000000002',
+      capturedResourceId: '0'.repeat(64),
+      key: { kind: 'library', name: 'imported-library' },
+      source: { kind: 'artifact', treeId }
+    }]
+  }, null, 2)}\n`);
+  return { fixture, harness: register(await loadArtifact(fixture.directory, true), []), treeId, skillPath };
+}
 
 async function writeLibrarySnapshotRecord(directory: TempDirectory, provider: string): Promise<{ descriptorPath: string; artifactPath: string; snapshotRoot: string }> {
   const snapshot = await publishSkillSnapshot(directory.path('bazframe-home'), provider);

@@ -13,7 +13,7 @@ You need:
 - macOS or Linux.
 - Access to a Pi-supported model provider.
 
-Git is not required for basic profile use. It is required when Bazframe identifies a Git worktree for a project override or acquires a Skill, library, or package from a remote Git source. Profile import requires each recorded remote revision to remain reachable from its recorded branch and never substitutes current branch HEAD.
+Git is not required for basic profile use or ZIP import/export. System Git is required for public Git profile import and remote resources; publishing and private Git import also require GitHub CLI (`gh`). Bazframe installs only exact profile commits reachable from the repository's `refs/heads/main`.
 
 After installing Pi, start it and enter `/login` to choose and authenticate with a model provider. Pi supports selected subscriptions and API keys; see [Pi's provider and authentication documentation](https://github.com/earendil-works/pi#readme).
 
@@ -165,7 +165,7 @@ export PI_CODING_AGENT_DIR=/absolute/path/to/pi-agent-state
 
 Set these before running Bazframe setup commands. Changing either value points the tools at different state; it does not copy or migrate existing state.
 
-> **Do not copy `BAZFRAME_HOME` between machines.** Stage 3 package portability is live on macOS and Linux, but Windows support and full portability are not. Use `bazframe profile export <profile> --output <directory>`, review exported `profile/AGENTS.md` for secrets because Bazframe does not redact user-authored instructions, and transfer the path-free declaration directory—not source trees or snapshots. Inspect with `bazframe profile import --map library:toolkit=/srv/skill-libraries/toolkit --map package:automation=/srv/skill-packages/automation --dry-run <directory>`, then execute with the same repeatable typed maps and `--yes` if new package builds are required. Each mapped root must be absolute, physical, and basename-matching. Dry-run takes no Bazframe write lock and performs no writes, network access, builds, prompts, or active-selection mutation; `--yes` is invalid with it. Execution acquires exact branch-reachable historical remote revisions, processes packages last, and publishes an inactive profile without promoting collection children. Exact healthy packages are reused offline without builds, authorization reports, or consent. Local direct Skills remain named omissions and have no mapping.
+> **Do not copy `BAZFRAME_HOME` between machines.** Use `bazframe profile publish` for a linked GitHub profile or `bazframe profile export --profile <profile> --output <zip>` for an independent ZIP. Inspect either transport with `bazframe profile import --dry-run <zip|git:user/repository>`, then import it. Review the exact preview before sharing: Bazframe applies a finite credential-filename exclusion policy, not secret scanning. `--yes` accepts routine safe defaults and exact package-build reports; `--overwrite` alone authorizes replacement or discard. Imported profiles remain inactive until `profile use`. Exact healthy resources are reused offline, packages execute last, and only settled initial clone/fetch unavailability may create an incomplete profile.
 
 ## Diagnose setup with status
 

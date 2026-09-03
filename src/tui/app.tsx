@@ -1634,9 +1634,9 @@ function ProfilesList({
                 bold={selectionVisible && profile.id === selectedId}
                 dimColor={parent && profile.id === selectedId}
                 wrap="truncate-end"
-                aria-label={`Profile ${profile.id}${profile.active ? ', current' : ''}${profile.favorite ? ', favorite' : ''}${profile.id === selectedId && selectionVisible ? active ? ', active selection' : ', parent selection' : ''}, ${profile.memberships.length} skills`}
+                aria-label={`Profile ${profile.id}${profile.active ? ', current' : ''}${profile.favorite ? ', favorite' : ''}${profile.completeness==='incomplete'?', incomplete':''}${profile.publication!==undefined?', published':''}${profile.id === selectedId && selectionVisible ? active ? ', active selection' : ', parent selection' : ''}, ${profile.memberships.length} skills`}
               >
-                {profile.active ? '▶' : profile.favorite ? '★' : ' '} {profile.id}
+                {profile.active ? '▶' : profile.favorite ? '★' : ' '} {profile.id}{profile.completeness==='incomplete'?' [incomplete]':profile.publication!==undefined?' [published]':''}
               </Text>
               <Text
                 inverse={active && profile.id === selectedId}
@@ -1691,6 +1691,7 @@ function ProfileEditor({
         : <Text dimColor wrap="truncate-end">
             {profile.membershipDiagnostic ?? profile.directory}
           </Text>}
+      {compact||profile.completeness===undefined?null:<Text wrap="truncate-end">Sharing: {profile.publication===undefined?'unpublished':`${profile.publication.repository} @ ${profile.publication.installedCommit} (${profile.publication.visibility})`}; {profile.completeness}{profile.missingResources?.length?`; missing ${profile.missingResources.map((item)=>`${item.kind}:${item.name} (${item.code})`).join(', ')}`:''}</Text>}
       {compact ? null : <Text wrap="truncate-end">Referenced Libraries: {formatProfileReferences(profile.libraryReferences)} (read-only)</Text>}
       {compact ? null : <Text wrap="truncate-end">Referenced Packages: {formatProfileReferences(profile.packageReferences)} (read-only)</Text>}
       <MembershipPane

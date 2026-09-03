@@ -30,6 +30,9 @@ import {
 const MAX_INSTRUCTIONS_BYTES = 1024 * 1024;
 const MAX_STATE_BYTES = 1024;
 const MAX_REGISTRATION_BYTES = 64 * 1024;
+const MAX_MANAGED_PROFILE_BYTES = 4 * 1024 * 1024;
+const MAX_MANAGED_ARTIFACT_FILES = 8192;
+const MAX_MANAGED_ARTIFACT_FILE_BYTES = 64 * 1024 * 1024;
 const PROFILE_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const SKILL_ALIAS_SUFFIX = "-x-bazframe";
@@ -1001,6 +1004,108 @@ async function collectionRefreshAvailability(collectionRoot: string): Promise<"a
 	} catch { return "unavailable"; }
 }
 
+async function loadManagedImportedSkills(bazframeHome: string, profileDirectory: string): Promise<Skill[]> {
+	const sidecarPath = join(profileDirectory, ".bazframe-profile-state.json");
+	if (await pathKind(sidecarPath) === "absent") return [];
+	const bytes = await readManagedFile(sidecarPath, "Managed profile state", MAX_MANAGED_PROFILE_BYTES);
+	let parsed: unknown;
+	try { parsed = JSON.parse(decodeUtf8(bytes, "Managed profile state")); }
+	catch (error) { throw new Error("Invalid managed profile state", { cause: error }); }
+	if (!isPlainRecord(parsed) || !hasExactKeys(parsed, ["schemaVersion", "profileInstanceId", "publication", "capturedResourceIds", "importedResources"])
+		|| parsed.schemaVersion !== 1 || !Array.isArray(parsed.importedResources) || parsed.importedResources.length > MAX_MANAGED_ARTIFACT_FILES) {
+		throw new Error("Invalid managed profile state");
+	}
+	const directories = new Set<string>();
+	for (const value of parsed.importedResources) {
+		if (!isPlainRecord(value) || !hasExactKeys(value, ["instanceId", "capturedResourceId", "key", "source"])
+			|| !isPlainRecord(value.key) || !hasExactKeys(value.key, ["kind", "name"])
+			|| !["skill", "library", "package"].includes(String(value.key.kind)) || !safeCollectionId(String(value.key.name))
+			|| !isPlainRecord(value.source) || typeof value.source.kind !== "string") throw new Error("Invalid imported profile resource");
+		if (value.source.kind === "missingRemoteGit") continue;
+		if ((value.source.kind !== "artifact" && value.source.kind !== "remoteGit") || typeof value.source.treeId !== "string" || !/^[a-f0-9]{64}$/u.test(value.source.treeId)) {
+			throw new Error("Invalid imported profile resource");
+		}
+		const expectedRole = value.key.kind === "package" ? "packageArtifacts" : value.key.kind;
+		for (const directory of await verifiedManagedArtifactSkillDirectories(bazframeHome, value.source.treeId, expectedRole)) directories.add(directory);
+	}
+	const skills: Skill[] = [];
+	for (const directory of [...directories].sort()) {
+		const loaded = loadSkillsFromDir({ dir: directory, source: "bazframe-profile" });
+		const expectedPath = join(directory, "SKILL.md");
+		const matching = loaded.skills.filter((skill) => skill.baseDir === directory && skill.filePath === expectedPath);
+		if (loaded.diagnostics.some((diagnostic) => diagnostic.type === "error") || matching.length !== 1) throw new Error(`Invalid imported profile Skill: ${directory}`);
+		skills.push(matching[0]!);
+	}
+	return skills;
+}
+
+async function verifiedManagedArtifactSkillDirectories(bazframeHome: string, treeId: string, expectedRole: unknown): Promise<string[]> {
+	const tree = join(bazframeHome, "profile-publishing", "trees", treeId);
+	const marker = decodeUtf8(await readManagedFile(join(tree, "COMMITTED"), "Managed artifact marker", 65), "Managed artifact marker");
+	if (marker !== `${treeId}\n`) throw new Error("Invalid managed artifact marker");
+	const manifestBytes = await readManagedFile(join(tree, "manifest.json"), "Managed artifact manifest", MAX_MANAGED_PROFILE_BYTES);
+	if (createHash("sha256").update(manifestBytes).digest("hex") !== treeId) throw new Error("Invalid managed artifact manifest digest");
+	let parsed: unknown;
+	try { parsed = JSON.parse(decodeUtf8(manifestBytes, "Managed artifact manifest")); }
+	catch (error) { throw new Error("Invalid managed artifact manifest", { cause: error }); }
+	if (!isPlainRecord(parsed) || !hasExactKeys(parsed, ["schemaVersion", "kind", "role", "files"])
+		|| parsed.schemaVersion !== 1 || parsed.kind !== "bazframe-artifact-tree" || parsed.role !== expectedRole
+		|| !Array.isArray(parsed.files) || parsed.files.length > MAX_MANAGED_ARTIFACT_FILES
+		|| !Buffer.from(`${JSON.stringify(parsed, null, 2)}\n`).equals(Buffer.from(manifestBytes))) throw new Error("Invalid managed artifact manifest");
+	const root = join(tree, "root");
+	const rootMetadata = await lstat(root);
+	const canonicalRoot = await realpath(root);
+	const canonicalHome = await realpath(bazframeHome);
+	if (rootMetadata.isSymbolicLink() || !rootMetadata.isDirectory() || !isWithin(canonicalRoot, canonicalHome)) throw new Error("Invalid managed artifact root");
+	const actualPaths: string[] = [];
+	await collectManagedArtifactPaths(root, "", 0, actualPaths);
+	const expectedPaths = parsed.files.map((value) => isPlainRecord(value) && typeof value.path === "string" ? value.path : "");
+	if (JSON.stringify(actualPaths.sort()) !== JSON.stringify([...expectedPaths].sort())) throw new Error("Invalid managed artifact closure");
+	const directories = new Set<string>();
+	let previous: string | undefined;
+	for (const value of parsed.files) {
+		if (!isPlainRecord(value) || !hasExactKeys(value, ["path", "sha256", "bytes", "executable"])
+			|| !portableCollectionRelativePath(value.path) || value.path === "." || value.path.split("/").length > 64
+			|| typeof value.sha256 !== "string" || !/^[a-f0-9]{64}$/u.test(value.sha256)
+			|| !Number.isSafeInteger(value.bytes) || Number(value.bytes) < 0 || Number(value.bytes) > MAX_MANAGED_ARTIFACT_FILE_BYTES || typeof value.executable !== "boolean"
+			|| (previous !== undefined && compareCodePoints(previous, value.path) >= 0)) throw new Error("Invalid managed artifact file");
+		previous = value.path;
+		const path = join(root, ...value.path.split("/"));
+		const metadata = await lstat(path);
+		if (metadata.isSymbolicLink() || !metadata.isFile() || metadata.size !== value.bytes) throw new Error("Invalid managed artifact file");
+		const fileBytes = await readFile(path);
+		if (fileBytes.byteLength !== value.bytes || createHash("sha256").update(fileBytes).digest("hex") !== value.sha256) throw new Error("Invalid managed artifact file");
+		if (value.path === "SKILL.md" || value.path.endsWith("/SKILL.md")) directories.add(value.path === "SKILL.md" ? root : join(root, ...value.path.split("/").slice(0, -1)));
+	}
+	return [...directories];
+}
+
+async function collectManagedArtifactPaths(root: string, prefix: string, depth: number, files: string[]): Promise<void> {
+	if (depth > 64 || files.length > MAX_MANAGED_ARTIFACT_FILES) throw new Error("Managed artifact closure exceeds limits");
+	for (const name of (await readdir(prefix === "" ? root : join(root, ...prefix.split("/")))).sort(compareCodePoints)) {
+		const relativePath = prefix === "" ? name : `${prefix}/${name}`;
+		if (!portableCollectionRelativePath(relativePath) || relativePath === ".") throw new Error("Invalid managed artifact path");
+		const path = join(root, ...relativePath.split("/"));
+		const metadata = await lstat(path);
+		if (metadata.isSymbolicLink()) throw new Error("Invalid managed artifact link");
+		if (metadata.isDirectory()) await collectManagedArtifactPaths(root, relativePath, depth + 1, files);
+		else if (metadata.isFile()) files.push(relativePath);
+		else throw new Error("Invalid managed artifact entry");
+		if (files.length > MAX_MANAGED_ARTIFACT_FILES) throw new Error("Managed artifact closure exceeds limits");
+	}
+}
+
+function compareCodePoints(left: string, right: string): number {
+	const a = [...left].map((character) => character.codePointAt(0)!);
+	const b = [...right].map((character) => character.codePointAt(0)!);
+	for (let index = 0; index < Math.min(a.length, b.length); index += 1) if (a[index] !== b[index]) return a[index]! - b[index]!;
+	return a.length - b.length;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value) && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+}
+
 async function loadProfile(bazframeHome: string): Promise<ProfileState> {
 	const id = await readActiveProfileId(bazframeHome);
 	const profilesPath = join(bazframeHome, "profiles");
@@ -1022,8 +1127,17 @@ async function loadProfile(bazframeHome: string): Promise<ProfileState> {
 			names.add(skill.name);
 		}
 		const collections = await loadProfileCollections(directory, loaded.skills);
+		const importedSkills = await loadManagedImportedSkills(bazframeHome, directory);
+		for (const imported of importedSkills) {
+			if (names.has(imported.name)) throw new Error(`Duplicate profile skill name: ${imported.name}`);
+			names.add(imported.name);
+		}
+		for (const derived of collections.derivedSkills) {
+			if (names.has(derived.name)) throw new Error(`Duplicate profile skill name: ${derived.name}`);
+			names.add(derived.name);
+		}
 		for (const openedDirectory of [...directories].reverse()) await assertCollectionDirectoryStable(openedDirectory);
-		const combined = [...loaded.skills, ...collections.derivedSkills.map((derived) => derived.skill)];
+		const combined = [...loaded.skills, ...collections.derivedSkills.map((derived) => derived.skill), ...importedSkills];
 		return {
 			id,
 			directory,

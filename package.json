@@ -1,6 +1,6 @@
 {
   "name": "bazframe",
-  "version": "0.1.0-beta.2",
+  "version": "0.1.0-beta.3",
   "description": "Manage reusable Agent Skills and profiles for coding-agent harnesses",
   "license": "MIT",
   "type": "module",
@@ -56,6 +56,8 @@
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.0.0",
     "@types/react": "19.2.18",
+    "@types/yauzl": "3.4.0",
+    "@types/yazl": "3.3.1",
     "@typescript-eslint/eslint-plugin": "^8.65.0",
     "@typescript-eslint/parser": "^8.65.0",
     "eslint": "^10.0.0",
@@ -68,6 +70,8 @@
   "dependencies": {
     "@earendil-works/pi-coding-agent": ">=0.84.4",
     "ink": "7.1.1",
-    "react": "19.2.8"
+    "react": "19.2.8",
+    "yauzl": "3.4.0",
+    "yazl": "3.3.1"
   }
 }

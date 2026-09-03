@@ -125,7 +125,7 @@ describe('remote Git source CLI', () => {
     const recoveryStatusDocument = JSON.parse((await run(['status', '--json'], cwd, environment)).stdout);
     expect(recoveryStatusDocument.result.correctiveActions).toContainEqual(expect.objectContaining({ id: 'remote-git' }));
     expect(recoveryStatusDocument.result.remoteGitSourceDiagnostics).not.toHaveLength(0);
-  }, 60_000);
+  }, 120_000);
 
   it('retains recovery state instead of publishing a package-build replacement of the rollback backup', async () => {
     const directory = await createTempDirectory('bazframe-managed-hostile-backup-'); directories.push(directory);

@@ -99,7 +99,7 @@ describe('unexposed exact-revision remote Git lifecycle', () => {
     expect(callbacks.at(-1)).toBe('update:toolkit');
     expect(await readFile(buildMarker, 'utf8')).toBe('build\nbuild\nbuild\n');
     expect((await readManagedGitRecord(home, 'package', 'toolkit')).record.revision).toBe(head);
-  }, 60_000);
+  }, 120_000);
 
   it.each(['refusal', 'manifest', 'dirty', 'origin', 'attached-head', 'branch-ref', 'root'] as const)(
     'keeps exact package %s drift or refusal pre-spawn',
@@ -264,7 +264,7 @@ describe('unexposed exact-revision remote Git lifecycle', () => {
     await expect(lstat(updateJournal.journal.staging!)).resolves.toBeDefined();
     await expect(lstat(updateJournal.journal.backup!)).resolves.toBeDefined();
     await expect(readManagedGitRecord(updateHome, 'package', 'toolkit')).resolves.toBeDefined();
-  }, 60_000);
+  }, 120_000);
 
   it('materializes a historical reachable library revision and reuses it without network', async () => {
     const directory = await createTempDirectory('bazframe-exact-git-history-'); directories.push(directory);

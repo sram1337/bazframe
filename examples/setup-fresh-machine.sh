@@ -21,15 +21,14 @@ bazframe profile use personal
 # bazframe skill add "$BAZFRAME_PACKAGE_ROOT/dist/skills/bazframe"
 # bazframe profile skill add bazframe
 
-# To restore a reviewed Stage 2 artifact, replace the `profile add/use` lines above with:
-# bazframe profile import --dry-run /path/to/profile-artifact
-# bazframe profile import --as personal /path/to/profile-artifact
-# bazframe profile use personal
+# To restore a reviewed shared profile, replace the `profile add/use` lines above with:
+# bazframe profile import --dry-run /path/to/profile.zip
+# bazframe profile import /path/to/profile.zip
+# bazframe profile use <imported-profile-name>
 #
-# For every local library declared by the artifact, add the same repeatable option to both import commands.
-# The absolute physical source directory basename must equal the library ID:
-# bazframe profile import --map library:toolkit=/absolute/path/to/toolkit --dry-run /path/to/profile-artifact
-# bazframe profile import --as personal --map library:toolkit=/absolute/path/to/toolkit /path/to/profile-artifact
+# Or import the latest exact published version from GitHub:
+# bazframe profile import --dry-run git:owner/profile-repository
+# bazframe profile import git:owner/profile-repository
 #
 # Remote Git sources remain explicit. Replace the examples before use:
 # bazframe skill add git:owner/root-skill

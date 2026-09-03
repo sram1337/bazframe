@@ -45,7 +45,7 @@ describe('experimental CLI vertical slice', () => {
     const fixture = await createFixture(true);
     const selected = await runCli(['profile', 'use', 'focused'], fixture.directory.root, fixture.environment);
     expect(selected).toMatchObject({ status: 0, stderr: '' });
-    expect(selected.stdout).toContain(`Profile directory: ${fixture.home}/profiles/focused`);
+    expect(selected.stdout).toContain('Active profile: focused');
 
     const before = await snapshotFilesystem(fixture.repository);
     const launched = await runCli(

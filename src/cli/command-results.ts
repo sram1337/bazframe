@@ -11,6 +11,7 @@ import type {
   SkillCollectionDiagnostic
 } from '../skill-collections/skill-collection-resolver.js';
 import { collectionKey, idForRecord, kindForRecord, skillsRootForRecord, type SkillCollectionKind } from '../skill-collections/skill-collection-store.js';
+import type { SharedProfileApplicationProjection } from '../profile-publishing/profile-application-projection.js';
 
 export interface ProtocolDiagnostic { level:'warning'|'info'; code:string; message:string }
 
@@ -111,9 +112,9 @@ export function profileExportResult(result: ProfileExportResult): Record<string,
  };
 }
 
-export function profileListResult(profileIds:readonly string[],activeProfile:string|undefined):Record<string,unknown>{
- const activeAvailable=activeProfile!==undefined&&profileIds.includes(activeProfile);
- return{profiles:profileIds.map((id)=>({id,active:id===activeProfile})),active:activeProfile===undefined?{state:'unselected'}:activeAvailable?{state:'selected',profileId:activeProfile}:{state:'missing',profileId:activeProfile}};
+export function profileListResult(profileIds:readonly string[],activeProfile:string|undefined,applications:readonly SharedProfileApplicationProjection[]=[]):Record<string,unknown>{
+ const activeAvailable=activeProfile!==undefined&&profileIds.includes(activeProfile);const byName=new Map(applications.map((item)=>[item.name,item]));
+ return{profiles:profileIds.map((id)=>({id,active:id===activeProfile,...(byName.get(id)?.extension??{})})),active:activeProfile===undefined?{state:'unselected'}:activeAvailable?{state:'selected',profileId:activeProfile}:{state:'missing',profileId:activeProfile}};
 }
 export function collectionDiagnosticResult(diagnostic:SkillCollectionDiagnostic):Record<string,unknown>{
  return{category:diagnostic.category,kind:diagnostic.collectionKind,id:diagnostic.collectionId,path:diagnostic.path,...('limit'in diagnostic?{limit:diagnostic.limit}:{}),...('name'in diagnostic?{name:diagnostic.name}:{}),...('diagnosticIndex'in diagnostic?{diagnosticIndex:diagnostic.diagnosticIndex,message:diagnostic.message}:{})};
@@ -132,6 +133,6 @@ export function projectListResult(projectStates:readonly RepositoryProjectState[
  return{globalPolicy,projects:projectStates.map((state)=>({repository:state.repository,state:state.schemaVersion===3?'enabled-override':state.schemaVersion===2?'disabled-override':'legacy-inherit',current:state.repository===currentWorktree})),current:currentWorktree===undefined?{state:'outside-git'}:{state:'git-worktree',repository:currentWorktree,override:currentProjectState===undefined?'inherit':currentProjectState.schemaVersion===3?'enabled-override':currentProjectState.schemaVersion===2?'disabled-override':'legacy-inherit'}};
 }
 export function statusResult(status:StatusInspection,health:'ready'|'attention'):Record<string,unknown>{
- const profile=status.profile.state!=='ready'?status.profile:{state:'ready',id:status.profile.id,instructionsPath:status.profile.instructionsPath,flatSkillCount:status.profile.flatSkillCount??status.profile.skillCount,collectionReferenceCount:status.profile.collectionReferenceCount??0,collections:(status.profile.collections??[]).map((item)=>({kind:item.collectionKind,id:item.collectionId,health:item.preparationState,root:item.collectionRoot??null,digest:item.snapshotDigest??null,skillsRoot:item.skillsRoot??null,rebuildAvailability:item.rebuildAvailability})),derivedSkills:(status.profile.derivedSkills??[]).map((item)=>({name:item.name,kind:item.collectionKind,collectionId:item.collectionId,relativePath:item.relativePath})),diagnostics:(status.profile.collectionDiagnostics??[]).map(collectionDiagnosticResult)};
+ const profile=status.profile.state!=='ready'?status.profile:{state:'ready',id:status.profile.id,instructionsPath:status.profile.instructionsPath,flatSkillCount:status.profile.flatSkillCount??status.profile.skillCount,collectionReferenceCount:status.profile.collectionReferenceCount??0,collections:(status.profile.collections??[]).map((item)=>({kind:item.collectionKind,id:item.collectionId,health:item.preparationState,root:item.collectionRoot??null,digest:item.snapshotDigest??null,skillsRoot:item.skillsRoot??null,rebuildAvailability:item.rebuildAvailability})),derivedSkills:(status.profile.derivedSkills??[]).map((item)=>({name:item.name,kind:item.collectionKind,collectionId:item.collectionId,relativePath:item.relativePath})),diagnostics:(status.profile.collectionDiagnostics??[]).map(collectionDiagnosticResult),...(status.profile.completeness===undefined?{}:{completeness:status.profile.completeness,missingResources:status.profile.missingResources??[],...(status.profile.publication===undefined?{}:{publication:status.profile.publication})})};
  return{health,bazframeHome:status.bazframeHome,piAgentDirectory:status.piAgentDirectory,adapter:{state:status.adapter.state,targetPath:status.adapter.targetPath,installedBazframeVersion:status.adapter.installedBazframeVersion??null},globalPolicy:status.globalPolicy.policy==='enabled'?{policy:'enabled',statePath:null}:{policy:'disabled',statePath:status.globalPolicy.statePath},repository:status.repository,effectiveBehavior:status.effectiveBehavior,profile,cachedCollisionAliasCount:status.cachedCollisionAliasCount,remoteGitSources:(status.managedGitProviders??[]).map(({record,health})=>({kind:record.kind,id:record.id,health,remote:record.remote,branch:record.branch,revision:record.revision,root:record.root})),remoteGitSourceDiagnostics:[...(status.managedGitDiagnostics??[])],correctiveActions:status.correctiveActions.map((item)=>({id:item.id,message:item.message}))};
 }

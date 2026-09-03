@@ -5,11 +5,12 @@ import { escapeUnsafeDisplayCharacters } from '../core/safe-text.js';
 import { isSafeProfileId } from '../profiles/profile-id.js';
 import { isManagedGitSource } from '../providers/managed-git.js';
 import { isSafeSkillId } from '../skills/skill-id.js';
+import { parseProfileGithubSource } from '../profile-publishing/profile-github.js';
 
 export type HelpTopic =
   | 'root' | 'pi' | 'adapter' | 'status' | 'global' | 'project' | 'tui'
   | 'profile' | 'profile-add' | 'profile-duplicate' | 'profile-remove' | 'profile-rename'
-  | 'profile-use' | 'profile-edit' | 'profile-export' | 'profile-import' | 'profile-list' | 'profile-current' | 'profile-skills'
+  | 'profile-use' | 'profile-edit' | 'profile-export' | 'profile-publish' | 'profile-import' | 'profile-update' | 'profile-version' | 'profile-version-list' | 'profile-version-use' | 'profile-list' | 'profile-current' | 'profile-skills'
   | 'profile-skills-add' | 'profile-skills-remove' | 'profile-libraries' | 'profile-libraries-add' | 'profile-libraries-remove'
   | 'profile-packages' | 'profile-packages-add' | 'profile-packages-remove'
   | 'libraries' | 'libraries-add' | 'libraries-update' | 'libraries-remove'
@@ -19,17 +20,17 @@ export type HelpTopic =
 type NoArgumentCommandName = 'profiles-overview' | 'profile-list' | 'profile-current' | 'skills-overview' | 'profile-skills-overview' | 'libraries-overview' | 'packages-overview' | 'profile-libraries-overview' | 'profile-packages-overview' | 'projects-overview' | 'global-overview' | 'adapters-overview' | 'global-enable' | 'global-disable' | 'project-enable' | 'project-disable' | 'status' | 'tui';
 type NoArgumentCommand = { [Name in NoArgumentCommandName]: { name: Name } }[NoArgumentCommandName];
 
-export interface ProfileImportCliMapping {
-  kind: 'library' | 'package';
-  id: string;
-  root: string;
-}
+export type ProfileImportCliSource = { kind: 'zip'; path: string } | { kind: 'git'; value: string; revision?: string };
 
 export type Command =
   | NoArgumentCommand
   | { name: 'profile-add' | 'profile-use' | 'profile-edit'; profileId: string }
-  | { name: 'profile-export'; profileId: string; outputDirectory: string }
-  | { name: 'profile-import'; artifactDirectory: string; destinationProfileId?: string; mappings: ProfileImportCliMapping[]; dryRun: boolean; yes: boolean }
+  | { name: 'profile-export'; profileId?: string; outputPath?: string; overwrite: boolean; bundleRemote: boolean }
+  | { name: 'profile-publish'; profileId?: string; visibility: 'preserve' | 'public' | 'private'; bundleRemote: boolean; yes: boolean }
+  | { name: 'profile-import'; source: ProfileImportCliSource; dryRun: boolean; overwrite: boolean; yes: boolean }
+  | { name: 'profile-update'; profileId?: string; overwrite: boolean }
+  | { name: 'profile-version-list'; profileId?: string }
+  | { name: 'profile-version-use'; revision: string; profileId?: string; overwrite: boolean }
   | { name: 'profile-duplicate'; sourceProfileId: string; profileId: string }
   | { name: 'profile-remove'; profileId: string; force: boolean }
   | { name: 'profile-rename'; previousProfileId: string; profileId: string }
@@ -56,7 +57,7 @@ export type ParseResult =
 
 const HELP_FLAGS = new Set(['-h', '--help']);
 const VERSION_FLAGS = new Set(['-v', '--version']);
-const VALUE_OPTIONS = new Set(['--as', '--map', '--output', '--profile']);
+const VALUE_OPTIONS = new Set(['--commit', '--output', '--profile']);
 
 export function parseArgv(input: readonly string[]): ParseResult {
   const extracted = extractJson(input);
@@ -129,7 +130,7 @@ function parseHelp(args: readonly string[]): ParseResult {
   if (legacy !== undefined) return migration(['help', ...legacy], 'root');
   const key = args.join(' ');
   const topics = new Map<string, HelpTopic>([
-    ['profile','profile'], ['profile list','profile-list'], ['profile current','profile-current'], ['profile add','profile-add'], ['profile duplicate','profile-duplicate'], ['profile remove','profile-remove'], ['profile rename','profile-rename'], ['profile use','profile-use'], ['profile edit','profile-edit'], ['profile export','profile-export'], ['profile import','profile-import'],
+    ['profile','profile'], ['profile list','profile-list'], ['profile current','profile-current'], ['profile add','profile-add'], ['profile duplicate','profile-duplicate'], ['profile remove','profile-remove'], ['profile rename','profile-rename'], ['profile use','profile-use'], ['profile edit','profile-edit'], ['profile export','profile-export'], ['profile publish','profile-publish'], ['profile import','profile-import'], ['profile update','profile-update'], ['profile version','profile-version'], ['profile version list','profile-version-list'], ['profile version use','profile-version-use'],
     ['profile skill','profile-skills'], ['profile skill list','profile-skills'], ['profile skill add','profile-skills-add'], ['profile skill remove','profile-skills-remove'],
     ['profile library','profile-libraries'], ['profile library list','profile-libraries'], ['profile library add','profile-libraries-add'], ['profile library remove','profile-libraries-remove'],
     ['profile package','profile-packages'], ['profile package list','profile-packages'], ['profile package add','profile-packages-add'], ['profile package remove','profile-packages-remove'],
@@ -153,6 +154,7 @@ function parseProfile(args: readonly string[]): ParseResult {
   if (rest.length === 1 && HELP_FLAGS.has(rest[0])) return { kind: 'help', topic };
   if (verb === 'list') return parseNoArgs('profile-list', rest, 'profile-list');
   if (verb === 'current') return parseNoArgs('profile-current', rest, 'profile-current');
+  if (verb === 'version') return parseProfileVersion(rest);
   if (verb === 'duplicate' || verb === 'rename') {
     const operands = noOptions(rest, topic);
     if (!Array.isArray(operands)) return operands;
@@ -167,93 +169,65 @@ function parseProfile(args: readonly string[]): ParseResult {
     return command({ name:'profile-remove', profileId:parsed.operands[0]!, force:parsed.booleans.has('force') });
   }
   if (verb === 'export') {
-    const parsed = options(rest, [], ['output'], topic); if ('kind' in parsed) return parsed;
-    if (parsed.operands.length !== 1 || !isSafeProfileId(parsed.operands[0]!)) return invalidProfile(topic, 'profile export requires one valid <profile>.');
-    const outputDirectory = parsed.values.get('output');
-    if (outputDirectory === undefined || outputDirectory.includes('\0')) return usage('profile export requires one nonempty --output <directory> value without NUL bytes.', topic);
-    return command({ name:'profile-export', profileId:parsed.operands[0]!, outputDirectory });
+    const parsed = options(rest, ['overwrite','bundle-remote'], ['output','profile'], topic); if ('kind' in parsed) return parsed;
+    if (parsed.operands.length !== 0) return usage('profile export accepts no positional profile; use --profile <profile>.', topic);
+    const profileId = parsed.values.get('profile'); if (profileId !== undefined && !isSafeProfileId(profileId)) return invalidProfile(topic);
+    const outputPath = parsed.values.get('output'); if (outputPath?.includes('\0')) return usage('--output must not contain NUL bytes.', topic);
+    return command({ name:'profile-export', ...(profileId === undefined ? {} : { profileId }), ...(outputPath === undefined ? {} : { outputPath }), overwrite:parsed.booleans.has('overwrite'), bundleRemote:parsed.booleans.has('bundle-remote') });
+  }
+  if (verb === 'publish') {
+    const parsed = options(rest, ['yes','public','private','bundle-remote'], ['profile'], topic); if ('kind' in parsed) return parsed;
+    if (parsed.operands.length !== 0) return usage('profile publish accepts no positional arguments.', topic);
+    if (parsed.booleans.has('public') && parsed.booleans.has('private')) return usage('--public and --private are mutually exclusive.', topic);
+    const profileId = parsed.values.get('profile'); if (profileId !== undefined && !isSafeProfileId(profileId)) return invalidProfile(topic);
+    return command({ name:'profile-publish', ...(profileId === undefined ? {} : { profileId }), visibility:parsed.booleans.has('public')?'public':parsed.booleans.has('private')?'private':'preserve', bundleRemote:parsed.booleans.has('bundle-remote'), yes:parsed.booleans.has('yes') });
   }
   if (verb === 'import') return parseProfileImport(rest, topic);
+  if (verb === 'update') {
+    const parsed = options(rest, ['overwrite'], ['profile'], topic); if ('kind' in parsed) return parsed;
+    if (parsed.operands.length !== 0) return usage('profile update accepts no positional arguments.', topic);
+    const profileId = parsed.values.get('profile'); if (profileId !== undefined && !isSafeProfileId(profileId)) return invalidProfile(topic);
+    return command({ name:'profile-update', ...(profileId === undefined ? {} : { profileId }), overwrite:parsed.booleans.has('overwrite') });
+  }
   if (verb === 'add' || verb === 'use' || verb === 'edit') {
     const operands = noOptions(rest, topic); if (!Array.isArray(operands)) return operands;
     if (operands.length !== 1) return usage(`profile ${verb} requires exactly one <profile> argument.`, topic);
     if (!isSafeProfileId(operands[0]!)) return invalidProfile(topic);
     return command({ name:`profile-${verb}` as 'profile-add'|'profile-use'|'profile-edit', profileId:operands[0]! });
   }
-  return usage('profile requires `list`, `current`, `export`, `import`, a lifecycle verb, or singular `skill`, `library`, or `package`.', 'profile');
+  return usage('profile requires `list`, `current`, `export`, `publish`, `import`, `update`, `version`, a lifecycle verb, or singular `skill`, `library`, or `package`.', 'profile');
 }
 
 function parseProfileImport(args: readonly string[], topic: HelpTopic): ParseResult {
-  const operands: string[] = [];
-  const mappings: ProfileImportCliMapping[] = [];
-  const mappingKeys = new Set<string>();
-  let destinationProfileId: string | undefined;
-  let dryRun = false;
-  let yes = false;
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index]!;
-    if (!arg.startsWith('-')) { operands.push(arg); continue; }
-    if (arg === '--') return usage('The `--` operand delimiter is not supported for this command.', topic);
-    const match = /^--([^=]+)(?:=(.*))?$/.exec(arg);
-    if (match === null) return usage(`Unknown option: ${arg}`, topic);
-    const name = match[1]!;
-    const inline = match[2];
-    if (name === 'dry-run' || name === 'yes') {
-      if (inline !== undefined) return usage(`Option --${name} does not accept a value.`, topic);
-      if (name === 'dry-run') {
-        if (dryRun) return usage('Option --dry-run may be specified only once.', topic);
-        dryRun = true;
-      } else {
-        if (yes) return usage('Option --yes may be specified only once.', topic);
-        yes = true;
-      }
-      continue;
-    }
-    if (name === 'as') {
-      if (destinationProfileId !== undefined) return usage('Option --as may be specified only once.', topic);
-      const value = inline !== undefined ? inline : args[++index];
-      if (value === undefined || value.length === 0 || value.startsWith('-')) return usage('Option --as requires a value.', topic);
-      if (!isSafeProfileId(value)) return invalidProfile(topic);
-      destinationProfileId = value;
-      continue;
-    }
-    if (name === 'map') {
-      const value = inline !== undefined ? inline : args[++index];
-      if (value === undefined || value.length === 0 || value.startsWith('-')) return usage('Option --map requires a value.', topic);
-      const mapping = parseProfileImportMapping(value, topic);
-      if ('kind' in mapping) return mapping;
-      const key = `${mapping.mapping.kind}:${mapping.mapping.id}`;
-      if (mappingKeys.has(key)) return usage(`Mapping ${key} may be specified only once.`, topic);
-      mappingKeys.add(key);
-      mappings.push(mapping.mapping);
-      continue;
-    }
-    return usage(`Unknown option: ${arg}`, topic);
+  const parsed = options(args, ['dry-run','overwrite','yes'], ['commit'], topic); if ('kind' in parsed) return parsed;
+  if (parsed.operands.length !== 1 || parsed.operands[0]!.length === 0 || parsed.operands[0]!.includes('\0')) return usage('profile import requires one nonempty ZIP path or git:<owner>/<repository>.', topic);
+  const input = parsed.operands[0]!;
+  const revision = parsed.values.get('commit');
+  if (input.startsWith('git:')) {
+    try { parseProfileGithubSource(input); } catch { return usage('Git profile sources must use git:<owner>/<repository>.', topic); }
+    return command({ name:'profile-import', source:{ kind:'git', value:input, ...(revision === undefined ? {} : { revision }) }, dryRun:parsed.booleans.has('dry-run'), overwrite:parsed.booleans.has('overwrite'), yes:parsed.booleans.has('yes') });
   }
-  if (yes && dryRun) return usage('Options --yes and --dry-run cannot be used together.', topic);
-  if (operands.length !== 1 || operands[0]!.length === 0 || operands[0]!.includes('\0')) {
-    return usage('profile import requires one nonempty <directory> value without NUL bytes.', topic);
-  }
-  return command({
-    name: 'profile-import',
-    artifactDirectory: operands[0]!,
-    ...(destinationProfileId === undefined ? {} : { destinationProfileId }),
-    mappings,
-    dryRun,
-    yes
-  });
+  if (revision !== undefined) return usage('--commit applies only to git:<owner>/<repository>.', topic);
+  return command({ name:'profile-import', source:{ kind:'zip', path:input }, dryRun:parsed.booleans.has('dry-run'), overwrite:parsed.booleans.has('overwrite'), yes:parsed.booleans.has('yes') });
 }
 
-function parseProfileImportMapping(value: string, topic: HelpTopic): { mapping: ProfileImportCliMapping } | ParseResult {
-  const match = /^([^:=]+):([^=]+)=(.*)$/u.exec(value);
-  if (match === null) return usage('Option --map requires (library|package):<id>=<absolute-source-directory>.', topic);
-  const [, kind, id, root] = match;
-  if (kind !== 'library' && kind !== 'package') return usage('Option --map supports only library and package resources.', topic);
-  if (id === undefined || !isSafeSkillId(id)) return invalidCollection(kind, topic);
-  if (root === undefined || root.length === 0 || root.includes('\0') || !isAbsolute(root)) {
-    return usage(`Mapped ${kind} roots must be nonempty absolute paths without NUL bytes.`, topic);
+function parseProfileVersion(args: readonly string[]): ParseResult {
+  if (args.length === 0 || (args.length === 1 && HELP_FLAGS.has(args[0]))) return { kind:'help', topic:'profile-version' };
+  const [verb, ...rest] = args;
+  if ((verb==='list'||verb==='use')&&rest.length===1&&HELP_FLAGS.has(rest[0])) return {kind:'help',topic:`profile-version-${verb}`};
+  if (verb === 'list') {
+    const parsed = options(rest, [], ['profile'], 'profile-version-list'); if ('kind' in parsed) return parsed;
+    if (parsed.operands.length !== 0) return usage('profile version list accepts no positional arguments.', 'profile-version-list');
+    const profileId = parsed.values.get('profile'); if (profileId !== undefined && !isSafeProfileId(profileId)) return invalidProfile('profile-version-list');
+    return command({ name:'profile-version-list', ...(profileId === undefined ? {} : { profileId }) });
   }
-  return { mapping: { kind, id, root } };
+  if (verb === 'use') {
+    const parsed = options(rest, ['overwrite'], ['profile'], 'profile-version-use'); if ('kind' in parsed) return parsed;
+    if (parsed.operands.length !== 1 || !/^[a-f0-9]{1,64}$/u.test(parsed.operands[0]!)) return usage('profile version use requires one lowercase hexadecimal <commit>.', 'profile-version-use');
+    const profileId = parsed.values.get('profile'); if (profileId !== undefined && !isSafeProfileId(profileId)) return invalidProfile('profile-version-use');
+    return command({ name:'profile-version-use', revision:parsed.operands[0]!, ...(profileId === undefined ? {} : { profileId }), overwrite:parsed.booleans.has('overwrite') });
+  }
+  return usage('profile version requires `list` or `use`.', 'profile-version');
 }
 
 function parseSkill(args: readonly string[]): ParseResult {
@@ -315,7 +289,7 @@ function parseProfileMember(kind:'skill'|'library'|'package',args:readonly strin
   if(verb!=='add'&&verb!=='remove')return usage(`profile ${kind} requires \`list\`, \`add\`, or \`remove\`.`,topic);
   const parsed=options(rest,[],['profile'],topic);if('kind'in parsed)return parsed;
   if(parsed.operands.length!==1)return usage(`profile ${kind} ${verb} requires one <${kind}>.`,topic);
-  const id=parsed.operands[0]!;if(!isSafeSkillId(id))return kind==='skill'?invalidSkill(topic):invalidCollection(kind,topic);
+  const id=parsed.operands[0]!;if(!isProfileResourceSelector(id))return invalidResourceSelector(kind,topic);
   const profileId=parsed.values.get('profile');if(profileId!==undefined&&!isSafeProfileId(profileId))return invalidProfile(topic);
   if(kind==='skill')return command({name:`profile-skill-${verb}`,skillId:id,...(profileId===undefined?{}:{profileId})} as Command);
   return command({name:`profile-${plural}-${verb}`,id,...(profileId===undefined?{}:{profileId})} as Command);
@@ -353,7 +327,8 @@ type ParsedOptions={operands:string[];booleans:Set<string>;values:Map<string,str
 function options(args:readonly string[],booleanNames:readonly string[],valueNames:readonly string[],topic:HelpTopic):ParsedOptions|ParseResult{
   const booleans=new Set<string>();const values=new Map<string,string>();const operands:string[]=[];
   for(let i=0;i<args.length;i++){
-    const arg=args[i]!;if(!arg.startsWith('-')){operands.push(arg);continue;}
+    let arg=args[i]!;if(!arg.startsWith('-')){operands.push(arg);continue;}
+    if(arg==='-y'&&booleanNames.includes('yes'))arg='--yes';
     if(arg==='--')return usage('The `--` operand delimiter is not supported for this command.',topic);
     const match=/^--([^=]+)(?:=(.*))?$/.exec(arg);if(match===null)return usage(`Unknown option: ${arg}`,topic);
     const name=match[1]!,inline=match[2];
@@ -391,3 +366,5 @@ function capitalize(value:string):string{return value[0]!.toUpperCase()+value.sl
 function invalidProfile(topic:HelpTopic,message='Profile IDs must be 1-64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen.'):ParseResult{return usage(message,topic);}
 function invalidSkill(topic:HelpTopic):ParseResult{return usage('Skill IDs must be 1-64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen.',topic);}
 function invalidCollection(kind:'library'|'package',topic:HelpTopic):ParseResult{return usage(`${capitalize(kind)} IDs must be 1-64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen.`,topic);}
+function isProfileResourceSelector(value:string):boolean{const parts=value.split('/');return parts.length<=2&&parts.every((part)=>isSafeSkillId(part));}
+function invalidResourceSelector(kind:'skill'|'library'|'package',topic:HelpTopic):ParseResult{return usage(`Profile ${kind} selectors must be a canonical name or one <profile>/<name> selector.`,topic);}

@@ -4,12 +4,13 @@ import { readUtf8InstructionFile } from '../core/content.js';
 import type { ChildResult } from '../core/child-process.js';
 import type { InheritedChildRunner } from '../core/external-editor.js';
 import { BazframeError, errorCode } from '../core/errors.js';
-import {
-  addProfile,
-  duplicateProfile,
-  removeProfile,
-  renameProfile
-} from '../profiles/profile-management.js';
+import { boundedTextForDisplay } from '../core/safe-text.js';
+import { readProfileSystemView } from '../profile-publishing/profile-view.js';
+import { mutateImportedProfileResourceMembership } from '../profile-publishing/profile-resource-membership.js';
+import { projectTuiProfileApplications } from '../profile-publishing/profile-application-projection.js';
+import type { JsonProfileStateV1OptionalExtension } from '../profile-publishing/profile-command-presentation.js';
+import { addProfile } from '../profiles/profile-management.js';
+import { duplicateManagedProfile, removeManagedProfile, renameManagedProfile, useManagedProfile } from '../profile-publishing/profile-managed-lifecycle.js';
 import {
   addProfileSkill,
   removeProfileSkill,
@@ -27,8 +28,7 @@ import {
 } from '../profiles/profile-removal-identity.js';
 import {
   profileDirectory,
-  readActiveProfile,
-  selectProfile
+  readActiveProfile
 } from '../profiles/profile-store.js';
 import { editSkillDefinition as launchSkillDefinitionEditor } from '../skills/skill-definition-editor.js';
 import { assertSafeSkillId, isSafeSkillId } from '../skills/skill-id.js';
@@ -113,6 +113,9 @@ export interface ProfileSummary {
   memberships: DirectMembership[];
   libraryReferences?: ProfileCollectionReferenceSummary[];
   packageReferences?: ProfileCollectionReferenceSummary[];
+  completeness?: JsonProfileStateV1OptionalExtension['completeness'];
+  missingResources?: JsonProfileStateV1OptionalExtension['missingResources'];
+  publication?: JsonProfileStateV1OptionalExtension['publication'];
 }
 
 export interface SkillSummary {
@@ -276,16 +279,16 @@ export function createBazframeTuiService(
       await addProfile(options.bazframeHome, profileId);
     },
     async duplicateProfile(sourceProfileId, profileId) {
-      await duplicateProfile(options.bazframeHome, sourceProfileId, profileId);
+      await duplicateManagedProfile(options.bazframeHome, sourceProfileId, profileId);
     },
     async useProfile(profileId) {
-      await selectProfile(options.bazframeHome, profileId);
+      await useManagedProfile(options.bazframeHome, profileId);
     },
     async toggleProfileFavorite(profileId) {
       await toggleStoredProfileFavorite(options.bazframeHome, profileId);
     },
     async renameProfile(previousProfileId, profileId) {
-      await renameProfile(options.bazframeHome, previousProfileId, profileId);
+      await renameManagedProfile(options.bazframeHome, previousProfileId, profileId);
     },
     async removeProfile(profileId, authorization) {
       if (authorization.kind === 'recursive') {
@@ -295,12 +298,10 @@ export function createBazframeTuiService(
             `Recursive removal confirmation must exactly match ${JSON.stringify(profileId)}.`
           );
         }
-        await removeProfile(options.bazframeHome, profileId, true, {
-          expectedIdentity: authorization.removalIdentity
-        });
+        await removeManagedProfile(options.bazframeHome, profileId,{expectedRemovalIdentity:authorization.removalIdentity});
         return;
       }
-      await removeProfile(options.bazframeHome, profileId, false);
+      await removeManagedProfile(options.bazframeHome,profileId,{requireGeneratedEmpty:true});
     },
     async editProfileInstructions(profileId) {
       return launchProfileInstructionEditor({
@@ -330,19 +331,26 @@ export function createBazframeTuiService(
       });
     },
     async addMembership(profileId, skill) {
+      if(skill.originId.startsWith('imported:')){
+        const view=await readProfileSystemView(options.bazframeHome);
+        const projected=view.skills.find((item)=>item.sourceResourceIdentity===skill.originId&&(item.name===skill.skillId||item.displayName===skill.skillId)&&item.directlyAttachable);
+        if(projected===undefined)throw new BazframeError('PROFILE_SKILL_MEMBERSHIP_STALE','Stale imported Skill membership reference.');
+        await mutateImportedProfileResourceMembership(options.bazframeHome,profileId,projected.sourceResourceIdentity,'add');
+        return;
+      }
       assertKnownOrigin(skill.originId);
       await addProfileSkill(options, profileId, skill.skillId);
     },
     async removeMembership(profileId, membership) {
-      assertKnownOrigin(membership.originId);
-      const expectedMembershipId = membershipProjectionId(profileId, membership.skillId);
+      const expectedMembershipId = membership.originId.startsWith('imported:')?importedMembershipProjectionId(profileId,membership.originId):membershipProjectionId(profileId, membership.skillId);
       if (membership.membershipId !== expectedMembershipId) {
         throw new BazframeError(
           'PROFILE_SKILL_MEMBERSHIP_STALE',
           `Stale profile skill membership reference: ${JSON.stringify(membership.membershipId)}`
         );
       }
-      await removeProfileSkill(options, profileId, membership.skillId);
+      if(membership.originId.startsWith('imported:'))await mutateImportedProfileResourceMembership(options.bazframeHome,profileId,membership.originId,'remove');
+      else { assertKnownOrigin(membership.originId); await removeProfileSkill(options, profileId, membership.skillId); }
     },
     async loadSkillPreview(skill) {
       return loadSkillPreview(options, skill);
@@ -386,7 +394,7 @@ async function loadSkillPreview(
   options: BazframeTuiServiceOptions,
   reference: SkillReference
 ): Promise<SkillPreview> {
-  assertSafeSkillId(reference.skillId);
+  if(!reference.originId.startsWith('imported:'))assertSafeSkillId(reference.skillId);
   let definitionPath: string | undefined;
   if (reference.originId === DEFAULT_SKILL_SOURCE_ID) {
     try {
@@ -402,6 +410,10 @@ async function loadSkillPreview(
     const collection = global.collections.find((item) => kindForRecord(item.record) === kind && idForRecord(item.record) === id);
     if (collection === undefined || collection.diagnostics.length > 0) throw new BazframeError('SKILL_PREVIEW_STALE', `${kind === 'library' ? 'Library' : 'Package'} is unavailable: ${id}`);
     definitionPath = collection.skills.find((skill) => skill.name === reference.skillId)?.definitionPath;
+  } else if(reference.originId.startsWith('imported:')){
+    const view=await readProfileSystemView(options.bazframeHome);
+    definitionPath=view.skills.find((item)=>item.sourceResourceIdentity===reference.originId&&(item.name===reference.skillId||item.displayName===reference.skillId))?.directory;
+    if(definitionPath!==undefined)definitionPath=join(definitionPath,'SKILL.md');
   } else {
     throw new BazframeError('SKILL_ORIGIN_UNKNOWN', `Unknown Skill origin: ${reference.originId}`);
   }
@@ -553,6 +565,7 @@ async function inspectDashboard(
       collectionGroups.push({ id: key, label: `${kind === 'library' ? 'Library' : 'Package'}: ${id}`, root: immutableRoot, artifactWritesSupported: false, skills: item.skills.map((skill) => ({ id: skill.name, originId: key, directory: skill.baseDir })) });
     }
   }
+  const importedDirectGroupIds=new Set<string>();
   const profiles = await inspectProfiles(
     options.bazframeHome,
     defaultCatalog?.registrations ?? [],
@@ -561,6 +574,28 @@ async function inspectDashboard(
     global,
     diagnostics
   );
+  try{
+    const systemView=await readProfileSystemView(options.bazframeHome);
+    const profileApplications=new Map(projectTuiProfileApplications(systemView,activeProfileId??null).map((item)=>[item.name,item.extension]));
+    for(const profile of profiles){
+      Object.assign(profile,profileApplications.get(profile.id)??{});
+      const projected=systemView.skills.filter((item)=>item.ownerProfiles.includes(profile.id)&&item.sourceResourceIdentity.startsWith('imported:'));
+      if(projected.some((item)=>item.directlyAttachable))profile.membershipWritable=true;
+      for(const item of projected)profile.memberships.push({id:item.displayName,membershipId:item.directlyAttachable?importedMembershipProjectionId(profile.id,item.sourceResourceIdentity):`${profile.id}:derived:${item.stableIdentity}`,originId:item.sourceResourceIdentity,skillId:item.displayName,path:item.directory,kind:'managed',manageable:item.directlyAttachable});
+      for(const resource of systemView.namespace.filter((item)=>item.ownerProfiles.includes(profile.id)&&item.stableIdentity.startsWith('imported:')&&item.kind!=='skill')){
+        const kind:SkillCollectionKind=resource.kind==='library'?'library':'package';
+        const summary:ProfileCollectionReferenceSummary={kind,id:resource.displayName,path:'.bazframe-profile-state.json',availability:resource.projected?'available':'unavailable',...(resource.projected?{}:{diagnostic:'Imported resource is unavailable.'})};
+        (resource.kind==='library'?profile.libraryReferences!:profile.packageReferences!).push(summary);
+      }
+    }
+    const byResource=new Map<string,typeof systemView.skills>();
+    for(const item of systemView.skills.filter((candidate)=>candidate.sourceResourceIdentity.startsWith('imported:'))){const group=byResource.get(item.sourceResourceIdentity)??[];group.push(item);byResource.set(item.sourceResourceIdentity,group);}
+    for(const [identity,items] of byResource){
+      const resource=systemView.namespace.find((item)=>item.stableIdentity===identity);if(resource===undefined)continue;
+      const group:SkillGroupSummary={id:identity,label:`Imported ${resource.kind==='skill'?'Skill':resource.kind==='library'?'Library':'Package'}: ${resource.displayName}`,root:items[0]!.directory,artifactWritesSupported:false,skills:items.map((item)=>({id:item.displayName,originId:identity,directory:item.directory}))};
+      collectionGroups.push(group);if(resource.kind==='skill')importedDirectGroupIds.add(identity);
+    }
+  }catch(error){diagnostics.push(diagnostic('profile-system-view',error));}
   const projectedProfileIds = new Set(profiles.map((profile) => profile.id));
   for (const profileId of favoriteProfileIds) {
     if (projectedProfileIds.has(profileId)) continue;
@@ -571,7 +606,8 @@ async function inspectDashboard(
     });
   }
   const { adapterStatus, status } = await inspectSetupStatuses(options, diagnostics);
-  const availableSkillGroups = defaultCatalog === undefined ? [] : [defaultCatalog.group];
+  const importedDirectGroups=collectionGroups.filter((group)=>importedDirectGroupIds.has(group.id));
+  const availableSkillGroups = [...(defaultCatalog === undefined ? [] : [defaultCatalog.group]),...importedDirectGroups];
   return {
     revision,
     ...(activeProfileId === undefined ? {} : { activeProfileId }),
@@ -920,6 +956,7 @@ function lexicalCompare(left: string, right: string): number {
 function membershipProjectionId(profileId: string, skillId: string): string {
   return `${profileId}:default:${skillId}`;
 }
+function importedMembershipProjectionId(profileId:string,stableIdentity:string):string{return `${profileId}:${stableIdentity}`;}
 
 function assertKnownOrigin(originId: string): void {
   if (originId !== DEFAULT_SKILL_SOURCE_ID) {
@@ -939,6 +976,6 @@ function diagnostic(id: string, error: unknown): DashboardDiagnostic {
   return {
     id,
     severity: 'error',
-    message: error instanceof Error ? error.message : String(error)
+    message: boundedTextForDisplay(error instanceof Error ? error.message : String(error))
   };
 }

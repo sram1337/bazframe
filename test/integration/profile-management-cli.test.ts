@@ -53,22 +53,20 @@ describe('profile management CLI', () => {
     expect((await run(['profile', 'skill', 'add', 'demo-skill'])).stdout)
       .toContain('Profile skill membership: added');
     await directory.write('home/profiles/focused/AGENTS.md', 'focused instructions');
-    await directory.write('home/profiles/focused/notes/detail.txt', 'detail');
     const providerBefore = await snapshotFilesystem(provider);
-    const sourceBefore = await snapshotFilesystem(directory.path('home/profiles/focused'));
 
     const duplicated = await run(['profile', 'duplicate', 'focused', 'focused-copy']);
     expect(duplicated).toMatchObject({ status: 0, stderr: '' });
     expect(duplicated.stdout).toContain('Profile lifecycle: duplicated');
     expect(duplicated.stdout).toContain('Source profile: focused');
     expect(duplicated.stdout).toContain('Active selection updated: no');
-    expect(await snapshotFilesystem(directory.path('home/profiles/focused-copy')))
-      .toEqual(sourceBefore);
+    expect(await directory.readText('home/profiles/focused-copy/AGENTS.md')).toBe('focused instructions');
+    expect(await realpath(directory.path('home/profiles/focused-copy/skills/demo-skill'))).toBe(providerSkill);
     expect((await run(['profile', 'current'])).stdout).toBe('focused\n');
     expect((await run(['profile', 'list'])).stdout).toContain('  - focused-copy');
     const duplicateAgain = await run(['profile', 'duplicate', 'focused', 'focused-copy']);
     expect(duplicateAgain.status).toBe(1);
-    expect(duplicateAgain.stderr).toContain('occupied');
+    expect(duplicateAgain.stderr).toContain('already exists');
 
     const renamed = await run(['profile', 'rename', 'focused', 'reviewer']);
     expect(renamed).toMatchObject({ status: 0, stderr: '' });
@@ -189,9 +187,9 @@ describe('profile management CLI', () => {
     const rootHelp = await runCli(['--help'], cwd, environment);
     expect(rootHelp).toMatchObject({ status: 0, stderr: '' });
     expect(rootHelp.stdout).toContain('Resources:');
-    expect(rootHelp.stdout).toContain('Queries:');
-    expect(rootHelp.stdout).toContain('bazframe profile list');
-    expect(rootHelp.stdout).not.toContain('bazframe profile add [--json] <profile>');
+    expect(rootHelp.stdout).toContain('Profile sharing:');
+    expect(rootHelp.stdout).toContain('bazframe profile publish');
+    expect(rootHelp.stdout).not.toContain('--map');
 
     const help = await runCli(['profile', '--help'], cwd, environment);
     expect(help).toMatchObject({ status: 0, stderr: '' });

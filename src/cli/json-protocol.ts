@@ -16,7 +16,7 @@ export interface JsonFailure { schemaVersion: 1; ok: false; command: string; err
 export function commandId(command: Command): string {
   const ids: Record<Command['name'], string> = {
     'profiles-overview':'profile.list','profile-list':'profile.list','profile-current':'profile.current',
-    'profile-add':'profile.add','profile-duplicate':'profile.duplicate','profile-remove':'profile.remove','profile-rename':'profile.rename','profile-use':'profile.use','profile-edit':'profile.edit','profile-export':'profile.export','profile-import':'profile.import',
+    'profile-add':'profile.add','profile-duplicate':'profile.duplicate','profile-remove':'profile.remove','profile-rename':'profile.rename','profile-use':'profile.use','profile-edit':'profile.edit','profile-export':'profile.export','profile-publish':'profile.publish','profile-import':'profile.import','profile-update':'profile.update','profile-version-list':'profile.version.list','profile-version-use':'profile.version.use',
     'skills-overview':'skill.list','default-skill-add':'skill.add','default-skill-remove':'skill.remove','skill-update':'skill.update','skill-edit':'skill.edit',
     'profile-skills-overview':'profile.skill.list','profile-skill-add':'profile.skill.add','profile-skill-remove':'profile.skill.remove',
     'libraries-overview':'library.list','libraries-add':'library.add','libraries-update':'library.update','libraries-remove':'library.remove',
@@ -40,6 +40,7 @@ export function inferredCommandId(argv: readonly string[]): string {
   if((words[0]==='add'||words[0]==='remove')&&words[1]==='skill')return`skill.${words[0]}`;
   if(words[0]==='profile'&&words[1]!==undefined&&words[1] in plurals)words[1]=plurals[words[1]]!;
   if (words[0] === 'profile' && ['skill','library','package'].includes(words[1] ?? '')) return [words[0],words[1],words[2]??'list'].join('.');
+  if(words[0]==='profile'&&words[1]==='version'&&(words[2]==='list'||words[2]==='use'))return`profile.version.${words[2]}`;
   if (['profile','skill','library','package','project','global','adapter'].includes(words[0] ?? '')) return [words[0],words[1]??(words[0]==='global'?'show':'list')].join('.');
   return words[0] ?? 'unknown';
 }

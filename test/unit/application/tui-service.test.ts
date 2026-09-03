@@ -70,6 +70,8 @@ describe('Bazframe TUI service', () => {
     expect((await fixture.service.loadDashboard()).revision).toBe(2);
   });
 
+  it('reports malformed managed state as bounded attention instead of a healthy profile projection',async()=>{const fixture=await createFixture();await fixture.directory.write('home/profiles/focused/.bazframe-profile-state.json','{}\n');const dashboard=await fixture.service.loadDashboard();expect(dashboard.status).toMatchObject({state:'unavailable'});expect(dashboard.diagnostics).toContainEqual(expect.objectContaining({id:'profile-system-view',severity:'error'}));expect(dashboard.profiles.find((profile)=>profile.id==='focused')).not.toHaveProperty('completeness');});
+
   it('mutates an explicit inactive profile and preserves active selection and provider content', async () => {
     if (process.platform === 'win32') return;
     const fixture = await createFixture();

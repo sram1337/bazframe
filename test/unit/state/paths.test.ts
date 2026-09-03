@@ -1,10 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { resolveBazframeHome, resolvePiAgentDirectory } from '../../../src/state/paths.js';
+import { profilePublishingBlobRoot, profilePublishingOperationLockRoot, profilePublishingRoot, profilePublishingStagingRoot, profilePublishingTransactionRoot, profilePublishingTreeRoot, resolveBazframeHome, resolvePiAgentDirectory } from '../../../src/state/paths.js';
 
 describe('external state paths', () => {
   it('resolves Bazframe and Pi defaults from the user home', () => {
     expect(resolveBazframeHome({}, '/users/alice')).toBe('/users/alice/.bazframe');
     expect(resolvePiAgentDirectory({}, '/users/alice')).toBe('/users/alice/.pi/agent');
+  });
+
+  it('derives profile-publishing store, transaction, staging, and operation-lock paths', () => {
+    expect(profilePublishingRoot('/home')).toBe('/home/profile-publishing');
+    expect(profilePublishingBlobRoot('/home')).toBe('/home/profile-publishing/blobs');
+    expect(profilePublishingTreeRoot('/home')).toBe('/home/profile-publishing/trees');
+    expect(profilePublishingTransactionRoot('/home')).toBe('/home/profile-publishing/transactions');
+    expect(profilePublishingStagingRoot('/home')).toBe('/home/profile-publishing/staging');
+    expect(profilePublishingOperationLockRoot('/home')).toBe('/home/profile-publishing/operation-locks');
   });
 
   it('accepts normalized absolute overrides', () => {

@@ -1,8 +1,8 @@
 # Profile Portability Design
 
-> Status: Stage 3 remote-Git and explicitly mapped local library/package export/import is live on macOS and Linux; Windows support and full portability remain pending
+> Status: historical Stage 3 contract, superseded by the shipped profile-sharing lifecycle in `profile-publishing-design.md` and `profile-publishing-engineering.md`; its directory artifact, `--as`, `--map`, omission, and partial-result guidance is not live CLI behavior
 >
-> `docs/design.md` remains the product source of truth. This document defines the implementation contract for profile export and import.
+> This document is retained as implementation history. Do not use its commands or schemas as current user guidance.
 
 ## Purpose
 
@@ -194,7 +194,7 @@ Portable Node directory rename has no conditional no-replace primitive. On some 
 bazframe profile import [--json] [--as <profile>] [--map (library|package):<id>=<absolute-source-directory>]... [--dry-run | --yes] <directory>
 ```
 
-This is the live Stage 3 grammar. `--map` is repeatable and typed for libraries and packages. `--yes` cannot be combined with `--dry-run`.
+This was the Stage 3 grammar before the profile-sharing replacement. It is retained only as historical design context; these options are not live.
 
 Import always begins with inspection and displays the resulting plan before it does anything else. By default it then executes that plan. `--dry-run` stops after inspection without taking a Bazframe write lock and performs no DNS, clone, fetch, build, package-declared process execution, prompt, Bazframe-home or artifact write, active-profile change, or policy/adapter/cache mutation. Inspection may perform bounded local reads and isolated non-network Git health checks for resources already present. Package execution retains its separate literal-`y` interactive confirmation or exact `--yes` authorization.
 
@@ -382,7 +382,7 @@ Implementation reuses the existing safe-ID, instruction-byte, traversal, Skill-d
 - use private staging and identity-checked cleanup preparation with a fresh root identity check before recursive removal;
 - avoid printing instruction bodies during ordinary inspection and errors.
 
-Existing authoritative limits apply where their semantics match, including the current effective-instruction and Skill traversal limits. Live Stage 3 export enforces a 1 MiB canonical manifest, 1,024 total profile entries across included Skills, omitted local Skills, libraries, and packages, 256 resources, and 1,024 entries in each streamed profile namespace inspection through its export-specific capture scanner.
+At this historical stage, existing authoritative limits applied where their semantics matched, including the then-current effective-instruction and Skill traversal limits. Stage 3 export enforced a 1 MiB canonical manifest, 1,024 total profile entries across included Skills, omitted local Skills, libraries, and packages, 256 resources, and 1,024 entries in each streamed profile namespace inspection through its export-specific capture scanner.
 
 Skill snapshot publication and verification enforce a 4 MiB raw and canonical manifest, 8,192 physical entries including the root, depth 32 with the root at depth zero, 4,096 UTF-8 bytes per relative path, 64 MiB logical bytes per regular file, and 512 MiB aggregate logical regular-file bytes. Directory enumeration and file copy/hash are streamed; per-file and aggregate budgets reconcile actual streamed bytes and stop concurrent growth after reading at most one byte beyond the applicable ceiling. Verification performs two bounded manifest/tree comparisons while retaining stable no-follow per-file reads and held root-directory identities. Cleanup preparation uses the same ceilings, makes only identity-checked physical directories writable through held handles, and refuses linked, special, unknown, or substituted entries. It freshly revalidates the cleanup root's physical identity immediately before recursive removal. Portable Node lacks handle-relative recursive deletion, so a non-cooperating same-user process can still substitute the root between that last check and `rm`; this residual final-pathname race is not claimed as identity-proven deletion. Test-only policy injection may lower but never raise these production limits.
 
@@ -455,7 +455,7 @@ Add:
 - `src/profile-portability/profile-import-local-library.ts`: live local library/package mapping identity, exact manifest capture for packages, and exact create/reuse classification;
 - `src/profile-portability/profile-import-package-build.ts`: bounded exact package-build report, consent identity, and possible-effect accounting;
 - `src/profile-portability/profile-import-plan.ts`: live no-write Stage 3 planning, typed mapping closure/overlap checks, and collision classification;
-- `src/profile-portability/profile-import.ts`: live Stage 3 remote Git/local library/package orchestration and final profile publication.
+- `src/profile-portability/profile-import.ts`: historical Stage 3 remote Git/local library/package orchestration and final profile publication.
 
 Required factoring:
 
@@ -487,7 +487,7 @@ Focused core, lifecycle-race, CLI/JSON, separate-home integration, and installed
 
 ### Stage 3: packages
 
-Stage 3 is live in the production CLI on macOS and Linux. Exports include path-free remote Git and `localMapping` package requirements. Import accepts typed repeatable library/package maps, acquires branch-reachable historical remote package revisions exactly, processes packages last, and creates mapped or remote packages through the ordinary bounded lifecycle. Exact healthy packages are reused offline without build, report, prompt, or consent.
+At the time of this historical record, Stage 3 was deployed in the production CLI on macOS and Linux. Its exports included path-free remote Git and `localMapping` package requirements. Its import accepted typed repeatable library/package maps, acquired branch-reachable historical remote package revisions exactly, processed packages last, and created mapped or remote packages through the ordinary bounded lifecycle. Exact healthy packages were reused offline without build, report, prompt, or consent. The replacement profile-sharing lifecycle has since superseded this surface.
 
 Every new build receives an exact manifest/argv/source/root report immediately before literal-`y` default-decline or `--yes` authorization, followed by adjacent root/manifest/Git revalidation. Reports state inherited `shell: false` execution, unsandboxed `current-process-user` credential/network/user-file risk, and nonrollbackable effects; partial results retain possible-effect package IDs. The 64 KiB manifest, 64-argument, 4 KiB per-argument, 16 KiB aggregate-argv, 4,096-byte package-path, 30-minute build, and 5-second termination-grace bounds are enforced.
 
