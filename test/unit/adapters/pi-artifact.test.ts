@@ -51,6 +51,57 @@ afterEach(async () => {
 });
 
 describe('packaged Pi adapter command', () => {
+  it('gates native Windows before state resolution, resources, agent start, and info', async () => {
+    const directory = await createTempDirectory('bazframe-pi-artifact-win32-gate-');
+    temporaryDirectories.push(directory);
+    process.env.BAZFRAME_HOME = directory.path('must-not-be-read');
+    process.env.PI_CODING_AGENT_DIR = directory.path('must-not-be-read-pi');
+    const adapter = await loadArtifact(directory, false, '0.84.4', {
+      runtimePlatform: 'win32',
+      poisonResolveState: true
+    });
+    const harness = register(adapter, []);
+    const notifications: Array<{ message: string; level: string }> = [];
+    const context = {
+      cwd: directory.path('cwd'),
+      hasUI: true,
+      ui: { notify: (message: string, level: string) => { notifications.push({ message, level }); } }
+    };
+
+    expect(required(harness.events, 'input')({}, context)).toEqual({ action: 'handled' });
+    await expect(required(harness.events, 'session_start')({}, context)).resolves.toBeUndefined();
+    await expect(required(harness.events, 'resources_discover')(
+      { cwd: directory.path('other-cwd') }, context
+    )).resolves.toBeUndefined();
+    const beforeAgent = required(harness.events, 'before_agent_start')(
+      { systemPrompt: 'native', systemPromptOptions: { contextFiles: [] } }, context
+    ) as { systemPrompt: string };
+    expect(beforeAgent.systemPrompt).toContain('Do not act on the user request.');
+    expect(beforeAgent.systemPrompt).toContain('Native Windows support is not available');
+
+    let reloaded = 0;
+    let info = { message: '', level: '' };
+    const command = required(harness.commands, 'bazframe');
+    await command.handler('info', {
+      getSystemPromptOptions: () => { throw new Error('info inspected Pi context'); },
+      reload: async () => { reloaded += 1; },
+      ui: { notify: (message: string, level: string) => { info = { message, level }; } }
+    });
+    expect(info).toEqual({
+      message: 'Native Windows support is not available in this Bazframe release. Use Bazframe on macOS or Linux; help and version output remain available.',
+      level: 'error'
+    });
+    await command.handler('reload', {
+      reload: async () => { reloaded += 1; },
+      ui: { notify: () => undefined }
+    });
+    expect(reloaded).toBe(1);
+    await expect(required(harness.events, 'resources_discover')(
+      { cwd: directory.path('after-reload') }, context
+    )).resolves.toBeUndefined();
+    expect(notifications.every(({ message }) => message.includes('Native Windows support is not available'))).toBe(true);
+  });
+
   it.each([
     ['0.84.3', false],
     ['0.84.4-beta.1', false],
@@ -1174,12 +1225,26 @@ function register(adapter: LoadedAdapter, runtimeCommands: RuntimeCommand[]): Ha
 async function loadArtifact(
   directory: TempDirectory,
   loadSkills: false | true | 'reject' | 'parity' = false,
-  piVersion = '0.84.4'
+  piVersion = '0.84.4',
+  testOptions: { runtimePlatform?: NodeJS.Platform; poisonResolveState?: boolean } = {}
 ): Promise<LoadedAdapter> {
-  const source = await readFile(
+  let source = await readFile(
     new URL('../../../artifacts/pi/bazframe.ts', import.meta.url),
     'utf8'
   );
+  if (testOptions.runtimePlatform !== undefined) {
+    const marker = 'const BAZFRAME_RUNTIME_PLATFORM = process.platform;';
+    if (!source.includes(marker)) throw new Error('Packaged Pi platform seam is missing');
+    source = source.replace(
+      marker,
+      `const BAZFRAME_RUNTIME_PLATFORM = ${JSON.stringify(testOptions.runtimePlatform)};`
+    );
+  }
+  if (testOptions.poisonResolveState === true) {
+    const marker = 'async function resolveState(cwd: string): Promise<AdapterState> {';
+    if (!source.includes(marker)) throw new Error('Packaged Pi state resolver marker is missing');
+    source = source.replace(marker, `${marker}\n\tthrow new Error("resolveState reached on gated platform");`);
+  }
   const compiled = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
     fileName: 'bazframe.ts'

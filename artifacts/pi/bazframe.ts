@@ -160,6 +160,10 @@ interface SkillAlias {
 	aliasPath: string;
 }
 
+const BAZFRAME_RUNTIME_PLATFORM = process.platform;
+const WINDOWS_PLATFORM_UNSUPPORTED_MESSAGE =
+	"Native Windows support is not available in this Bazframe release. Use Bazframe on macOS or Linux; help and version output remain available.";
+
 interface AdapterState {
 	cwd: string;
 	bazframeHome: string;
@@ -181,6 +185,18 @@ interface GitResult {
 	stdout: Uint8Array;
 	stderr: Uint8Array;
 	error?: Error;
+}
+
+function initialAdapterState(cwd: string): AdapterState {
+	return {
+		cwd,
+		bazframeHome: process.env.BAZFRAME_HOME ?? join(homedir(), ".bazframe"),
+		initialized: BAZFRAME_RUNTIME_PLATFORM === "win32",
+		projectBehavior: "outside-git",
+		globalPolicy: "enabled",
+		skillAliases: [],
+		...(BAZFRAME_RUNTIME_PLATFORM === "win32" ? { error: WINDOWS_PLATFORM_UNSUPPORTED_MESSAGE } : {}),
+	};
 }
 
 function compatibilityFailure(): string | undefined {
@@ -1542,18 +1558,13 @@ function showFailure(ctx: ExtensionContext, message: string): void {
 }
 
 export default function bazframePiAdapter(pi: ExtensionAPI): void {
-	let state: AdapterState = {
-		cwd: process.cwd(),
-		bazframeHome: process.env.BAZFRAME_HOME ?? join(homedir(), ".bazframe"),
-		initialized: false,
-		projectBehavior: "outside-git",
-		globalPolicy: "enabled",
-		skillAliases: [],
-	};
+	let state = initialAdapterState(process.cwd());
 	let contextModeNotified = false;
 
 	pi.on("session_start", async (_event, ctx) => {
-		state = await resolveState(ctx.cwd);
+		state = BAZFRAME_RUNTIME_PLATFORM === "win32"
+			? initialAdapterState(ctx.cwd)
+			: await resolveState(ctx.cwd);
 		contextModeNotified = false;
 		if (state.error !== undefined && ctx.hasUI) {
 			ctx.ui.notify(`Bazframe profile failed to load: ${state.error}`, "error");
@@ -1561,7 +1572,9 @@ export default function bazframePiAdapter(pi: ExtensionAPI): void {
 	});
 
 	pi.on("resources_discover", async (event, ctx) => {
-		state = await resolveState(event.cwd);
+		state = BAZFRAME_RUNTIME_PLATFORM === "win32"
+			? initialAdapterState(event.cwd)
+			: await resolveState(event.cwd);
 		if (!state.initialized || state.error !== undefined || state.profile === undefined) return;
 		try {
 			const prepared = await prepareProfileSkillPaths(state, pi);
@@ -1597,13 +1610,15 @@ export default function bazframePiAdapter(pi: ExtensionAPI): void {
 	});
 
 	pi.on("before_agent_start", (event, ctx) => {
-		if (!state.initialized || state.profile === undefined) return;
+		if (!state.initialized) return;
+		if (BAZFRAME_RUNTIME_PLATFORM !== "win32" && state.profile === undefined) return;
 		if (state.error !== undefined) {
 			showFailure(ctx, state.error);
 			return {
 				systemPrompt: `Bazframe Pi adapter failed before agent start. Do not act on the user request.\n\n${state.error}`,
 			};
 		}
+		if (state.profile === undefined) return;
 		let restoreGlobalContext: boolean;
 		try {
 			restoreGlobalContext = contextPaths(event.systemPromptOptions).length === 0;
@@ -1641,6 +1656,10 @@ export default function bazframePiAdapter(pi: ExtensionAPI): void {
 		handler: async (args, ctx) => {
 			switch (args.trim()) {
 				case "info":
+					if (BAZFRAME_RUNTIME_PLATFORM === "win32") {
+						ctx.ui.notify(WINDOWS_PLATFORM_UNSUPPORTED_MESSAGE, "error");
+						return;
+					}
 					ctx.ui.notify(info(state, pi, ctx), state.error === undefined ? "info" : "error");
 					return;
 				case "reload":

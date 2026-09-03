@@ -12,6 +12,10 @@ import { childExitStatus, spawnPi } from '../agents/spawn-pi.js';
 import { BazframeError } from '../core/errors.js';
 import { EXIT_STATUS } from '../core/exit-status.js';
 import type { InheritedChildRunner } from '../core/external-editor.js';
+import {
+  assertBazframePlatformSupported,
+  WINDOWS_PLATFORM_UNSUPPORTED_CODE
+} from '../core/platform-support.js';
 import { boundedPathForDisplay, boundedTextForDisplay, escapeUnsafeDisplayCharacters, stringifyForTerminal } from '../core/safe-text.js';
 import { composeInstructions } from '../harness/compose-instructions.js';
 import { createTemporaryInstructionFile } from '../harness/temporary-instructions.js';
@@ -159,6 +163,8 @@ import { projectManagedProfileRuntime } from '../profile-publishing/profile-runt
 export interface CliDependencies {
   cwd?: () => string;
   environment?: NodeJS.ProcessEnv;
+  /** Internal test seam. Production callers use process.platform. */
+  platform?: NodeJS.Platform;
   temporaryRoot?: string;
   piExecutable?: string;
   userHome?: string;
@@ -237,6 +243,7 @@ export async function runCli(
     let result: Record<string, unknown> | undefined;
     const diagnostics: ProtocolDiagnostic[] = [];
     try {
+      assertBazframePlatformSupported(dependencies.platform);
       if(parsed.command.name==='profile-publish'&&!parsed.command.yes)throw new BazframeError('PROFILE_PUBLISH_CONFIRMATION_REQUIRED','Profile publication in JSON mode requires --yes.');
       if (parsed.command.name === 'packages-add' && isManagedGitSource(parsed.command.root) && !parsed.command.yes) throw new BazframeError('MANAGED_GIT_BUILD_CONFIRMATION_REQUIRED', 'Package acquisition from a remote Git source in JSON mode requires --yes.');
       if (parsed.command.name === 'packages-update' && !parsed.command.yes) throw new BazframeError('MANAGED_GIT_BUILD_CONFIRMATION_REQUIRED', 'Package update from a remote Git source in JSON mode requires --yes.');
@@ -261,11 +268,15 @@ export async function runCli(
   }
 
   try {
+    assertBazframePlatformSupported(dependencies.platform);
     return await invokeWithProfileRuntime(parsed.command, dependencies, (next) => runCommand(parsed.command,next,writeStdout,writeStderr,stdoutColors,stderrColors));
   } catch (error) {
     const id=commandId(parsed.command);
     const message = isLifecycleCommandId(id)?projectLifecycleSafeMessage(error instanceof Error?error.message:'Bazframe encountered an unexpected internal error.'):boundedTextForDisplay(error instanceof Error ? error.message : String(error));
-    writeStderr(`${stderrColors.error('error:')} ${message}\n`);
+    const code = error instanceof BazframeError && error.code === WINDOWS_PLATFORM_UNSUPPORTED_CODE
+      ? `${WINDOWS_PLATFORM_UNSUPPORTED_CODE}: `
+      : '';
+    writeStderr(`${stderrColors.error('error:')} ${code}${message}\n`);
     return interruptionExitStatus(error) ?? (isLifecycleCommandId(id)&&isLifecycleRefusalError(error)?EXIT_STATUS.usage:EXIT_STATUS.failure);
   }
 }
