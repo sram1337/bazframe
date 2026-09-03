@@ -30,6 +30,15 @@ export PI_CODING_AGENT_DIR="$TEMP_ROOT/pi-agent"
 
 Remove the temporary root after the check. Do not point tests at `$HOME/.bazframe` or `$HOME/.pi/agent`.
 
+Use the reusable checks during development:
+
+```bash
+npm run check:quick
+npm run check:publishing # when changing profile publishing or its public projections
+```
+
+`check:quick` runs static and diff-integrity checks without building or testing. `check:publishing` builds and runs the directly related unit and integration suites, but it does not replace complete validation.
+
 Run the standard validation gate before submitting a change:
 
 ```bash
