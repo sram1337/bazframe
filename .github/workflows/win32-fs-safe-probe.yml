@@ -1,0 +1,51 @@
+name: Experimental Windows fs-safe evidence
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  public-api-probe:
+    name: Evidence collection only (green is not foundation acceptance or Windows support)
+    runs-on: windows-2022
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: tools/win32-fs-safe-probe
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+          cache-dependency-path: tools/win32-fs-safe-probe/package-lock.json
+      - name: Run the same checked harness used on local Windows machines
+        id: probe
+        continue-on-error: true
+        run: '& ..\..\scripts\run-win32-fs-safe-probe.ps1'
+      - name: Upload evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: experimental-win32-fs-safe-evidence
+          if-no-files-found: warn
+          path: |
+            tools/win32-fs-safe-probe/evidence.json
+            tools/win32-fs-safe-probe/npm-install.log
+      - name: Report collection status; green means collection completed only
+        if: always()
+        run: |
+          @(
+            "## Experimental Windows fs-safe evidence",
+            "A green job means evidence collection completed. It does **not** mean foundation acceptance, production adoption, or Windows support.",
+            "Checked local harness: ${{ steps.probe.outcome }}."
+          ) | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+          if (Test-Path ./evidence.json) { Get-Content ./evidence.json }
+          if ("${{ steps.probe.outcome }}" -ne "success") {
+            throw "The experimental evidence collection did not complete; inspect the uploaded staged failure report."
+          }
