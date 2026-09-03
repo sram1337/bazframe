@@ -23,7 +23,7 @@ Pi owns runtime settings and resources. Bazframe owns profile lifecycle, selecti
 
 ```bash
 npm install --global --ignore-scripts @earendil-works/pi-coding-agent
-npm install --global bazframe@next
+npm install --global bazframe
 bazframe adapter install pi
 bazframe status
 ```

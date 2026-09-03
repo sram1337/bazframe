@@ -135,7 +135,7 @@ try {
     || manifest.homepage !== 'https://github.com/sram1337/bazframe#readme'
     || manifest.bugs?.url !== 'https://github.com/sram1337/bazframe/issues'
     || manifest.publishConfig?.access !== 'public'
-    || manifest.publishConfig?.tag !== 'next'
+    || manifest.publishConfig?.tag !== 'latest'
   ) {
     throw new Error('Packed public-package metadata does not match the pending beta contract.');
   }

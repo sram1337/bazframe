@@ -27,7 +27,7 @@ Bazframe is currently a beta for Pi 0.84.4 or newer on macOS and Linux.
 
 ```bash
 npm install --global --ignore-scripts @earendil-works/pi-coding-agent
-npm install --global bazframe@next
+npm install --global bazframe
 
 # Create a profile. `profile edit` uses VISUAL, then EDITOR.
 bazframe profile add personal

@@ -53,7 +53,7 @@ Passing the tarball path published the inspected bytes rather than repacking the
 ```bash
 npm view bazframe@0.1.0-beta.1 name version dist-tags repository --json
 npm dist-tag ls bazframe
-npm install --global bazframe@next
+npm install --global bazframe
 bazframe --version
 ```
 
@@ -71,4 +71,4 @@ After the package exists, configure its npm trusted publisher for:
 
 Protect the GitHub `npm` environment with the desired reviewer gate. The workflow uses a GitHub-hosted runner, `id-token: write`, and npm 11 or newer. It carries no npm token; npm exchanges the workflow's OIDC identity for short-lived publishing authority and generates provenance.
 
-Subsequent releases use a clean `v<package-version>` tag. `.github/workflows/npm-publish.yml` first validates without OIDC authority: it verifies the tag, refuses private or missing-license metadata, accepts either a root-license choice or explicit `UNLICENSED`, requires the package to exist, runs tests and the production audit, then packs, checksums, and uploads one tarball. Only the protected `npm` publish job receives `id-token: write`; it verifies the downloaded checksum and publishes that exact tarball with the `next` tag. Configure the trusted publisher before pushing a release tag.
+Subsequent releases use a clean `v<package-version>` tag. `.github/workflows/npm-publish.yml` first validates without OIDC authority: it verifies the tag, refuses private or missing-license metadata, accepts either a root-license choice or explicit `UNLICENSED`, requires the package to exist, runs tests and the production audit, then packs, checksums, and uploads one tarball. Only the protected `npm` publish job receives `id-token: write`; it verifies the downloaded checksum and publishes that exact tarball with the default `latest` tag. Configure the trusted publisher before pushing a release tag.

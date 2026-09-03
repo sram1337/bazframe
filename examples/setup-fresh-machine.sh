@@ -7,8 +7,8 @@ set -e
 # Install a current Pi release (Bazframe requires Pi 0.84.4 or newer).
 npm install --global --ignore-scripts @earendil-works/pi-coding-agent
 
-# Install the Bazframe public beta from npm's next channel.
-npm install --global bazframe@next
+# Install the current Bazframe release.
+npm install --global bazframe
 
 # Install the Pi adapter and create a local profile.
 bazframe adapter install pi

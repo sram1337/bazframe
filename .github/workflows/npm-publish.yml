@@ -47,8 +47,8 @@ jobs:
           if (manifest.license !== 'UNLICENSED' && !existsSync('LICENSE')) {
             throw new Error('A non-UNLICENSED package requires a root LICENSE file.');
           }
-          if (manifest.publishConfig?.access !== 'public' || manifest.publishConfig?.tag !== 'next') {
-            throw new Error('The npm beta must publish publicly with the next dist-tag.');
+          if (manifest.publishConfig?.access !== 'public' || manifest.publishConfig?.tag !== 'latest') {
+            throw new Error('Bazframe releases must publish publicly with the default latest dist-tag.');
           }
           NODE
       - name: Require an existing npm package
@@ -103,4 +103,4 @@ jobs:
           mapfile -t TARBALLS < <(find release -maxdepth 1 -type f -name '*.tgz' -print)
           test "${#TARBALLS[@]}" -eq 1
           (cd release && sha256sum --check "$(basename "${TARBALLS[0]}").sha256")
-          npm publish "${TARBALLS[0]}" --access public --tag next
+          npm publish "${TARBALLS[0]}" --access public --tag latest

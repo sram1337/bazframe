@@ -23,10 +23,10 @@ Install Pi and the Bazframe public beta globally:
 
 ```bash
 npm install --global --ignore-scripts @earendil-works/pi-coding-agent
-npm install --global bazframe@next
+npm install --global bazframe
 ```
 
-`next` is Bazframe's explicit beta channel. Verify the installed commands:
+The current beta is Bazframe's default npm release. Verify the installed commands:
 
 ```bash
 pi --version
@@ -39,7 +39,7 @@ To update, repeat the installation commands. After each Bazframe update, reinsta
 
 ```bash
 npm install --global --ignore-scripts @earendil-works/pi-coding-agent
-npm install --global bazframe@next
+npm install --global bazframe
 bazframe adapter install pi
 ```
 

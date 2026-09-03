@@ -12,7 +12,7 @@ The resulting flow is:
 
 ```bash
 npm install --global --ignore-scripts @earendil-works/pi-coding-agent
-npm install --global bazframe@next
+npm install --global bazframe
 bazframe adapter install pi
 bazframe profile add focused
 bazframe profile edit focused
@@ -21,7 +21,7 @@ cd my-project
 pi
 ```
 
-Bazframe supports Pi 0.84.4 or newer. The npm beta installs from the `next` channel; Pi, Skills, libraries, and packages retain their own distribution lifecycles.
+Bazframe supports Pi 0.84.4 or newer. The npm beta is the default `latest` release; Pi, Skills, libraries, and packages retain their own distribution lifecycles.
 
 `bazframe adapter install pi` is a one-time, explicit setup step. It copies Bazframe's packaged extension into Pi's global extension directory and records ownership metadata so Bazframe can update, repair, or safely uninstall only that artifact. Pi then discovers the extension automatically.
 
