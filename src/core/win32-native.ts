@@ -74,6 +74,12 @@ export interface WindowsPrivateDirectoryCreationReceipt {
   parentAfter: WindowsPathInspection;
 }
 
+export interface WindowsPrivateFileCreationReceipt {
+  parentBefore: WindowsPathInspection;
+  created: WindowsPathInspection;
+  parentAfter: WindowsPathInspection;
+}
+
 export interface WindowsStableReadReceipt {
   bytes: Buffer;
   byteCount: string;
@@ -103,6 +109,7 @@ export interface WindowsStableDirectoryEnumerationReceipt {
 export interface BazframeWin32NativeBackend {
   inspectPath(path: string): WindowsPathInspection;
   createPrivateDirectory(parentPath: string, finalComponent: string): WindowsPrivateDirectoryCreationReceipt;
+  createPrivateFile(parentPath: string, finalComponent: string): WindowsPrivateFileCreationReceipt;
   renameDirectoryNoReplace(
     parentPath: string,
     sourceComponent: string,
@@ -119,6 +126,7 @@ interface RawNativeModule {
   getNativeWindowsInfo: () => unknown;
   inspectWindowsPath: (path: string) => unknown;
   createWindowsPrivateDirectory: (parentPath: string, finalComponent: string) => unknown;
+  createWindowsPrivateFile: (parentPath: string, finalComponent: string) => unknown;
   renameWindowsDirectoryNoReplace: (
     parentPath: string,
     sourceComponent: string,
@@ -261,6 +269,28 @@ export function loadBazframeWin32Native(
         );
       }
     },
+    createPrivateFile(
+      parentPath: string,
+      finalComponent: string
+    ): WindowsPrivateFileCreationReceipt {
+      requirePath(parentPath);
+      requireFinalComponent(finalComponent);
+      let receipt: unknown;
+      try {
+        receipt = native.createWindowsPrivateFile(parentPath, finalComponent);
+      } catch (error) {
+        throw nativeCreationFailure(error);
+      }
+      try {
+        return privateFileCreationReceipt(receipt, finalComponent);
+      } catch (error) {
+        throw failure(
+          'WINDOWS_NATIVE_CREATE_AMBIGUOUS',
+          'The native Windows private-file creation result is malformed; the created path must be inspected before reuse.',
+          error
+        );
+      }
+    },
     async renameDirectoryNoReplace(
       parentPath: string,
       sourceComponent: string,
@@ -348,6 +378,7 @@ function nativeModule(value: unknown): RawNativeModule {
     'getNativeWindowsInfo',
     'inspectWindowsPath',
     'createWindowsPrivateDirectory',
+    'createWindowsPrivateFile',
     'renameWindowsDirectoryNoReplace',
     'readWindowsFileStable',
     'enumerateWindowsDirectoryStable'
@@ -399,6 +430,26 @@ function privateDirectoryCreationReceipt(
   const parentAfter = pathInspection(record.parentAfter);
   if (parentBefore.kind !== 'directory' || parentAfter.kind !== 'directory'
     || created.kind !== 'directory' || !sameDirectoryIdentity(parentBefore, parentAfter)
+    || parentBefore.volume.identity !== created.volume.identity
+    || parentBefore.volume.identity !== parentAfter.volume.identity
+    || !isDirectCanonicalChild(parentBefore.canonicalPath, created.canonicalPath, finalComponent)) {
+    invalid();
+  }
+  return { parentBefore, created, parentAfter };
+}
+
+function privateFileCreationReceipt(
+  value: unknown,
+  finalComponent: string
+): WindowsPrivateFileCreationReceipt {
+  const record = exactRecord(value, ['parentBefore', 'created', 'parentAfter'], 'private file creation');
+  const parentBefore = pathInspection(record.parentBefore);
+  const created = pathInspection(record.created);
+  const parentAfter = pathInspection(record.parentAfter);
+  if (parentBefore.kind !== 'directory' || parentAfter.kind !== 'directory'
+    || created.kind !== 'regular-file' || created.object.numberOfLinks !== '00000001'
+    || created.object.size !== '0000000000000000'
+    || !sameDirectoryIdentity(parentBefore, parentAfter)
     || parentBefore.volume.identity !== created.volume.identity
     || parentBefore.volume.identity !== parentAfter.volume.identity
     || !isDirectCanonicalChild(parentBefore.canonicalPath, created.canonicalPath, finalComponent)) {

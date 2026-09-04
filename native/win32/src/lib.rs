@@ -123,6 +123,13 @@ pub struct WindowsPrivateDirectoryCreationReceipt {
 }
 
 #[napi(object)]
+pub struct WindowsPrivateFileCreationReceipt {
+    pub parent_before: WindowsPathInspection,
+    pub created: WindowsPathInspection,
+    pub parent_after: WindowsPathInspection,
+}
+
+#[napi(object)]
 pub struct WindowsStableReadReceipt {
     pub bytes: Buffer,
     pub byte_count: String,
@@ -204,6 +211,20 @@ pub fn create_windows_private_directory(
         component.and_then(|component| {
             platform::create_windows_private_directory(&parent_path, &component)
         }),
+    )
+}
+
+#[napi(js_name = "createWindowsPrivateFile")]
+pub fn create_windows_private_file(
+    env: Env,
+    parent_path: String,
+    final_component: Utf16String,
+) -> Result<WindowsPrivateFileCreationReceipt> {
+    let component = component::validate_final_component(&final_component);
+    into_napi(
+        env,
+        component
+            .and_then(|component| platform::create_windows_private_file(&parent_path, &component)),
     )
 }
 

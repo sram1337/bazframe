@@ -12,7 +12,7 @@ use napi::Error;
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS,
     ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_FILES, ERROR_PATH_NOT_FOUND,
-    ERROR_SHARING_VIOLATION, ERROR_SUCCESS, GENERIC_READ, GetLastError, HANDLE,
+    ERROR_SHARING_VIOLATION, ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE,
     INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
@@ -28,7 +28,7 @@ use windows_sys::Win32::Security::{
     SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
+    CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_SEQUENTIAL_SCAN,
     FILE_ID_EXTD_DIR_INFO, FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED,
@@ -44,7 +44,8 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken}
 use crate::{
     DirectoryEntryData, DirectoryEnumerationData, NativeResult, StableReadData,
     WindowsObjectObservation, WindowsPathInspection, WindowsPrivateDirectoryCreationReceipt,
-    WindowsSecurityObservation, WindowsVolumeObservation, native_error,
+    WindowsPrivateFileCreationReceipt, WindowsSecurityObservation, WindowsVolumeObservation,
+    native_error,
 };
 
 const DRIVE_FIXED: u32 = 3;
@@ -161,6 +162,88 @@ pub(crate) fn create_windows_private_directory(
             )
         },
     )
+}
+
+pub(crate) fn create_windows_private_file(
+    parent_path: &str,
+    final_component: &str,
+) -> NativeResult<WindowsPrivateFileCreationReceipt> {
+    let parent = open_admitted_path(parent_path, FILE_READ_ATTRIBUTES | READ_CONTROL)?;
+    let parent_before = inspect_opened_path(&parent)?;
+    if parent_before.kind != "directory" {
+        return Err(native_error(
+            "ERR_WIN32_NOT_DIRECTORY",
+            "private-file creation requires a directory parent",
+        ));
+    }
+
+    let target_path = join_direct_child(parent_path, final_component);
+    let target_extended = extended_drive_path(&target_path)?;
+    let descriptor = private_security_descriptor(&parent_before.security.current_user_sid)?;
+    let mut attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: 0,
+    };
+    let encoded = wide(&target_extended);
+    // SAFETY: the path and security descriptor are terminated/valid and remain
+    // alive for the complete no-replace creation call.
+    let created_handle = unsafe {
+        CreateFileW(
+            encoded.as_ptr(),
+            GENERIC_WRITE | FILE_READ_ATTRIBUTES | READ_CONTROL,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            &mut attributes,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            null_mut(),
+        )
+    };
+    if created_handle == INVALID_HANDLE_VALUE {
+        return Err(last_win_error("create protected Windows file"));
+    }
+    let _created_handle = OwnedHandle(created_handle);
+
+    let parent_after = inspect_opened_path(&parent).map_err(|_| {
+        native_error(
+            "ERR_WIN32_CREATE_AMBIGUOUS",
+            "private-file creation succeeded but its parent could not be proved",
+        )
+    })?;
+    let created = inspect_windows_path(&target_path).map_err(|_| {
+        native_error(
+            "ERR_WIN32_CREATE_AMBIGUOUS",
+            "private-file creation succeeded but its result could not be proved",
+        )
+    })?;
+    let separator = if parent_before.canonical_path.ends_with('\\') {
+        ""
+    } else {
+        "\\"
+    };
+    let expected_child = format!(
+        "{}{}{}",
+        parent_before.canonical_path, separator, final_component
+    );
+    if !same_directory_identity(&parent_before, &parent_after)
+        || !same_security_observation(&parent_before.security, &parent_after.security)
+        || created.kind != "regular-file"
+        || created.object.number_of_links != "00000001"
+        || created.object.size != "0000000000000000"
+        || created.volume.identity != parent_before.volume.identity
+        || created.object.volume_identity != parent_before.object.volume_identity
+        || created.canonical_path != expected_child
+    {
+        return Err(native_error(
+            "ERR_WIN32_CREATE_AMBIGUOUS",
+            "private-file creation result was not the requested empty stable direct child",
+        ));
+    }
+    Ok(WindowsPrivateFileCreationReceipt {
+        parent_before,
+        created,
+        parent_after,
+    })
 }
 
 fn inspect_opened_path(opened: &OpenedPath) -> NativeResult<WindowsPathInspection> {

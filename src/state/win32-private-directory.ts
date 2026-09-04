@@ -125,6 +125,62 @@ export function createWindowsPrivateDirectory(
   }
 }
 
+/** Creates one protected, owner-private empty file without replacement or cleanup. */
+export function createWindowsPrivateFile(
+  backend: BazframeWin32NativeBackend,
+  parentPath: string,
+  finalComponent: string
+): WindowsPathInspection {
+  if (!isValidWindowsPathComponent(finalComponent)) {
+    throw failure(
+      'WINDOWS_PRIVATE_FILE_NAME_INVALID',
+      'The Windows private-file name is invalid or reserved.'
+    );
+  }
+  const chain = inspectPrivateChain(backend, parentPath);
+  const admittedChain = revalidateChain(backend, chain);
+  const admittedParent = admittedChain[0]!.inspection;
+  let receipt;
+  try {
+    receipt = backend.createPrivateFile(parentPath, finalComponent);
+  } catch (error) {
+    if (errorCode(error) === 'WINDOWS_NATIVE_DIRECTORY_OCCUPIED') {
+      throw failure('WINDOWS_PRIVATE_FILE_OCCUPIED', 'The private file destination is already occupied.', error);
+    }
+    if (errorCode(error) === 'WINDOWS_NATIVE_CREATE_AMBIGUOUS') throw fileCreateAmbiguous(error);
+    throw error;
+  }
+
+  try {
+    requireSameDirectory(admittedParent, receipt.parentBefore);
+    requireSameSecurity(admittedParent.security, receipt.parentBefore.security);
+    requireSameDirectory(receipt.parentBefore, receipt.parentAfter);
+    requireSameSecurity(receipt.parentBefore.security, receipt.parentAfter.security);
+    requireDirectPrivateChild(receipt.parentBefore, receipt.created, finalComponent);
+    requireSameCurrentUser(receipt.parentBefore, receipt.created);
+    assertPrivateFile(receipt.created);
+    if (receipt.created.object.size !== '0000000000000000') {
+      throw fileInvalid('created file is not empty');
+    }
+    if (!isProtected(receipt.created.security)) throw fileInvalid('created file DACL is not protected');
+
+    const afterChain = revalidateChain(backend, admittedChain);
+    requireSameDirectory(receipt.parentAfter, afterChain[0]!.inspection);
+    requireSameSecurity(receipt.parentAfter.security, afterChain[0]!.inspection.security);
+    const child = backend.inspectPath(win32.join(parentPath, finalComponent));
+    assertPrivateFile(child);
+    if (child.object.size !== '0000000000000000') throw fileInvalid('created file is not empty');
+    if (!isProtected(child.security)) throw fileInvalid('created file DACL is not protected');
+    requireSameRegularFile(receipt.created, child);
+    requireSameSecurity(receipt.created.security, child.security);
+    requireDirectPrivateChild(afterChain[0]!.inspection, child, finalComponent);
+    requireSameCurrentUser(afterChain[0]!.inspection, child);
+    return child;
+  } catch (error) {
+    throw fileCreateAmbiguous(error);
+  }
+}
+
 function inspectPrivateChain(backend: BazframeWin32NativeBackend, path: string): ChainEntry[] {
   requireDriveAbsolutePath(path);
   const chain: ChainEntry[] = [];
@@ -480,6 +536,14 @@ function fileInvalid(reason: string, cause?: unknown): BazframeError {
   return failure(
     'WINDOWS_PRIVATE_FILE_PRIVACY_UNPROVED',
     `The file cannot be proved owner-private: ${reason}.`,
+    cause
+  );
+}
+
+function fileCreateAmbiguous(cause: unknown): BazframeError {
+  return failure(
+    'WINDOWS_PRIVATE_FILE_CREATE_AMBIGUOUS',
+    'Private-file creation may have changed storage; retain and inspect the destination before reuse.',
     cause
   );
 }

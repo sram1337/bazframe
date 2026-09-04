@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { open } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -46,14 +45,8 @@ try {
     await publicationModule.executeWindowsDirectoryPublication({
       ...common,
       operation,
-      async materialize(candidatePath) {
-        const file = await open(join(candidatePath, 'new.txt'), 'wx');
-        try {
-          await file.writeFile('new\n');
-          await file.sync();
-        } finally {
-          await file.close();
-        }
+      async materialize(candidate) {
+        await candidate.createPrivateFile('new.txt', Buffer.from('new\n'));
       },
       hooks: {
         afterPhase(phase) {

@@ -100,11 +100,73 @@ describe('Windows directory publication composition', () => {
     ]);
   });
 
+  it('drains unawaited materializer operations and expires the capability before closure', async () => {
+    const fixture = harness();
+    const options = fixture.executeOptions('fresh');
+    let retainedWriter: Parameters<ExecuteWindowsDirectoryPublicationOptions['materialize']>[0] | undefined;
+    options.materialize = (candidate) => {
+      retainedWriter = candidate;
+      void candidate.createPrivateFile('new.txt', Buffer.from('new\n'));
+    };
+    const result = await executeWindowsDirectoryPublication(options);
+    expect(result).toMatchObject({ action: 'committed', phase: 'COMMITTED' });
+    expect(fixture.file(`${fixture.destination}\\new.txt`).bytes?.toString()).toBe('new\n');
+    await expect(retainedWriter!.createPrivateFile(
+      'late.txt', Buffer.from('late\n')
+    )).rejects.toMatchObject({ code: 'WINDOWS_DIRECTORY_PUBLICATION_AUTHORITY_INVALID' });
+    expect(fixture.has(`${fixture.destination}\\late.txt`)).toBe(false);
+  });
+
+  it.each([
+    { maxEntries: 0 },
+    { maxPathBytes: 2 },
+    { maxFileBytes: 3 },
+    { maxAggregateBytes: 3 }
+  ])('refuses candidate materialization beyond a lower bound before file creation: %j', async (limit) => {
+    const fixture = harness();
+    const options = fixture.executeOptions('fresh');
+    options.candidateLimits = limit;
+    await expect(executeWindowsDirectoryPublication(options)).rejects.toMatchObject({
+      code: 'WINDOWS_DIRECTORY_PUBLICATION_LIMIT_EXCEEDED'
+    });
+    expect(fixture.has(`${fixture.candidate}\\new.txt`)).toBe(false);
+    expect(fixture.phases()).toEqual(['PLANNED', 'ABORTED']);
+  });
+
+  it('does not treat an undefined materializer rejection as success', async () => {
+    const fixture = harness();
+    const options = fixture.executeOptions('fresh');
+    options.materialize = () => Promise.reject(undefined);
+    let rejected = false;
+    try {
+      await executeWindowsDirectoryPublication(options);
+    } catch (error) {
+      rejected = true;
+      expect(error).toBeUndefined();
+    }
+    expect(rejected).toBe(true);
+    expect(fixture.phases()).toEqual(['PLANNED', 'ABORTED']);
+    expect(fixture.has(fixture.destination)).toBe(false);
+  });
+
+  it('drains and reports an unawaited materializer refusal', async () => {
+    const fixture = harness();
+    const options = fixture.executeOptions('fresh');
+    options.candidateLimits = { maxEntries: 0 };
+    options.materialize = (candidate) => {
+      void candidate.createPrivateFile('new.txt', Buffer.from('new\n'));
+    };
+    await expect(executeWindowsDirectoryPublication(options)).rejects.toMatchObject({
+      code: 'WINDOWS_DIRECTORY_PUBLICATION_LIMIT_EXCEEDED'
+    });
+    expect(fixture.phases()).toEqual(['PLANNED', 'ABORTED']);
+  });
+
   it('records pre-readiness namespace drift as ambiguity rather than abort', async () => {
     const fixture = harness();
     const options = fixture.executeOptions('fresh');
-    options.materialize = (candidatePath) => {
-      fixture.nodes.set(`${candidatePath}\\new.txt`, file(90, 'new\n'));
+    options.materialize = async (candidate) => {
+      await candidate.createPrivateFile('new.txt', Buffer.from('new\n'));
       fixture.nodes.set(fixture.destination, dir(91));
     };
     await expect(executeWindowsDirectoryPublication(options)).rejects.toMatchObject({
@@ -450,7 +512,9 @@ function harness(options: { destination?: TestNode; oldFile?: string } = {}) {
         dependentState: { expectedSha256: DEPENDENT, observeSha256: () => fixture.dependent },
         authority,
         io,
-        materialize(path: string) { nodes.set(`${path}\\new.txt`, file(nextId++, 'new\n')); }
+        async materialize(candidate: { createPrivateFile(name: string, bytes: Uint8Array): Promise<void> }) {
+          await candidate.createPrivateFile('new.txt', Buffer.from('new\n'));
+        }
       };
       if (mode === 'fresh') return { ...common, operation: { mode: 'fresh' } };
       return {
@@ -491,6 +555,15 @@ function harness(options: { destination?: TestNode; oldFile?: string } = {}) {
       nodes.set(path, created);
       return { parentBefore, created: inspection(path, created), parentAfter: inspection(parentPath, parent) };
     },
+    createPrivateFile(parentPath, finalComponent) {
+      const parent = required(nodes, parentPath);
+      const path = win32.join(parentPath, finalComponent);
+      if (nodes.has(path)) throw new BazframeError('WINDOWS_NATIVE_DIRECTORY_OCCUPIED', 'occupied');
+      const parentBefore = inspection(parentPath, parent);
+      const created = file(nextId++, '');
+      nodes.set(path, created);
+      return { parentBefore, created: inspection(path, created), parentAfter: inspection(parentPath, parent) };
+    },
     async renameDirectoryNoReplace(parentPath, sourceComponent, destinationComponent) {
       renameCalls.push([
         win32.join(parentPath, sourceComponent),
@@ -526,9 +599,10 @@ function harness(options: { destination?: TestNode; oldFile?: string } = {}) {
   };
 
   const io: WindowsDirectoryPublicationIo = {
-    async appendFileExclusive(path, bytes) {
-      if (nodes.has(path)) throw Object.assign(new Error('occupied'), { code: 'EEXIST' });
-      nodes.set(path, { ...file(nextId++, ''), bytes: Buffer.from(bytes) });
+    async writeExistingFile(path, bytes) {
+      const node = required(nodes, path);
+      if (node.kind !== 'file') throw new Error('expected existing private file');
+      node.bytes = Buffer.from(bytes);
     },
     async rename(source, target) {
       renameCalls.push([source, target]);

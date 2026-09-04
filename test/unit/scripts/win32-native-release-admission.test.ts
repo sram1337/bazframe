@@ -118,11 +118,17 @@ describe('Win32 native release admission', () => {
     ['failed private-directory observation', (fixture: EvidenceFixture) => {
       fixture.source.observations.privateDirectoryFirstVisibilityPrivate = false;
     }],
+    ['failed private-file observation', (fixture: EvidenceFixture) => {
+      fixture.source.observations.privateFileFirstVisibilityPrivate = false;
+    }],
     ['failed directory-closure observation', (fixture: EvidenceFixture) => {
       fixture.source.observations.boundedDirectoryClosure = false;
     }],
     ['failed directory-publication observation', (fixture: EvidenceFixture) => {
       fixture.installed.observations.directoryPublicationRestartRecovery = false;
+    }],
+    ['failed bounded-materializer observation', (fixture: EvidenceFixture) => {
+      fixture.installed.observations.directoryPublicationMaterializerBounded = false;
     }],
     ['nested/external receipt mismatch', (fixture: EvidenceFixture) => { fixture.aggregate.sourceConformance.observations.stableByteCount = '000000000000000e'; }],
     ['extra schema field', (fixture: EvidenceFixture) => { fixture.installed.extra = true; }],
@@ -264,6 +270,8 @@ function receipt(kind: 'source-tree' | 'packed-install') {
       privateDirectoryInvalidNameRefusedBeforeMutation: true,
       privateDirectoryReparseParentRefused: true,
       privateDirectoryDirectChildLocalNtfs: true,
+      privateFileFirstVisibilityPrivate: true,
+      privateFileNoReplace: true,
       stableDirectoryEnumerationEmptyAndBounded: true,
       stableDirectoryEnumerationDeterministic: true,
       stableDirectoryEnumerationMultiBufferComplete: true,
@@ -277,6 +285,8 @@ function receipt(kind: 'source-tree' | 'packed-install') {
       directoryClosureDriftRefused: true,
       directoryClosureReparseRefusedTargetPreserved: true,
       directoryPublicationFreshNoReplace: true,
+      directoryPublicationMaterializerDrained: true,
+      directoryPublicationMaterializerBounded: true,
       directoryPublicationReplacementBackupRetained: true,
       directoryPublicationAppendOnlyPrivateJournal: true,
       directoryPublicationRenameErrorPredicates: true,

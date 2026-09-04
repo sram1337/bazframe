@@ -16,7 +16,9 @@ import {
 } from './win32-directory-closure.js';
 import {
   admitWindowsPrivateDirectory,
+  admitWindowsPrivateFile,
   createWindowsPrivateDirectory,
+  createWindowsPrivateFile,
   isValidWindowsPathComponent
 } from './win32-private-directory.js';
 
@@ -69,8 +71,19 @@ export interface WindowsDirectoryPublicationAuthority {
 }
 
 export interface WindowsDirectoryPublicationIo {
-  appendFileExclusive(path: string, bytes: Uint8Array): Promise<void>;
+  writeExistingFile(path: string, bytes: Uint8Array): Promise<void>;
   rename(source: string, destination: string): Promise<void>;
+}
+
+export interface WindowsDirectoryPublicationCandidateWriter {
+  createPrivateFile(finalComponent: string, bytes: Uint8Array): Promise<void>;
+}
+
+export interface WindowsDirectoryPublicationCandidateLimits {
+  maxEntries: number;
+  maxPathBytes: number;
+  maxFileBytes: number;
+  maxAggregateBytes: number;
 }
 
 export interface WindowsDirectoryPublicationHooks {
@@ -101,7 +114,9 @@ export interface ExecuteWindowsDirectoryPublicationOptions extends CommonOptions
         expectedOld: WindowsDirectoryPublicationExpectation;
         overwriteAuthorization: 'explicit-overwrite';
       };
-  materialize(candidatePath: string): void | Promise<void>;
+  materialize(candidate: WindowsDirectoryPublicationCandidateWriter): void | Promise<void>;
+  /** Internal lower-only test/composition bounds; omitted callers use production ceilings. */
+  candidateLimits?: Partial<WindowsDirectoryPublicationCandidateLimits>;
 }
 
 export interface RecoverWindowsDirectoryPublicationOptions extends CommonOptions {
@@ -161,6 +176,7 @@ export async function executeWindowsDirectoryPublication(
     throw overwriteRequired();
   }
   const io = options.io ?? nativeWindowsDirectoryPublicationIo(options.backend, options.parentPath);
+  const limits = candidateLimits(options.candidateLimits);
   const paths = transactionPaths(
     options.parentPath,
     options.journalRootPath,
@@ -208,7 +224,81 @@ export async function executeWindowsDirectoryPublication(
   try {
     assertAuthority(options.authority, transactionId);
     createWindowsPrivateDirectory(options.backend, options.parentPath, paths.names.candidateName);
-    await options.materialize(paths.candidate);
+    let materializerActive = true;
+    let candidateEntries = 0;
+    let candidateBytes = 0;
+    const candidateNames = new Set<string>();
+    const materializerOperations: Array<Promise<void>> = [];
+    const trackMaterializerOperation = (operation: Promise<void>): Promise<void> => {
+      materializerOperations.push(operation);
+      void operation.catch(() => undefined);
+      return operation;
+    };
+    const candidateWriter: WindowsDirectoryPublicationCandidateWriter = Object.freeze({
+      createPrivateFile(finalComponent: string, bytes: Uint8Array): Promise<void> {
+        if (!materializerActive) {
+          const rejected = Promise.reject(authorityInvalid('candidate materializer is no longer active'));
+          void rejected.catch(() => undefined);
+          return rejected;
+        }
+        try {
+          assertAuthority(options.authority, transactionId);
+          if (!isValidWindowsPathComponent(finalComponent) || !(bytes instanceof Uint8Array)) {
+            throw new BazframeError(
+              'WINDOWS_DIRECTORY_PUBLICATION_STAGING_INVALID',
+              'Candidate file name or byte payload type is invalid.'
+            );
+          }
+          const nameKey = portableKey(finalComponent);
+          const pathBytes = Buffer.byteLength(finalComponent, 'utf8');
+          if (candidateNames.has(nameKey)) {
+            throw new BazframeError(
+              'WINDOWS_DIRECTORY_PUBLICATION_STAGING_INVALID',
+              'Candidate file names collide under the portable Windows policy.'
+            );
+          }
+          if (candidateEntries + 1 > limits.maxEntries
+            || pathBytes > limits.maxPathBytes
+            || bytes.byteLength > limits.maxFileBytes
+            || candidateBytes + bytes.byteLength > limits.maxAggregateBytes) {
+            throw new BazframeError(
+              'WINDOWS_DIRECTORY_PUBLICATION_LIMIT_EXCEEDED',
+              'Candidate materialization exceeds its bounded entry, path, or aggregate byte limit.'
+            );
+          }
+          candidateNames.add(nameKey);
+          candidateEntries += 1;
+          candidateBytes += bytes.byteLength;
+          return trackMaterializerOperation(createAndWritePrivateFile(
+            options.backend,
+            io,
+            paths.candidate,
+            finalComponent,
+            Buffer.from(bytes)
+          ).then(() => {
+            assertAuthority(options.authority, transactionId);
+          }));
+        } catch (error) {
+          return trackMaterializerOperation(Promise.reject(error));
+        }
+      }
+    });
+    let materializerFailed = false;
+    let materializerError: unknown;
+    try {
+      await options.materialize(candidateWriter);
+    } catch (error) {
+      materializerFailed = true;
+      materializerError = error;
+    } finally {
+      materializerActive = false;
+    }
+    const materializerResults = await Promise.allSettled(materializerOperations);
+    const operationFailure = materializerResults.find(
+      (entry): entry is PromiseRejectedResult => entry.status === 'rejected'
+    );
+    if (materializerFailed) throw materializerError;
+    if (operationFailure !== undefined) throw operationFailure.reason;
     assertAuthority(options.authority, transactionId);
     const candidate = expectation(await captureWindowsDirectoryClosure(options.backend, paths.candidate));
     const readyState = await observeNamespace(options.backend, options.parentPath, paths.names);
@@ -357,8 +447,8 @@ function nativeWindowsDirectoryPublicationIo(
   parentPath: string
 ): WindowsDirectoryPublicationIo {
   return {
-    async appendFileExclusive(path, bytes) {
-      const handle = await open(path, 'wx');
+    async writeExistingFile(path, bytes) {
+      const handle = await open(path, 'r+');
       try {
         await handle.writeFile(bytes);
         await handle.sync();
@@ -548,7 +638,13 @@ async function appendJournal(
   const recordPath = win32.join(journalDirectory, journalRecordName(next.sequence));
   let writeError: unknown;
   try {
-    await io.appendFileExclusive(recordPath, bytes);
+    await createAndWritePrivateFile(
+      options.backend,
+      io,
+      journalDirectory,
+      win32.basename(recordPath),
+      bytes
+    );
   } catch (error) {
     writeError = error;
   }
@@ -576,6 +672,26 @@ async function appendJournal(
       { cause: cause instanceof Error ? cause : undefined }
     );
   }
+}
+
+async function createAndWritePrivateFile(
+  backend: BazframeWin32NativeBackend,
+  io: WindowsDirectoryPublicationIo,
+  parentPath: string,
+  finalComponent: string,
+  bytes: Uint8Array
+): Promise<void> {
+  const created = createWindowsPrivateFile(backend, parentPath, finalComponent);
+  const path = win32.join(parentPath, finalComponent);
+  await io.writeExistingFile(path, bytes);
+  const after = admitWindowsPrivateFile(backend, path);
+  if (created.canonicalPath.toLowerCase() !== after.canonicalPath.toLowerCase()
+    || created.volume.identity !== after.volume.identity
+    || created.object.volumeIdentity !== after.object.volumeIdentity
+    || created.object.fileId !== after.object.fileId) {
+    throw ambiguous('private file identity changed while its bytes were written');
+  }
+  requireSameSecurity(created.security, after.security);
 }
 
 async function advance(
@@ -1000,6 +1116,46 @@ async function assertDependentState(
   sha(expected, 'dependent state digest');
   const observed = await options.dependentState.observeSha256();
   if (observed !== expected) throw changed('dependent state changed');
+}
+
+function candidateLimits(
+  lower: Partial<WindowsDirectoryPublicationCandidateLimits> | undefined
+): Readonly<WindowsDirectoryPublicationCandidateLimits> {
+  const maximum: WindowsDirectoryPublicationCandidateLimits = {
+    maxEntries: PROFILE_PORTABILITY_PRODUCTION_LIMITS.stagingEntries,
+    maxPathBytes: PROFILE_PORTABILITY_PRODUCTION_LIMITS.stagingPathBytes,
+    maxFileBytes: PROFILE_PORTABILITY_PRODUCTION_LIMITS.checkoutFileBytes,
+    maxAggregateBytes: PROFILE_PORTABILITY_PRODUCTION_LIMITS.stagingBytes
+  };
+  if (lower === undefined) return Object.freeze(maximum);
+  if (lower === null || typeof lower !== 'object' || Array.isArray(lower)
+    || (Object.getPrototypeOf(lower) !== Object.prototype
+      && Object.getPrototypeOf(lower) !== null)) {
+    throw new BazframeError(
+      'WINDOWS_DIRECTORY_PUBLICATION_STAGING_INVALID',
+      'Candidate limits must be a plain data object.'
+    );
+  }
+  const keys = Object.keys(maximum) as Array<keyof WindowsDirectoryPublicationCandidateLimits>;
+  if (Object.keys(lower).some((key) => !keys.includes(
+    key as keyof WindowsDirectoryPublicationCandidateLimits
+  ))) {
+    throw new BazframeError(
+      'WINDOWS_DIRECTORY_PUBLICATION_STAGING_INVALID',
+      'Candidate limits contain an unknown field.'
+    );
+  }
+  const result = { ...maximum, ...lower };
+  for (const key of keys) {
+    if (!Number.isSafeInteger(result[key]) || result[key] < 0
+      || Object.is(result[key], -0) || result[key] > maximum[key]) {
+      throw new BazframeError(
+        'WINDOWS_DIRECTORY_PUBLICATION_STAGING_INVALID',
+        'Candidate limits must be nonnegative integers no greater than production ceilings.'
+      );
+    }
+  }
+  return Object.freeze(result);
 }
 
 function validateCommon(options: CommonOptions, transactionId: string): void {

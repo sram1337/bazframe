@@ -62,6 +62,7 @@ describe('Bazframe-owned Windows native loader', () => {
   it.each([
     ['missing inspect export', { inspectWindowsPath: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
     ['missing create export', { createWindowsPrivateDirectory: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
+    ['missing file-create export', { createWindowsPrivateFile: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
     ['missing rename export', { renameWindowsDirectoryNoReplace: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
     ['missing enumerate export', { enumerateWindowsDirectoryStable: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
     ['legacy contract v3', { info: { contractVersion: 3 } }, 'WINDOWS_NATIVE_CONTRACT_MISMATCH'],
@@ -187,6 +188,19 @@ describe('Bazframe-owned Windows native loader', () => {
     });
     expect(() => load(native).createPrivateDirectory('C:\\state', 'child')).toThrow(
       expect.objectContaining({ code: expectedCode })
+    );
+  });
+
+  it('validates first-visible private-file creation receipts', () => {
+    const native = module();
+    const backend = load(native);
+    expect(backend.createPrivateFile('C:\\state', 'journal.json').created).toMatchObject({
+      kind: 'regular-file',
+      object: { size: '0000000000000000', numberOfLinks: '00000001' }
+    });
+    const malformed = module({ privateFileCreation: creation() });
+    expect(() => load(malformed).createPrivateFile('C:\\state', 'journal.json')).toThrow(
+      expect.objectContaining({ code: 'WINDOWS_NATIVE_CREATE_AMBIGUOUS' })
     );
   });
 
@@ -342,10 +356,13 @@ function module(overrides: Record<string, unknown> = {}): Record<string, unknown
     getNativeWindowsInfo: () => info,
     inspectWindowsPath: () => overrides.inspection ?? inspection(),
     createWindowsPrivateDirectory: () => overrides.creation ?? creation(),
+    createWindowsPrivateFile: () => overrides.privateFileCreation ?? privateFileCreation(),
     renameWindowsDirectoryNoReplace: vi.fn(() => Promise.resolve()),
     readWindowsFileStable: () => Promise.resolve(overrides.stableRead ?? stableRead()),
     enumerateWindowsDirectoryStable: () => Promise.resolve(overrides.enumeration ?? enumeration()),
-    ...without(overrides, ['info', 'inspection', 'creation', 'stableRead', 'enumeration'])
+    ...without(overrides, [
+      'info', 'inspection', 'creation', 'privateFileCreation', 'stableRead', 'enumeration'
+    ])
   };
 }
 
@@ -374,6 +391,17 @@ function creation(): Record<string, unknown> {
   return {
     parentBefore: directoryInspection('state'),
     created: directoryInspection('state\\child', '00000000000000002000000000000002'),
+    parentAfter: directoryInspection('state')
+  };
+}
+
+function privateFileCreation(): Record<string, unknown> {
+  return {
+    parentBefore: directoryInspection('state'),
+    created: inspection({
+      canonicalPath: '\\\\?\\Volume{12345678-1234-1234-1234-123456789abc}\\state\\journal.json',
+      object: { size: '0000000000000000' }
+    }),
     parentAfter: directoryInspection('state')
   };
 }

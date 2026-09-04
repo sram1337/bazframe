@@ -3,12 +3,14 @@ import type {
   BazframeWin32NativeBackend,
   WindowsPathInspection,
   WindowsPrivateDirectoryCreationReceipt,
+  WindowsPrivateFileCreationReceipt,
   WindowsSecurityObservation
 } from '../../../src/core/win32-native.js';
 import {
   admitWindowsPrivateDirectory,
   admitWindowsPrivateFile,
-  createWindowsPrivateDirectory
+  createWindowsPrivateDirectory,
+  createWindowsPrivateFile
 } from '../../../src/state/win32-private-directory.js';
 import { BazframeError } from '../../../src/core/errors.js';
 
@@ -77,6 +79,48 @@ describe('Windows private-directory composition', () => {
     });
     expect(() => admitWindowsPrivateFile(drift, 'C:\\state\\file.txt')).toThrow(
       expect.objectContaining({ code: 'WINDOWS_PRIVATE_FILE_PRIVACY_UNPROVED' })
+    );
+  });
+
+  it('creates an empty protected owner-private file without replacement and revalidates it', () => {
+    const parent = directory('C:\\state');
+    const child = regularFile('C:\\state\\record.json');
+    const create = vi.fn(() => fileCreation(parent, child));
+    const backend = fakeBackend(
+      (path) => path.endsWith('record.json') ? child : directory(path),
+      undefined,
+      create
+    );
+    expect(createWindowsPrivateFile(backend, 'C:\\state', 'record.json')).toEqual(child);
+    expect(create).toHaveBeenCalledWith('C:\\state', 'record.json');
+
+    const occupied = fakeBackend(
+      (path) => path.endsWith('record.json') ? child : directory(path),
+      undefined,
+      () => { throw new BazframeError('WINDOWS_NATIVE_DIRECTORY_OCCUPIED', 'occupied'); }
+    );
+    expect(() => createWindowsPrivateFile(occupied, 'C:\\state', 'record.json')).toThrow(
+      expect.objectContaining({ code: 'WINDOWS_PRIVATE_FILE_OCCUPIED' })
+    );
+
+    const invalidCreate = vi.fn(() => fileCreation(parent, child));
+    expect(() => createWindowsPrivateFile(
+      fakeBackend(() => parent, undefined, invalidCreate),
+      'C:\\state',
+      'invalid:name'
+    )).toThrow(expect.objectContaining({ code: 'WINDOWS_PRIVATE_FILE_NAME_INVALID' }));
+    expect(invalidCreate).not.toHaveBeenCalled();
+
+    const broadChild = regularFile('C:\\state\\record.json', {
+      security: security({ daclBytes: privateAcl([ace(0, FOREIGN)]) })
+    });
+    const ambiguous = fakeBackend(
+      (path) => path.endsWith('record.json') ? broadChild : directory(path),
+      undefined,
+      () => fileCreation(parent, broadChild)
+    );
+    expect(() => createWindowsPrivateFile(ambiguous, 'C:\\state', 'record.json')).toThrow(
+      expect.objectContaining({ code: 'WINDOWS_PRIVATE_FILE_CREATE_AMBIGUOUS' })
     );
   });
 
@@ -263,6 +307,9 @@ function fakeBackend(
   inspectPath: (path: string) => WindowsPathInspection,
   createPrivateDirectory: (parentPath: string, component: string) => WindowsPrivateDirectoryCreationReceipt = () => {
     throw new Error('unexpected create');
+  },
+  createPrivateFile: (parentPath: string, component: string) => WindowsPrivateFileCreationReceipt = () => {
+    throw new Error('unexpected create');
   }
 ): BazframeWin32NativeBackend {
   return {
@@ -274,6 +321,7 @@ function fakeBackend(
       return inspection;
     },
     createPrivateDirectory,
+    createPrivateFile,
     renameDirectoryNoReplace: async () => { throw new Error('unexpected rename'); },
     readStableFile: async () => { throw new Error('unexpected read'); },
     enumerateStableDirectory: async () => { throw new Error('unexpected enumeration'); }
@@ -285,6 +333,14 @@ function creation(
   created: WindowsPathInspection,
   parentAfter = parentBefore
 ): WindowsPrivateDirectoryCreationReceipt {
+  return { parentBefore, created, parentAfter };
+}
+
+function fileCreation(
+  parentBefore: WindowsPathInspection,
+  created: WindowsPathInspection,
+  parentAfter = parentBefore
+): WindowsPrivateFileCreationReceipt {
   return { parentBefore, created, parentAfter };
 }
 

@@ -297,6 +297,7 @@ function tree(initial: Record<string, TestNode>) {
       return backend.inspectOverride?.(path, base) ?? base;
     },
     createPrivateDirectory() { throw new Error('unexpected mutation'); },
+    createPrivateFile() { throw new Error('unexpected mutation'); },
     async renameDirectoryNoReplace() { throw new Error('unexpected mutation'); },
     async readStableFile(path, maximum) {
       readCalls.push(path);

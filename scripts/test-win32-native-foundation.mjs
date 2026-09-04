@@ -73,6 +73,15 @@ try {
     privateComponent
   );
   const parentAfterPrivateCreation = backend.inspectPath(testRoot);
+  const privateFileComponent = 'private-file.txt';
+  const privateFilePath = join(privateRoot, privateFileComponent);
+  const privateFileReceipt = backend.createPrivateFile(privateRoot, privateFileComponent);
+  const privateFileBefore = privateDirectoryModule.admitWindowsPrivateFile(backend, privateFilePath);
+  await expectCode(
+    () => backend.createPrivateFile(privateRoot, privateFileComponent),
+    'WINDOWS_NATIVE_DIRECTORY_OCCUPIED'
+  );
+  const privateFileAfter = privateDirectoryModule.admitWindowsPrivateFile(backend, privateFilePath);
   const occupiedBefore = backend.inspectPath(privateRoot);
   await expectCode(
     () => privateDirectoryModule.createWindowsPrivateDirectory(backend, testRoot, privateComponent),
@@ -300,6 +309,16 @@ try {
     .update('publication-dependent-state:none')
     .digest('hex');
   const authority = (transactionId) => ({ transactionId, assertHeld() {} });
+  const createAndWritePrivateFile = async (parentPath, component, bytes) => {
+    privateDirectoryModule.createWindowsPrivateFile(backend, parentPath, component);
+    const handle = await open(join(parentPath, component), 'r+');
+    try {
+      await handle.writeFile(bytes);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  };
   const createPublicationFixture = async (label, withOld = false) => {
     const component = `publication-${label}`;
     const root = join(privateRoot, component);
@@ -312,7 +331,7 @@ try {
     const destination = join(parent, destinationName);
     if (withOld) {
       privateDirectoryModule.createWindowsPrivateDirectory(backend, parent, destinationName);
-      await writePrivateInheritedFile(join(destination, 'old.txt'), 'old\n');
+      await createAndWritePrivateFile(destination, 'old.txt', 'old\n');
     }
     return { root, parent, journals, destinationName, destination };
   };
@@ -332,9 +351,57 @@ try {
     dependentState: { expectedSha256: dependentStateSha256, observeSha256: observed },
     authority: authority(transactionId)
   });
-  const materializePublicationCandidate = async (candidatePath) => {
-    await writePrivateInheritedFile(join(candidatePath, 'new.txt'), 'new\n');
+  const materializePublicationCandidate = async (candidate) => {
+    await candidate.createPrivateFile('new.txt', Buffer.from('new\n'));
   };
+
+  const unawaitedFixture = await createPublicationFixture('unawaited');
+  const unawaitedTransaction = transactionId();
+  let retainedCandidateWriter;
+  const unawaitedResult = await directoryPublicationModule.executeWindowsDirectoryPublication({
+    ...commonPublicationOptions(unawaitedFixture, unawaitedTransaction),
+    operation: { mode: 'fresh' },
+    candidateLimits: { maxEntries: 1, maxPathBytes: 32, maxFileBytes: 4, maxAggregateBytes: 4 },
+    materialize(candidate) {
+      retainedCandidateWriter = candidate;
+      void candidate.createPrivateFile('new.txt', Buffer.from('new\n'));
+    }
+  });
+  await expectCode(
+    () => retainedCandidateWriter.createPrivateFile('late.txt', Buffer.from('late\n')),
+    'WINDOWS_DIRECTORY_PUBLICATION_AUTHORITY_INVALID'
+  );
+  const materializerDrained = unawaitedResult.action === 'committed'
+    && await readFile(join(unawaitedFixture.destination, 'new.txt'), 'utf8') === 'new\n'
+    && !await pathExists(join(unawaitedFixture.destination, 'late.txt'));
+
+  const boundedCases = [
+    ['entries', { maxEntries: 0, maxPathBytes: 32, maxFileBytes: 4, maxAggregateBytes: 4 }],
+    ['path', { maxEntries: 1, maxPathBytes: 6, maxFileBytes: 4, maxAggregateBytes: 4 }],
+    ['file', { maxEntries: 1, maxPathBytes: 32, maxFileBytes: 3, maxAggregateBytes: 4 }],
+    ['aggregate', { maxEntries: 1, maxPathBytes: 32, maxFileBytes: 4, maxAggregateBytes: 3 }]
+  ];
+  let materializerBounded = true;
+  for (const [label, limits] of boundedCases) {
+    const boundedFixture = await createPublicationFixture(`bounded-materializer-${label}`);
+    const boundedTransaction = transactionId();
+    await expectCode(
+      () => directoryPublicationModule.executeWindowsDirectoryPublication({
+        ...commonPublicationOptions(boundedFixture, boundedTransaction),
+        operation: { mode: 'fresh' },
+        candidateLimits: limits,
+        materialize(candidate) {
+          void candidate.createPrivateFile('new.txt', Buffer.from('new\n'));
+        }
+      }),
+      'WINDOWS_DIRECTORY_PUBLICATION_LIMIT_EXCEEDED'
+    );
+    materializerBounded &&= !await pathExists(join(
+      boundedFixture.parent,
+      `.bazframe-candidate-${boundedTransaction}`,
+      'new.txt'
+    ));
+  }
 
   const freshFixture = await createPublicationFixture('fresh');
   const freshTransaction = transactionId();
@@ -665,6 +732,20 @@ try {
     privateDirectoryDirectChildLocalNtfs: privateInspection.volume.identity
       === rootInspection.volume.identity
       && privateInspection.volume.filesystemName === 'NTFS',
+    privateFileFirstVisibilityPrivate: sameRegularFileIdentityVolumeAndSecurity(
+      privateFileReceipt.created,
+      privateFileBefore
+    )
+      && privateFileReceipt.created.security.ownerSid
+        === privateFileReceipt.created.security.currentUserSid
+      && privateFileReceipt.created.security.daclPresent
+      && !privateFileReceipt.created.security.daclNull
+      && (privateFileReceipt.created.security.descriptorControl & 0x1000) !== 0
+      && privateFileReceipt.created.object.size === '0000000000000000',
+    privateFileNoReplace: sameRegularFileIdentityVolumeAndSecurity(
+      privateFileBefore,
+      privateFileAfter
+    ),
     stableDirectoryEnumerationEmptyAndBounded: emptyEnumeration.entries.length === 0
       && enumeration.entries.length === 4,
     stableDirectoryEnumerationDeterministic: JSON.stringify(enumeration.entries)
@@ -686,6 +767,8 @@ try {
     directoryClosureReparseRefusedTargetPreserved: true,
     directoryPublicationFreshNoReplace: freshResult.action === 'committed'
       && !freshResult.backupRetained,
+    directoryPublicationMaterializerDrained: materializerDrained,
+    directoryPublicationMaterializerBounded: materializerBounded,
     directoryPublicationReplacementBackupRetained: replacementResult.action === 'committed'
       && replacementResult.backupRetained,
     directoryPublicationAppendOnlyPrivateJournal: freshJournalClosure.closure.entries.length === 6,
@@ -748,8 +831,8 @@ async function writePrivateInheritedFile(path, bytes) {
 
 function publicationIo(renameOperation) {
   return {
-    async appendFileExclusive(path, bytes) {
-      const handle = await open(path, 'wx');
+    async writeExistingFile(path, bytes) {
+      const handle = await open(path, 'r+');
       try {
         await handle.writeFile(bytes);
         await handle.sync();
@@ -812,6 +895,45 @@ async function expectCode(operation, expected) {
 
 function requireCondition(condition, name) {
   if (!condition) throw new Error(`Native conformance failed: ${name}`);
+}
+
+function sameRegularFileIdentityVolumeAndSecurity(before, after) {
+  return before.canonicalPath.toLowerCase() === after.canonicalPath.toLowerCase()
+    && before.kind === 'regular-file'
+    && after.kind === 'regular-file'
+    && before.ancestryReparseFree === true
+    && after.ancestryReparseFree === true
+    && before.volume.identity === after.volume.identity
+    && before.volume.filesystemName === after.volume.filesystemName
+    && before.volume.driveType === after.volume.driveType
+    && before.volume.canonicalVolumeGuidPath.toLowerCase()
+      === after.volume.canonicalVolumeGuidPath.toLowerCase()
+    && before.volume.remoteDevice === after.volume.remoteDevice
+    && before.object.volumeIdentity === after.object.volumeIdentity
+    && before.object.fileId === after.object.fileId
+    && before.object.size === after.object.size
+    && before.object.allocationSize === after.object.allocationSize
+    && before.object.numberOfLinks === after.object.numberOfLinks
+    && before.object.creationTime === after.object.creationTime
+    && before.object.lastWriteTime === after.object.lastWriteTime
+    && before.object.changeTime === after.object.changeTime
+    && before.object.attributes === after.object.attributes
+    && before.object.reparseTag === null
+    && after.object.reparseTag === null
+    && before.object.deletePending === false
+    && after.object.deletePending === false
+    && before.object.directory === false
+    && after.object.directory === false
+    && before.security.descriptorControl === after.security.descriptorControl
+    && before.security.daclPresent === after.security.daclPresent
+    && before.security.daclNull === after.security.daclNull
+    && before.security.daclDefaulted === after.security.daclDefaulted
+    && before.security.daclBytes.equals(after.security.daclBytes)
+    && before.security.ownerSid === after.security.ownerSid
+    && before.security.ownerDefaulted === after.security.ownerDefaulted
+    && before.security.groupSid === after.security.groupSid
+    && before.security.groupDefaulted === after.security.groupDefaulted
+    && before.security.currentUserSid === after.security.currentUserSid;
 }
 
 function sameDirectoryIdentityVolumeAndSecurity(before, after) {
