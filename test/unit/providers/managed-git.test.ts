@@ -345,8 +345,10 @@ describe('remote Git source and provenance', () => {
     await expect(captureManagedGitExportHealth(home, 'skill', 'toolkit', { ...process.env, BAZFRAME_GIT_COMMAND: malformedWrapper }))
       .rejects.toMatchObject({ code: 'MANAGED_GIT_PROCESS_FAILED' });
 
-    await unlink(join(home, 'skills/toolkit'));
-    await symlink(root, join(home, 'skills/toolkit'));
+    const registration = join(home, 'skills/toolkit');
+    const replacementRegistration = join(home, 'skills/.toolkit-replacement');
+    await symlink(root, replacementRegistration);
+    await rename(replacementRegistration, registration);
     const replacedRegistration = await captureManagedGitExportHealth(home, 'skill', 'toolkit', environment);
     expect(sameManagedGitExportHealth(second, replacedRegistration)).toBe(false);
 

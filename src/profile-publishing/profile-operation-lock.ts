@@ -66,12 +66,15 @@ export function profileOperationSocketPath(home: string, key: string): string {
 }
 
 async function acquire(home: string, key: string): Promise<HeldOperationLock> {
-  const root = profilePublishingOperationLockRoot(home); await ensureManagedDirectory(home, root);
-  await cleanupStaleLockNamespace(root);
+  const root = profilePublishingOperationLockRoot(home);
   const path = profileOperationSocketPath(home, key);
-  // This private path is shorter than the canonical path so every canonical
-  // path accepted by macOS' Unix-socket limit can also host its live endpoint.
+  // Owner and canonical basenames have the same byte width. Check both before
+  // creating state or binding either endpoint so platform truncation cannot
+  // surface as ENOENT.
   const ownerPath = join(root, `.o-${randomBytes(14).toString('base64url')}`);
+  assertUnixSocketPathsSupported([path, ownerPath]);
+  await ensureManagedDirectory(home, root);
+  await cleanupStaleLockNamespace(root);
   const server = createServer();
   let ownerIdentity: { device: bigint; inode: bigint } | undefined;
   let claimPath: string | undefined;
@@ -215,6 +218,14 @@ function listen(server: Server, path: string): Promise<void> { return new Promis
 function probe(path: string): Promise<'live' | 'stale'> { return new Promise((resolveProbe, reject) => { const socket = createConnection(path); socket.once('connect', () => { socket.destroy(); resolveProbe('live'); }); socket.once('error', (error: NodeJS.ErrnoException) => { socket.destroy(); if (error.code === 'ECONNREFUSED' || error.code === 'ENOENT') resolveProbe('stale'); else reject(error); }); }); }
 function closeServer(server: Server): Promise<void> { return new Promise((resolveClose) => { if (!server.listening) { resolveClose(); return; } server.close(() => resolveClose()); }); }
 async function syncDirectory(path: string): Promise<void> { const handle = await open(path, 'r'); try { await handle.sync(); } finally { await handle.close(); } }
+function assertUnixSocketPathsSupported(paths: readonly string[]): void {
+  // sockaddr_un.sun_path is 108 bytes on Linux and 104 bytes on Darwin; one
+  // byte is reserved for the trailing NUL terminator.
+  const maximumBytes = process.platform === 'darwin' ? 103 : 107;
+  if (paths.some((path) => Buffer.byteLength(path, 'utf8') > maximumBytes)) {
+    throw new BazframeError('PROFILE_OPERATION_LOCK_PATH_UNSUPPORTED', 'Could not acquire profile operation lock.');
+  }
+}
 function mapListenError(error: unknown): BazframeError { const code = errorCode(error); return new BazframeError(code === 'ENAMETOOLONG' || code === 'EINVAL' ? 'PROFILE_OPERATION_LOCK_PATH_UNSUPPORTED' : 'PROFILE_OPERATION_LOCK_FAILED', 'Could not acquire profile operation lock.', { cause: error }); }
 function heldLocksStillOwned(held: readonly HeldOperationLock[]): boolean {
   try {
