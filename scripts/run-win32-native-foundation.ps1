@@ -60,7 +60,13 @@ $temporaryRoot = (Resolve-Path -LiteralPath $temporaryCandidate).Path
 Assert-LocalNtfsPath -Path $repository -Purpose 'The Bazframe checkout'
 Assert-LocalNtfsPath -Path $temporaryRoot -Purpose 'The exact conformance temporary root'
 
-$runtimeText = & node -e 'console.log(JSON.stringify({platform:process.platform,arch:process.arch,version:process.versions.node}))'
+$nodeCommand = (Get-Command node.exe -CommandType Application -ErrorAction Stop |
+    Select-Object -First 1).Source
+$npmCommand = (Get-Command npm.cmd -CommandType Application -ErrorAction Stop |
+    Select-Object -First 1).Source
+$npxCommand = (Get-Command npx.cmd -CommandType Application -ErrorAction Stop |
+    Select-Object -First 1).Source
+$runtimeText = & $nodeCommand -e 'console.log(JSON.stringify({platform:process.platform,arch:process.arch,version:process.versions.node}))'
 Assert-NativeExit -Operation 'Node runtime inspection'
 $runtime = $runtimeText | ConvertFrom-Json
 if ($runtime.platform -ne 'win32' -or $runtime.arch -ne 'x64') {
@@ -105,7 +111,7 @@ Push-Location $repository
 try {
     $env:RUNNER_TEMP = $temporaryRoot
     $env:CARGO_TARGET_DIR = $cargoTargetRoot
-    & npm ci --no-audit --no-fund *>&1 |
+    & $npmCommand ci --no-audit --no-fund *>&1 |
         Tee-Object -FilePath (Join-Path $evidenceRoot 'npm-ci.log')
     Assert-NativeExit -Operation 'npm ci'
 
@@ -155,17 +161,17 @@ try {
     $binaryHash | Set-Content (Join-Path $evidenceRoot 'native-binary.sha256')
 
     $env:BAZFRAME_WIN32_NATIVE_PACK_MODE = 'foundation-evidence'
-    & npm run build
+    & $npmCommand run build
     Assert-NativeExit -Operation 'TypeScript build'
-    & npx vitest run --config vitest.config.ts test/unit/core/win32-native.test.ts test/unit/cli/platform-support.test.ts
+    & $npxCommand vitest run --config vitest.config.ts test/unit/core/win32-native.test.ts test/unit/cli/platform-support.test.ts
     Assert-NativeExit -Operation 'Native contract tests'
 
     $sourceEvidencePath = Join-Path $evidenceRoot 'native-source-evidence.json'
-    & node .\scripts\test-win32-native-foundation.mjs --output $sourceEvidencePath
+    & $nodeCommand .\scripts\test-win32-native-foundation.mjs --output $sourceEvidencePath
     Assert-NativeExit -Operation 'Source-tree native conformance'
 
     New-Item -ItemType Directory -Path $packRoot | Out-Null
-    $packText = & npm pack --json --silent --pack-destination $packRoot
+    $packText = & $npmCommand pack --json --silent --pack-destination $packRoot
     Assert-NativeExit -Operation 'npm pack'
     $pack = $packText | ConvertFrom-Json
     if ($pack.Count -ne 1) {
@@ -175,7 +181,7 @@ try {
     $tarballHash = (Get-FileHash -LiteralPath $tarball -Algorithm SHA256).Hash.ToLowerInvariant()
 
     New-Item -ItemType Directory -Path $installRoot | Out-Null
-    & npm install --prefix $installRoot --ignore-scripts --no-package-lock --no-audit --no-fund $tarball *>&1 |
+    & $npmCommand install --prefix $installRoot --ignore-scripts --no-package-lock --no-audit --no-fund $tarball *>&1 |
         Tee-Object -FilePath (Join-Path $evidenceRoot 'npm-packed-install.log')
     Assert-NativeExit -Operation 'Packed npm install'
     $installed = Join-Path $installRoot 'node_modules\bazframe'
@@ -187,7 +193,7 @@ try {
 
     $env:npm_config_offline = 'true'
     $installedEvidencePath = Join-Path $evidenceRoot 'native-installed-evidence.json'
-    & node .\scripts\test-win32-native-foundation.mjs --package-root $installed --output $installedEvidencePath
+    & $nodeCommand .\scripts\test-win32-native-foundation.mjs --package-root $installed --output $installedEvidencePath
     Assert-NativeExit -Operation 'Installed native conformance'
 
     $sourceEvidence = Get-Content -LiteralPath $sourceEvidencePath -Raw | ConvertFrom-Json
