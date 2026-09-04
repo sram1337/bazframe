@@ -7,7 +7,11 @@ const PACKED_TUI_DEADLINE_MS = 30_000;
 const projectRoot = process.cwd();
 const sourceManifest = JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf8'));
 const npmExecPath = process.env.npm_execpath;
-const temporaryRoot = mkdtempSync(process.platform==='darwin'?'/tmp/bzfpkg-':join(tmpdir(), 'bazframe-2-pack-'));
+const temporaryRoot = mkdtempSync(
+  process.platform === 'darwin' || process.platform === 'linux'
+    ? '/tmp/bzfpkg-'
+    : join(tmpdir(), 'bazframe-2-pack-')
+);
 let tarballPath;
 
 if (!npmExecPath) {
