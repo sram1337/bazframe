@@ -166,6 +166,7 @@ try {
     & $npxCommand vitest run --config vitest.config.ts test/unit/core/win32-native.test.ts test/unit/state/win32-private-directory.test.ts test/unit/cli/platform-support.test.ts
     Assert-NativeExit -Operation 'Native contract tests'
 
+    $env:BAZFRAME_WIN32_NATIVE_TEST_PARENT = $temporaryRoot
     $sourceEvidencePath = Join-Path $evidenceRoot 'native-source-evidence.json'
     & $nodeCommand .\scripts\test-win32-native-foundation.mjs --output $sourceEvidencePath
     Assert-NativeExit -Operation 'Source-tree native conformance'

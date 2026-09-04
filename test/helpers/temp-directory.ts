@@ -24,8 +24,13 @@ async function makeWritable(path: string): Promise<void> {
 }
 
 export async function createTempDirectory(prefix = 'bazframe-2-test-'): Promise<TempDirectory> {
-  const effectivePrefix=process.platform==='darwin'&&!prefix.startsWith('/')?'bzft-':prefix;
-  const root = await mkdtemp(effectivePrefix.startsWith('/') ? effectivePrefix : join(process.platform==='darwin'?'/tmp':tmpdir(), effectivePrefix));
+  // Keep Unix test homes comfortably below sockaddr_un limits; descriptive
+  // caller prefixes are diagnostics only and must not invalidate lock tests.
+  const effectivePrefix = (process.platform === 'darwin' || process.platform === 'linux')
+    && !prefix.startsWith('/') ? 'bzft-' : prefix;
+  const root = await mkdtemp(effectivePrefix.startsWith('/')
+    ? effectivePrefix
+    : join(process.platform === 'darwin' ? '/tmp' : tmpdir(), effectivePrefix));
   return {
     root,
     path: (...segments) => join(root, ...segments),

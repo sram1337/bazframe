@@ -131,11 +131,14 @@ jobs:
       - name: Exercise native local-NTFS foundation from the source tree
         run: |
           $ErrorActionPreference = 'Stop'
-          $drive = (Get-Item $env:RUNNER_TEMP).PSDrive.Name
+          $testParent = $env:LOCALAPPDATA
+          $drive = (Get-Item $testParent).PSDrive.Name
           $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$($drive):'"
           if ($null -eq $disk -or $disk.DriveType -ne 3 -or $disk.FileSystem -ne 'NTFS') {
-            throw 'RUNNER_TEMP is not on a fixed local NTFS volume.'
+            throw 'The private conformance parent is not on a fixed local NTFS volume.'
           }
+          $env:BAZFRAME_WIN32_NATIVE_TEST_PARENT = $testParent
+          "BAZFRAME_WIN32_NATIVE_TEST_PARENT=$testParent" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           node ./scripts/test-win32-native-foundation.mjs --output ./native-source-evidence.json
           if ($LASTEXITCODE -ne 0) { throw "source-tree native conformance failed with exit $LASTEXITCODE" }
 

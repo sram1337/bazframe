@@ -51,7 +51,7 @@ try {
   );
   const nativeBytes = await readFile(nativePath);
 
-  temporaryParent = resolve(process.env.RUNNER_TEMP ?? tmpdir());
+  temporaryParent = resolve(process.env.BAZFRAME_WIN32_NATIVE_TEST_PARENT ?? tmpdir());
   const testRootComponent = `bazframe-native-foundation-${randomUUID()}`;
   testRoot = join(temporaryParent, testRootComponent);
   const bootstrapReceipt = backend.createPrivateDirectory(temporaryParent, testRootComponent);
