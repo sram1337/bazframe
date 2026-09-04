@@ -11,6 +11,7 @@ coverage/
 /native-source-evidence.json
 /native-msvc-version.txt
 /native-rust-version.txt
+/win32-native-release-admission.json
 /bazframe-*.tgz
 
 # Local environment

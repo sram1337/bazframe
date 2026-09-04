@@ -1,6 +1,14 @@
 name: Bazframe-owned Windows native foundation
 
 on:
+  workflow_call:
+    outputs:
+      artifact_id:
+        description: Numeric ID of the successful foundation artifact.
+        value: ${{ jobs.native-foundation.outputs.artifact_id }}
+      artifact_digest:
+        description: Raw lowercase 64-hex SHA-256 output from actions/upload-artifact.
+        value: ${{ jobs.native-foundation.outputs.artifact_digest }}
   workflow_dispatch:
   pull_request:
     paths:
@@ -40,6 +48,9 @@ jobs:
   native-foundation:
     name: Evidence only (public Windows gate remains closed)
     runs-on: windows-2022
+    outputs:
+      artifact_id: ${{ steps.upload-success.outputs.artifact-id }}
+      artifact_digest: ${{ steps.upload-success.outputs.artifact-digest }}
     timeout-minutes: 30
     defaults:
       run:
@@ -207,6 +218,7 @@ jobs:
           if ($completion -ne 'passed') { throw 'Native foundation evidence is incomplete or failed.' }
 
       - name: Upload successful binary and evidence
+        id: upload-success
         if: success()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

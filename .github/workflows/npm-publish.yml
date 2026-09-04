@@ -6,6 +6,7 @@ on:
       - "v*"
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -13,7 +14,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  native-foundation:
+    uses: ./.github/workflows/win32-native-foundation.yml
+
   validate:
+    needs: native-foundation
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -29,11 +34,12 @@ jobs:
           test "$(node --version)" = "v24.14.1"
           test "$(npm --version)" = "11.11.0"
       - name: Verify release identity
+        id: release-identity
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           node --input-type=module <<'NODE'
-          import { existsSync, readFileSync } from 'node:fs';
+          import { appendFileSync, existsSync, readFileSync } from 'node:fs';
           const manifest = JSON.parse(readFileSync('package.json', 'utf8'));
           if (`v${manifest.version}` !== process.env.RELEASE_TAG) {
             throw new Error(`Tag ${process.env.RELEASE_TAG} does not match v${manifest.version}.`);
@@ -50,12 +56,79 @@ jobs:
           if (manifest.publishConfig?.access !== 'public' || manifest.publishConfig?.tag !== 'latest') {
             throw new Error('Bazframe releases must publish publicly with the default latest dist-tag.');
           }
+          appendFileSync(process.env.GITHUB_OUTPUT, `package_version=${manifest.version}\n`);
           NODE
       - name: Require an existing npm package
         run: npm view bazframe name >/dev/null
       - run: npm ci
       - run: npm test
       - run: npm audit --omit=dev
+      - name: Retrieve the exact same-run native artifact by numeric ID
+        id: native-artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.native-foundation.outputs.artifact_id }}
+          ARTIFACT_DIGEST_OUTPUT: ${{ needs.native-foundation.outputs.artifact_digest }}
+          EXPECTED_NAME: bazframe-win32-native-foundation-${{ github.sha }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          EXPECTED_REPOSITORY_ID: ${{ github.repository_id }}
+          EXPECTED_RUN_ID: ${{ github.run_id }}
+          EXPECTED_HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$ARTIFACT_DIGEST_OUTPUT" =~ ^[a-f0-9]{64}$ ]]
+          ARTIFACT_DIGEST="sha256:$ARTIFACT_DIGEST_OUTPUT"
+          export ARTIFACT_DIGEST
+          METADATA="$RUNNER_TEMP/win32-native-artifact-metadata.json"
+          ARCHIVE="$RUNNER_TEMP/win32-native-foundation.zip"
+          gh api "/repos/$EXPECTED_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > "$METADATA"
+          node --input-type=module - "$METADATA" <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const metadata = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+          const expected = process.env;
+          if (String(metadata.id) !== expected.ARTIFACT_ID
+              || metadata.name !== expected.EXPECTED_NAME
+              || metadata.expired !== false
+              || metadata.digest !== expected.ARTIFACT_DIGEST
+              || String(metadata.workflow_run?.id) !== expected.EXPECTED_RUN_ID
+              || String(metadata.workflow_run?.repository_id) !== expected.EXPECTED_REPOSITORY_ID
+              || String(metadata.workflow_run?.head_repository_id) !== expected.EXPECTED_REPOSITORY_ID
+              || metadata.workflow_run?.head_sha !== expected.EXPECTED_HEAD_SHA) {
+            throw new Error('Native artifact metadata does not match this release run, repository, commit, name, or digest.');
+          }
+          NODE
+          gh api "/repos/$EXPECTED_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$ARCHIVE"
+          ACTUAL_DIGEST="$(sha256sum "$ARCHIVE" | cut -d' ' -f1)"
+          test "$ACTUAL_DIGEST" = "$ARTIFACT_DIGEST_OUTPUT"
+          printf 'archive=%s\n' "$ARCHIVE" >> "$GITHUB_OUTPUT"
+          printf 'archive_digest=sha256:%s\n' "$ARTIFACT_DIGEST_OUTPUT" >> "$GITHUB_OUTPUT"
+      - name: Admit the evidenced binary for package assembly
+        env:
+          ARTIFACT_ARCHIVE: ${{ steps.native-artifact.outputs.archive }}
+          ARTIFACT_ID: ${{ needs.native-foundation.outputs.artifact_id }}
+          ARTIFACT_DIGEST: ${{ steps.native-artifact.outputs.archive_digest }}
+          PACKAGE_VERSION: ${{ steps.release-identity.outputs.package_version }}
+          PRODUCER_REPOSITORY: ${{ github.repository }}
+          PRODUCER_REPOSITORY_ID: ${{ github.repository_id }}
+          PRODUCER_RUN_ID: ${{ github.run_id }}
+          RELEASE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          rm -rf artifacts/native/win32-x64-msvc
+          rm -f win32-native-release-admission.json
+          node ./scripts/win32-native-release-admission.mjs \
+            --repository-root "$GITHUB_WORKSPACE" \
+            --archive "$ARTIFACT_ARCHIVE" \
+            --release-commit "$RELEASE_COMMIT" \
+            --package-version "$PACKAGE_VERSION" \
+            --producer-repository "$PRODUCER_REPOSITORY" \
+            --producer-repository-id "$PRODUCER_REPOSITORY_ID" \
+            --producer-run-id "$PRODUCER_RUN_ID" \
+            --artifact-id "$ARTIFACT_ID" \
+            --archive-digest "$ARTIFACT_DIGEST"
+          printf 'BAZFRAME_WIN32_NATIVE_PACK_MODE=release-admission\n' >> "$GITHUB_ENV"
+          printf 'BAZFRAME_WIN32_NATIVE_RELEASE_COMMIT=%s\n' "$RELEASE_COMMIT" >> "$GITHUB_ENV"
       - name: Pack and checksum the reviewed bytes
         id: pack
         run: |
@@ -66,6 +139,13 @@ jobs:
             *) echo "Unexpected tarball path: $TARBALL" >&2; exit 1 ;;
           esac
           test -f "$TARBALL"
+          node ./scripts/verify-win32-native-release-tarball.mjs \
+            --tarball "$TARBALL" \
+            --admission win32-native-release-admission.json \
+            --release-commit "$GITHUB_SHA" \
+            --producer-repository "$GITHUB_REPOSITORY" \
+            --producer-repository-id "$GITHUB_REPOSITORY_ID" \
+            --producer-run-id "$GITHUB_RUN_ID"
           sha256sum "$TARBALL" > "$TARBALL.sha256"
           printf 'tarball=%s\n' "$TARBALL" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -74,6 +154,7 @@ jobs:
           path: |
             ${{ steps.pack.outputs.tarball }}
             ${{ steps.pack.outputs.tarball }}.sha256
+            win32-native-release-admission.json
           if-no-files-found: error
           retention-days: 1
 
@@ -83,9 +164,13 @@ jobs:
     timeout-minutes: 10
     environment: npm
     permissions:
+      actions: read
       contents: read
       id-token: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24.14.1
@@ -103,4 +188,11 @@ jobs:
           mapfile -t TARBALLS < <(find release -maxdepth 1 -type f -name '*.tgz' -print)
           test "${#TARBALLS[@]}" -eq 1
           (cd release && sha256sum --check "$(basename "${TARBALLS[0]}").sha256")
+          node ./scripts/verify-win32-native-release-tarball.mjs \
+            --tarball "${TARBALLS[0]}" \
+            --admission release/win32-native-release-admission.json \
+            --release-commit "$GITHUB_SHA" \
+            --producer-repository "$GITHUB_REPOSITORY" \
+            --producer-repository-id "$GITHUB_REPOSITORY_ID" \
+            --producer-run-id "$GITHUB_RUN_ID"
           npm publish "${TARBALLS[0]}" --access public --tag latest

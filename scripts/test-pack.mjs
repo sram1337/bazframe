@@ -92,6 +92,8 @@ try {
   assertMissing(join(packageRoot, 'skills', 'bazframe'));
   assertMissing(join(packageRoot, 'skills', 'bazify'));
   assertExists(join(packageRoot, 'artifacts', 'pi', 'bazframe.ts'));
+  assertMissing(join(packageRoot, 'artifacts', 'native', 'win32-x64-msvc', 'bazframe-win32.node'));
+  assertMissing(join(packageRoot, 'win32-native-release-admission.json'));
   assertExists(join(packageRoot, 'README.md'));
   assertExists(join(packageRoot, 'CONTRIBUTING.md'));
   assertExists(join(packageRoot, 'docs', 'getting-started.md'));
