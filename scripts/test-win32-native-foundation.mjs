@@ -1,10 +1,13 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   link,
   mkdir,
   mkdtemp,
+  open,
+  lstat,
   readFile,
+  rename,
   rm,
   symlink,
   unlink,
@@ -18,7 +21,7 @@ const args = process.argv.slice(2);
 const packageRoot = resolve(argument('--package-root') ?? fileURLToPath(new URL('..', import.meta.url)));
 const outputPath = resolve(argument('--output') ?? join(packageRoot, 'win32-native-evidence.json'));
 const report = {
-  schemaVersion: 3,
+  schemaVersion: 4,
   purpose: 'Bazframe-owned native Windows foundation evidence only; not a Windows support claim.',
   environment: {
     platform: process.platform,
@@ -47,6 +50,9 @@ try {
   );
   const directoryClosureModule = await import(
     pathToFileURL(join(packageRoot, 'dist/state/win32-directory-closure.js')).href
+  );
+  const directoryPublicationModule = await import(
+    pathToFileURL(join(packageRoot, 'dist/state/win32-directory-publication.js')).href
   );
   const backend = nativeModule.loadBazframeWin32Native();
   const nativePath = join(
@@ -291,6 +297,321 @@ try {
     'enumerated reparse target preserved'
   );
 
+  const dependentStateSha256 = createHash('sha256')
+    .update('publication-dependent-state:none')
+    .digest('hex');
+  const authority = (transactionId) => ({ transactionId, assertHeld() {} });
+  const createPublicationFixture = async (label, withOld = false) => {
+    const component = `publication-${label}`;
+    const root = join(privateRoot, component);
+    privateDirectoryModule.createWindowsPrivateDirectory(backend, privateRoot, component);
+    const parent = join(root, 'parent');
+    const journals = join(root, 'journals');
+    privateDirectoryModule.createWindowsPrivateDirectory(backend, root, 'parent');
+    privateDirectoryModule.createWindowsPrivateDirectory(backend, root, 'journals');
+    const destinationName = 'profile';
+    const destination = join(parent, destinationName);
+    if (withOld) {
+      privateDirectoryModule.createWindowsPrivateDirectory(backend, parent, destinationName);
+      await writePrivateInheritedFile(join(destination, 'old.txt'), 'old\n');
+    }
+    return { root, parent, journals, destinationName, destination };
+  };
+  const commonPublicationOptions = (fixture, transactionId, observed = () => dependentStateSha256) => ({
+    backend,
+    parentPath: fixture.parent,
+    journalRootPath: fixture.journals,
+    destinationName: fixture.destinationName,
+    dependentState: { expectedSha256: dependentStateSha256, observeSha256: observed },
+    authority: authority(transactionId)
+  });
+  const materializePublicationCandidate = async (candidatePath) => {
+    await writePrivateInheritedFile(join(candidatePath, 'new.txt'), 'new\n');
+  };
+
+  const freshFixture = await createPublicationFixture('fresh');
+  const freshTransaction = transactionId();
+  const freshResult = await directoryPublicationModule.executeWindowsDirectoryPublication({
+    ...commonPublicationOptions(freshFixture, freshTransaction),
+    operation: { mode: 'fresh' },
+    materialize: materializePublicationCandidate
+  });
+  requireCondition(freshResult.action === 'committed' && !freshResult.backupRetained, 'fresh publication committed');
+  requireCondition(await readFile(join(freshFixture.destination, 'new.txt'), 'utf8') === 'new\n', 'fresh publication bytes');
+  const freshJournalClosure = await directoryClosureModule.captureWindowsDirectoryClosure(
+    backend,
+    join(freshFixture.journals, freshTransaction),
+    { maxEntries: 8, maxDepth: 0, maxPathBytes: 32, maxFileBytes: 1024 * 1024, maxAggregateBytes: 8 * 1024 * 1024 }
+  );
+  requireCondition(
+    freshJournalClosure.closure.entries.length === 6
+      && freshJournalClosure.closure.entries.every((entry) => entry.kind === 'file'),
+    'publication journal closure is private and append-only'
+  );
+
+  const replacementFixture = await createPublicationFixture('replacement', true);
+  const replacementTransaction = transactionId();
+  const expectedOld = await directoryClosureModule.captureWindowsDirectoryClosure(
+    backend,
+    replacementFixture.destination
+  );
+  const replacementResult = await directoryPublicationModule.executeWindowsDirectoryPublication({
+    ...commonPublicationOptions(replacementFixture, replacementTransaction),
+    operation: {
+      mode: 'replacement',
+      expectedOld: {
+        rootIdentity: expectedOld.rootIdentity,
+        closureSha256: expectedOld.closureSha256
+      },
+      overwriteAuthorization: 'explicit-overwrite'
+    },
+    materialize: materializePublicationCandidate
+  });
+  const replacementBackup = join(
+    replacementFixture.parent,
+    `.bazframe-backup-${replacementTransaction}`
+  );
+  const retainedOld = await directoryClosureModule.captureWindowsDirectoryClosure(backend, replacementBackup);
+  requireCondition(
+    replacementResult.action === 'committed' && replacementResult.backupRetained
+      && retainedOld.rootIdentity === expectedOld.rootIdentity
+      && retainedOld.closureSha256 === expectedOld.closureSha256
+      && await readFile(join(replacementFixture.destination, 'new.txt'), 'utf8') === 'new\n',
+    'replacement publication retained exact private backup'
+  );
+
+  const sharingFixture = await createPublicationFixture('sharing');
+  const sharingTransaction = transactionId();
+  let sharingFailures = 1;
+  await expectCode(
+    () => directoryPublicationModule.executeWindowsDirectoryPublication({
+      ...commonPublicationOptions(sharingFixture, sharingTransaction),
+      operation: { mode: 'fresh' },
+      materialize: materializePublicationCandidate,
+      io: publicationIo(async (source, destination) => {
+        if (sharingFailures > 0) {
+          sharingFailures -= 1;
+          throw Object.assign(new Error('sharing violation'), { code: 'EBUSY' });
+        }
+        await rename(source, destination);
+      })
+    }),
+    'WINDOWS_DIRECTORY_PUBLICATION_RETRY_REQUIRED'
+  );
+  const recoveredSharing = await directoryPublicationModule.recoverWindowsDirectoryPublication({
+    ...commonPublicationOptions(sharingFixture, sharingTransaction),
+    transactionId: sharingTransaction
+  });
+  requireCondition(recoveredSharing.action === 'committed', 'no-effect sharing failure recovered');
+
+  const afterEffectFixture = await createPublicationFixture('after-effect', true);
+  const afterEffectTransaction = transactionId();
+  const afterEffectOld = await directoryClosureModule.captureWindowsDirectoryClosure(
+    backend,
+    afterEffectFixture.destination
+  );
+  const afterEffectResult = await directoryPublicationModule.executeWindowsDirectoryPublication({
+    ...commonPublicationOptions(afterEffectFixture, afterEffectTransaction),
+    operation: {
+      mode: 'replacement',
+      expectedOld: {
+        rootIdentity: afterEffectOld.rootIdentity,
+        closureSha256: afterEffectOld.closureSha256
+      },
+      overwriteAuthorization: 'explicit-overwrite'
+    },
+    materialize: materializePublicationCandidate,
+    io: publicationIo(async (source, destination) => {
+      await rename(source, destination);
+      throw Object.assign(new Error('reported error after effect'), { code: 'EIO' });
+    })
+  });
+  requireCondition(afterEffectResult.action === 'committed', 'after-effect rename error reconciled');
+
+  let occupiedRacePreserved = true;
+  for (const kind of ['file', 'empty-directory', 'nonempty-directory', 'case-directory', 'symlink', 'junction']) {
+    const fixture = await createPublicationFixture(`race-${kind}`);
+    const transaction = transactionId();
+    let occupiedPath = fixture.destination;
+    let beforeInspection;
+    let beforeReparseTag;
+    let beforeReparseFileId;
+    const raceResult = await directoryPublicationModule.executeWindowsDirectoryPublication({
+      ...commonPublicationOptions(fixture, transaction),
+      operation: { mode: 'fresh' },
+      materialize: materializePublicationCandidate,
+      io: publicationIo(async (source, destination) => {
+        if (kind === 'file') {
+          await writePrivateInheritedFile(destination, 'occupied\n');
+          beforeInspection = backend.inspectPath(destination);
+        } else if (kind === 'symlink' || kind === 'junction') {
+          await symlink(outside, destination, kind === 'symlink' ? 'dir' : 'junction');
+          const occupied = await backend.enumerateStableDirectory(fixture.parent, 3);
+          const reparse = occupied.entries.find(
+            (entry) => entry.name.toLowerCase() === fixture.destinationName
+          );
+          beforeReparseTag = reparse?.reparseTag;
+          beforeReparseFileId = reparse?.fileId;
+        } else {
+          const component = kind === 'case-directory' ? 'PROFILE' : fixture.destinationName;
+          occupiedPath = join(fixture.parent, component);
+          privateDirectoryModule.createWindowsPrivateDirectory(backend, fixture.parent, component);
+          if (kind === 'nonempty-directory') {
+            await writePrivateInheritedFile(join(occupiedPath, 'occupied.txt'), 'occupied\n');
+          }
+          beforeInspection = backend.inspectPath(occupiedPath);
+        }
+        await rename(source, destination);
+      })
+    });
+    occupiedRacePreserved &&= raceResult.action === 'ambiguous';
+    if (kind === 'symlink' || kind === 'junction') {
+      const occupied = await backend.enumerateStableDirectory(fixture.parent, 3);
+      const afterReparse = occupied.entries.find(
+        (entry) => entry.name.toLowerCase() === fixture.destinationName
+      );
+      const afterReparseTag = afterReparse?.reparseTag;
+      occupiedRacePreserved &&= (await lstat(fixture.destination)).isSymbolicLink()
+        && beforeReparseTag !== null && beforeReparseTag !== undefined
+        && beforeReparseTag === afterReparseTag
+        && beforeReparseFileId !== undefined
+        && beforeReparseFileId === afterReparse?.fileId
+        && beforeReparseTag === (kind === 'symlink' ? 0xa000000c : 0xa0000003)
+        && await readFile(join(outside, 'child.txt'), 'utf8') === 'outside\n';
+    } else {
+      const afterInspection = backend.inspectPath(occupiedPath);
+      occupiedRacePreserved &&= beforeInspection.object.fileId === afterInspection.object.fileId;
+      if (kind === 'file') {
+        occupiedRacePreserved &&= await readFile(occupiedPath, 'utf8') === 'occupied\n';
+      }
+    }
+  }
+  requireCondition(occupiedRacePreserved, 'occupied race destinations preserved');
+
+  const dependentFixture = await createPublicationFixture('dependent-drift', true);
+  const dependentTransaction = transactionId();
+  const dependentOld = await directoryClosureModule.captureWindowsDirectoryClosure(
+    backend,
+    dependentFixture.destination
+  );
+  let observedDependent = dependentStateSha256;
+  const dependentResult = await directoryPublicationModule.executeWindowsDirectoryPublication({
+    ...commonPublicationOptions(dependentFixture, dependentTransaction, () => observedDependent),
+    operation: {
+      mode: 'replacement',
+      expectedOld: {
+        rootIdentity: dependentOld.rootIdentity,
+        closureSha256: dependentOld.closureSha256
+      },
+      overwriteAuthorization: 'explicit-overwrite'
+    },
+    materialize: materializePublicationCandidate,
+    hooks: {
+      afterPhase(phase) {
+        if (phase === 'CANDIDATE_RENAME_INTENT') {
+          observedDependent = createHash('sha256').update('changed-dependent-state').digest('hex');
+        }
+      }
+    }
+  });
+  requireCondition(
+    dependentResult.action === 'ambiguous'
+      && !await pathExists(dependentFixture.destination)
+      && await readFile(join(
+        dependentFixture.parent,
+        `.bazframe-candidate-${dependentTransaction}`,
+        'new.txt'
+      ), 'utf8') === 'new\n'
+      && (await lstat(join(dependentFixture.parent, `.bazframe-backup-${dependentTransaction}`))).isDirectory(),
+    'dependent-state drift before publication retained private transaction state'
+  );
+
+  const journalDriftFixture = await createPublicationFixture('journal-drift');
+  const journalDriftTransaction = transactionId();
+  await expectCode(
+    () => directoryPublicationModule.executeWindowsDirectoryPublication({
+      ...commonPublicationOptions(journalDriftFixture, journalDriftTransaction),
+      operation: { mode: 'fresh' },
+      materialize: materializePublicationCandidate,
+      io: publicationIo(async () => {
+        throw Object.assign(new Error('sharing violation'), { code: 'EBUSY' });
+      })
+    }),
+    'WINDOWS_DIRECTORY_PUBLICATION_RETRY_REQUIRED'
+  );
+  const journalDriftDirectory = join(journalDriftFixture.journals, journalDriftTransaction);
+  const journalEntries = await backend.enumerateStableDirectory(journalDriftDirectory, 8);
+  const lastJournal = journalEntries.entries.at(-1).name;
+  await writeFile(join(journalDriftDirectory, lastJournal), '{"broken":true}\n');
+  let renameAfterJournalDrift = false;
+  await expectCode(
+    () => directoryPublicationModule.recoverWindowsDirectoryPublication({
+      ...commonPublicationOptions(journalDriftFixture, journalDriftTransaction),
+      transactionId: journalDriftTransaction,
+      io: publicationIo(async () => { renameAfterJournalDrift = true; })
+    }),
+    'WINDOWS_DIRECTORY_PUBLICATION_JOURNAL_INVALID'
+  );
+  requireCondition(!renameAfterJournalDrift, 'corrupt journal refused before recovery rename');
+
+  const crashCases = [
+    ...[
+      'PLANNED', 'CANDIDATE_READY', 'OLD_RENAME_INTENT', 'OLD_RENAME_PROVEN',
+      'CANDIDATE_RENAME_INTENT', 'CANDIDATE_RENAME_PROVEN',
+      'DEPENDENT_STATE_PROVEN', 'COMMITTED'
+    ].map((phase) => ({ publicationMode: 'replacement', phase })),
+    ...[
+      'PLANNED', 'CANDIDATE_READY', 'CANDIDATE_RENAME_INTENT',
+      'CANDIDATE_RENAME_PROVEN', 'DEPENDENT_STATE_PROVEN', 'COMMITTED'
+    ].map((phase) => ({ publicationMode: 'fresh', phase })),
+    { publicationMode: 'replacement', point: 'after-old-rename' },
+    { publicationMode: 'replacement', point: 'after-candidate-rename' },
+    { publicationMode: 'fresh', point: 'after-candidate-rename' }
+  ];
+  const childScript = fileURLToPath(new URL('./test-win32-directory-publication-child.mjs', import.meta.url));
+  let restartRecoveryPassed = true;
+  for (const crashCase of crashCases) {
+    const label = crashCase.phase ?? crashCase.point;
+    const fixture = await createPublicationFixture(
+      `crash-${crashCase.publicationMode}-${label.toLowerCase()}`,
+      crashCase.publicationMode === 'replacement'
+    );
+    const transaction = transactionId();
+    const commonArgs = [
+      childScript,
+      '--package-root', packageRoot,
+      '--parent', fixture.parent,
+      '--journal-root', fixture.journals,
+      '--destination', fixture.destinationName,
+      '--transaction', transaction,
+      '--publication-mode', crashCase.publicationMode
+    ];
+    const crashArgs = crashCase.phase === undefined
+      ? ['--crash-point', crashCase.point]
+      : ['--crash-phase', crashCase.phase];
+    const stopped = spawnSync(process.execPath, [
+      ...commonArgs,
+      '--mode', 'start',
+      ...crashArgs
+    ], { encoding: 'utf8', shell: false });
+    if (stopped.status !== 86) {
+      throw new Error(`Publication crash child failed at ${label}: ${stopped.status}; ${stopped.stderr}`);
+    }
+    const recovered = spawnSync(process.execPath, [
+      ...commonArgs,
+      '--mode', 'recover'
+    ], { encoding: 'utf8', shell: false });
+    if (recovered.status !== 0) {
+      throw new Error(`Publication recovery child failed at ${label}: ${recovered.status}; ${recovered.stderr}`);
+    }
+    const value = JSON.parse(recovered.stdout);
+    const expectedAction = crashCase.phase === 'PLANNED' || crashCase.phase === 'CANDIDATE_READY'
+      ? 'aborted'
+      : crashCase.phase === 'COMMITTED' ? 'terminal' : 'committed';
+    restartRecoveryPassed &&= value.action === expectedAction;
+  }
+  requireCondition(restartRecoveryPassed, 'fresh/replacement clean-process phase and post-rename recovery matrix');
+
   report.observations = {
     binarySha256: createHash('sha256').update(nativeBytes).digest('hex'),
     packageVersion: manifest.version,
@@ -355,7 +676,18 @@ try {
     directoryClosureHardLinkRefused: true,
     directoryClosureForeignFileAclRefused: true,
     directoryClosureDriftRefused: true,
-    directoryClosureReparseRefusedTargetPreserved: true
+    directoryClosureReparseRefusedTargetPreserved: true,
+    directoryPublicationFreshNoReplace: freshResult.action === 'committed'
+      && !freshResult.backupRetained,
+    directoryPublicationReplacementBackupRetained: replacementResult.action === 'committed'
+      && replacementResult.backupRetained,
+    directoryPublicationAppendOnlyPrivateJournal: freshJournalClosure.closure.entries.length === 6,
+    directoryPublicationRenameErrorPredicates: recoveredSharing.action === 'committed'
+      && afterEffectResult.action === 'committed',
+    directoryPublicationOccupiedRacePreserved: occupiedRacePreserved,
+    directoryPublicationDependentDriftRetained: dependentResult.action === 'ambiguous',
+    directoryPublicationCorruptJournalRefused: !renameAfterJournalDrift,
+    directoryPublicationRestartRecovery: restartRecoveryPassed
   };
   for (const [name, value] of Object.entries(report.observations)) {
     if (typeof value === 'boolean') requireCondition(value, name);
@@ -385,6 +717,45 @@ try {
   await writeFile(outputPath, `${JSON.stringify(report, null, 2)}\n`);
   console.log(`Bazframe native Windows foundation: ${report.completion}`);
   console.log(`Evidence: ${outputPath}`);
+}
+
+async function pathExists(path) {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (error !== null && typeof error === 'object' && error.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+async function writePrivateInheritedFile(path, bytes) {
+  const handle = await open(path, 'wx');
+  try {
+    await handle.writeFile(bytes);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+function publicationIo(renameOperation = rename) {
+  return {
+    async appendFileExclusive(path, bytes) {
+      const handle = await open(path, 'wx');
+      try {
+        await handle.writeFile(bytes);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    },
+    rename: renameOperation
+  };
+}
+
+function transactionId() {
+  return randomUUID().replaceAll('-', '');
 }
 
 function makePrivateTestFile(path, currentUserSid) {

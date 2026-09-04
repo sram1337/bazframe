@@ -272,7 +272,7 @@ Bazframe owns the native Windows API, source, compiled binary, conformance tests
 
 Release admission is implemented as a separate same-release-run decision. The tag workflow calls the reusable foundation producer, retrieves its successful artifact by numeric ID, normalizes the upload action's raw digest to the REST API's algorithm-prefixed form, verifies same-run/repository/commit metadata and the downloaded archive digest, strictly validates the exact artifact inventory plus both external and nested conformance receipts, and creates a commit/version/toolchain/digest-bound ephemeral assembly record without changing the foundation receipts. Every release-mode build and `prepack` revalidates that record and the current fixed-path binary. The final root tarball must contain no alternate `.node` member, exactly one regular fixed-path binary with the admitted digest, and no admission record; the protected publish job additionally binds the record's producer repository, repository ID, and run ID to trusted current context before repeating verification without repacking. Ordinary unsupported-platform packs remain binary-free.
 
-The native contract remains deliberately narrow. Contract version 2 and its schema-v2 source-tree and packed-install evidence passed on native Windows x64/Node 22.19.0 for commit `3d2551c` in workflow run `33881686168`. Contract version 3 adds only the missing direct-directory fact boundary and requires a new exact native evidence run before that addition is accepted:
+The native contract remains deliberately narrow. Contract version 2 and its schema-v2 source-tree and packed-install evidence passed on native Windows x64/Node 22.19.0 for commit `3d2551c` in workflow run `33881686168`. Contract version 3 adds only the missing direct-directory fact boundary; its source-tree and packed-install evidence passed on native Windows x64/Node 22.19.0 for commit `eb5dc56` in workflow run `33892131696`:
 
 - `getNativeWindowsInfo` reports the exact contract, package version, target, native read ceiling, and native direct-directory entry ceiling;
 - `inspectWindowsPath` opens and checks each drive-absolute path component without following reparses, records and immediately reopens/recompares every traversed identity, derives filesystem and device facts from the pinned final object and its canonical volume, admits only a fixed local NTFS disk with persistent ACL support and non-remote device evidence, and returns canonical volume/object facts with lossless fixed-width identities plus owner, group, current-user, descriptor-control, non-null-DACL, and canonical in-use ACL-byte evidence from the same opened object;
@@ -290,7 +290,7 @@ The earlier exact-`0.7.2` OpenClaw probe remains reproducible historical evidenc
 
 The foundation build-and-conformance workflow binds the Windows binary digest to its source commit and pinned Node, Rust, MSVC, and action inputs. The equivalent clean-checkout local PowerShell harness is `scripts/run-win32-native-foundation.ps1`; it binds the same source/toolchain facts and preserves the binary, tarball, digests, installation logs, and source/installed receipts in an ignored evidence directory. Both paths test native loading, fixed local NTFS facts, exact identities, ancestor/final reparse refusal, bounded stable reads, and loading from a packed root tarball. Passing foundation evidence is now a required input to the separate release-admission mechanism described above; neither mechanism authorizes a Windows support claim.
 
-Contract-v2 source composition and conformance cover protected owner-private first visibility for one direct child, effective DACL evidence, inherited private-chain admission, unsafe-root refusal, Unicode-name creation, occupied no-replace refusal, and invalid/reparse-backed-parent refusal. Its source-tree and packed-install receipts passed with exact path-free schema-v2 booleans. Contract-v3 source adds bounded handle enumeration and TypeScript-composed deterministic, aggregate-bounded, no-follow directory closure evidence. Its source and packed receipts use exact evidence schema version 3 and retain only booleans rather than names, paths, identities, SIDs, ACL bytes, or file content. The contract-v3 milestone remains unaccepted until the native Windows workflow passes with those receipts.
+Contract-v2 source composition and conformance cover protected owner-private first visibility for one direct child, effective DACL evidence, inherited private-chain admission, unsafe-root refusal, Unicode-name creation, occupied no-replace refusal, and invalid/reparse-backed-parent refusal. Its source-tree and packed-install receipts passed with exact path-free schema-v2 booleans. Contract-v3 source adds bounded handle enumeration and TypeScript-composed deterministic, aggregate-bounded, no-follow directory closure evidence. Its source and packed receipts use exact evidence schema version 3 and retain only booleans rather than names, paths, identities, SIDs, ACL bytes, or file content. Exact run `33892131696` accepted that internal contract-v3 milestone without authorizing release admission or a Windows support claim.
 
 After that evidence run, Bazframe must resolve the remaining outcomes through TypeScript composition tests before adding another native export:
 
@@ -304,6 +304,34 @@ After that evidence run, Bazframe must resolve the remaining outcomes through Ty
 - packed local/global installation through both executable names for the complete section 2 matrix.
 
 A new native operation is added only when a concrete composition test shows that the current fact/receipt boundary cannot produce an accepted outcome. The complete public product gate remains closed throughout this internal sequencing.
+
+### 7.2 Directory-publication composition contract
+
+The directory-publication internal slice composes guarded pathname renames with contract-v3 facts rather than adding a native rename export. Node's Windows rename is not treated as proof by itself. Before and after every attempted rename—including a rejected call—TypeScript derives the outcome only from an admitted private parent, stable bounded parent enumeration, exact lossless directory identities and closure digests, and the journaled dependent-state digest. Native Windows conformance must show that an occupied file, empty or nonempty directory, case-equivalent name, symlink, or junction is not replaced. Any contrary native evidence reopens the need for a narrower native operation.
+
+The composition requires a separately supplied exclusive-operation authority. Until cooperating Windows locks pass their own later gate, only isolated internal conformance may supply that authority; this slice is not wired to public commands. The publication parent, journal root, per-transaction journal directory, candidate, destination, and backup must be owner-private on one admitted local NTFS volume with one current-user security identity. The destination is one validated Windows component. Candidate and backup names are derived only from the exact 32-lowercase-hex transaction ID.
+
+Each transaction uses immutable, append-only, canonically encoded, bounded journal records. A protected private transaction directory is created before candidate creation. Every record file is exclusively created under a proved inheritable-private parent, completely written and flushed, stably reread, and included in a final owner-private journal-directory closure proof before the corresponding phase is accepted. Records bind the transaction, mode, literal `explicit-overwrite` authorization or `not-authorized`, parent/journal identities, destination/candidate/backup names, expected-old/candidate/backup identity and closure digests, dependent-state digest, sequence, and phase. No Windows directory-`fsync` or sudden-power-loss equivalence is claimed.
+
+The legal fresh route is:
+
+```text
+PLANNED -> CANDIDATE_READY -> CANDIDATE_RENAME_INTENT
+        -> CANDIDATE_RENAME_PROVEN -> DEPENDENT_STATE_PROVEN -> COMMITTED
+```
+
+The legal replacement route inserts:
+
+```text
+CANDIDATE_READY -> OLD_RENAME_INTENT -> OLD_RENAME_PROVEN
+                -> CANDIDATE_RENAME_INTENT
+```
+
+`ABORTED` is permitted only before a rename intent. `AMBIGUOUS` is permitted from any nonterminal phase and is terminal. Every other transition, identity width, field, key order, sequence, mode/authorization combination, or changed immutable proof is refused. A fresh transaction always records `not-authorized`; replacement requires the literal `explicit-overwrite` value before journal or candidate creation. Routine confirmation has no representation at this seam.
+
+Recovery receives the trusted parent and journal-root paths plus the transaction ID; journal bytes never authorize arbitrary paths. It independently proves the current dependent state and namespace tuple before mutation. Before rename intent, a proved untouched transaction may abort while retaining its private candidate. At `OLD_RENAME_INTENT`, only exact `(destination=old, candidate=new, backup=absent)` may retry old-to-backup, while exact `(destination=absent, candidate=new, backup=old)` may advance. At `CANDIDATE_RENAME_INTENT`, only the exact fresh or detached-replacement tuple may retry candidate-to-destination, while exact `(destination=new, candidate=absent, backup=absent|old)` may advance. Candidate proof, dependent-state proof, and commit each re-prove that final tuple. A rename error with the exact before tuple is retryable retained state; an error with the exact after tuple advances; every other tuple, unreadable object, malformed journal, drifted parent/security/dependent state, or unprovable journal write remains retained and ambiguous.
+
+No recursive removal occurs in this slice. A committed replacement retains its exact private backup and journal for the later reclamation capability. Aborted or ambiguous candidates, backups, journals, and partial journal records likewise remain private. Cleanup failure cannot roll back a proved publication. Evidence receipts remain path-, content-, SID-, ACL-, identity-, and machine-detail-free and continue to report `releaseAdmission: not-authorized` and `windowsSupportClaim: false`.
 
 ## 8. Acceptance requirements
 
