@@ -491,6 +491,17 @@ function harness(options: { destination?: TestNode; oldFile?: string } = {}) {
       nodes.set(path, created);
       return { parentBefore, created: inspection(path, created), parentAfter: inspection(parentPath, parent) };
     },
+    async renameDirectoryNoReplace(parentPath, sourceComponent, destinationComponent) {
+      renameCalls.push([
+        win32.join(parentPath, sourceComponent),
+        win32.join(parentPath, destinationComponent)
+      ]);
+      moveTree(
+        nodes,
+        win32.join(parentPath, sourceComponent),
+        win32.join(parentPath, destinationComponent)
+      );
+    },
     async readStableFile(path, maximum) {
       const node = required(nodes, path);
       if (node.kind !== 'file' || node.bytes === undefined || node.bytes.byteLength > maximum) {

@@ -35,8 +35,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO,
     FileAttributeTagInfo, FileBasicInfo, FileIdExtdDirectoryInfo, FileIdExtdDirectoryRestartInfo,
     FileIdInfo, FileStandardInfo, GetDriveTypeW, GetFileInformationByHandleEx,
-    GetFinalPathNameByHandleW, GetFullPathNameW, GetVolumeInformationByHandleW, OPEN_EXISTING,
-    QueryDosDeviceW, READ_CONTROL, ReadFile, VOLUME_NAME_GUID,
+    GetFinalPathNameByHandleW, GetFullPathNameW, GetVolumeInformationByHandleW, MoveFileExW,
+    OPEN_EXISTING, QueryDosDeviceW, READ_CONTROL, ReadFile, VOLUME_NAME_GUID,
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
@@ -225,6 +225,62 @@ fn finish_private_directory_creation(
         created,
         parent_after,
     })
+}
+
+pub(crate) fn rename_windows_directory_no_replace(
+    parent_path: &str,
+    source_component: &str,
+    destination_component: &str,
+) -> NativeResult<()> {
+    let parent = open_admitted_path(parent_path, FILE_READ_ATTRIBUTES | READ_CONTROL)?;
+    let parent_before = inspect_opened_path(&parent)?;
+    if parent_before.kind != "directory" {
+        return Err(native_error(
+            "ERR_WIN32_NOT_DIRECTORY",
+            "no-replace directory rename requires a directory parent",
+        ));
+    }
+
+    let source_path = join_direct_child(parent_path, source_component);
+    let source = open_admitted_path(&source_path, FILE_READ_ATTRIBUTES | READ_CONTROL)?;
+    let source_inspection = inspect_opened_path(&source)?;
+    if source_inspection.kind != "directory" {
+        return Err(native_error(
+            "ERR_WIN32_NOT_DIRECTORY",
+            "no-replace directory rename requires a physical directory source",
+        ));
+    }
+    if source_inspection.volume.identity != parent_before.volume.identity {
+        return Err(native_error(
+            "ERR_WIN32_IO",
+            "no-replace directory rename source and parent are on different volumes",
+        ));
+    }
+
+    let parent_after = inspect_opened_path(&parent)?;
+    if !same_directory_identity(&parent_before, &parent_after)
+        || !same_security_observation(&parent_before.security, &parent_after.security)
+    {
+        return Err(native_error(
+            "ERR_WIN32_READ_CHANGED",
+            "no-replace directory rename parent changed before the operation",
+        ));
+    }
+
+    let destination_path = join_direct_child(parent_path, destination_component);
+    let source_extended = extended_drive_path(&source_path)?;
+    let destination_extended = extended_drive_path(&destination_path)?;
+    let source_encoded = wide(&source_extended);
+    let destination_encoded = wide(&destination_extended);
+    // SAFETY: both validated, terminated paths remain alive for the complete call.
+    // A zero flag set intentionally forbids replacement, copy fallback, and delayed moves.
+    let renamed = unsafe { MoveFileExW(source_encoded.as_ptr(), destination_encoded.as_ptr(), 0) };
+    if renamed == 0 {
+        return Err(last_win_error(
+            "rename Windows directory without replacement",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn read_windows_file_stable(path: &str, max_bytes: u32) -> NativeResult<StableReadData> {

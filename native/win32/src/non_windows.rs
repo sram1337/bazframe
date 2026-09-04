@@ -20,6 +20,17 @@ pub(crate) fn create_windows_private_directory(
     ))
 }
 
+pub(crate) fn rename_windows_directory_no_replace(
+    _parent_path: &str,
+    _source_component: &str,
+    _destination_component: &str,
+) -> NativeResult<()> {
+    Err(native_error(
+        "ERR_WIN32_UNSUPPORTED_TARGET",
+        "Bazframe native no-replace directory rename requires win32-x64-msvc",
+    ))
+}
+
 pub(crate) fn read_windows_file_stable(
     _path: &str,
     _max_bytes: u32,

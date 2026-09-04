@@ -274,6 +274,7 @@ function fakeBackend(
       return inspection;
     },
     createPrivateDirectory,
+    renameDirectoryNoReplace: async () => { throw new Error('unexpected rename'); },
     readStableFile: async () => { throw new Error('unexpected read'); },
     enumerateStableDirectory: async () => { throw new Error('unexpected enumeration'); }
   };

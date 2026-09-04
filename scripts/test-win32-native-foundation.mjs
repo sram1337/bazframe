@@ -7,14 +7,13 @@ import {
   open,
   lstat,
   readFile,
-  rename,
   rm,
   symlink,
   unlink,
   writeFile
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const args = process.argv.slice(2);
@@ -317,6 +316,14 @@ try {
     }
     return { root, parent, journals, destinationName, destination };
   };
+  const nativePublicationRename = async (source, destination) => {
+    const parent = dirname(source);
+    requireCondition(
+      parent.toLowerCase() === dirname(destination).toLowerCase(),
+      'native publication rename stays within one parent'
+    );
+    await backend.renameDirectoryNoReplace(parent, basename(source), basename(destination));
+  };
   const commonPublicationOptions = (fixture, transactionId, observed = () => dependentStateSha256) => ({
     backend,
     parentPath: fixture.parent,
@@ -393,7 +400,7 @@ try {
           sharingFailures -= 1;
           throw Object.assign(new Error('sharing violation'), { code: 'EBUSY' });
         }
-        await rename(source, destination);
+        await nativePublicationRename(source, destination);
       })
     }),
     'WINDOWS_DIRECTORY_PUBLICATION_RETRY_REQUIRED'
@@ -422,7 +429,7 @@ try {
     },
     materialize: materializePublicationCandidate,
     io: publicationIo(async (source, destination) => {
-      await rename(source, destination);
+      await nativePublicationRename(source, destination);
       throw Object.assign(new Error('reported error after effect'), { code: 'EIO' });
     })
   });
@@ -461,7 +468,7 @@ try {
           }
           beforeInspection = backend.inspectPath(occupiedPath);
         }
-        await rename(source, destination);
+        await nativePublicationRename(source, destination);
       })
     });
     occupiedRacePreserved &&= raceResult.action === 'ambiguous';
@@ -739,7 +746,7 @@ async function writePrivateInheritedFile(path, bytes) {
   }
 }
 
-function publicationIo(renameOperation = rename) {
+function publicationIo(renameOperation) {
   return {
     async appendFileExclusive(path, bytes) {
       const handle = await open(path, 'wx');

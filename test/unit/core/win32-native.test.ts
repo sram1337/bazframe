@@ -62,8 +62,9 @@ describe('Bazframe-owned Windows native loader', () => {
   it.each([
     ['missing inspect export', { inspectWindowsPath: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
     ['missing create export', { createWindowsPrivateDirectory: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
+    ['missing rename export', { renameWindowsDirectoryNoReplace: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
     ['missing enumerate export', { enumerateWindowsDirectoryStable: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
-    ['legacy contract v2', { info: { contractVersion: 2 } }, 'WINDOWS_NATIVE_CONTRACT_MISMATCH'],
+    ['legacy contract v3', { info: { contractVersion: 3 } }, 'WINDOWS_NATIVE_CONTRACT_MISMATCH'],
     ['contract', { info: { contractVersion: 1 } }, 'WINDOWS_NATIVE_CONTRACT_MISMATCH'],
     ['version', { info: { packageVersion: '0.1.0-other' } }, 'WINDOWS_NATIVE_VERSION_MISMATCH'],
     ['target', { info: { target: 'win32-arm64-msvc' } }, 'WINDOWS_NATIVE_TARGET_MISMATCH'],
@@ -189,6 +190,30 @@ describe('Bazframe-owned Windows native loader', () => {
     );
   });
 
+  it('calls only the native no-replace rename with validated sibling components', async () => {
+    const native = module();
+    const backend = load(native);
+    await backend.renameDirectoryNoReplace('C:\\state', 'candidate', 'profile');
+    expect(native.renameWindowsDirectoryNoReplace).toHaveBeenCalledWith(
+      'C:\\state', 'candidate', 'profile'
+    );
+    await expect(backend.renameDirectoryNoReplace('C:\\state', 'PROFILE', 'profile')).rejects.toMatchObject({
+      code: 'WINDOWS_NATIVE_PATH_INVALID'
+    });
+    expect(native.renameWindowsDirectoryNoReplace).toHaveBeenCalledTimes(1);
+  });
+
+  it('maps native no-replace rename refusals without a fallback', async () => {
+    const native = module({
+      renameWindowsDirectoryNoReplace: () => Promise.reject(
+        coded('GenericFailure', 'ERR_WIN32_ALREADY_EXISTS: occupied')
+      )
+    });
+    await expect(load(native).renameDirectoryNoReplace(
+      'C:\\state', 'candidate', 'profile'
+    )).rejects.toMatchObject({ code: 'WINDOWS_NATIVE_DIRECTORY_OCCUPIED' });
+  });
+
   it('maps typed native operation refusal without exposing a weaker path', () => {
     const native = module({
       inspectWindowsPath: () => { throw coded('ERR_WIN32_VOLUME_REMOTE'); }
@@ -306,7 +331,7 @@ function load(
 
 function module(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   const info = {
-    contractVersion: 3,
+    contractVersion: 4,
     packageVersion: VERSION,
     target: 'win32-x64-msvc',
     maxStableReadBytes: BAZFRAME_WIN32_NATIVE_MAX_STABLE_READ_BYTES,
@@ -317,6 +342,7 @@ function module(overrides: Record<string, unknown> = {}): Record<string, unknown
     getNativeWindowsInfo: () => info,
     inspectWindowsPath: () => overrides.inspection ?? inspection(),
     createWindowsPrivateDirectory: () => overrides.creation ?? creation(),
+    renameWindowsDirectoryNoReplace: vi.fn(() => Promise.resolve()),
     readWindowsFileStable: () => Promise.resolve(overrides.stableRead ?? stableRead()),
     enumerateWindowsDirectoryStable: () => Promise.resolve(overrides.enumeration ?? enumeration()),
     ...without(overrides, ['info', 'inspection', 'creation', 'stableRead', 'enumeration'])

@@ -19,7 +19,7 @@ use non_windows as platform;
 #[cfg(windows)]
 use windows as platform;
 
-pub const NATIVE_CONTRACT_VERSION: u32 = 3;
+pub const NATIVE_CONTRACT_VERSION: u32 = 4;
 // Mirrors PROFILE_PORTABILITY_PRODUCTION_LIMITS.checkoutFileBytes. The native
 // boundary may lower a caller's bound but never allocates beyond this product
 // authority.
@@ -231,6 +231,51 @@ impl Task for StableReadTask {
             after: data.after,
         })
     }
+}
+
+pub struct NoReplaceDirectoryRenameTask {
+    parent_path: String,
+    source_component: String,
+    destination_component: String,
+}
+
+impl Task for NoReplaceDirectoryRenameTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        into_async_napi(platform::rename_windows_directory_no_replace(
+            &self.parent_path,
+            &self.source_component,
+            &self.destination_component,
+        ))
+    }
+
+    fn resolve(&mut self, _env: Env, _data: Self::Output) -> Result<Self::JsValue> {
+        Ok(())
+    }
+}
+
+#[napi(js_name = "renameWindowsDirectoryNoReplace")]
+pub fn rename_windows_directory_no_replace(
+    parent_path: String,
+    source_component: Utf16String,
+    destination_component: Utf16String,
+) -> Result<AsyncTask<NoReplaceDirectoryRenameTask>> {
+    let source_component = into_async_napi(component::validate_final_component(&source_component))?;
+    let destination_component =
+        into_async_napi(component::validate_final_component(&destination_component))?;
+    if source_component == destination_component {
+        return Err(Error::new(
+            Status::InvalidArg,
+            "ERR_WIN32_INVALID_PATH: rename components must be distinct".to_owned(),
+        ));
+    }
+    Ok(AsyncTask::new(NoReplaceDirectoryRenameTask {
+        parent_path,
+        source_component,
+        destination_component,
+    }))
 }
 
 #[napi(js_name = "readWindowsFileStable")]

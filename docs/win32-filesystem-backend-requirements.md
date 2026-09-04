@@ -292,10 +292,10 @@ The foundation build-and-conformance workflow binds the Windows binary digest to
 
 Contract-v2 source composition and conformance cover protected owner-private first visibility for one direct child, effective DACL evidence, inherited private-chain admission, unsafe-root refusal, Unicode-name creation, occupied no-replace refusal, and invalid/reparse-backed-parent refusal. Its source-tree and packed-install receipts passed with exact path-free schema-v2 booleans. Contract-v3 source adds bounded handle enumeration and TypeScript-composed deterministic, aggregate-bounded, no-follow directory closure evidence. Its source and packed receipts use exact evidence schema version 3 and retain only booleans rather than names, paths, identities, SIDs, ACL bytes, or file content. Exact run `33892131696` accepted that internal contract-v3 milestone without authorizing release admission or a Windows support claim.
 
-After that evidence run, Bazframe must resolve the remaining outcomes through TypeScript composition tests before adding another native export:
+After that evidence run, Bazframe must resolve the remaining outcomes through narrowly bounded composition and native evidence:
 
 - unsafe-root repair and ordinary sharing-failure behavior beyond the proved one-component private-directory slice;
-- fresh and replacement directory publication with journal predicates and retained ambiguity;
+- exact contract-v4 fresh and replacement directory-publication evidence with the no-replace rename primitive described below;
 - cooperating locks with positive process-instance/dead-owner evidence and safe reclaim;
 - exact directory-symlink/junction membership creation, inspection, and link-only removal;
 - generic bounded owned-tree reclamation with reparse-as-leaf and private quarantine behavior;
@@ -303,11 +303,13 @@ After that evidence run, Bazframe must resolve the remaining outcomes through Ty
 - admitted external roots, bounded remote ZIP copying, installed Pi projection, and the current Windows Terminal TUI; and
 - packed local/global installation through both executable names for the complete section 2 matrix.
 
-A new native operation is added only when a concrete composition test shows that the current fact/receipt boundary cannot produce an accepted outcome. The complete public product gate remains closed throughout this internal sequencing.
+A new native operation is added only when a concrete composition test shows that the current fact/receipt boundary cannot produce an accepted outcome. Native local-NTFS evidence supplied that trigger: Node's Windows directory rename replaced a competing regular file and the post-operation tuple was indistinguishable from a legitimate commit. Contract v4 therefore adds one narrow no-replace directory-rename operation. The complete public product gate remains closed throughout this internal sequencing.
 
 ### 7.2 Directory-publication composition contract
 
-The directory-publication internal slice composes guarded pathname renames with contract-v3 facts rather than adding a native rename export. Node's Windows rename is not treated as proof by itself. Before and after every attempted rename—including a rejected call—TypeScript derives the outcome only from an admitted private parent, stable bounded parent enumeration, exact lossless directory identities and closure digests, and the journaled dependent-state digest. Native Windows conformance must show that an occupied file, empty or nonempty directory, case-equivalent name, symlink, or junction is not replaced. Any contrary native evidence reopens the need for a narrower native operation.
+The directory-publication internal slice composes contract-v4 no-replace directory renames with the existing contract-v3 facts. The native operation accepts one admitted parent plus validated source and destination components, admits a physical direct-child directory source on the same fixed local NTFS volume, and invokes `MoveFileExW(source, destination, 0)`. It exposes no replace, copy, delayed, or fallback mode. Both old-to-backup and candidate-to-destination use this primitive; Node's replacement-capable Windows rename is not used by production composition.
+
+The syscall result is not treated as proof by itself. Before and after every attempted rename—including a rejected call—TypeScript derives the transaction outcome only from an admitted private parent, stable bounded parent enumeration, exact lossless directory identities and closure digests, and the journaled dependent-state digest. Native Windows conformance must show that an occupied file, empty or nonempty directory, case-equivalent name, symlink, or junction is not replaced. Source-handle binding and native tri-state transaction results remain unnecessary under the accepted threat model; TypeScript retains predicate reconciliation and all journal policy.
 
 The composition requires a separately supplied exclusive-operation authority. Until cooperating Windows locks pass their own later gate, only isolated internal conformance may supply that authority; this slice is not wired to public commands. The publication parent, journal root, per-transaction journal directory, candidate, destination, and backup must be owner-private on one admitted local NTFS volume with one current-user security identity. The destination is one validated Windows component. Candidate and backup names are derived only from the exact 32-lowercase-hex transaction ID.
 

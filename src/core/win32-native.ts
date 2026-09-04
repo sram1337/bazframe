@@ -2,7 +2,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { BazframeError, errorCode } from './errors.js';
 
-export const BAZFRAME_WIN32_NATIVE_CONTRACT_VERSION = 3;
+export const BAZFRAME_WIN32_NATIVE_CONTRACT_VERSION = 4;
 export const BAZFRAME_WIN32_NATIVE_TARGET = 'win32-x64-msvc';
 // Must remain equal to native/win32/src/lib.rs and the authoritative profile
 // portability production ceilings.
@@ -103,6 +103,11 @@ export interface WindowsStableDirectoryEnumerationReceipt {
 export interface BazframeWin32NativeBackend {
   inspectPath(path: string): WindowsPathInspection;
   createPrivateDirectory(parentPath: string, finalComponent: string): WindowsPrivateDirectoryCreationReceipt;
+  renameDirectoryNoReplace(
+    parentPath: string,
+    sourceComponent: string,
+    destinationComponent: string
+  ): Promise<void>;
   readStableFile(path: string, maxBytes: number): Promise<WindowsStableReadReceipt>;
   enumerateStableDirectory(
     path: string,
@@ -114,6 +119,11 @@ interface RawNativeModule {
   getNativeWindowsInfo: () => unknown;
   inspectWindowsPath: (path: string) => unknown;
   createWindowsPrivateDirectory: (parentPath: string, finalComponent: string) => unknown;
+  renameWindowsDirectoryNoReplace: (
+    parentPath: string,
+    sourceComponent: string,
+    destinationComponent: string
+  ) => unknown;
   readWindowsFileStable: (path: string, maxBytes: number) => unknown;
   enumerateWindowsDirectoryStable: (path: string, maxEntries: number) => unknown;
 }
@@ -251,6 +261,30 @@ export function loadBazframeWin32Native(
         );
       }
     },
+    async renameDirectoryNoReplace(
+      parentPath: string,
+      sourceComponent: string,
+      destinationComponent: string
+    ): Promise<void> {
+      requirePath(parentPath);
+      requireFinalComponent(sourceComponent);
+      requireFinalComponent(destinationComponent);
+      if (portableComponentKey(sourceComponent) === portableComponentKey(destinationComponent)) {
+        throw failure(
+          'WINDOWS_NATIVE_PATH_INVALID',
+          'The native Windows rename components must be distinct.'
+        );
+      }
+      try {
+        await Promise.resolve(native.renameWindowsDirectoryNoReplace(
+          parentPath,
+          sourceComponent,
+          destinationComponent
+        ));
+      } catch (error) {
+        throw nativeOperationFailure(error);
+      }
+    },
     async readStableFile(path: string, maxBytes: number): Promise<WindowsStableReadReceipt> {
       requirePath(path);
       if (!Number.isSafeInteger(maxBytes) || maxBytes < 0
@@ -314,6 +348,7 @@ function nativeModule(value: unknown): RawNativeModule {
     'getNativeWindowsInfo',
     'inspectWindowsPath',
     'createWindowsPrivateDirectory',
+    'renameWindowsDirectoryNoReplace',
     'readWindowsFileStable',
     'enumerateWindowsDirectoryStable'
   ] as const) {
@@ -640,6 +675,10 @@ function requirePath(path: string): void {
   if (typeof path !== 'string' || path.length === 0 || path.includes('\0')) {
     throw failure('WINDOWS_NATIVE_PATH_INVALID', 'The native Windows path input is invalid.');
   }
+}
+
+function portableComponentKey(value: string): string {
+  return value.normalize('NFC').toLowerCase().toUpperCase().toLowerCase();
 }
 
 function requireFinalComponent(value: string): void {

@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { open, rename } from 'node:fs/promises';
+import { open } from 'node:fs/promises';
 import { win32 } from 'node:path';
 import type {
   BazframeWin32NativeBackend,
@@ -160,7 +160,7 @@ export async function executeWindowsDirectoryPublication(
     && options.operation.overwriteAuthorization !== 'explicit-overwrite') {
     throw overwriteRequired();
   }
-  const io = options.io ?? nodeWindowsDirectoryPublicationIo();
+  const io = options.io ?? nativeWindowsDirectoryPublicationIo(options.backend, options.parentPath);
   const paths = transactionPaths(
     options.parentPath,
     options.journalRootPath,
@@ -238,7 +238,7 @@ export async function recoverWindowsDirectoryPublication(
 ): Promise<WindowsDirectoryPublicationResult> {
   assertAuthority(options.authority, options.transactionId);
   validateCommon(options, options.transactionId);
-  const io = options.io ?? nodeWindowsDirectoryPublicationIo();
+  const io = options.io ?? nativeWindowsDirectoryPublicationIo(options.backend, options.parentPath);
   const paths = transactionPaths(
     options.parentPath,
     options.journalRootPath,
@@ -352,7 +352,10 @@ export function newWindowsDirectoryPublicationTransactionId(): string {
   return randomBytes(16).toString('hex');
 }
 
-function nodeWindowsDirectoryPublicationIo(): WindowsDirectoryPublicationIo {
+function nativeWindowsDirectoryPublicationIo(
+  backend: BazframeWin32NativeBackend,
+  parentPath: string
+): WindowsDirectoryPublicationIo {
   return {
     async appendFileExclusive(path, bytes) {
       const handle = await open(path, 'wx');
@@ -363,7 +366,20 @@ function nodeWindowsDirectoryPublicationIo(): WindowsDirectoryPublicationIo {
         await handle.close();
       }
     },
-    rename
+    async rename(source, destination) {
+      if (windowsPathKey(win32.dirname(source)) !== windowsPathKey(parentPath)
+        || windowsPathKey(win32.dirname(destination)) !== windowsPathKey(parentPath)) {
+        throw new BazframeError(
+          'WINDOWS_DIRECTORY_PUBLICATION_STORAGE_INVALID',
+          'Publication rename paths must remain direct children of the admitted parent.'
+        );
+      }
+      await backend.renameDirectoryNoReplace(
+        parentPath,
+        win32.basename(source),
+        win32.basename(destination)
+      );
+    }
   };
 }
 
@@ -550,9 +566,13 @@ async function appendJournal(
     const cause = writeError ?? error;
     const stage = writeError === undefined ? 'read-back' : 'append-reconciliation';
     const causeCode = diagnosticErrorCode(cause);
+    const safeDetail = cause instanceof BazframeError
+      && cause.code === 'WINDOWS_DIRECTORY_CLOSURE_INVALID'
+      ? `: ${cause.message}`
+      : '';
     throw new BazframeError(
       'WINDOWS_DIRECTORY_PUBLICATION_JOURNAL_WRITE_AMBIGUOUS',
-      `The publication journal write could not be proved during ${stage} (${causeCode}); private transaction state was retained.`,
+      `The publication journal write could not be proved during ${stage} (${causeCode}${safeDetail}); private transaction state was retained.`,
       { cause: cause instanceof Error ? cause : undefined }
     );
   }
@@ -1077,10 +1097,13 @@ function portableKey(value: string): string {
   return value.normalize('NFC').toLowerCase().toUpperCase().toLowerCase();
 }
 
+function windowsPathKey(value: string): string {
+  return win32.normalize(value).replace(/[\\]+$/u, '').toLowerCase();
+}
+
 function windowsPathsOverlap(left: string, right: string): boolean {
-  const normalize = (value: string) => value.replace(/[\\]+$/u, '').toLowerCase();
-  const a = normalize(left);
-  const b = normalize(right);
+  const a = windowsPathKey(left);
+  const b = windowsPathKey(right);
   return a === b || a.startsWith(`${b}\\`) || b.startsWith(`${a}\\`);
 }
 
