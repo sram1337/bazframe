@@ -1,5 +1,6 @@
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
+import { once } from 'node:events';
 import {
   link,
   mkdir,
@@ -20,7 +21,7 @@ const args = process.argv.slice(2);
 const packageRoot = resolve(argument('--package-root') ?? fileURLToPath(new URL('..', import.meta.url)));
 const outputPath = resolve(argument('--output') ?? join(packageRoot, 'win32-native-evidence.json'));
 const report = {
-  schemaVersion: 4,
+  schemaVersion: 5,
   purpose: 'Bazframe-owned native Windows foundation evidence only; not a Windows support claim.',
   environment: {
     platform: process.platform,
@@ -52,6 +53,9 @@ try {
   );
   const directoryPublicationModule = await import(
     pathToFileURL(join(packageRoot, 'dist/state/win32-directory-publication.js')).href
+  );
+  const operationLockModule = await import(
+    pathToFileURL(join(packageRoot, 'dist/state/win32-operation-lock.js')).href
   );
   const backend = nativeModule.loadBazframeWin32Native();
   const nativePath = join(
@@ -686,6 +690,148 @@ try {
   }
   requireCondition(restartRecoveryPassed, 'fresh/replacement clean-process phase and post-rename recovery matrix');
 
+  const lockRootComponent = 'operation-locks';
+  const lockRoot = join(privateRoot, lockRootComponent);
+  privateDirectoryModule.createWindowsPrivateDirectory(backend, privateRoot, lockRootComponent);
+  const lockOptions = (lockComponent) => ({
+    backend,
+    lockRootPath: lockRoot,
+    lockComponent,
+    details: { command: 'native-lock-evidence', target: 'evidence-state' }
+  });
+  let expiredLockAuthority;
+  const firstLockRecovery = await operationLockModule.withWindowsOperationLock(
+    lockOptions('state.lock'),
+    async (held) => {
+      held.assertHeld();
+      expiredLockAuthority = held;
+      return held.recovery;
+    }
+  );
+  await expectCode(
+    () => expiredLockAuthority.assertHeld(),
+    'WINDOWS_OPERATION_LOCK_AUTHORITY_INVALID'
+  );
+  const lockDirectory = join(lockRoot, 'state.lock');
+  const lockGuard = privateDirectoryModule.admitWindowsPrivateFile(
+    backend,
+    join(lockDirectory, 'guard')
+  );
+  const lockOwner = privateDirectoryModule.admitWindowsPrivateFile(
+    backend,
+    join(lockDirectory, 'owner')
+  );
+
+  const lockedPublicationFixture = await createPublicationFixture('operation-lock-authority');
+  const lockedPublicationTransaction = transactionId();
+  const lockedPublication = await operationLockModule.withWindowsOperationLock(
+    lockOptions('publication.lock'),
+    async (held) => directoryPublicationModule.executeWindowsDirectoryPublication({
+      ...commonPublicationOptions(lockedPublicationFixture, lockedPublicationTransaction),
+      authority: {
+        transactionId: lockedPublicationTransaction,
+        assertHeld: () => held.assertHeld()
+      },
+      operation: { mode: 'fresh' },
+      materialize: materializePublicationCandidate
+    })
+  );
+
+  const processProbe = backend.acquireFileLock(join(lockDirectory, 'guard'));
+  requireCondition(processProbe.state === 'acquired', 'idle lock guard reacquired');
+  const alteredCreationTime = `${processProbe.currentProcess.creationTime.slice(0, -1)}${
+    processProbe.currentProcess.creationTime.endsWith('0') ? '1' : '0'
+  }`;
+  const reusedProcess = backend.inspectProcessInstance({
+    pid: processProbe.currentProcess.pid,
+    creationTime: alteredCreationTime
+  });
+  processProbe.capability.release();
+
+  const lockChildScript = fileURLToPath(new URL('./test-win32-operation-lock-child.mjs', import.meta.url));
+  const lockChildArgs = (lockComponent, mode) => [
+    lockChildScript,
+    '--package-root', packageRoot,
+    '--lock-root', lockRoot,
+    '--lock-component', lockComponent,
+    '--mode', mode
+  ];
+  const holder = await spawnLockHolder(lockChildArgs('state.lock', 'hold'));
+  try {
+    await expectCode(
+      () => operationLockModule.withWindowsOperationLock(
+        lockOptions('state.lock'),
+        async () => undefined
+      ),
+      'WINDOWS_OPERATION_LOCK_BUSY'
+    );
+  } finally {
+    await terminateLockHolder(holder, 'lock holder');
+  }
+  const killedOwnerRecovery = await operationLockModule.withWindowsOperationLock(
+    lockOptions('state.lock'),
+    async (held) => held.recovery
+  );
+
+  const unannounced = spawnSync(process.execPath, lockChildArgs('interrupted.lock', 'crash-unannounced'), {
+    encoding: 'utf8',
+    shell: false
+  });
+  if (unannounced.status !== 86) {
+    throw new Error(`Unannounced lock child failed: ${unannounced.status}; ${unannounced.stderr}`);
+  }
+  const unannouncedRecovery = await operationLockModule.withWindowsOperationLock(
+    lockOptions('interrupted.lock'),
+    async (held) => held.recovery
+  );
+
+  await operationLockModule.withWindowsOperationLock(
+    lockOptions('malformed.lock'),
+    async () => undefined
+  );
+  const malformedDirectory = join(lockRoot, 'malformed.lock');
+  await writeFile(join(malformedDirectory, 'owner'), '{bad\n');
+  const malformedHolder = await spawnLockHolder(lockChildArgs('malformed.lock', 'hold-native'));
+  try {
+    await expectCode(
+      () => operationLockModule.withWindowsOperationLock(
+        lockOptions('malformed.lock'),
+        async () => undefined
+      ),
+      'WINDOWS_OPERATION_LOCK_BUSY_AMBIGUOUS'
+    );
+  } finally {
+    await terminateLockHolder(malformedHolder, 'malformed lock holder');
+  }
+  const malformedRecovery = await operationLockModule.withWindowsOperationLock(
+    lockOptions('malformed.lock'),
+    async (held) => held.recovery
+  );
+
+  await operationLockModule.withWindowsOperationLock(
+    lockOptions('binding-a.lock'),
+    async () => undefined
+  );
+  await operationLockModule.withWindowsOperationLock(
+    lockOptions('binding-b.lock'),
+    async () => undefined
+  );
+  await writeFile(
+    join(lockRoot, 'binding-b.lock', 'owner'),
+    await readFile(join(lockRoot, 'binding-a.lock', 'owner'))
+  );
+  await expectCode(
+    () => operationLockModule.withWindowsOperationLock(
+      lockOptions('binding-b.lock'),
+      async () => undefined
+    ),
+    'WINDOWS_OPERATION_LOCK_INVALID'
+  );
+
+  const releasedProbe = backend.acquireFileLock(join(lockDirectory, 'guard'));
+  const operationLockReleased = releasedProbe.state === 'acquired';
+  if (releasedProbe.state === 'acquired') releasedProbe.capability.release();
+
   report.observations = {
     binarySha256: createHash('sha256').update(nativeBytes).digest('hex'),
     packageVersion: manifest.version,
@@ -777,7 +923,24 @@ try {
     directoryPublicationOccupiedRacePreserved: occupiedRacePreserved,
     directoryPublicationDependentDriftRetained: dependentResult.action === 'ambiguous',
     directoryPublicationCorruptJournalRefused: !renameAfterJournalDrift,
-    directoryPublicationRestartRecovery: restartRecoveryPassed
+    directoryPublicationRestartRecovery: restartRecoveryPassed,
+    operationLockPrivatePersistentNamespace: firstLockRecovery === 'none'
+      && lockGuard.object.size === '0000000000000000'
+      && lockOwner.object.numberOfLinks === '00000001'
+      && lockGuard.security.ownerSid === lockGuard.security.currentUserSid
+      && lockOwner.security.ownerSid === lockOwner.security.currentUserSid,
+    operationLockAuthorityExpires: true,
+    operationLockAuthorizesPublication: lockedPublication.action === 'committed'
+      && await readFile(join(lockedPublicationFixture.destination, 'new.txt'), 'utf8') === 'new\n',
+    operationLockContentionAnnounced: true,
+    operationLockKilledOwnerRecovery: killedOwnerRecovery === 'dead-owner',
+    operationLockInterruptedAnnouncementRecovery:
+      unannouncedRecovery === 'incomplete-announcement',
+    operationLockMalformedBusyRefused:
+      malformedRecovery === 'incomplete-announcement',
+    operationLockWrongBindingRefused: true,
+    operationLockPidReuseDistinguished: reusedProcess.state === 'different',
+    operationLockReleased: operationLockReleased
   };
   for (const [name, value] of Object.entries(report.observations)) {
     if (typeof value === 'boolean') requireCondition(value, name);
@@ -807,6 +970,70 @@ try {
   await writeFile(outputPath, `${JSON.stringify(report, null, 2)}\n`);
   console.log(`Bazframe native Windows foundation: ${report.completion}`);
   console.log(`Evidence: ${outputPath}`);
+}
+
+async function spawnLockHolder(args) {
+  const child = spawn(process.execPath, args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+    shell: false
+  });
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  try {
+    await new Promise((resolveHolder, rejectHolder) => {
+      const onData = () => {
+        const newline = stdout.indexOf('\n');
+        if (newline < 0) return;
+        try {
+          const announcement = JSON.parse(stdout.slice(0, newline));
+          requireCondition(announcement.state === 'held', 'lock child announced held state');
+          cleanup();
+          resolveHolder();
+        } catch (error) {
+          cleanup();
+          rejectHolder(error);
+        }
+      };
+      const onExit = (code) => {
+        cleanup();
+        rejectHolder(new Error(`Lock holder exited before acquisition: ${code}; ${stderr}`));
+      };
+      const cleanup = () => {
+        child.stdout.off('data', onData);
+        child.off('exit', onExit);
+      };
+      child.stdout.on('data', onData);
+      child.on('exit', onExit);
+      onData();
+    });
+  } catch (error) {
+    try {
+      await terminateLockHolder(child, 'unannounced lock holder');
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        'Lock-holder startup and cleanup failed',
+        { cause: cleanupError }
+      );
+    }
+    throw error;
+  }
+  return child;
+}
+
+async function terminateLockHolder(child, label) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = once(child, 'exit');
+  const accepted = child.kill('SIGKILL');
+  if (!accepted && child.exitCode === null && child.signalCode === null) {
+    throw new Error(`${label} did not accept termination`);
+  }
+  await exited;
 }
 
 async function pathExists(path) {

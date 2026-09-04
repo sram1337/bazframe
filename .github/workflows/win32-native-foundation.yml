@@ -18,12 +18,15 @@ on:
       - 'src/state/win32-private-directory.ts'
       - 'src/state/win32-directory-closure.ts'
       - 'src/state/win32-directory-publication.ts'
+      - 'src/state/win32-operation-lock.ts'
       - 'test/unit/core/win32-native.test.ts'
       - 'test/unit/state/win32-private-directory.test.ts'
       - 'test/unit/state/win32-directory-closure.test.ts'
       - 'test/unit/state/win32-directory-publication.test.ts'
+      - 'test/unit/state/win32-operation-lock.test.ts'
       - 'scripts/test-win32-native-foundation.mjs'
       - 'scripts/test-win32-directory-publication-child.mjs'
+      - 'scripts/test-win32-operation-lock-child.mjs'
       - 'scripts/run-win32-native-foundation.ps1'
       - 'scripts/test-pack.mjs'
       - 'scripts/build.mjs'
@@ -38,12 +41,15 @@ on:
       - 'src/state/win32-private-directory.ts'
       - 'src/state/win32-directory-closure.ts'
       - 'src/state/win32-directory-publication.ts'
+      - 'src/state/win32-operation-lock.ts'
       - 'test/unit/core/win32-native.test.ts'
       - 'test/unit/state/win32-private-directory.test.ts'
       - 'test/unit/state/win32-directory-closure.test.ts'
       - 'test/unit/state/win32-directory-publication.test.ts'
+      - 'test/unit/state/win32-operation-lock.test.ts'
       - 'scripts/test-win32-native-foundation.mjs'
       - 'scripts/test-win32-directory-publication-child.mjs'
+      - 'scripts/test-win32-operation-lock-child.mjs'
       - 'scripts/run-win32-native-foundation.ps1'
       - 'scripts/test-pack.mjs'
       - 'scripts/build.mjs'
@@ -135,7 +141,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           npm run build
           if ($LASTEXITCODE -ne 0) { throw "npm build failed with exit $LASTEXITCODE" }
-          npx vitest run --config vitest.config.ts test/unit/core/win32-native.test.ts test/unit/state/win32-private-directory.test.ts test/unit/state/win32-directory-closure.test.ts test/unit/state/win32-directory-publication.test.ts test/unit/cli/platform-support.test.ts
+          npx vitest run --config vitest.config.ts test/unit/core/win32-native.test.ts test/unit/state/win32-private-directory.test.ts test/unit/state/win32-directory-closure.test.ts test/unit/state/win32-directory-publication.test.ts test/unit/state/win32-operation-lock.test.ts test/unit/cli/platform-support.test.ts
           if ($LASTEXITCODE -ne 0) { throw "native contract tests failed with exit $LASTEXITCODE" }
 
       - name: Exercise native local-NTFS foundation from the source tree
@@ -205,8 +211,8 @@ jobs:
           $sourceConformance = if (Test-Path native-source-evidence.json) { Get-Content native-source-evidence.json -Raw | ConvertFrom-Json } else { $null }
           $installedConformance = if (Test-Path native-installed-evidence.json) { Get-Content native-installed-evidence.json -Raw | ConvertFrom-Json } else { $null }
           $completion = if ($null -ne $binarySha256 -and
-              $sourceConformance.schemaVersion -eq 4 -and
-              $installedConformance.schemaVersion -eq 4 -and
+              $sourceConformance.schemaVersion -eq 5 -and
+              $installedConformance.schemaVersion -eq 5 -and
               $sourceConformance.completion -eq 'passed' -and
               $installedConformance.completion -eq 'passed' -and
               $sourceConformance.releaseAdmission -eq 'not-authorized' -and
@@ -216,7 +222,7 @@ jobs:
               $sourceConformance.observations.binarySha256 -eq $binarySha256 -and
               $installedConformance.observations.binarySha256 -eq $binarySha256) { 'passed' } else { 'failed' }
           $evidence = [ordered]@{
-            schemaVersion = 4
+            schemaVersion = 5
             purpose = 'Bazframe-owned native foundation evidence only; not release admission or a Windows support claim.'
             completion = $completion
             sourceCommit = '${{ github.sha }}'

@@ -63,9 +63,12 @@ describe('Bazframe-owned Windows native loader', () => {
     ['missing inspect export', { inspectWindowsPath: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
     ['missing create export', { createWindowsPrivateDirectory: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
     ['missing file-create export', { createWindowsPrivateFile: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
+    ['missing lock-acquire export', { acquireWindowsFileLock: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
+    ['missing lock-release export', { releaseWindowsFileLock: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
+    ['missing process-inspection export', { inspectWindowsProcessInstance: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
     ['missing rename export', { renameWindowsDirectoryNoReplace: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
     ['missing enumerate export', { enumerateWindowsDirectoryStable: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
-    ['legacy contract v3', { info: { contractVersion: 3 } }, 'WINDOWS_NATIVE_CONTRACT_MISMATCH'],
+    ['legacy contract v4', { info: { contractVersion: 4 } }, 'WINDOWS_NATIVE_CONTRACT_MISMATCH'],
     ['contract', { info: { contractVersion: 1 } }, 'WINDOWS_NATIVE_CONTRACT_MISMATCH'],
     ['version', { info: { packageVersion: '0.1.0-other' } }, 'WINDOWS_NATIVE_VERSION_MISMATCH'],
     ['target', { info: { target: 'win32-arm64-msvc' } }, 'WINDOWS_NATIVE_TARGET_MISMATCH'],
@@ -202,6 +205,36 @@ describe('Bazframe-owned Windows native loader', () => {
     expect(() => load(malformed).createPrivateFile('C:\\state', 'journal.json')).toThrow(
       expect.objectContaining({ code: 'WINDOWS_NATIVE_CREATE_AMBIGUOUS' })
     );
+  });
+
+  it('wraps acquired file locks in an expiring capability and validates process instances', () => {
+    const native = module();
+    const backend = load(native);
+    const acquired = backend.acquireFileLock('C:\\state\\guard');
+    expect(acquired.state).toBe('acquired');
+    if (acquired.state !== 'acquired') throw new Error('expected acquired lock');
+    acquired.capability.assertHeld();
+    acquired.capability.release();
+    acquired.capability.release();
+    expect(native.releaseWindowsFileLock).toHaveBeenCalledWith('0000000000000001');
+    expect(() => acquired.capability.assertHeld()).toThrow(expect.objectContaining({
+      code: 'WINDOWS_NATIVE_LOCK_NOT_HELD'
+    }));
+    expect(backend.inspectProcessInstance({ pid: 42, creationTime: '0000000000000001' }))
+      .toEqual({ state: 'running' });
+    expect(native.inspectWindowsProcessInstance).toHaveBeenCalledWith(42, '0000000000000001');
+  });
+
+  it('rejects malformed acquired lock receipts only after releasing their native handle', () => {
+    const release = vi.fn();
+    const native = module({
+      releaseWindowsFileLock: release,
+      lockAcquisition: { ...lockAcquisition(), unexpected: true }
+    });
+    expect(() => load(native).acquireFileLock('C:\\state\\guard')).toThrow(expect.objectContaining({
+      code: 'WINDOWS_NATIVE_RECEIPT_INVALID'
+    }));
+    expect(release).toHaveBeenCalledWith('0000000000000001');
   });
 
   it('calls only the native no-replace rename with validated sibling components', async () => {
@@ -345,7 +378,7 @@ function load(
 
 function module(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   const info = {
-    contractVersion: 4,
+    contractVersion: 5,
     packageVersion: VERSION,
     target: 'win32-x64-msvc',
     maxStableReadBytes: BAZFRAME_WIN32_NATIVE_MAX_STABLE_READ_BYTES,
@@ -357,11 +390,15 @@ function module(overrides: Record<string, unknown> = {}): Record<string, unknown
     inspectWindowsPath: () => overrides.inspection ?? inspection(),
     createWindowsPrivateDirectory: () => overrides.creation ?? creation(),
     createWindowsPrivateFile: () => overrides.privateFileCreation ?? privateFileCreation(),
+    acquireWindowsFileLock: vi.fn(() => overrides.lockAcquisition ?? lockAcquisition()),
+    releaseWindowsFileLock: vi.fn(),
+    inspectWindowsProcessInstance: vi.fn(() => overrides.processInspection ?? { state: 'running' }),
     renameWindowsDirectoryNoReplace: vi.fn(() => Promise.resolve()),
     readWindowsFileStable: () => Promise.resolve(overrides.stableRead ?? stableRead()),
     enumerateWindowsDirectoryStable: () => Promise.resolve(overrides.enumeration ?? enumeration()),
     ...without(overrides, [
-      'info', 'inspection', 'creation', 'privateFileCreation', 'stableRead', 'enumeration'
+      'info', 'inspection', 'creation', 'privateFileCreation', 'lockAcquisition',
+      'processInspection', 'stableRead', 'enumeration'
     ])
   };
 }
@@ -403,6 +440,17 @@ function privateFileCreation(): Record<string, unknown> {
       object: { size: '0000000000000000' }
     }),
     parentAfter: directoryInspection('state')
+  };
+}
+
+function lockAcquisition(): Record<string, unknown> {
+  const guard = inspection({ object: { size: '0000000000000000' } });
+  return {
+    state: 'acquired',
+    token: '0000000000000001',
+    guardBefore: guard,
+    guardAfter: guard,
+    currentProcess: { pid: 42, creationTime: '0000000000000001' }
   };
 }
 

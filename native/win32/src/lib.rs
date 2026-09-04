@@ -4,6 +4,9 @@
 // @openclaw/fs-safe 0.7.2 (Copyright (c) 2026 openclaw, MIT). See ../NOTICE.md
 // and ../OPENCLAW-LICENSE. Bazframe owns this API and compiled artifact.
 
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
+
 use napi::bindgen_prelude::{AsyncTask, Buffer, Task, Utf16String};
 use napi::{Env, Error, Result, Status};
 use napi_derive::napi;
@@ -19,7 +22,7 @@ use non_windows as platform;
 #[cfg(windows)]
 use windows as platform;
 
-pub const NATIVE_CONTRACT_VERSION: u32 = 4;
+pub const NATIVE_CONTRACT_VERSION: u32 = 5;
 // Mirrors PROFILE_PORTABILITY_PRODUCTION_LIMITS.checkoutFileBytes. The native
 // boundary may lower a caller's bound but never allocates beyond this product
 // authority.
@@ -27,6 +30,8 @@ pub const MAX_STABLE_READ_BYTES: u32 = 64 * 1024 * 1024;
 // Mirrors PROFILE_PORTABILITY_PRODUCTION_LIMITS.stagingEntries. Recursive and
 // product-specific limits remain TypeScript-owned and may only lower this ceiling.
 pub const MAX_STABLE_DIRECTORY_ENTRIES: u32 = 32_768;
+
+static FILE_LOCK_CLEANUP_ENVIRONMENTS: OnceLock<Mutex<HashSet<usize>>> = OnceLock::new();
 
 pub(crate) type NativeResult<T> = std::result::Result<T, Error<String>>;
 
@@ -138,6 +143,26 @@ pub struct WindowsStableReadReceipt {
 }
 
 #[napi(object)]
+pub struct WindowsProcessInstance {
+    pub pid: u32,
+    pub creation_time: String,
+}
+
+#[napi(object)]
+pub struct WindowsFileLockAcquisitionReceipt {
+    pub state: String,
+    pub token: Option<String>,
+    pub guard_before: WindowsPathInspection,
+    pub guard_after: WindowsPathInspection,
+    pub current_process: WindowsProcessInstance,
+}
+
+#[napi(object)]
+pub struct WindowsProcessInstanceInspectionReceipt {
+    pub state: String,
+}
+
+#[napi(object)]
 pub struct WindowsDirectoryEntryObservation {
     pub name: Utf16String,
     pub file_id: String,
@@ -225,6 +250,66 @@ pub fn create_windows_private_file(
         env,
         component
             .and_then(|component| platform::create_windows_private_file(&parent_path, &component)),
+    )
+}
+
+#[napi(js_name = "acquireWindowsFileLock")]
+pub fn acquire_windows_file_lock(
+    env: Env,
+    guard_path: String,
+) -> Result<WindowsFileLockAcquisitionReceipt> {
+    let environment = env.raw() as usize;
+    ensure_file_lock_environment_cleanup(env, environment)?;
+    into_napi(
+        env,
+        platform::acquire_windows_file_lock(&guard_path, environment),
+    )
+}
+
+#[napi(js_name = "releaseWindowsFileLock")]
+pub fn release_windows_file_lock(env: Env, token: String) -> Result<()> {
+    into_napi(env, platform::release_windows_file_lock(&token))
+}
+
+fn ensure_file_lock_environment_cleanup(env: Env, environment: usize) -> Result<()> {
+    let environments = FILE_LOCK_CLEANUP_ENVIRONMENTS.get_or_init(|| Mutex::new(HashSet::new()));
+    let inserted = environments
+        .lock()
+        .map_err(|_| {
+            Error::new(
+                Status::GenericFailure,
+                "ERR_WIN32_LOCK_STATE: native cleanup state is unavailable".to_owned(),
+            )
+        })?
+        .insert(environment);
+    if !inserted {
+        return Ok(());
+    }
+    if let Err(error) = env.add_env_cleanup_hook(environment, |owned_environment| {
+        platform::release_windows_file_locks_for_environment(owned_environment);
+        if let Some(environments) = FILE_LOCK_CLEANUP_ENVIRONMENTS.get() {
+            if let Ok(mut environments) = environments.lock() {
+                environments.remove(&owned_environment);
+            }
+        }
+    }) {
+        if let Ok(mut environments) = environments.lock() {
+            environments.remove(&environment);
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[napi(js_name = "inspectWindowsProcessInstance")]
+pub fn inspect_windows_process_instance(
+    env: Env,
+    pid: u32,
+    creation_time: String,
+) -> Result<WindowsProcessInstanceInspectionReceipt> {
+    into_napi(
+        env,
+        platform::inspect_windows_process_instance(pid, &creation_time),
     )
 }
 

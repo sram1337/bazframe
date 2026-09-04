@@ -1,19 +1,22 @@
 // Windows HANDLE/reparse techniques are adapted from @openclaw/fs-safe 0.7.2
 // (Copyright (c) 2026 openclaw, MIT). See ../OPENCLAW-LICENSE.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, c_void};
 use std::mem::{align_of, offset_of, size_of, zeroed};
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::ptr::{null, null_mut};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use napi::Error;
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS,
-    ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_FILES, ERROR_PATH_NOT_FOUND,
-    ERROR_SHARING_VIOLATION, ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE,
-    INVALID_HANDLE_VALUE, LocalFree,
+    ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER, ERROR_LOCK_VIOLATION,
+    ERROR_NO_MORE_FILES, ERROR_PATH_NOT_FOUND, ERROR_SHARING_VIOLATION, ERROR_SUCCESS, FILETIME,
+    GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+    WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
@@ -35,17 +38,22 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO,
     FileAttributeTagInfo, FileBasicInfo, FileIdExtdDirectoryInfo, FileIdExtdDirectoryRestartInfo,
     FileIdInfo, FileStandardInfo, GetDriveTypeW, GetFileInformationByHandleEx,
-    GetFinalPathNameByHandleW, GetFullPathNameW, GetVolumeInformationByHandleW, MoveFileExW,
-    OPEN_EXISTING, QueryDosDeviceW, READ_CONTROL, ReadFile, VOLUME_NAME_GUID,
+    GetFinalPathNameByHandleW, GetFullPathNameW, GetVolumeInformationByHandleW,
+    LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx, MoveFileExW, OPEN_EXISTING,
+    QueryDosDeviceW, READ_CONTROL, ReadFile, UnlockFileEx, VOLUME_NAME_GUID,
 };
-use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows_sys::Win32::System::IO::{IO_STATUS_BLOCK, OVERLAPPED};
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, GetCurrentProcessId, GetProcessTimes, OpenProcess, OpenProcessToken,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+};
 
 use crate::{
     DirectoryEntryData, DirectoryEnumerationData, NativeResult, StableReadData,
-    WindowsObjectObservation, WindowsPathInspection, WindowsPrivateDirectoryCreationReceipt,
-    WindowsPrivateFileCreationReceipt, WindowsSecurityObservation, WindowsVolumeObservation,
-    native_error,
+    WindowsFileLockAcquisitionReceipt, WindowsObjectObservation, WindowsPathInspection,
+    WindowsPrivateDirectoryCreationReceipt, WindowsPrivateFileCreationReceipt,
+    WindowsProcessInstance, WindowsProcessInstanceInspectionReceipt, WindowsSecurityObservation,
+    WindowsVolumeObservation, native_error,
 };
 
 const DRIVE_FIXED: u32 = 3;
@@ -53,6 +61,9 @@ const FILE_PERSISTENT_ACLS: u32 = 0x0000_0008;
 const FILE_DEVICE_DISK: u32 = 0x0000_0007;
 const FILE_REMOTE_DEVICE: u32 = 0x0000_0010;
 const FILE_FS_DEVICE_INFORMATION_CLASS: i32 = 4;
+
+static FILE_LOCK_HANDLES: OnceLock<Mutex<HashMap<u64, RetainedFileLock>>> = OnceLock::new();
+static NEXT_FILE_LOCK_TOKEN: AtomicU64 = AtomicU64::new(1);
 
 #[repr(C)]
 struct FileFsDeviceInformation {
@@ -81,6 +92,11 @@ impl Drop for OwnedHandle {
             unsafe { CloseHandle(self.0) };
         }
     }
+}
+
+struct RetainedFileLock {
+    handle: isize,
+    environment: usize,
 }
 
 struct OwnedLocal(*mut c_void);
@@ -243,6 +259,282 @@ pub(crate) fn create_windows_private_file(
         parent_before,
         created,
         parent_after,
+    })
+}
+
+pub(crate) fn acquire_windows_file_lock(
+    guard_path: &str,
+    environment: usize,
+) -> NativeResult<WindowsFileLockAcquisitionReceipt> {
+    let opened = open_admitted_path_with_final_share(
+        guard_path,
+        GENERIC_READ | GENERIC_WRITE | FILE_READ_ATTRIBUTES | READ_CONTROL,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+    )?;
+    let guard_before = inspect_opened_path(&opened)?;
+    require_lock_guard(&guard_before)?;
+
+    // SAFETY: the synchronous file handle is valid, the zeroed OVERLAPPED
+    // selects byte offset zero, and the one-byte range is fixed by contract.
+    let mut overlapped: OVERLAPPED = unsafe { zeroed() };
+    let locked = unsafe {
+        LockFileEx(
+            opened.handle.0,
+            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            0,
+            1,
+            0,
+            &mut overlapped,
+        )
+    };
+    if locked == 0 {
+        // SAFETY: reads the error from the immediately preceding lock call.
+        let code = unsafe { GetLastError() };
+        if code != ERROR_LOCK_VIOLATION {
+            return Err(win_error(code, "acquire Windows file lock"));
+        }
+        let guard_after = inspect_opened_path(&opened)?;
+        require_same_lock_guard(&guard_before, &guard_after)?;
+        return Ok(WindowsFileLockAcquisitionReceipt {
+            state: "busy".to_owned(),
+            token: None,
+            guard_before,
+            guard_after,
+            current_process: current_process_instance()?,
+        });
+    }
+
+    let guard_after = inspect_opened_path(&opened)?;
+    require_same_lock_guard(&guard_before, &guard_after)?;
+    let current_process = current_process_instance()?;
+    let token = retain_file_lock_handle(opened.handle, environment)?;
+    Ok(WindowsFileLockAcquisitionReceipt {
+        state: "acquired".to_owned(),
+        token: Some(token),
+        guard_before,
+        guard_after,
+        current_process,
+    })
+}
+
+pub(crate) fn release_windows_file_lock(token: &str) -> NativeResult<()> {
+    let value = parse_file_lock_token(token)?;
+    let raw = {
+        let mut handles = file_lock_handles().lock().map_err(|_| {
+            native_error(
+                "ERR_WIN32_LOCK_STATE",
+                "native Windows file-lock state is unavailable",
+            )
+        })?;
+        handles.remove(&value).ok_or_else(|| {
+            native_error(
+                "ERR_WIN32_LOCK_NOT_HELD",
+                "native Windows file-lock capability is not held",
+            )
+        })?
+    };
+    unlock_retained_file_lock(raw)
+}
+
+pub(crate) fn release_windows_file_locks_for_environment(environment: usize) {
+    let retained = if let Ok(mut handles) = file_lock_handles().lock() {
+        let tokens = handles
+            .iter()
+            .filter_map(|(token, retained)| (retained.environment == environment).then_some(*token))
+            .collect::<Vec<_>>();
+        tokens
+            .into_iter()
+            .filter_map(|token| handles.remove(&token))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    for handle in retained {
+        let _ = unlock_retained_file_lock(handle);
+    }
+}
+
+fn unlock_retained_file_lock(retained: RetainedFileLock) -> NativeResult<()> {
+    let handle = OwnedHandle(retained.handle as HANDLE);
+    // SAFETY: this is the exact retained handle and byte range used to acquire
+    // the lock. Closing the handle below remains an unconditional backstop.
+    let mut overlapped: OVERLAPPED = unsafe { zeroed() };
+    let unlocked = unsafe { UnlockFileEx(handle.0, 0, 1, 0, &mut overlapped) };
+    if unlocked == 0 {
+        return Err(last_win_error("release Windows file lock"));
+    }
+    Ok(())
+}
+
+pub(crate) fn inspect_windows_process_instance(
+    pid: u32,
+    expected_creation_time: &str,
+) -> NativeResult<WindowsProcessInstanceInspectionReceipt> {
+    if pid == 0 {
+        return Err(native_error(
+            "ERR_WIN32_INVALID_PROCESS_INSTANCE",
+            "Windows process identifier must be positive",
+        ));
+    }
+    let expected = parse_fixed_hex_u64(expected_creation_time, "process creation time")?;
+    // SAFETY: the PID and fixed access mask are values; no inherited handle is requested.
+    let raw = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            0,
+            pid,
+        )
+    };
+    if raw.is_null() {
+        // SAFETY: reads the error from the immediately preceding process-open call.
+        let code = unsafe { GetLastError() };
+        if code == ERROR_INVALID_PARAMETER {
+            return Ok(WindowsProcessInstanceInspectionReceipt {
+                state: "absent".to_owned(),
+            });
+        }
+        return Err(win_error(code, "inspect Windows process instance"));
+    }
+    let process = OwnedHandle(raw);
+    let actual = process_creation_time(process.0)?;
+    if actual != expected {
+        return Ok(WindowsProcessInstanceInspectionReceipt {
+            state: "different".to_owned(),
+        });
+    }
+    // SAFETY: the retained process handle has SYNCHRONIZE access and zero is a
+    // nonblocking observation of this exact process object.
+    let wait = unsafe { WaitForSingleObject(process.0, 0) };
+    let state = match wait {
+        WAIT_TIMEOUT => "running",
+        WAIT_OBJECT_0 => "exited",
+        WAIT_FAILED => return Err(last_win_error("wait for Windows process instance")),
+        _ => {
+            return Err(native_error(
+                "ERR_WIN32_PROCESS_INSTANCE_AMBIGUOUS",
+                "Windows returned an unexpected process wait result",
+            ));
+        }
+    };
+    Ok(WindowsProcessInstanceInspectionReceipt {
+        state: state.to_owned(),
+    })
+}
+
+fn current_process_instance() -> NativeResult<WindowsProcessInstance> {
+    // SAFETY: both functions return facts for the current process.
+    let pid = unsafe { GetCurrentProcessId() };
+    let creation_time = process_creation_time(unsafe { GetCurrentProcess() })?;
+    Ok(WindowsProcessInstance {
+        pid,
+        creation_time: format!("{creation_time:016x}"),
+    })
+}
+
+fn process_creation_time(process: HANDLE) -> NativeResult<u64> {
+    let mut created = FILETIME::default();
+    let mut exited = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: the process handle has query access and all output pointers are valid.
+    if unsafe { GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user) } == 0 {
+        return Err(last_win_error("query Windows process creation time"));
+    }
+    Ok((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+}
+
+fn require_lock_guard(guard: &WindowsPathInspection) -> NativeResult<()> {
+    if guard.kind != "regular-file"
+        || guard.object.directory
+        || guard.object.reparse_tag != 0
+        || guard.object.delete_pending
+        || guard.object.number_of_links != "00000001"
+        || guard.object.size != "0000000000000000"
+        || guard.object.volume_identity != guard.volume.identity
+        || !guard.ancestry_reparse_free
+    {
+        return Err(native_error(
+            "ERR_WIN32_LOCK_GUARD_INVALID",
+            "Windows file-lock guard is not an empty single-link physical regular file",
+        ));
+    }
+    Ok(())
+}
+
+fn require_same_lock_guard(
+    before: &WindowsPathInspection,
+    after: &WindowsPathInspection,
+) -> NativeResult<()> {
+    require_lock_guard(before)?;
+    require_lock_guard(after)?;
+    if before.canonical_path != after.canonical_path
+        || before.volume.identity != after.volume.identity
+        || !same_stable_observation(&before.object, &after.object)
+        || !same_security_observation(&before.security, &after.security)
+    {
+        return Err(native_error(
+            "ERR_WIN32_LOCK_GUARD_CHANGED",
+            "Windows file-lock guard changed during acquisition",
+        ));
+    }
+    Ok(())
+}
+
+fn file_lock_handles() -> &'static Mutex<HashMap<u64, RetainedFileLock>> {
+    FILE_LOCK_HANDLES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn retain_file_lock_handle(handle: OwnedHandle, environment: usize) -> NativeResult<String> {
+    let mut handles = file_lock_handles().lock().map_err(|_| {
+        native_error(
+            "ERR_WIN32_LOCK_STATE",
+            "native Windows file-lock state is unavailable",
+        )
+    })?;
+    let token = loop {
+        let candidate = NEXT_FILE_LOCK_TOKEN.fetch_add(1, Ordering::Relaxed);
+        if candidate != 0 && !handles.contains_key(&candidate) {
+            break candidate;
+        }
+    };
+    handles.insert(
+        token,
+        RetainedFileLock {
+            handle: handle.0 as isize,
+            environment,
+        },
+    );
+    std::mem::forget(handle);
+    Ok(format!("{token:016x}"))
+}
+
+fn parse_file_lock_token(token: &str) -> NativeResult<u64> {
+    let value = parse_fixed_hex_u64(token, "file-lock capability")?;
+    if value == 0 {
+        return Err(native_error(
+            "ERR_WIN32_LOCK_NOT_HELD",
+            "native Windows file-lock capability is invalid",
+        ));
+    }
+    Ok(value)
+}
+
+fn parse_fixed_hex_u64(value: &str, label: &str) -> NativeResult<u64> {
+    if value.len() != 16
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(native_error(
+            "ERR_WIN32_INVALID_PROCESS_INSTANCE",
+            format!("Windows {label} must be fixed-width lowercase hexadecimal"),
+        ));
+    }
+    u64::from_str_radix(value, 16).map_err(|_| {
+        native_error(
+            "ERR_WIN32_INVALID_PROCESS_INSTANCE",
+            format!("Windows {label} is invalid"),
+        )
     })
 }
 
@@ -722,6 +1014,18 @@ fn same_path_inspection(a: &WindowsPathInspection, b: &WindowsPathInspection) ->
 }
 
 fn open_admitted_path(path: &str, final_access: u32) -> NativeResult<OpenedPath> {
+    open_admitted_path_with_final_share(
+        path,
+        final_access,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+    )
+}
+
+fn open_admitted_path_with_final_share(
+    path: &str,
+    final_access: u32,
+    final_share: u32,
+) -> NativeResult<OpenedPath> {
     validate_input_path(path)?;
     let full = full_path(path)?;
     let (drive_root, prefixes) = admitted_prefixes(&full)?;
@@ -740,7 +1044,11 @@ fn open_admitted_path(path: &str, final_access: u32) -> NativeResult<OpenedPath>
         } else {
             FILE_READ_ATTRIBUTES
         };
-        let handle = open_existing(prefix, access)?;
+        let handle = if index == last {
+            open_existing_with_share(prefix, access, final_share)?
+        } else {
+            open_existing(prefix, access)?
+        };
         let tag = attribute_tag(handle.0)?;
         if tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
             return Err(native_error(
@@ -920,6 +1228,14 @@ fn reject_subst_or_device_alias(drive_root: &str) -> NativeResult<()> {
 }
 
 fn open_existing(path: &str, access: u32) -> NativeResult<OwnedHandle> {
+    open_existing_with_share(
+        path,
+        access,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+    )
+}
+
+fn open_existing_with_share(path: &str, access: u32, share: u32) -> NativeResult<OwnedHandle> {
     let extended = extended_drive_path(path)?;
     let encoded = wide(&extended);
     // SAFETY: encoded is NUL-terminated and all pointer parameters are valid.
@@ -927,7 +1243,7 @@ fn open_existing(path: &str, access: u32) -> NativeResult<OwnedHandle> {
         CreateFileW(
             encoded.as_ptr(),
             access,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            share,
             null(),
             OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL

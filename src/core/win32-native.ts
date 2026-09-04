@@ -2,7 +2,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { BazframeError, errorCode } from './errors.js';
 
-export const BAZFRAME_WIN32_NATIVE_CONTRACT_VERSION = 4;
+export const BAZFRAME_WIN32_NATIVE_CONTRACT_VERSION = 5;
 export const BAZFRAME_WIN32_NATIVE_TARGET = 'win32-x64-msvc';
 // Must remain equal to native/win32/src/lib.rs and the authoritative profile
 // portability production ceilings.
@@ -87,6 +87,33 @@ export interface WindowsStableReadReceipt {
   after: WindowsObjectObservation;
 }
 
+export interface WindowsProcessInstance {
+  pid: number;
+  creationTime: string;
+}
+
+export interface WindowsFileLockCapability {
+  assertHeld(): void;
+  release(): void;
+}
+
+export type WindowsFileLockAcquisition = {
+  state: 'busy';
+  guardBefore: WindowsPathInspection;
+  guardAfter: WindowsPathInspection;
+  currentProcess: WindowsProcessInstance;
+} | {
+  state: 'acquired';
+  guardBefore: WindowsPathInspection;
+  guardAfter: WindowsPathInspection;
+  currentProcess: WindowsProcessInstance;
+  capability: WindowsFileLockCapability;
+};
+
+export interface WindowsProcessInstanceInspection {
+  state: 'running' | 'exited' | 'different' | 'absent';
+}
+
 export interface WindowsDirectoryEntryObservation {
   name: string;
   fileId: string;
@@ -122,11 +149,19 @@ export interface BazframeWin32NativeBackend {
   ): Promise<WindowsStableDirectoryEnumerationReceipt>;
 }
 
+export interface BazframeWin32LockBackend {
+  acquireFileLock(guardPath: string): WindowsFileLockAcquisition;
+  inspectProcessInstance(process: WindowsProcessInstance): WindowsProcessInstanceInspection;
+}
+
 interface RawNativeModule {
   getNativeWindowsInfo: () => unknown;
   inspectWindowsPath: (path: string) => unknown;
   createWindowsPrivateDirectory: (parentPath: string, finalComponent: string) => unknown;
   createWindowsPrivateFile: (parentPath: string, finalComponent: string) => unknown;
+  acquireWindowsFileLock: (guardPath: string) => unknown;
+  releaseWindowsFileLock: (token: string) => unknown;
+  inspectWindowsProcessInstance: (pid: number, creationTime: string) => unknown;
   renameWindowsDirectoryNoReplace: (
     parentPath: string,
     sourceComponent: string,
@@ -150,7 +185,7 @@ export interface Win32NativeLoadOptions {
  */
 export function loadBazframeWin32Native(
   options: Win32NativeLoadOptions = {}
-): BazframeWin32NativeBackend {
+): BazframeWin32NativeBackend & BazframeWin32LockBackend {
   const platform = options.platform ?? process.platform;
   const arch = options.arch ?? process.arch;
   if (platform !== 'win32') {
@@ -291,6 +326,93 @@ export function loadBazframeWin32Native(
         );
       }
     },
+    acquireFileLock(guardPath: string): WindowsFileLockAcquisition {
+      requirePath(guardPath);
+      let raw: unknown;
+      try {
+        raw = native.acquireWindowsFileLock(guardPath);
+      } catch (error) {
+        throw nativeOperationFailure(error);
+      }
+      let cleanupToken: string | undefined;
+      if (raw !== null && typeof raw === 'object' && !Array.isArray(raw)) {
+        const candidateToken = (raw as Record<string, unknown>).token;
+        cleanupToken = typeof candidateToken === 'string' && HEX_64.test(candidateToken)
+          ? candidateToken
+          : undefined;
+      }
+      try {
+        const record = exactRecord(raw, [
+          'state', 'token', 'guardBefore', 'guardAfter', 'currentProcess'
+        ], 'file lock acquisition');
+        if (record.state !== 'acquired' && record.state !== 'busy') invalid();
+        const guardBefore = pathInspection(record.guardBefore);
+        const guardAfter = pathInspection(record.guardAfter);
+        if (!sameLockGuard(guardBefore, guardAfter)) invalid();
+        const currentProcess = processInstance(record.currentProcess);
+        if (record.state === 'busy') {
+          if (record.token !== null) invalid();
+          return { state: 'busy', guardBefore, guardAfter, currentProcess };
+        }
+        if (cleanupToken === undefined || record.token !== cleanupToken) invalid();
+        const token = cleanupToken;
+        let held = true;
+        const capability: WindowsFileLockCapability = Object.freeze({
+          assertHeld(): void {
+            if (!held) {
+              throw failure(
+                'WINDOWS_NATIVE_LOCK_NOT_HELD',
+                'The native Windows file-lock capability is no longer held.'
+              );
+            }
+          },
+          release(): void {
+            if (!held) return;
+            held = false;
+            try {
+              native.releaseWindowsFileLock(token);
+            } catch (error) {
+              throw nativeOperationFailure(error);
+            }
+          }
+        });
+        cleanupToken = undefined;
+        return { state: 'acquired', guardBefore, guardAfter, currentProcess, capability };
+      } catch (error) {
+        if (cleanupToken !== undefined) {
+          try {
+            native.releaseWindowsFileLock(cleanupToken);
+          } catch (releaseError) {
+            throw failure(
+              'WINDOWS_NATIVE_LOCK_RELEASE_FAILED',
+              'The malformed native Windows lock receipt could not be released safely.',
+              releaseError
+            );
+          }
+        }
+        if (error instanceof BazframeError) throw error;
+        throw receiptFailure('Native Windows file-lock acquisition evidence is malformed.', error);
+      }
+    },
+    inspectProcessInstance(
+      process: WindowsProcessInstance
+    ): WindowsProcessInstanceInspection {
+      const expected = processInstance(process);
+      let raw: unknown;
+      try {
+        raw = native.inspectWindowsProcessInstance(expected.pid, expected.creationTime);
+      } catch (error) {
+        throw nativeOperationFailure(error);
+      }
+      try {
+        const record = exactRecord(raw, ['state'], 'process instance inspection');
+        if (record.state !== 'running' && record.state !== 'exited'
+          && record.state !== 'different' && record.state !== 'absent') invalid();
+        return { state: record.state };
+      } catch (error) {
+        throw receiptFailure('Native Windows process-instance evidence is malformed.', error);
+      }
+    },
     async renameDirectoryNoReplace(
       parentPath: string,
       sourceComponent: string,
@@ -379,6 +501,9 @@ function nativeModule(value: unknown): RawNativeModule {
     'inspectWindowsPath',
     'createWindowsPrivateDirectory',
     'createWindowsPrivateFile',
+    'acquireWindowsFileLock',
+    'releaseWindowsFileLock',
+    'inspectWindowsProcessInstance',
     'renameWindowsDirectoryNoReplace',
     'readWindowsFileStable',
     'enumerateWindowsDirectoryStable'
@@ -622,6 +747,27 @@ function objectObservation(value: unknown): WindowsObjectObservation {
   return observation;
 }
 
+function processInstance(value: unknown): WindowsProcessInstance {
+  const record = exactRecord(value, ['pid', 'creationTime'], 'process instance');
+  const pid = uint32(record.pid);
+  if (pid === 0) invalid();
+  return { pid, creationTime: hex(record.creationTime, HEX_64) };
+}
+
+function sameLockGuard(a: WindowsPathInspection, b: WindowsPathInspection): boolean {
+  return a.canonicalPath.toLowerCase() === b.canonicalPath.toLowerCase()
+    && a.kind === 'regular-file' && b.kind === 'regular-file'
+    && a.volume.identity === b.volume.identity
+    && a.object.volumeIdentity === a.volume.identity
+    && b.object.volumeIdentity === b.volume.identity
+    && a.object.numberOfLinks === '00000001'
+    && b.object.numberOfLinks === '00000001'
+    && a.object.size === '0000000000000000'
+    && b.object.size === '0000000000000000'
+    && sameStableObservation(a.object, b.object)
+    && sameSecurityObservation(a.security, b.security);
+}
+
 function sameDirectoryIdentity(a: WindowsPathInspection, b: WindowsPathInspection): boolean {
   return a.canonicalPath.toLowerCase() === b.canonicalPath.toLowerCase()
     && a.kind === 'directory' && b.kind === 'directory'
@@ -771,11 +917,19 @@ function nativeOperationFailure(error: unknown): BazframeError {
     ERR_WIN32_ENUMERATION_INCOMPLETE: { code: 'WINDOWS_NATIVE_ENUMERATION_INCOMPLETE' },
     ERR_WIN32_ENUMERATION_LIMIT: { code: 'WINDOWS_NATIVE_ENUMERATION_LIMIT_EXCEEDED' },
     ERR_WIN32_INVALID_PATH: { code: 'WINDOWS_NATIVE_PATH_INVALID' },
+    ERR_WIN32_INVALID_PROCESS_INSTANCE: { code: 'WINDOWS_NATIVE_PROCESS_INSTANCE_INVALID' },
     ERR_WIN32_IO: { code: 'WINDOWS_NATIVE_IO_FAILED' },
+    ERR_WIN32_LOCK_GUARD_CHANGED: { code: 'WINDOWS_NATIVE_LOCK_GUARD_CHANGED' },
+    ERR_WIN32_LOCK_GUARD_INVALID: { code: 'WINDOWS_NATIVE_LOCK_GUARD_INVALID' },
+    ERR_WIN32_LOCK_NOT_HELD: { code: 'WINDOWS_NATIVE_LOCK_NOT_HELD' },
+    ERR_WIN32_LOCK_STATE: { code: 'WINDOWS_NATIVE_LOCK_STATE_INVALID' },
     ERR_WIN32_METADATA_UNAVAILABLE: { code: 'WINDOWS_NATIVE_METADATA_UNAVAILABLE' },
     ERR_WIN32_NOT_DIRECTORY: { code: 'WINDOWS_NATIVE_NOT_DIRECTORY' },
     ERR_WIN32_NOT_REGULAR_FILE: { code: 'WINDOWS_NATIVE_NOT_REGULAR_FILE' },
     ERR_WIN32_PATH_NOT_FOUND: { code: 'WINDOWS_NATIVE_PATH_NOT_FOUND' },
+    ERR_WIN32_PROCESS_INSTANCE_AMBIGUOUS: {
+      code: 'WINDOWS_NATIVE_PROCESS_INSTANCE_AMBIGUOUS'
+    },
     ERR_WIN32_READ_CHANGED: { code: 'WINDOWS_NATIVE_READ_CHANGED' },
     ERR_WIN32_READ_INCOMPLETE: { code: 'WINDOWS_NATIVE_READ_INCOMPLETE' },
     ERR_WIN32_READ_LIMIT: {

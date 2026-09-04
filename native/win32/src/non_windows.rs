@@ -1,6 +1,7 @@
 use crate::{
-    DirectoryEnumerationData, NativeResult, StableReadData, WindowsPathInspection,
-    WindowsPrivateDirectoryCreationReceipt, WindowsPrivateFileCreationReceipt, native_error,
+    DirectoryEnumerationData, NativeResult, StableReadData, WindowsFileLockAcquisitionReceipt,
+    WindowsPathInspection, WindowsPrivateDirectoryCreationReceipt,
+    WindowsPrivateFileCreationReceipt, WindowsProcessInstanceInspectionReceipt, native_error,
 };
 
 pub(crate) fn inspect_windows_path(_path: &str) -> NativeResult<WindowsPathInspection> {
@@ -27,6 +28,35 @@ pub(crate) fn create_windows_private_file(
     Err(native_error(
         "ERR_WIN32_UNSUPPORTED_TARGET",
         "Bazframe native private-file creation requires win32-x64-msvc",
+    ))
+}
+
+pub(crate) fn acquire_windows_file_lock(
+    _guard_path: &str,
+    _environment: usize,
+) -> NativeResult<WindowsFileLockAcquisitionReceipt> {
+    Err(native_error(
+        "ERR_WIN32_UNSUPPORTED_TARGET",
+        "Bazframe native file locking requires win32-x64-msvc",
+    ))
+}
+
+pub(crate) fn release_windows_file_lock(_token: &str) -> NativeResult<()> {
+    Err(native_error(
+        "ERR_WIN32_UNSUPPORTED_TARGET",
+        "Bazframe native file locking requires win32-x64-msvc",
+    ))
+}
+
+pub(crate) fn release_windows_file_locks_for_environment(_environment: usize) {}
+
+pub(crate) fn inspect_windows_process_instance(
+    _pid: u32,
+    _creation_time: &str,
+) -> NativeResult<WindowsProcessInstanceInspectionReceipt> {
+    Err(native_error(
+        "ERR_WIN32_UNSUPPORTED_TARGET",
+        "Bazframe native process inspection requires win32-x64-msvc",
     ))
 }
 
