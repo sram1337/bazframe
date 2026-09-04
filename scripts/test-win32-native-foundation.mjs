@@ -159,9 +159,15 @@ try {
   privateDirectoryModule.createWindowsPrivateDirectory(backend, privateRoot, closureComponent);
   privateDirectoryModule.createWindowsPrivateDirectory(backend, closureRoot, 'nested-数据');
   privateDirectoryModule.createWindowsPrivateDirectory(backend, closureRoot, 'empty');
-  await writeFile(join(closureRoot, 'zeta.txt'), 'zeta\n');
-  await writeFile(join(closureRoot, 'alpha.txt'), 'alpha\n');
-  await writeFile(join(closureRoot, 'nested-数据', 'value.txt'), 'nested\n');
+  const closureFiles = [
+    [join(closureRoot, 'zeta.txt'), 'zeta\n'],
+    [join(closureRoot, 'alpha.txt'), 'alpha\n'],
+    [join(closureRoot, 'nested-数据', 'value.txt'), 'nested\n']
+  ];
+  for (const [path, bytes] of closureFiles) {
+    await writeFile(path, bytes);
+    makePrivateTestFile(path, rootInspection.security.currentUserSid);
+  }
 
   const enumeration = await backend.enumerateStableDirectory(closureRoot, 4);
   const enumerationNames = enumeration.entries.map((entry) => entry.name);
@@ -259,6 +265,7 @@ try {
   privateDirectoryModule.createWindowsPrivateDirectory(backend, privateRoot, broadAclComponent);
   const broadAclFile = join(broadAclRoot, 'secret.txt');
   await writeFile(broadAclFile, 'secret\n');
+  makePrivateTestFile(broadAclFile, rootInspection.security.currentUserSid);
   execFileSync('icacls.exe', [broadAclFile, '/grant', '*S-1-1-0:(R)'], { stdio: 'pipe' });
   await expectCode(
     () => directoryClosureModule.captureWindowsDirectoryClosure(backend, broadAclRoot),
@@ -380,6 +387,17 @@ try {
   console.log(`Evidence: ${outputPath}`);
 }
 
+function makePrivateTestFile(path, currentUserSid) {
+  execFileSync('icacls.exe', [path, '/inheritance:r'], { stdio: 'pipe' });
+  execFileSync('icacls.exe', [path, '/grant:r', `*${currentUserSid}:(F)`], { stdio: 'pipe' });
+  execFileSync(
+    'icacls.exe',
+    [path, '/grant', '*S-1-5-18:(F)', '*S-1-5-32-544:(F)'],
+    { stdio: 'pipe' }
+  );
+  execFileSync('icacls.exe', [path, '/setowner', `*${currentUserSid}`], { stdio: 'pipe' });
+}
+
 function unusedDriveLetter() {
   for (let code = 'Z'.charCodeAt(0); code >= 'D'.charCodeAt(0); code -= 1) {
     const drive = `${String.fromCharCode(code)}:`;
@@ -465,6 +483,7 @@ function replaceCaseInsensitive(value, search, replacement) {
 
 function safeError(error) {
   let message = error instanceof Error ? error.message : String(error);
+  message = message.replace(/S-[0-9]+(?:-[0-9]+)+/giu, '[sid]');
   for (const [path, label] of [
     [privateRoot, '[private-root]'],
     [testRoot, '[test-root]'],
