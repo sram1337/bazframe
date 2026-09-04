@@ -148,7 +148,7 @@ pub struct WindowsProcessInstance {
     pub creation_time: String,
 }
 
-#[napi(object)]
+#[napi(object, use_nullable)]
 pub struct WindowsFileLockAcquisitionReceipt {
     pub state: String,
     pub token: Option<String>,

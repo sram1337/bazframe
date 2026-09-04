@@ -225,6 +225,19 @@ describe('Bazframe-owned Windows native loader', () => {
     expect(native.inspectWindowsProcessInstance).toHaveBeenCalledWith(42, '0000000000000001');
   });
 
+  it('accepts an exact busy lock receipt with an explicit null token', () => {
+    const busy = { ...lockAcquisition(), state: 'busy', token: null };
+    expect(load(module({ lockAcquisition: busy })).acquireFileLock('C:\\state\\guard'))
+      .toMatchObject({ state: 'busy', currentProcess: { pid: 42 } });
+
+    const missingToken = Object.fromEntries(
+      Object.entries(busy).filter(([key]) => key !== 'token')
+    );
+    expect(() => load(module({ lockAcquisition: missingToken })).acquireFileLock(
+      'C:\\state\\guard'
+    )).toThrow(expect.objectContaining({ code: 'WINDOWS_NATIVE_RECEIPT_INVALID' }));
+  });
+
   it('rejects malformed acquired lock receipts only after releasing their native handle', () => {
     const release = vi.fn();
     const native = module({
