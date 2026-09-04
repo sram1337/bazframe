@@ -9,7 +9,7 @@ This guide covers installation of the Pi integration, a first profile, policy, a
 You need:
 
 - Node.js 22.19.0 or newer, including `npm`.
-- Pi 0.84.4 or newer.
+- Pi 0.84.4 or newer, excluding the broken published 0.85.0 package.
 - macOS or Linux.
 - Access to a Pi-supported model provider.
 
@@ -22,7 +22,7 @@ After installing Pi, start it and enter `/login` to choose and authenticate with
 Install Pi and the Bazframe public beta globally:
 
 ```bash
-npm install --global --ignore-scripts @earendil-works/pi-coding-agent
+npm install --global --ignore-scripts '@earendil-works/pi-coding-agent@>=0.84.4 <0.85.0 || >=0.85.1'
 npm install --global bazframe
 ```
 
@@ -33,12 +33,12 @@ pi --version
 bazframe --version
 ```
 
-Pi must report version 0.84.4 or newer. Bazframe reports `Bazframe <installed-version>`.
+Pi must report a supported version: 0.84.4 or newer except 0.85.0. Bazframe reports `Bazframe <installed-version>`.
 
 To update, repeat the installation commands. After each Bazframe update, reinstall the packaged Pi adapter so its version matches the CLI:
 
 ```bash
-npm install --global --ignore-scripts @earendil-works/pi-coding-agent
+npm install --global --ignore-scripts '@earendil-works/pi-coding-agent@>=0.84.4 <0.85.0 || >=0.85.1'
 npm install --global bazframe
 bazframe adapter install pi
 ```

@@ -4,8 +4,8 @@ set -e
 # Requires Node.js 22.19 or newer, npm, and Git.
 # This is a bootstrap recipe. Stage 2 profile artifacts can import exact remote Git Skills/libraries and explicitly mapped local libraries, but this script does not assume a user-specific artifact.
 
-# Install a current Pi release (Bazframe requires Pi 0.84.4 or newer).
-npm install --global --ignore-scripts @earendil-works/pi-coding-agent
+# Install a compatible Pi release (Bazframe requires 0.84.4 or newer and excludes broken 0.85.0).
+npm install --global --ignore-scripts '@earendil-works/pi-coding-agent@>=0.84.4 <0.85.0 || >=0.85.1'
 
 # Install the current Bazframe release.
 npm install --global bazframe

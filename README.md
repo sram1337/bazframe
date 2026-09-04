@@ -13,12 +13,12 @@ Compose standard [Agent Skills](https://agentskills.io/) and personal `AGENTS.md
 - Shares ready profiles through deterministic ZIP exports or versioned GitHub repositories.
 - Provides a scriptable CLI, setup diagnostics, and a keyboard-first terminal UI.
 
-Bazframe is currently a beta for Pi 0.84.4 or newer on macOS and Linux.
+Bazframe is currently a beta for Pi 0.84.4 or newer on macOS and Linux. The broken published Pi 0.85.0 package is excluded because it omits a required runtime dependency.
 
 ## Requirements
 
 - [Node.js](https://nodejs.org/) 22.19.0 or newer, including npm.
-- Pi 0.84.4 or newer.
+- Pi 0.84.4 or newer, excluding the broken published 0.85.0 package.
 - macOS or Linux.
 - A model provider configured for Pi; see [Pi's authentication documentation](https://github.com/earendil-works/pi#readme).
 - Git for remote resources and Git profile imports; [GitHub CLI](https://cli.github.com/) (`gh`) for publishing and private Git imports. Neither is required for basic profile use or ZIP sharing.
@@ -26,7 +26,7 @@ Bazframe is currently a beta for Pi 0.84.4 or newer on macOS and Linux.
 ## Quick start
 
 ```bash
-npm install --global --ignore-scripts @earendil-works/pi-coding-agent
+npm install --global --ignore-scripts '@earendil-works/pi-coding-agent@>=0.84.4 <0.85.0 || >=0.85.1'
 npm install --global bazframe
 
 # Create a profile. `profile edit` uses VISUAL, then EDITOR.

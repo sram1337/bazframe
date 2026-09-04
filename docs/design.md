@@ -11,7 +11,7 @@ The first production slice integrates Bazframe with Pi through a global Pi exten
 The resulting flow is:
 
 ```bash
-npm install --global --ignore-scripts @earendil-works/pi-coding-agent
+npm install --global --ignore-scripts '@earendil-works/pi-coding-agent@>=0.84.4 <0.85.0 || >=0.85.1'
 npm install --global bazframe
 bazframe adapter install pi
 bazframe profile add focused
@@ -21,7 +21,7 @@ cd my-project
 pi
 ```
 
-Bazframe supports Pi 0.84.4 or newer. The npm beta is the default `latest` release; Pi, Skills, libraries, and packages retain their own distribution lifecycles.
+Bazframe supports Pi 0.84.4 or newer, excluding the broken published Pi 0.85.0 package whose root export imports an undeclared runtime dependency. The npm beta is the default `latest` release; Pi, Skills, libraries, and packages retain their own distribution lifecycles.
 
 `bazframe adapter install pi` is a one-time, explicit setup step. It copies Bazframe's packaged extension into Pi's global extension directory and records ownership metadata so Bazframe can update, repair, or safely uninstall only that artifact. Pi then discovers the extension automatically.
 
@@ -206,7 +206,7 @@ The complete alias is limited to 64 characters. When necessary, the Pi adapter t
 
 The alias is used only when its generated name is free from pre-existing Pi skill commands, every profile skill's original name, and aliases generated earlier in the same projection. An occupied generated alias is a visible Pi projection error: Bazframe returns no profile skill paths for that projection and does not replace the occupant or try another suffix. Successful aliases are runtime cache under `adapter-cache/pi`; they do not rename or mutate stored profile identity.
 
-Pi 0.84.4 is the minimum supported runtime; the adapter supports newer Pi releases through the same public extension contract. A future coding-agent adapter must define and test its instruction order and provenance, loader compatibility, runtime command namespace, duplicate behavior, and collision projection. It may expose both definitions under adapter-specific deterministic reported names or fail visibly, but it cannot silently drop or overwrite either definition, mutate the profile skill's identity, or persist a runtime alias into the portable profile.
+Pi 0.84.4 is the minimum supported runtime; the adapter supports newer Pi releases through the same public extension contract, with the broken published Pi 0.85.0 package explicitly excluded. A future coding-agent adapter must define and test its instruction order and provenance, loader compatibility, runtime command namespace, duplicate behavior, and collision projection. It may expose both definitions under adapter-specific deterministic reported names or fail visibly, but it cannot silently drop or overwrite either definition, mutate the profile skill's identity, or persist a runtime alias into the portable profile.
 
 ## Skill libraries, Skill packages, and profile composition
 

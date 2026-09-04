@@ -1,7 +1,7 @@
 ---
 name: bazframe
 description: Manages, exports, and imports Bazframe profiles, added Skills, Skill libraries, Skill packages, policy, the Pi adapter, status, and the terminal UI. Use when configuring or diagnosing Bazframe.
-compatibility: Requires the Bazframe CLI and Pi 0.84.4 or newer.
+compatibility: Requires the Bazframe CLI and Pi 0.84.4 or newer, excluding the broken published 0.85.0 package.
 ---
 
 # Bazframe

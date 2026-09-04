@@ -11,7 +11,7 @@ pi       # native Pi context followed by the active profile
 pi -nc   # global Pi context followed by the active profile
 ```
 
-`-nc` is Pi's native `--no-context-files` flag. Pi represents its resulting context choice in `systemPromptOptions.contextFiles`. Bazframe supports Pi 0.84.4 or newer; the recorded executable evidence began with the earlier Pi 0.82 baseline.
+`-nc` is Pi's native `--no-context-files` flag. Pi represents its resulting context choice in `systemPromptOptions.contextFiles`. Bazframe supports Pi 0.84.4 or newer, excluding the broken published 0.85.0 package; the recorded executable evidence began with the earlier Pi 0.82 baseline.
 
 ## Adaptive rule
 

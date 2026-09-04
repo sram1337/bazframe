@@ -22,13 +22,13 @@ Pi owns runtime settings and resources. Bazframe owns profile lifecycle, selecti
 ### 2.1 Install
 
 ```bash
-npm install --global --ignore-scripts @earendil-works/pi-coding-agent
+npm install --global --ignore-scripts '@earendil-works/pi-coding-agent@>=0.84.4 <0.85.0 || >=0.85.1'
 npm install --global bazframe
 bazframe adapter install pi
 bazframe status
 ```
 
-Pi 0.84.4 is the minimum supported runtime; installation selects a current Pi release. Adapter installation is explicit. The command places one self-contained Bazframe artifact in Pi's effective global extension directory and records its identity under the Bazframe home. Pi auto-discovers the extension, which lets the user invoke `pi` directly. Absent global state enables Bazframe without a policy file. Project overrides take precedence.
+Pi 0.84.4 is the minimum supported runtime; installation selects a current compatible Pi release and excludes the broken published 0.85.0 package. Adapter installation is explicit. The command places one self-contained Bazframe artifact in Pi's effective global extension directory and records its identity under the Bazframe home. Pi auto-discovers the extension, which lets the user invoke `pi` directly. Absent global state enables Bazframe without a policy file. Project overrides take precedence.
 
 ### 2.2 Configure defaults
 

@@ -159,7 +159,7 @@ try {
     throw new Error('Packed public-package metadata does not match the pending beta contract.');
   }
   if (
-    manifest.dependencies?.['@earendil-works/pi-coding-agent'] !== '>=0.84.4'
+    manifest.dependencies?.['@earendil-works/pi-coding-agent'] !== '>=0.84.4 <0.85.0 || >=0.85.1'
     || manifest.dependencies?.ink !== '7.1.1'
     || manifest.dependencies?.react !== '19.2.8'
   ) {
