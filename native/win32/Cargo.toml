@@ -1,0 +1,26 @@
+[package]
+name = "bazframe-win32-native"
+version = "0.1.0-beta.3"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/sram1337/bazframe"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "=3.12.2", default-features = false, features = ["dyn-symbols", "napi8"] }
+napi-derive = "=3.6.3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+] }
+
+[build-dependencies]
+napi-build = "=2.4.1"

@@ -12,11 +12,18 @@
     "bzf": "dist/cli.js"
   },
   "files": [
-    "artifacts/",
+    "artifacts/pi/",
+    "artifacts/native/win32-x64-msvc/bazframe-win32.node",
     "dist/",
     "docs/",
     "!docs/reviews/",
     "examples/",
+    "native/win32/Cargo.lock",
+    "native/win32/Cargo.toml",
+    "native/win32/NOTICE.md",
+    "native/win32/OPENCLAW-LICENSE",
+    "native/win32/build.rs",
+    "native/win32/src/",
     "README.md",
     "CONTRIBUTING.md"
   ],

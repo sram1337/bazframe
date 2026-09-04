@@ -103,6 +103,23 @@ try {
   assertExists(join(packageRoot, 'docs', 'research', 'prototype-alternatives.md'));
   assertMissing(join(packageRoot, 'docs', 'reviews'));
   assertExists(join(packageRoot, 'docs', 'releasing.md'));
+  for (const relativePath of [
+    'Cargo.lock', 'Cargo.toml', 'NOTICE.md', 'OPENCLAW-LICENSE', 'build.rs',
+    join('src', 'lib.rs'), join('src', 'non_windows.rs'), join('src', 'windows.rs')
+  ]) {
+    const packagedPath = join(packageRoot, 'native', 'win32', relativePath);
+    const trackedPath = join(projectRoot, 'native', 'win32', relativePath);
+    assertExists(packagedPath);
+    if (!readFileSync(packagedPath).equals(readFileSync(trackedPath))) {
+      throw new Error(`Packaged native source does not exactly match its tracked source: ${relativePath}`);
+    }
+  }
+  const nativeCargoManifest = readFileSync(join(packageRoot, 'native', 'win32', 'Cargo.toml'), 'utf8');
+  const nativeVersion = /^version = "([^"]+)"$/mu.exec(nativeCargoManifest)?.[1];
+  if (nativeVersion !== sourceManifest.version) {
+    throw new Error(`Packed native source version does not match Bazframe: ${nativeVersion ?? 'missing'}`);
+  }
+  assertMissing(join(packageRoot, 'native', 'win32', 'target'));
   assertMissing(join(packageRoot, 'TODO.md'));
   assertExists(join(packageRoot, 'examples', 'setup-fresh-machine.sh'));
   assertExists(join(packageRoot, 'examples', 'profiles', 'focused', 'AGENTS.md'));

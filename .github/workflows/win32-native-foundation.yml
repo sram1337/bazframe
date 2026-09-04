@@ -1,0 +1,235 @@
+name: Bazframe-owned Windows native foundation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/win32-native-foundation.yml'
+      - 'native/win32/**'
+      - 'src/core/win32-native.ts'
+      - 'test/unit/core/win32-native.test.ts'
+      - 'scripts/test-win32-native-foundation.mjs'
+      - 'scripts/run-win32-native-foundation.ps1'
+      - 'scripts/test-pack.mjs'
+      - 'scripts/build.mjs'
+      - 'package.json'
+      - 'package-lock.json'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/win32-native-foundation.yml'
+      - 'native/win32/**'
+      - 'src/core/win32-native.ts'
+      - 'test/unit/core/win32-native.test.ts'
+      - 'scripts/test-win32-native-foundation.mjs'
+      - 'scripts/run-win32-native-foundation.ps1'
+      - 'scripts/test-pack.mjs'
+      - 'scripts/build.mjs'
+      - 'package.json'
+      - 'package-lock.json'
+
+permissions:
+  contents: read
+
+env:
+  BAZFRAME_RUST_TOOLCHAIN: 1.88.0
+  BAZFRAME_MSVC_TOOLS_VERSION: 14.44.35207
+  BAZFRAME_WIN32_NATIVE_PACK_MODE: foundation-evidence
+
+jobs:
+  native-foundation:
+    name: Evidence only (public Windows gate remains closed)
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Pin Rust toolchain and Windows target
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustup toolchain install $env:BAZFRAME_RUST_TOOLCHAIN --profile minimal --component rustfmt --no-self-update
+          if ($LASTEXITCODE -ne 0) { throw "rustup toolchain install failed with exit $LASTEXITCODE" }
+          rustup target add x86_64-pc-windows-msvc --toolchain $env:BAZFRAME_RUST_TOOLCHAIN
+          if ($LASTEXITCODE -ne 0) { throw "rustup target add failed with exit $LASTEXITCODE" }
+          rustc +$env:BAZFRAME_RUST_TOOLCHAIN --version --verbose | Tee-Object native-rust-version.txt
+          if ($LASTEXITCODE -ne 0) { throw "rustc version inspection failed with exit $LASTEXITCODE" }
+
+      - name: Format, check, and build with the pinned MSVC toolset
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP 'bazframe-native-cargo'
+          if (Test-Path -LiteralPath $env:CARGO_TARGET_DIR) {
+            Remove-Item -LiteralPath $env:CARGO_TARGET_DIR -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $env:CARGO_TARGET_DIR | Out-Null
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0) { throw "vswhere failed with exit $LASTEXITCODE" }
+          if ([string]::IsNullOrWhiteSpace($install)) { throw 'Visual Studio C++ build tools are unavailable.' }
+          $toolRoot = Join-Path $install "VC\Tools\MSVC\$env:BAZFRAME_MSVC_TOOLS_VERSION"
+          if (-not (Test-Path $toolRoot)) { throw "Pinned MSVC tools are unavailable: $env:BAZFRAME_MSVC_TOOLS_VERSION" }
+          Import-Module (Join-Path $install 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $install -SkipAutomaticLocation -DevCmdArguments "-arch=x64 -host_arch=x64 -vcvars_ver=14.44"
+          $compiler = (Get-Command cl.exe).Source
+          if (-not $compiler.StartsWith($toolRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Selected MSVC compiler is outside the pinned toolset: $compiler"
+          }
+          $compilerInfo = (Get-Item $compiler).VersionInfo
+          @(
+            "Path=$compiler"
+            "FileVersion=$($compilerInfo.FileVersion)"
+            "ProductVersion=$($compilerInfo.ProductVersion)"
+          ) | Set-Content native-msvc-version.txt
+          cargo +$env:BAZFRAME_RUST_TOOLCHAIN fmt --manifest-path native/win32/Cargo.toml -- --check
+          if ($LASTEXITCODE -ne 0) { throw "cargo fmt failed with exit $LASTEXITCODE" }
+          cargo +$env:BAZFRAME_RUST_TOOLCHAIN check --locked --manifest-path native/win32/Cargo.toml --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "cargo check failed with exit $LASTEXITCODE" }
+          cargo +$env:BAZFRAME_RUST_TOOLCHAIN test --locked --manifest-path native/win32/Cargo.toml --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "cargo test failed with exit $LASTEXITCODE" }
+          cargo +$env:BAZFRAME_RUST_TOOLCHAIN build --locked --release --manifest-path native/win32/Cargo.toml --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit $LASTEXITCODE" }
+          New-Item -ItemType Directory -Force artifacts/native/win32-x64-msvc | Out-Null
+          Copy-Item (Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc\release\bazframe_win32_native.dll') artifacts/native/win32-x64-msvc/bazframe-win32.node
+          (Get-FileHash artifacts/native/win32-x64-msvc/bazframe-win32.node -Algorithm SHA256).Hash.ToLowerInvariant() |
+            Set-Content native-binary.sha256
+
+      - name: Build TypeScript and run platform-neutral native contract tests
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm run build
+          if ($LASTEXITCODE -ne 0) { throw "npm build failed with exit $LASTEXITCODE" }
+          npx vitest run --config vitest.config.ts test/unit/core/win32-native.test.ts test/unit/cli/platform-support.test.ts
+          if ($LASTEXITCODE -ne 0) { throw "native contract tests failed with exit $LASTEXITCODE" }
+
+      - name: Exercise native local-NTFS foundation from the source tree
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $drive = (Get-Item $env:RUNNER_TEMP).PSDrive.Name
+          $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$($drive):'"
+          if ($null -eq $disk -or $disk.DriveType -ne 3 -or $disk.FileSystem -ne 'NTFS') {
+            throw 'RUNNER_TEMP is not on a fixed local NTFS volume.'
+          }
+          node ./scripts/test-win32-native-foundation.mjs --output ./native-source-evidence.json
+          if ($LASTEXITCODE -ne 0) { throw "source-tree native conformance failed with exit $LASTEXITCODE" }
+
+      - name: Pack once and exercise the installed root-bundled binary offline
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pack = npm pack --json --silent | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "npm pack failed with exit $LASTEXITCODE" }
+          if ($pack.Count -ne 1) { throw 'Expected exactly one Bazframe tarball.' }
+          $tarball = Join-Path $PWD $pack[0].filename
+          $installRoot = Join-Path $env:RUNNER_TEMP 'bazframe-native-packed-install'
+          New-Item -ItemType Directory -Force $installRoot | Out-Null
+          npm install --prefix $installRoot --ignore-scripts --no-package-lock $tarball
+          if ($LASTEXITCODE -ne 0) { throw "packed npm install failed with exit $LASTEXITCODE" }
+          $installed = Join-Path $installRoot 'node_modules\bazframe'
+          $installedNative = Join-Path $installed 'artifacts\native\win32-x64-msvc\bazframe-win32.node'
+          $expectedHash = (Get-Content native-binary.sha256 -Raw).Trim()
+          $installedHash = (Get-FileHash $installedNative -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($installedHash -ne $expectedHash) { throw 'Packed native binary does not match the reviewed build output.' }
+          $env:npm_config_offline = 'true'
+          node ./scripts/test-win32-native-foundation.mjs --package-root $installed --output ./native-installed-evidence.json
+          if ($LASTEXITCODE -ne 0) { throw "installed native conformance failed with exit $LASTEXITCODE" }
+          $sourceReceipt = Get-Content native-source-evidence.json -Raw | ConvertFrom-Json
+          $installedReceipt = Get-Content native-installed-evidence.json -Raw | ConvertFrom-Json
+          if ($sourceReceipt.completion -ne 'passed' -or $installedReceipt.completion -ne 'passed') {
+            throw 'Native conformance receipts did not both pass.'
+          }
+          if ($sourceReceipt.releaseAdmission -ne 'not-authorized' -or
+              $installedReceipt.releaseAdmission -ne 'not-authorized' -or
+              $sourceReceipt.windowsSupportClaim -ne $false -or
+              $installedReceipt.windowsSupportClaim -ne $false) {
+            throw 'Native conformance receipts changed the closed release/support boundary.'
+          }
+          if ($sourceReceipt.observations.binarySha256 -ne $expectedHash -or
+              $installedReceipt.observations.binarySha256 -ne $expectedHash) {
+            throw 'Native conformance receipt digests do not match the reviewed binary.'
+          }
+          $finalCommit = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "final Git revision inspection failed with exit $LASTEXITCODE" }
+          $finalWorktreeState = & git status --porcelain=v1 --untracked-files=all
+          if ($LASTEXITCODE -ne 0) { throw "final Git worktree inspection failed with exit $LASTEXITCODE" }
+          if ($finalCommit -ne '${{ github.sha }}' -or
+              -not [string]::IsNullOrWhiteSpace(($finalWorktreeState -join "`n"))) {
+            throw 'The Bazframe source changed during native evidence collection.'
+          }
+
+      - name: Assemble source-bound evidence
+        if: always()
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $nodeVersion = node --version
+          if ($LASTEXITCODE -ne 0) { throw "Node version inspection failed with exit $LASTEXITCODE" }
+          $binarySha256 = if (Test-Path native-binary.sha256) { (Get-Content native-binary.sha256 -Raw).Trim() } else { $null }
+          $sourceConformance = if (Test-Path native-source-evidence.json) { Get-Content native-source-evidence.json -Raw | ConvertFrom-Json } else { $null }
+          $installedConformance = if (Test-Path native-installed-evidence.json) { Get-Content native-installed-evidence.json -Raw | ConvertFrom-Json } else { $null }
+          $completion = if ($null -ne $binarySha256 -and
+              $sourceConformance.completion -eq 'passed' -and
+              $installedConformance.completion -eq 'passed' -and
+              $sourceConformance.releaseAdmission -eq 'not-authorized' -and
+              $installedConformance.releaseAdmission -eq 'not-authorized' -and
+              $sourceConformance.windowsSupportClaim -eq $false -and
+              $installedConformance.windowsSupportClaim -eq $false -and
+              $sourceConformance.observations.binarySha256 -eq $binarySha256 -and
+              $installedConformance.observations.binarySha256 -eq $binarySha256) { 'passed' } else { 'failed' }
+          $evidence = [ordered]@{
+            schemaVersion = 1
+            purpose = 'Bazframe-owned native foundation evidence only; not release admission or a Windows support claim.'
+            completion = $completion
+            sourceCommit = '${{ github.sha }}'
+            runnerImage = $env:ImageOS
+            runnerImageVersion = $env:ImageVersion
+            node = $nodeVersion
+            rust = if (Test-Path native-rust-version.txt) { Get-Content native-rust-version.txt -Raw } else { $null }
+            msvcToolsVersion = $env:BAZFRAME_MSVC_TOOLS_VERSION
+            msvc = if (Test-Path native-msvc-version.txt) { Get-Content native-msvc-version.txt -Raw } else { $null }
+            binarySha256 = $binarySha256
+            sourceConformance = $sourceConformance
+            installedConformance = $installedConformance
+            releaseAdmission = 'not-authorized'
+            windowsSupportClaim = $false
+          }
+          $evidence | ConvertTo-Json -Depth 20 | Set-Content native-foundation-evidence.json
+          Get-Content native-foundation-evidence.json
+          if ($completion -ne 'passed') { throw 'Native foundation evidence is incomplete or failed.' }
+
+      - name: Upload successful binary and evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bazframe-win32-native-foundation-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            artifacts/native/win32-x64-msvc/bazframe-win32.node
+            native-binary.sha256
+            native-foundation-evidence.json
+            native-source-evidence.json
+            native-installed-evidence.json
+            native-rust-version.txt
+            native-msvc-version.txt
+
+      - name: Upload failed-run diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bazframe-win32-native-foundation-failed-${{ github.sha }}
+          if-no-files-found: warn
+          path: |
+            native-foundation-evidence.json
+            native-source-evidence.json
+            native-installed-evidence.json
+            native-rust-version.txt
+            native-msvc-version.txt

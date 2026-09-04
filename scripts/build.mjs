@@ -1,5 +1,29 @@
 import { spawnSync } from 'node:child_process';
-import { chmod, cp, rm } from 'node:fs/promises';
+import { chmod, cp, lstat, rm } from 'node:fs/promises';
+
+const nativeArtifact = new URL(
+  '../artifacts/native/win32-x64-msvc/bazframe-win32.node',
+  import.meta.url
+);
+const nativePackMode = process.env.BAZFRAME_WIN32_NATIVE_PACK_MODE;
+let nativeArtifactPresent = false;
+try {
+  const metadata = await lstat(nativeArtifact);
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new Error('The Bazframe Windows native pack input must be one physical regular file.');
+  }
+  nativeArtifactPresent = true;
+} catch (error) {
+  if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
+}
+if (nativeArtifactPresent && nativePackMode !== 'foundation-evidence') {
+  throw new Error(
+    'Refusing an unadmitted Windows native pack input. Remove the ignored binary or use the foundation evidence workflow.'
+  );
+}
+if (!nativeArtifactPresent && nativePackMode !== undefined) {
+  throw new Error('The requested Windows native foundation pack input is missing.');
+}
 
 await rm(new URL('../dist', import.meta.url), { recursive: true, force: true });
 

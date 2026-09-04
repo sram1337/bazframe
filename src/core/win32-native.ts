@@ -1,0 +1,424 @@
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+import { BazframeError, errorCode } from './errors.js';
+
+export const BAZFRAME_WIN32_NATIVE_CONTRACT_VERSION = 1;
+export const BAZFRAME_WIN32_NATIVE_TARGET = 'win32-x64-msvc';
+// Must remain equal to native/win32/src/lib.rs and the authoritative profile
+// portability per-file production ceiling.
+export const BAZFRAME_WIN32_NATIVE_MAX_STABLE_READ_BYTES = 64 * 1024 * 1024;
+
+const HEX_32 = /^[a-f0-9]{8}$/u;
+const HEX_64 = /^[a-f0-9]{16}$/u;
+const HEX_128 = /^[a-f0-9]{32}$/u;
+const VOLUME_GUID = /^\\\\\?\\Volume\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}\\$/u;
+const requireFromHere = createRequire(import.meta.url);
+const nativeArtifactUrl = new URL(
+  '../../artifacts/native/win32-x64-msvc/bazframe-win32.node',
+  import.meta.url
+);
+const packageManifestUrl = new URL('../../package.json', import.meta.url);
+
+export interface WindowsVolumeObservation {
+  identity: string;
+  filesystemName: 'NTFS';
+  driveType: 'fixed';
+  canonicalVolumeGuidPath: string;
+  remoteDevice: false;
+}
+
+export interface WindowsObjectObservation {
+  volumeIdentity: string;
+  fileId: string;
+  size: string;
+  allocationSize: string;
+  numberOfLinks: string;
+  creationTime: string;
+  lastAccessTime: string;
+  lastWriteTime: string;
+  changeTime: string;
+  attributes: number;
+  reparseTag: number | null;
+  deletePending: boolean;
+  directory: boolean;
+}
+
+export interface WindowsPathInspection {
+  canonicalPath: string;
+  kind: 'regular-file' | 'directory';
+  volume: WindowsVolumeObservation;
+  object: WindowsObjectObservation;
+  ancestryReparseFree: true;
+}
+
+export interface WindowsStableReadReceipt {
+  bytes: Buffer;
+  byteCount: string;
+  before: WindowsObjectObservation;
+  after: WindowsObjectObservation;
+}
+
+export interface BazframeWin32NativeBackend {
+  inspectPath(path: string): WindowsPathInspection;
+  readStableFile(path: string, maxBytes: number): Promise<WindowsStableReadReceipt>;
+}
+
+interface RawNativeModule {
+  getNativeWindowsInfo: () => unknown;
+  inspectWindowsPath: (path: string) => unknown;
+  readWindowsFileStable: (path: string, maxBytes: number) => unknown;
+}
+
+export interface Win32NativeLoadOptions {
+  /** Internal conformance seams; production callers omit these values. */
+  platform?: NodeJS.Platform;
+  arch?: string;
+  loadModule?: (absolutePath: string) => unknown;
+  loadPackageManifest?: (absolutePath: string) => unknown;
+}
+
+/**
+ * Loads the root-bundled Bazframe binary for internal capability tests.
+ * The public CLI platform gate does not call or expose this function.
+ */
+export function loadBazframeWin32Native(
+  options: Win32NativeLoadOptions = {}
+): BazframeWin32NativeBackend {
+  const platform = options.platform ?? process.platform;
+  const arch = options.arch ?? process.arch;
+  if (platform !== 'win32') {
+    throw failure(
+      'WINDOWS_NATIVE_PLATFORM_UNSUPPORTED',
+      'The Bazframe native Windows backend requires native Windows.'
+    );
+  }
+  if (arch !== 'x64') {
+    throw failure(
+      'WINDOWS_NATIVE_ARCH_UNSUPPORTED',
+      'The Bazframe native Windows backend requires Windows x64.'
+    );
+  }
+  const expectedPackageVersion = installedPackageVersion(options.loadPackageManifest);
+  const absolutePath = fileURLToPath(nativeArtifactUrl);
+  let loaded: unknown;
+  try {
+    loaded = (options.loadModule ?? ((path) => requireFromHere(path)))(absolutePath);
+  } catch (error) {
+    const code = errorCode(error);
+    if (code === 'MODULE_NOT_FOUND' || code === 'ERR_MODULE_NOT_FOUND') {
+      throw failure(
+        'WINDOWS_NATIVE_ARTIFACT_MISSING',
+        'The bundled Bazframe Windows native artifact is missing. Reinstall Bazframe from the reviewed package.',
+        error
+      );
+    }
+    throw failure(
+      code === 'ERR_DLOPEN_FAILED'
+        ? 'WINDOWS_NATIVE_ARTIFACT_INCOMPATIBLE'
+        : 'WINDOWS_NATIVE_ARTIFACT_LOAD_FAILED',
+      'The bundled Bazframe Windows native artifact could not be loaded. Reinstall Bazframe for Windows x64 with a supported Node version.',
+      error
+    );
+  }
+  let native: RawNativeModule;
+  try {
+    native = nativeModule(loaded);
+  } catch (error) {
+    if (error instanceof BazframeError) throw error;
+    throw failure(
+      'WINDOWS_NATIVE_EXPORT_MISSING',
+      'The bundled Bazframe Windows native artifact does not expose its required contract.',
+      error
+    );
+  }
+  let info: Record<string, unknown>;
+  try {
+    info = exactRecord(native.getNativeWindowsInfo(), [
+      'contractVersion',
+      'packageVersion',
+      'target',
+      'maxStableReadBytes'
+    ], 'native contract information');
+  } catch (error) {
+    throw receiptFailure('Native contract information is malformed.', error);
+  }
+  if (info.contractVersion !== BAZFRAME_WIN32_NATIVE_CONTRACT_VERSION) {
+    throw failure(
+      'WINDOWS_NATIVE_CONTRACT_MISMATCH',
+      'The bundled Bazframe Windows native contract is incompatible with this Bazframe build.'
+    );
+  }
+  if (info.packageVersion !== expectedPackageVersion) {
+    throw failure(
+      'WINDOWS_NATIVE_VERSION_MISMATCH',
+      'The bundled Bazframe Windows native artifact does not match this Bazframe package version.'
+    );
+  }
+  if (info.target !== BAZFRAME_WIN32_NATIVE_TARGET) {
+    throw failure(
+      'WINDOWS_NATIVE_TARGET_MISMATCH',
+      'The bundled Bazframe Windows native artifact reports an unexpected target.'
+    );
+  }
+  if (info.maxStableReadBytes !== BAZFRAME_WIN32_NATIVE_MAX_STABLE_READ_BYTES) {
+    throw failure(
+      'WINDOWS_NATIVE_CONTRACT_MISMATCH',
+      'The bundled Bazframe Windows native read limit does not match this Bazframe build.'
+    );
+  }
+
+  return Object.freeze({
+    inspectPath(path: string): WindowsPathInspection {
+      requirePath(path);
+      let receipt: unknown;
+      try {
+        receipt = native.inspectWindowsPath(path);
+      } catch (error) {
+        throw nativeOperationFailure(error);
+      }
+      return pathInspection(receipt);
+    },
+    async readStableFile(path: string, maxBytes: number): Promise<WindowsStableReadReceipt> {
+      requirePath(path);
+      if (!Number.isSafeInteger(maxBytes) || maxBytes < 0
+        || maxBytes > BAZFRAME_WIN32_NATIVE_MAX_STABLE_READ_BYTES) {
+        throw failure(
+          'WINDOWS_NATIVE_READ_LIMIT_INVALID',
+          'The Bazframe native stable-read byte bound is invalid.'
+        );
+      }
+      let receipt: unknown;
+      try {
+        receipt = await Promise.resolve(native.readWindowsFileStable(path, maxBytes));
+      } catch (error) {
+        throw nativeOperationFailure(error);
+      }
+      return stableReadReceipt(receipt, maxBytes);
+    }
+  });
+}
+
+function installedPackageVersion(
+  loadManifest: ((absolutePath: string) => unknown) | undefined
+): string {
+  try {
+    const value = (loadManifest ?? ((path) => requireFromHere(path)))(fileURLToPath(packageManifestUrl));
+    const version = plainRecord(value).version;
+    if (typeof version !== 'string' || version.length === 0) invalid();
+    return version;
+  } catch (error) {
+    throw failure(
+      'WINDOWS_NATIVE_PACKAGE_METADATA_INVALID',
+      'The installed Bazframe package metadata is unavailable or invalid.',
+      error
+    );
+  }
+}
+
+function nativeModule(value: unknown): RawNativeModule {
+  const record = plainRecord(value);
+  for (const name of ['getNativeWindowsInfo', 'inspectWindowsPath', 'readWindowsFileStable'] as const) {
+    if (typeof record[name] !== 'function') {
+      throw failure(
+        'WINDOWS_NATIVE_EXPORT_MISSING',
+        'The bundled Bazframe Windows native artifact is missing a required capability export.'
+      );
+    }
+  }
+  return record as unknown as RawNativeModule;
+}
+
+function pathInspection(value: unknown): WindowsPathInspection {
+  try {
+    const record = exactRecord(value, [
+      'canonicalPath', 'kind', 'volume', 'object', 'ancestryReparseFree'
+    ], 'path inspection');
+    if (typeof record.canonicalPath !== 'string' || record.canonicalPath.length === 0) invalid();
+    if (record.kind !== 'regular-file' && record.kind !== 'directory') invalid();
+    if (record.ancestryReparseFree !== true) invalid();
+    const volume = volumeObservation(record.volume);
+    const object = objectObservation(record.object);
+    if (!record.canonicalPath.toLowerCase().startsWith(volume.canonicalVolumeGuidPath.toLowerCase())
+      || object.volumeIdentity !== volume.identity || object.reparseTag !== null
+      || object.deletePending || object.directory !== (record.kind === 'directory')) invalid();
+    return {
+      canonicalPath: record.canonicalPath,
+      kind: record.kind,
+      volume,
+      object,
+      ancestryReparseFree: true
+    };
+  } catch (error) {
+    throw receiptFailure('Native Windows path inspection is malformed or inadmissible.', error);
+  }
+}
+
+function stableReadReceipt(value: unknown, maxBytes: number): WindowsStableReadReceipt {
+  try {
+    const record = exactRecord(value, ['bytes', 'byteCount', 'before', 'after'], 'stable read');
+    if (!(record.bytes instanceof Uint8Array)) invalid();
+    const byteCount = hex(record.byteCount, HEX_64);
+    const count = BigInt(`0x${byteCount}`);
+    const bytes = Buffer.from(record.bytes);
+    if (count !== BigInt(bytes.byteLength) || count > BigInt(maxBytes)) invalid();
+    const before = objectObservation(record.before);
+    const after = objectObservation(record.after);
+    if (before.directory || after.directory || before.reparseTag !== null || after.reparseTag !== null
+      || before.deletePending || after.deletePending || before.size !== byteCount
+      || after.size !== byteCount || !sameStableObservation(before, after)) {
+      throw failure(
+        'WINDOWS_NATIVE_READ_CHANGED',
+        'The native stable-read receipt reports changed or inconsistent file state.'
+      );
+    }
+    return { bytes, byteCount, before, after };
+  } catch (error) {
+    if (error instanceof BazframeError && error.code === 'WINDOWS_NATIVE_READ_CHANGED') throw error;
+    throw receiptFailure('Native Windows stable-read evidence is malformed.', error);
+  }
+}
+
+function volumeObservation(value: unknown): WindowsVolumeObservation {
+  const record = exactRecord(value, [
+    'identity', 'filesystemName', 'driveType', 'canonicalVolumeGuidPath', 'remoteDevice'
+  ], 'volume observation');
+  const identity = hex(record.identity, HEX_64);
+  if (record.filesystemName !== 'NTFS' || record.driveType !== 'fixed'
+    || record.remoteDevice !== false || typeof record.canonicalVolumeGuidPath !== 'string'
+    || !VOLUME_GUID.test(record.canonicalVolumeGuidPath)) invalid();
+  return {
+    identity,
+    filesystemName: 'NTFS',
+    driveType: 'fixed',
+    canonicalVolumeGuidPath: record.canonicalVolumeGuidPath,
+    remoteDevice: false
+  };
+}
+
+function objectObservation(value: unknown): WindowsObjectObservation {
+  const record = exactRecord(value, [
+    'volumeIdentity', 'fileId', 'size', 'allocationSize', 'numberOfLinks',
+    'creationTime', 'lastAccessTime', 'lastWriteTime', 'changeTime', 'attributes',
+    'reparseTag', 'deletePending', 'directory'
+  ], 'object observation');
+  const observation: WindowsObjectObservation = {
+    volumeIdentity: hex(record.volumeIdentity, HEX_64),
+    fileId: hex(record.fileId, HEX_128),
+    size: hex(record.size, HEX_64),
+    allocationSize: hex(record.allocationSize, HEX_64),
+    numberOfLinks: hex(record.numberOfLinks, HEX_32),
+    creationTime: hex(record.creationTime, HEX_64),
+    lastAccessTime: hex(record.lastAccessTime, HEX_64),
+    lastWriteTime: hex(record.lastWriteTime, HEX_64),
+    changeTime: hex(record.changeTime, HEX_64),
+    attributes: uint32(record.attributes),
+    reparseTag: uint32(record.reparseTag) === 0 ? null : uint32(record.reparseTag),
+    deletePending: boolean(record.deletePending),
+    directory: boolean(record.directory)
+  };
+  return observation;
+}
+
+function sameStableObservation(a: WindowsObjectObservation, b: WindowsObjectObservation): boolean {
+  return a.volumeIdentity === b.volumeIdentity
+    && a.fileId === b.fileId
+    && a.size === b.size
+    && a.allocationSize === b.allocationSize
+    && a.numberOfLinks === b.numberOfLinks
+    && a.creationTime === b.creationTime
+    && a.lastWriteTime === b.lastWriteTime
+    && a.changeTime === b.changeTime
+    && a.attributes === b.attributes
+    && a.reparseTag === b.reparseTag
+    && a.deletePending === b.deletePending
+    && a.directory === b.directory;
+}
+
+function exactRecord(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {
+  const record = plainRecord(value);
+  const actual = Object.keys(record).sort();
+  const expected = [...keys].sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+    throw new Error(`invalid ${label}`);
+  }
+  return record;
+}
+
+function plainRecord(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) invalid();
+  return value as Record<string, unknown>;
+}
+
+function hex(value: unknown, pattern: RegExp): string {
+  if (typeof value !== 'string' || !pattern.test(value)) invalid();
+  return value;
+}
+
+function uint32(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 0xffff_ffff) invalid();
+  return value;
+}
+
+function boolean(value: unknown): boolean {
+  if (typeof value !== 'boolean') invalid();
+  return value;
+}
+
+function requirePath(path: string): void {
+  if (typeof path !== 'string' || path.length === 0 || path.includes('\0')) {
+    throw failure('WINDOWS_NATIVE_PATH_INVALID', 'The native Windows path input is invalid.');
+  }
+}
+
+function invalid(): never {
+  throw new Error('invalid native receipt');
+}
+
+function receiptFailure(message: string, cause: unknown): BazframeError {
+  if (cause instanceof BazframeError) return cause;
+  return failure('WINDOWS_NATIVE_RECEIPT_INVALID', message, cause);
+}
+
+function nativeOperationFailure(error: unknown): BazframeError {
+  const mapped: Record<string, { code: string; message?: string }> = {
+    ERR_WIN32_ACCESS_DENIED: { code: 'WINDOWS_NATIVE_ACCESS_DENIED' },
+    ERR_WIN32_FILESYSTEM_UNSUPPORTED: { code: 'WINDOWS_NATIVE_FILESYSTEM_UNSUPPORTED' },
+    ERR_WIN32_INVALID_PATH: { code: 'WINDOWS_NATIVE_PATH_INVALID' },
+    ERR_WIN32_IO: { code: 'WINDOWS_NATIVE_IO_FAILED' },
+    ERR_WIN32_METADATA_UNAVAILABLE: { code: 'WINDOWS_NATIVE_METADATA_UNAVAILABLE' },
+    ERR_WIN32_NOT_DIRECTORY: { code: 'WINDOWS_NATIVE_NOT_DIRECTORY' },
+    ERR_WIN32_NOT_REGULAR_FILE: { code: 'WINDOWS_NATIVE_NOT_REGULAR_FILE' },
+    ERR_WIN32_PATH_NOT_FOUND: { code: 'WINDOWS_NATIVE_PATH_NOT_FOUND' },
+    ERR_WIN32_READ_CHANGED: { code: 'WINDOWS_NATIVE_READ_CHANGED' },
+    ERR_WIN32_READ_INCOMPLETE: { code: 'WINDOWS_NATIVE_READ_INCOMPLETE' },
+    ERR_WIN32_READ_LIMIT: {
+      code: 'WINDOWS_NATIVE_READ_LIMIT_EXCEEDED',
+      message: 'The Windows file exceeds the Bazframe-supplied stable-read byte bound.'
+    },
+    ERR_WIN32_REPARSE_REFUSED: { code: 'WINDOWS_NATIVE_REPARSE_REFUSED' },
+    ERR_WIN32_SHARING_VIOLATION: { code: 'WINDOWS_NATIVE_SHARING_VIOLATION' },
+    ERR_WIN32_UNSUPPORTED_TARGET: { code: 'WINDOWS_NATIVE_TARGET_UNSUPPORTED' },
+    ERR_WIN32_VOLUME_NOT_FIXED: { code: 'WINDOWS_NATIVE_VOLUME_NOT_FIXED' },
+    ERR_WIN32_VOLUME_REMOTE: { code: 'WINDOWS_NATIVE_VOLUME_REMOTE' }
+  };
+  const nativeCode = nativeOperationCode(error);
+  const result = nativeCode === undefined ? undefined : mapped[nativeCode];
+  return failure(
+    result?.code ?? 'WINDOWS_NATIVE_OPERATION_FAILED',
+    result?.message ?? 'The Bazframe native Windows operation failed without producing admissible evidence.',
+    error
+  );
+}
+
+function nativeOperationCode(error: unknown): string | undefined {
+  const direct = errorCode(error);
+  if (direct?.startsWith('ERR_WIN32_')) return direct;
+  if (error instanceof Error) {
+    return /(?:^|\b)(ERR_WIN32_[A-Z0-9_]+):/u.exec(error.message)?.[1];
+  }
+  return undefined;
+}
+
+function failure(code: string, message: string, cause?: unknown): BazframeError {
+  return new BazframeError(code, message, cause === undefined ? undefined : { cause });
+}

@@ -2,6 +2,16 @@
 node_modules/
 dist/
 coverage/
+/native/win32/target/
+/artifacts/native/win32-x64-msvc/*.node
+/win32-native-evidence*/
+/native-binary.sha256
+/native-foundation-evidence.json
+/native-installed-evidence.json
+/native-source-evidence.json
+/native-msvc-version.txt
+/native-rust-version.txt
+/bazframe-*.tgz
 
 # Local environment
 .env

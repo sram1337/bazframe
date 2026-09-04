@@ -1,6 +1,6 @@
 # Native Windows Full-Product Outcome-Parity Proposal
 
-> **Status: Approved design direction; not implemented**
+> **Status: Approved design direction; foundation implementation in progress**
 >
 > Native Windows remains unsupported. Bazframe will make no partial Windows support claim: the complete current product surface in this document must pass native Windows installed-package acceptance before Windows x64 on local NTFS is supported. [`design.md`](design.md) remains the product source of truth, and the shipped macOS/Linux contract is unchanged.
 
@@ -107,9 +107,9 @@ npm install bazframe
 npm install --global bazframe
 ```
 
-Installation and first use require no compiler toolchain, Visual Studio, Rust, WSL, Git Bash, interactive installer, postinstall binary download, or runtime binary download. Any required platform artifact must be selected by ordinary npm dependency resolution. A missing native artifact, omitted optional dependency, unsupported OS/CPU/Node combination, ABI mismatch, or load failure must produce a specific remediation diagnostic before Windows-sensitive work.
+Installation and first use require no compiler toolchain, Visual Studio, Rust, WSL, Git Bash, interactive installer, postinstall binary download, or runtime binary download. A release admitted to open Windows support bundles the exact reviewed `artifacts/native/win32-x64-msvc/bazframe-win32.node`, produced from pinned source under `native/win32/`, inside the Bazframe root tarball. The fixed package-relative loader selects it only on native Windows x64 and validates its contract, target, and package version. A missing, corrupt, wrong-target, ABI-incompatible, version-mismatched, or malformed bundled artifact produces a specific remediation diagnostic before Windows-sensitive work.
 
-Any accepted capability that depends on native behavior must fail closed rather than silently substitute a mechanism weaker than that capability's tested contract. Binding availability does not prove which mechanism an operation used: a guarded pathname implementation is allowed where this document expressly accepts the supported-platform residual race and native Windows acceptance proves the required outcome. Any production dependency must be pinned to an exact reviewed version and pass installed-artifact acceptance. This proposal does not approve a dependency or require a separately published Bazframe-specific native package.
+Any accepted capability that depends on native behavior must fail closed rather than silently substitute a mechanism weaker than that capability's tested contract. A guarded pathname implementation is allowed where this document expressly accepts the supported-platform residual race and native Windows acceptance proves the required outcome. Native source dependencies and toolchains are pinned, and the compiled binary, source commit, tests, and digest form one reviewed evidence set. The accepted binary ships inside the existing single Bazframe npm artifact; no installation lifecycle script or secondary platform package is required. While the public gate remains closed, ordinary releases omit the unaccepted binary.
 
 ## 5. Common filesystem outcomes
 
@@ -266,48 +266,37 @@ Git/`gh` and acquisition workspace reclamation has the additional process-tree-s
 
 The Windows port must preserve the exact implemented feature and CLI-only boundaries in section 2.2. It does not add shell process dispatch or optimistic state.
 
-## 7. Preferred prototype candidate: `@openclaw/fs-safe@0.7.2`
+## 7. Bazframe-owned native Windows foundation
 
-`@openclaw/fs-safe@0.7.2` is the preferred prototype candidate, not an adopted dependency. Static inspection establishes only these relevant distribution facts:
+Bazframe owns the native Windows API, source, compiled binary, conformance tests, provenance, and release evidence. Pinned Rust/N-API source lives under `native/win32/`. The foundation workflow assembles a Windows x64 MSVC binary at `artifacts/native/win32-x64-msvc/bazframe-win32.node` and packs it into a temporary single-root-tarball conformance artifact. Normal macOS/Linux development and unsupported-platform releases omit the binary, and the build refuses an unmarked ignored binary so it cannot enter an ordinary pack accidentally. After native foundation acceptance, release admission must fetch a successful commit-matched artifact, validate both conformance receipts and its recorded digest, and place those exact bytes into the final root tarball before the public gate may open.
 
-- the package is MIT licensed;
-- it requires Node `>=22`;
-- it declares exact optional `@openclaw/fs-safe-win32-x64-msvc@0.7.2` delivery;
-- ordinary installation requires no consumer compilation, postinstall download, or interactive installer;
-- Windows x64 is the only currently evidenced Windows target; and
-- its Windows containment guarantee is documented as `best-effort`, not a race-free sandbox.
+The first native contract is deliberately narrow:
 
-Its public root operations, bounded reads/writes, native reparse rejection, `createPrivateDirectory`, sidecar locking, strict file publication, and `tempWorkspace({ cleanupSafety: "require-bounded" })` are candidate building blocks. Static source/package evidence does not prove Bazframe's Windows outcomes.
+- `getNativeWindowsInfo` reports the exact contract, package version, target, and native read ceiling;
+- `inspectWindowsPath` opens and checks each drive-absolute path component without following reparses, records and immediately reopens/recompares every traversed identity, derives filesystem and device facts from the pinned final object and its canonical volume, admits only a fixed local NTFS disk with persistent ACL support and non-remote device evidence, and returns canonical volume/object facts with lossless fixed-width identities; and
+- `readWindowsFileStable` opens one admitted non-reparse regular file, enforces the Bazframe byte bound, reads from that handle, and returns bytes plus exact before/after identity, size, link, attribute, and change-time evidence.
 
-If evaluated, the adapter must:
+Identity and 64-bit metadata cross N-API as fixed-width lowercase hexadecimal strings. TypeScript validates every native DTO, reconciles byte counts, rejects before/after drift, maps stable diagnostics, and remains authoritative for product policy. The loader uses one fixed package-relative binary path and has no weaker fallback. These internal capabilities do not bypass or relax the central public Windows gate.
 
-- pin exactly `0.7.2` and its exact platform artifact;
-- call `configureFsSafeNative({ mode: "require" })` before any Windows-sensitive work, treating this only as proof that the binding is available;
-- use public package exports only, never private `dist/native.js` or unpublished binding internals;
-- fail rather than use fallback for each named capability whose accepted contract requires a native mechanism, while permitting explicitly accepted guarded pathname operations;
-- bootstrap private roots through creation-time DACL setup or proved safe inheritance;
-- map typed package errors to actionable Bazframe diagnostics;
-- inspect cleanup receipts rather than assume removal; and
-- never authorize from a lossy JavaScript `number` native identity receipt.
+The earlier exact-`0.7.2` OpenClaw probe remains reproducible historical evidence. Its native Windows run established ordinary binary loading and useful private-directory behavior, while its public receipts could not establish accepted storage or lossless identity. That evidence motivated the two Bazframe foundation capabilities. Adapted HANDLE-management, reparse-inspection, and N-API error-bridging techniques retain the complete MIT notice and source provenance in `native/win32/`.
 
-A wrapper, upstream extension, or fork is justified only after a named native-Windows evidence gate shows that supported public APIs cannot meet an accepted outcome. A stronger or cleaner API alone is not justification.
+### 7.1 Remaining capability and product evidence
 
-### 7.1 Complete-scope evidence gaps and conditional extensions
+The foundation build-and-conformance workflow must bind the Windows binary digest to its source commit and pinned Node, Rust, MSVC, and action inputs. The equivalent clean-checkout local PowerShell harness is `scripts/run-win32-native-foundation.ps1`; it binds the same source/toolchain facts and preserves the binary, tarball, digests, installation logs, and source/installed receipts in an ignored evidence directory. Both paths test native loading, fixed local NTFS facts, exact identities, ancestor/final reparse refusal, bounded stable reads, and loading from a packed root tarball. The binary is not admitted into release assembly until this evidence passes.
 
-Native Windows x64 evaluation must resolve:
+After foundation acceptance, Bazframe must resolve the remaining outcomes through TypeScript composition tests before adding another native export:
 
-- **Storage admission:** reliable local-volume and NTFS identification, including managed UNC/mapped-drive refusal and bounded remote ZIP copy into accepted private staging. Add a narrow public volume-admission surface only if reviewed public APIs cannot prove it.
-- **Lossless identity:** a stable high-level receipt containing exact volume and file identity fields sufficient for reads, recovery, membership, and reclamation. Its representation is not prescribed; `BigInt`, exact strings, or exact byte tuples may qualify. Add a public lossless identity receipt only if that evidence fails; never authorize from the candidate's rounded numeric native identity.
-- **Lifecycle directory operations:** fresh no-replace publication plus generic candidate/backup replacement and post-effect inspection through public APIs. Add a narrow rooted directory-publication primitive only if guarded public operations cannot meet parity.
-- **Operation locks:** contention, killed owners, PID reuse resistance, dead-owner/stale recovery, and interrupted/ambiguous reclaim. Replace or narrowly extend the sidecar surface only if it cannot serialize all cooperating lifecycles while failing closed.
-- **Membership representation:** creation, inspection, exact-target validation, and link-only removal of accepted directory symlinks/junctions. Extend only after public-API tests show this outcome cannot be achieved safely.
-- **Ordinary owned-tree reclamation:** bounded identity-proved cleanup, reparse-as-leaf handling, sharing failures, and private quarantine fallback for profiles/candidates/backups/resource state. Extend only if public bounded cleanup cannot meet those outcomes.
-- **Privacy and sharing:** private-root creation, safe DACL inheritance, existing-root admission/repair, antivirus/indexer interference, and open-handle outcomes across all state and external-write locations.
-- **Git and processes:** native Git/`gh` acquisition, interruption, termination, output bounds, recovery, and separate process-tree settlement evidence before workspace reclamation.
-- **Editors:** profile and Added Skill editor launch, contained final-file links, inherited terminal behavior, Ctrl+C, exit/signal propagation, and revalidation.
-- **External roots and state:** local source/build/editor roots, canonical project-worktree identity reads, ZIP output, and Pi adapter install/repair/uninstall writes outside `BAZFRAME_HOME`; global/project policy bytes remain managed state under `BAZFRAME_HOME`.
-- **TUI:** current feature-set behavior on Windows Terminal, including editor handoff and terminal restoration.
-- **Installed artifacts and Pi:** native binary loading, both entrypoints, adapter provisioning, runtime projection, and the full CLI/TUI matrix from packed local and global installs.
+- owner-private first visibility, effective DACL inheritance, unsafe-root repair/refusal, and sharing failures;
+- deterministic bounded directory enumeration and closure receipts;
+- fresh and replacement directory publication with journal predicates and retained ambiguity;
+- cooperating locks with positive process-instance/dead-owner evidence and safe reclaim;
+- exact directory-symlink/junction membership creation, inspection, and link-only removal;
+- generic bounded owned-tree reclamation with reparse-as-leaf and private quarantine behavior;
+- native Git/`gh`, package, editor, policy, adapter, and child-process interruption/settlement;
+- admitted external roots, bounded remote ZIP copying, installed Pi projection, and the current Windows Terminal TUI; and
+- packed local/global installation through both executable names for the complete section 2 matrix.
+
+A new native operation is added only when a concrete composition test shows that the current fact/receipt boundary cannot produce an accepted outcome. The complete public product gate remains closed throughout this internal sequencing.
 
 ## 8. Acceptance requirements
 
@@ -320,7 +309,7 @@ Acceptance must cover:
 - ordinary local and global `npm install bazframe` without compiler, WSL, Git Bash, interactive installation, or binary download;
 - both installed `bazframe` and `bzf` entrypoints;
 - native Windows x64 and every claimed Node version;
-- missing/omitted optional artifact, unsupported target, ABI mismatch, and load diagnostics without capability-specific fallback, plus evidence of the actual mechanism used rather than inference from native loader mode;
+- missing, corrupt, wrong-target, ABI-incompatible, version-mismatched, and malformed bundled-artifact diagnostics without fallback, plus evidence that each accepted operation used the reviewed Bazframe binary;
 - local NTFS admission and managed UNC, mapped-drive, network, cloud-placeholder, other-reparse, and unproved-filesystem refusal;
 - bounded remote/unsupported-storage ZIP copy into proved private local staging;
 - allowed Git network transport with private local workspaces; and
@@ -363,7 +352,7 @@ Only the complete passing matrix permits a Windows x64/local-NTFS support claim.
 
 This proposal does not include:
 
-- a current Windows support claim or adoption of `@openclaw/fs-safe`;
+- a current Windows support claim;
 - partial Windows support for a subset of the current product;
 - network-backed `BAZFRAME_HOME`, staging, checkouts, journals, locks, or other managed state;
 - Windows ARM64 or a filesystem other than independently accepted local NTFS;
