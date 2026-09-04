@@ -148,7 +148,9 @@ pub struct WindowsProcessInstance {
     pub creation_time: String,
 }
 
-#[napi(object, use_nullable)]
+// In pinned napi-derive, bare `use_nullable` means false. Keep the explicit value
+// so a busy receipt carries the exact `token: null` property required by TypeScript.
+#[napi(object, use_nullable = true)]
 pub struct WindowsFileLockAcquisitionReceipt {
     pub state: String,
     pub token: Option<String>,
