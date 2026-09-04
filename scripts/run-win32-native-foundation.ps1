@@ -163,7 +163,7 @@ try {
     $env:BAZFRAME_WIN32_NATIVE_PACK_MODE = 'foundation-evidence'
     & $npmCommand run build
     Assert-NativeExit -Operation 'TypeScript build'
-    & $npxCommand vitest run --config vitest.config.ts test/unit/core/win32-native.test.ts test/unit/cli/platform-support.test.ts
+    & $npxCommand vitest run --config vitest.config.ts test/unit/core/win32-native.test.ts test/unit/state/win32-private-directory.test.ts test/unit/cli/platform-support.test.ts
     Assert-NativeExit -Operation 'Native contract tests'
 
     $sourceEvidencePath = Join-Path $evidenceRoot 'native-source-evidence.json'
@@ -198,6 +198,9 @@ try {
 
     $sourceEvidence = Get-Content -LiteralPath $sourceEvidencePath -Raw | ConvertFrom-Json
     $installedEvidence = Get-Content -LiteralPath $installedEvidencePath -Raw | ConvertFrom-Json
+    if ($sourceEvidence.schemaVersion -ne 2 -or $installedEvidence.schemaVersion -ne 2) {
+        throw 'Native conformance reports do not use evidence schema version 2.'
+    }
     if ($sourceEvidence.completion -ne 'passed' -or $installedEvidence.completion -ne 'passed') {
         throw 'Native conformance reports did not both pass.'
     }
@@ -225,7 +228,7 @@ try {
     $tarballPayload = [System.IO.File]::ReadAllBytes($tarball)
     $tarballName = Split-Path -Leaf $tarball
     $report = [ordered]@{
-        schemaVersion = 1
+        schemaVersion = 2
         purpose = 'Bazframe-owned native foundation evidence only; not release admission or a Windows support claim.'
         completion = 'passed'
         sourceCommit = $sourceCommit

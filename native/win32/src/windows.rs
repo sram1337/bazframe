@@ -9,23 +9,39 @@ use std::ptr::{null, null_mut};
 
 use napi::Error;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND,
-    ERROR_SHARING_VIOLATION, GENERIC_READ, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS,
+    ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_PATH_NOT_FOUND, ERROR_SHARING_VIOLATION,
+    ERROR_SUCCESS, GENERIC_READ, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+};
+use windows_sys::Win32::Security::Authorization::{
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
+    SE_FILE_OBJECT,
+};
+use windows_sys::Win32::Security::{
+    ACL, ACL_SIZE_INFORMATION, AclSizeInformation, DACL_SECURITY_INFORMATION,
+    GROUP_SECURITY_INFORMATION, GetAclInformation, GetSecurityDescriptorControl,
+    GetSecurityDescriptorDacl, GetSecurityDescriptorGroup, GetSecurityDescriptorOwner,
+    GetSidIdentifierAuthority, GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
+    IsValidAcl, IsValidSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_SEQUENTIAL_SCAN, FILE_ID_INFO, FILE_NAME_NORMALIZED,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO,
-    FileAttributeTagInfo, FileBasicInfo, FileIdInfo, FileStandardInfo, GetDriveTypeW,
-    GetFileInformationByHandleEx, GetFinalPathNameByHandleW, GetFullPathNameW,
-    GetVolumeInformationByHandleW, OPEN_EXISTING, QueryDosDeviceW, ReadFile, VOLUME_NAME_GUID,
+    CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_SEQUENTIAL_SCAN,
+    FILE_ID_INFO, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FILE_STANDARD_INFO, FileAttributeTagInfo, FileBasicInfo, FileIdInfo,
+    FileStandardInfo, GetDriveTypeW, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
+    GetFullPathNameW, GetVolumeInformationByHandleW, OPEN_EXISTING, QueryDosDeviceW, READ_CONTROL,
+    ReadFile, VOLUME_NAME_GUID,
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use crate::{
     NativeResult, StableReadData, WindowsObjectObservation, WindowsPathInspection,
-    WindowsVolumeObservation, native_error,
+    WindowsPrivateDirectoryCreationReceipt, WindowsSecurityObservation, WindowsVolumeObservation,
+    native_error,
 };
 
 const DRIVE_FIXED: u32 = 3;
@@ -63,6 +79,17 @@ impl Drop for OwnedHandle {
     }
 }
 
+struct OwnedLocal(*mut c_void);
+
+impl Drop for OwnedLocal {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: this wrapper uniquely owns LocalAlloc memory returned by a Win32 API.
+            unsafe { LocalFree(self.0) };
+        }
+    }
+}
+
 struct OpenedPath {
     handle: OwnedHandle,
     canonical_path: String,
@@ -76,18 +103,65 @@ struct PrefixObservation {
 }
 
 pub(crate) fn inspect_windows_path(path: &str) -> NativeResult<WindowsPathInspection> {
-    let opened = open_admitted_path(path, FILE_READ_ATTRIBUTES)?;
+    let opened = open_admitted_path(path, FILE_READ_ATTRIBUTES | READ_CONTROL)?;
+    inspect_opened_path(&opened)
+}
+
+pub(crate) fn create_windows_private_directory(
+    parent_path: &str,
+    final_component: &str,
+) -> NativeResult<WindowsPrivateDirectoryCreationReceipt> {
+    let parent = open_admitted_path(parent_path, FILE_READ_ATTRIBUTES | READ_CONTROL)?;
+    let parent_before = inspect_opened_path(&parent)?;
+    if parent_before.kind != "directory" {
+        return Err(native_error(
+            "ERR_WIN32_NOT_DIRECTORY",
+            "private-directory creation requires a directory parent",
+        ));
+    }
+
+    let target_path = join_direct_child(parent_path, final_component);
+    let target_extended = extended_drive_path(&target_path)?;
+    let descriptor = private_security_descriptor(&parent_before.security.current_user_sid)?;
+    let mut attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: 0,
+    };
+    let encoded = wide(&target_extended);
+    // SAFETY: the path and security descriptor are terminated/valid and both
+    // remain alive for the complete no-replace creation call.
+    let created = unsafe { CreateDirectoryW(encoded.as_ptr(), &mut attributes) };
+    if created == 0 {
+        return Err(last_win_error("create protected Windows directory"));
+    }
+
+    finish_private_directory_creation(parent, parent_before, &target_path, final_component).map_err(
+        |_| {
+            native_error(
+                "ERR_WIN32_CREATE_AMBIGUOUS",
+                "private-directory creation succeeded but its result could not be proved",
+            )
+        },
+    )
+}
+
+fn inspect_opened_path(opened: &OpenedPath) -> NativeResult<WindowsPathInspection> {
     let before = snapshot(opened.handle.0)?;
+    let security_before = inspect_security(opened.handle.0)?;
     let volume = inspect_volume(opened.handle.0, &opened.canonical_path, &before)?;
+    let security_after = inspect_security(opened.handle.0)?;
     let after = snapshot(opened.handle.0)?;
-    if !same_stable_observation(&before, &after) {
+    if !same_stable_observation(&before, &after)
+        || !same_security_observation(&security_before, &security_after)
+    {
         return Err(native_error(
             "ERR_WIN32_READ_CHANGED",
-            "path identity or metadata changed while it was inspected",
+            "path identity, metadata, or security changed while it was inspected",
         ));
     }
     Ok(WindowsPathInspection {
-        canonical_path: opened.canonical_path,
+        canonical_path: opened.canonical_path.clone(),
         kind: if before.directory {
             "directory".to_owned()
         } else {
@@ -95,7 +169,44 @@ pub(crate) fn inspect_windows_path(path: &str) -> NativeResult<WindowsPathInspec
         },
         volume,
         object: after,
+        security: security_after,
         ancestry_reparse_free: opened.ancestry_reparse_free,
+    })
+}
+
+fn finish_private_directory_creation(
+    parent: OpenedPath,
+    parent_before: WindowsPathInspection,
+    target_path: &str,
+    final_component: &str,
+) -> NativeResult<WindowsPrivateDirectoryCreationReceipt> {
+    let parent_after = inspect_opened_path(&parent)?;
+    let created = inspect_windows_path(target_path)?;
+    let separator = if parent_before.canonical_path.ends_with('\\') {
+        ""
+    } else {
+        "\\"
+    };
+    let expected_child = format!(
+        "{}{}{}",
+        parent_before.canonical_path, separator, final_component
+    );
+    if !same_directory_identity(&parent_before, &parent_after)
+        || !same_security_observation(&parent_before.security, &parent_after.security)
+        || created.kind != "directory"
+        || created.volume.identity != parent_before.volume.identity
+        || created.object.volume_identity != parent_before.object.volume_identity
+        || created.canonical_path != expected_child
+    {
+        return Err(native_error(
+            "ERR_WIN32_CREATE_AMBIGUOUS",
+            "private-directory creation result was not the requested stable direct child",
+        ));
+    }
+    Ok(WindowsPrivateDirectoryCreationReceipt {
+        parent_before,
+        created,
+        parent_after,
     })
 }
 
@@ -514,6 +625,311 @@ fn inspect_volume(
     })
 }
 
+fn inspect_security(handle: HANDLE) -> NativeResult<WindowsSecurityObservation> {
+    let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+    // SAFETY: the handle is valid and the descriptor output pointer is writable.
+    let status = unsafe {
+        GetSecurityInfo(
+            handle,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return Err(win_error(status, "query Windows object security"));
+    }
+    if descriptor.is_null() {
+        return Err(native_error(
+            "ERR_WIN32_METADATA_UNAVAILABLE",
+            "Windows returned no object security descriptor",
+        ));
+    }
+    let _descriptor_owner = OwnedLocal(descriptor);
+
+    let mut control = 0_u16;
+    let mut revision = 0_u32;
+    // SAFETY: descriptor is valid LocalAlloc memory returned by GetSecurityInfo.
+    if unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) } == 0 {
+        return Err(last_win_error("query Windows security descriptor control"));
+    }
+
+    let mut owner: PSID = null_mut();
+    let mut owner_defaulted = 0;
+    // SAFETY: descriptor and output pointers are valid.
+    if unsafe { GetSecurityDescriptorOwner(descriptor, &mut owner, &mut owner_defaulted) } == 0 {
+        return Err(last_win_error("query Windows security descriptor owner"));
+    }
+    if owner.is_null() {
+        return Err(native_error(
+            "ERR_WIN32_METADATA_UNAVAILABLE",
+            "Windows returned no object owner security identifier",
+        ));
+    }
+    let mut group: PSID = null_mut();
+    let mut group_defaulted = 0;
+    // SAFETY: descriptor and output pointers are valid.
+    if unsafe { GetSecurityDescriptorGroup(descriptor, &mut group, &mut group_defaulted) } == 0 {
+        return Err(last_win_error("query Windows security descriptor group"));
+    }
+    if group.is_null() {
+        return Err(native_error(
+            "ERR_WIN32_METADATA_UNAVAILABLE",
+            "Windows returned no object group security identifier",
+        ));
+    }
+    let mut dacl_present = 0;
+    let mut dacl_defaulted = 0;
+    let mut dacl: *mut ACL = null_mut();
+    // SAFETY: descriptor and output pointers are valid.
+    if unsafe {
+        GetSecurityDescriptorDacl(
+            descriptor,
+            &mut dacl_present,
+            &mut dacl,
+            &mut dacl_defaulted,
+        )
+    } == 0
+    {
+        return Err(last_win_error("query Windows security descriptor DACL"));
+    }
+
+    let dacl_bytes = if dacl_present != 0 && !dacl.is_null() {
+        // SAFETY: DACL points within the live descriptor and IsValidAcl validates its header.
+        if unsafe { IsValidAcl(dacl) } == 0 {
+            return Err(native_error(
+                "ERR_WIN32_METADATA_UNAVAILABLE",
+                "Windows returned an invalid object DACL",
+            ));
+        }
+        let mut size_info: ACL_SIZE_INFORMATION = unsafe { zeroed() };
+        // SAFETY: DACL is valid and size_info is the exact requested output structure.
+        if unsafe {
+            GetAclInformation(
+                dacl,
+                (&mut size_info as *mut ACL_SIZE_INFORMATION).cast(),
+                size_of::<ACL_SIZE_INFORMATION>() as u32,
+                AclSizeInformation,
+            )
+        } == 0
+        {
+            return Err(last_win_error("query Windows DACL size"));
+        }
+        // SAFETY: IsValidAcl succeeded, so reading the fixed ACL header is valid.
+        let declared_size = unsafe { (*dacl).AclSize } as usize;
+        if declared_size < size_of::<ACL>()
+            || size_info.AclBytesInUse < size_of::<ACL>() as u32
+            || size_info.AclBytesInUse as usize > declared_size
+        {
+            return Err(native_error(
+                "ERR_WIN32_METADATA_UNAVAILABLE",
+                "Windows returned inconsistent object DACL sizing",
+            ));
+        }
+        let bytes_in_use = size_info.AclBytesInUse as usize;
+        // SAFETY: the validated ACL reports bytes_in_use within its declared live allocation.
+        let mut bytes =
+            unsafe { std::slice::from_raw_parts(dacl.cast::<u8>(), bytes_in_use) }.to_vec();
+        // Unused ACL capacity is not security evidence and may contain unstable padding. Expose a
+        // canonical complete ACL whose declared size is exactly the bytes that contain its ACEs.
+        bytes[2..4].copy_from_slice(&(bytes_in_use as u16).to_le_bytes());
+        bytes
+    } else {
+        Vec::new()
+    };
+
+    Ok(WindowsSecurityObservation {
+        descriptor_control: u32::from(control),
+        dacl_present: dacl_present != 0,
+        dacl_null: dacl_present != 0 && dacl.is_null(),
+        dacl_defaulted: dacl_defaulted != 0,
+        dacl_bytes: dacl_bytes.into(),
+        owner_sid: sid_string(owner)?,
+        owner_defaulted: owner_defaulted != 0,
+        group_sid: sid_string(group)?,
+        group_defaulted: group_defaulted != 0,
+        current_user_sid: current_user_sid()?,
+    })
+}
+
+fn current_user_sid() -> NativeResult<String> {
+    let mut token = null_mut();
+    // SAFETY: process pseudo-handle is valid and token output is writable.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(last_win_error("open current Windows process token"));
+    }
+    let token = OwnedHandle(token);
+    let mut needed = 0_u32;
+    // SAFETY: zero-length query requests the required TOKEN_USER buffer size.
+    let first = unsafe { GetTokenInformation(token.0, TokenUser, null_mut(), 0, &mut needed) };
+    if first != 0 || needed < size_of::<TOKEN_USER>() as u32 {
+        return Err(native_error(
+            "ERR_WIN32_METADATA_UNAVAILABLE",
+            "Windows returned an invalid current-user token size",
+        ));
+    }
+    // SAFETY: reads the immediately preceding sizing call's error.
+    if unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
+        return Err(last_win_error("size current Windows user token"));
+    }
+    let word = size_of::<usize>();
+    let words = (needed as usize).div_ceil(word);
+    let mut buffer = vec![0_usize; words];
+    let mut returned = 0_u32;
+    // SAFETY: the aligned buffer has at least needed writable bytes.
+    if unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenUser,
+            buffer.as_mut_ptr().cast(),
+            needed,
+            &mut returned,
+        )
+    } == 0
+    {
+        return Err(last_win_error("query current Windows user token"));
+    }
+    if returned < size_of::<TOKEN_USER>() as u32 || returned > needed {
+        return Err(native_error(
+            "ERR_WIN32_METADATA_UNAVAILABLE",
+            "Windows returned inconsistent current-user token bytes",
+        ));
+    }
+    // SAFETY: the successful TOKEN_USER query wrote the aligned fixed header.
+    let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+    sid_string(user.User.Sid)
+}
+
+fn sid_string(sid: PSID) -> NativeResult<String> {
+    if sid.is_null() || unsafe { IsValidSid(sid) } == 0 {
+        return Err(native_error(
+            "ERR_WIN32_METADATA_UNAVAILABLE",
+            "Windows returned an invalid security identifier",
+        ));
+    }
+    // SAFETY: the validated SID exposes a fixed identifier authority pointer.
+    let authority = unsafe { GetSidIdentifierAuthority(sid) };
+    // SAFETY: the validated SID exposes a one-byte subauthority count pointer.
+    let count_pointer = unsafe { GetSidSubAuthorityCount(sid) };
+    if authority.is_null() || count_pointer.is_null() {
+        return Err(native_error(
+            "ERR_WIN32_METADATA_UNAVAILABLE",
+            "Windows returned incomplete security identifier metadata",
+        ));
+    }
+    // SAFETY: both pointers refer into the validated live SID.
+    let authority_bytes = unsafe { (*authority).Value };
+    let count = unsafe { *count_pointer };
+    if count > 15 {
+        return Err(native_error(
+            "ERR_WIN32_METADATA_UNAVAILABLE",
+            "Windows returned an oversized security identifier",
+        ));
+    }
+    let authority_value = authority_bytes
+        .into_iter()
+        .fold(0_u64, |value, byte| (value << 8) | u64::from(byte));
+    let mut value = format!("S-1-{authority_value}");
+    for index in 0..u32::from(count) {
+        // SAFETY: index is below the validated SID's declared subauthority count.
+        let subauthority = unsafe { GetSidSubAuthority(sid, index) };
+        if subauthority.is_null() {
+            return Err(native_error(
+                "ERR_WIN32_METADATA_UNAVAILABLE",
+                "Windows returned incomplete security identifier metadata",
+            ));
+        }
+        use std::fmt::Write as _;
+        // SAFETY: the pointer refers to the indexed subauthority in the validated SID.
+        write!(&mut value, "-{}", unsafe { *subauthority }).expect("writing to String cannot fail");
+    }
+    Ok(value)
+}
+
+fn private_security_descriptor(current_user_sid: &str) -> NativeResult<OwnedLocal> {
+    // Leave the primary group unset so Windows assigns the creator token's valid
+    // primary group; TOKEN_USER is not necessarily assignable as an object group.
+    let sddl = format!(
+        "O:{0}D:P(A;OICI;FA;;;{0})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)",
+        current_user_sid
+    );
+    let encoded = wide(&sddl);
+    let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+    let mut size = 0_u32;
+    // SAFETY: SDDL is terminated and output pointers are writable.
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            encoded.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            &mut size,
+        )
+    } == 0
+    {
+        return Err(last_win_error(
+            "construct protected Windows security descriptor",
+        ));
+    }
+    if descriptor.is_null() {
+        return Err(native_error(
+            "ERR_WIN32_METADATA_UNAVAILABLE",
+            "Windows returned no protected security descriptor",
+        ));
+    }
+    let descriptor = OwnedLocal(descriptor);
+    if size == 0 {
+        return Err(native_error(
+            "ERR_WIN32_METADATA_UNAVAILABLE",
+            "Windows returned an invalid protected security descriptor",
+        ));
+    }
+    Ok(descriptor)
+}
+
+fn join_direct_child(parent: &str, component: &str) -> String {
+    let separator = if parent.ends_with(['\\', '/']) {
+        ""
+    } else {
+        "\\"
+    };
+    format!("{parent}{separator}{component}")
+}
+
+fn same_directory_identity(a: &WindowsPathInspection, b: &WindowsPathInspection) -> bool {
+    a.canonical_path == b.canonical_path
+        && a.kind == "directory"
+        && b.kind == "directory"
+        && a.volume.identity == b.volume.identity
+        && a.object.volume_identity == b.object.volume_identity
+        && a.object.file_id == b.object.file_id
+        && a.object.reparse_tag == 0
+        && b.object.reparse_tag == 0
+        && !a.object.delete_pending
+        && !b.object.delete_pending
+        && a.object.directory
+        && b.object.directory
+}
+
+fn same_security_observation(
+    a: &WindowsSecurityObservation,
+    b: &WindowsSecurityObservation,
+) -> bool {
+    a.descriptor_control == b.descriptor_control
+        && a.dacl_present == b.dacl_present
+        && a.dacl_null == b.dacl_null
+        && a.dacl_defaulted == b.dacl_defaulted
+        && a.dacl_bytes.as_ref() == b.dacl_bytes.as_ref()
+        && a.owner_sid == b.owner_sid
+        && a.owner_defaulted == b.owner_defaulted
+        && a.group_sid == b.group_sid
+        && a.group_defaulted == b.group_defaulted
+        && a.current_user_sid == b.current_user_sid
+}
+
 fn snapshot(handle: HANDLE) -> NativeResult<WindowsObjectObservation> {
     let tag = attribute_tag(handle)?;
     if tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
@@ -698,6 +1114,7 @@ fn last_win_error(operation: &str) -> Error<String> {
 
 fn win_error(code: u32, operation: &str) -> Error<String> {
     let stable = match code {
+        ERROR_ALREADY_EXISTS | ERROR_FILE_EXISTS => "ERR_WIN32_ALREADY_EXISTS",
         ERROR_SHARING_VIOLATION => "ERR_WIN32_SHARING_VIOLATION",
         ERROR_ACCESS_DENIED => "ERR_WIN32_ACCESS_DENIED",
         ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => "ERR_WIN32_PATH_NOT_FOUND",

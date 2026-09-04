@@ -38,7 +38,17 @@ const OBSERVATION_BOOLEANS = Object.freeze([
   'finalReparseRefused',
   'ancestorReparseRefused',
   'boundedStableReads',
-  'junctionTargetPreserved'
+  'junctionTargetPreserved',
+  'privateDirectoryFirstVisibilityPrivate',
+  'privateDirectoryOwnerCurrentUser',
+  'privateDirectoryDaclPresentNonNullProtected',
+  'privateDirectoryTrustedFullControl',
+  'privateDirectoryNoReplace',
+  'privateDirectoryParentStable',
+  'privateDirectoryUnicodeName',
+  'privateDirectoryInvalidNameRefusedBeforeMutation',
+  'privateDirectoryReparseParentRefused',
+  'privateDirectoryDirectChildLocalNtfs'
 ]);
 
 export async function admitWin32NativeRelease(options) {
@@ -270,7 +280,7 @@ function validateAggregateEvidence({ aggregate, releaseCommit, binarySha256, sou
     'node', 'rust', 'msvcToolsVersion', 'msvc', 'binarySha256', 'sourceConformance',
     'installedConformance', 'releaseAdmission', 'windowsSupportClaim'
   ], 'aggregate evidence');
-  equal(aggregate.schemaVersion, 1, 'aggregate schemaVersion');
+  equal(aggregate.schemaVersion, 2, 'aggregate schemaVersion');
   equal(aggregate.purpose, AGGREGATE_PURPOSE, 'aggregate purpose');
   equal(aggregate.completion, 'passed', 'aggregate completion');
   equal(aggregate.sourceCommit, releaseCommit, 'aggregate source commit');
@@ -301,7 +311,7 @@ function validateConformanceReceipt(receipt, expectedKind, packageVersion, binar
     'schemaVersion', 'purpose', 'environment', 'packageRootKind', 'completion',
     'releaseAdmission', 'windowsSupportClaim', 'observations', 'failures'
   ], `${expectedKind} receipt`);
-  equal(receipt.schemaVersion, 1, `${expectedKind} schemaVersion`);
+  equal(receipt.schemaVersion, 2, `${expectedKind} schemaVersion`);
   equal(receipt.purpose, FOUNDATION_PURPOSE, `${expectedKind} purpose`);
   exactObject(receipt.environment, ['platform', 'arch', 'node'], `${expectedKind} environment`);
   equal(receipt.environment.platform, 'win32', `${expectedKind} platform`);

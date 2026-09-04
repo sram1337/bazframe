@@ -20,6 +20,7 @@ interface FixtureOptions {
 }
 
 interface EvidenceReceipt {
+  schemaVersion: number;
   completion: string;
   releaseAdmission: string;
   environment: { node: string };
@@ -28,6 +29,7 @@ interface EvidenceReceipt {
 }
 
 interface AggregateEvidence {
+  schemaVersion: number;
   sourceCommit: string;
   rust: string;
   msvcToolsVersion: string;
@@ -54,6 +56,14 @@ describe('Win32 native release admission', () => {
     expect(publishWorkflow).toContain('[[ "$ARTIFACT_DIGEST_OUTPUT" =~ ^[a-f0-9]{64}$ ]]');
     expect(publishWorkflow).toContain('ARTIFACT_DIGEST="sha256:$ARTIFACT_DIGEST_OUTPUT"');
     expect(publishWorkflow).toContain('test "$ACTUAL_DIGEST" = "$ARTIFACT_DIGEST_OUTPUT"');
+  });
+
+  it('derives no-replace evidence from immediate before/after identity and security', async () => {
+    const conformance = await readFile('scripts/test-win32-native-foundation.mjs', 'utf8');
+    expect(conformance).toContain('const occupiedBefore = backend.inspectPath(privateRoot);');
+    expect(conformance).toContain('const occupiedAfter = backend.inspectPath(privateRoot);');
+    expect(conformance).toContain('privateDirectoryNoReplace: occupiedChildUnchanged');
+    expect(conformance).not.toContain('privateDirectoryNoReplace: true');
   });
 
   it('admits only exact commit-bound evidence and emits an assembly-only record', async () => {
@@ -96,10 +106,18 @@ describe('Win32 native release admission', () => {
     ['wrong Node version', (fixture: EvidenceFixture) => { fixture.installed.environment.node = '24.0.0'; }],
     ['wrong Rust toolchain', (fixture: EvidenceFixture) => { fixture.aggregate.rust = fixture.rust.replace('1.88.0', '1.89.0'); }],
     ['wrong MSVC toolchain', (fixture: EvidenceFixture) => { fixture.aggregate.msvcToolsVersion = '14.45.0'; }],
+    ['old v1 evidence', (fixture: EvidenceFixture) => {
+      fixture.source.schemaVersion = 1;
+      fixture.installed.schemaVersion = 1;
+      fixture.aggregate.schemaVersion = 1;
+    }],
     ['failed completion', (fixture: EvidenceFixture) => { fixture.source.completion = 'failed'; }],
     ['changed release boundary', (fixture: EvidenceFixture) => { fixture.installed.releaseAdmission = 'authorized'; }],
     ['changed support boundary', (fixture: EvidenceFixture) => { fixture.aggregate.windowsSupportClaim = true; }],
     ['failed observation', (fixture: EvidenceFixture) => { fixture.source.observations.localFixedNtfs = false; }],
+    ['failed private-directory observation', (fixture: EvidenceFixture) => {
+      fixture.source.observations.privateDirectoryFirstVisibilityPrivate = false;
+    }],
     ['nested/external receipt mismatch', (fixture: EvidenceFixture) => { fixture.aggregate.sourceConformance.observations.stableByteCount = '000000000000000e'; }],
     ['extra schema field', (fixture: EvidenceFixture) => { fixture.installed.extra = true; }],
     ['wrong checksum', (fixture: EvidenceFixture) => { fixture.checksum = `${'0'.repeat(64)}\r\n`; }],
@@ -188,7 +206,7 @@ function evidenceFixture(): EvidenceFixture {
   const rust = 'rustc 1.88.0 (6b00bc388 2025-06-23)\r\nhost: x86_64-pc-windows-msvc\r\n';
   const msvc = 'Path=C:\\VS\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\cl.exe\r\n';
   const aggregate = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     purpose: 'Bazframe-owned native foundation evidence only; not release admission or a Windows support claim.',
     completion: 'passed',
     sourceCommit: commit,
@@ -209,7 +227,7 @@ function evidenceFixture(): EvidenceFixture {
 
 function receipt(kind: 'source-tree' | 'packed-install') {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     purpose: 'Bazframe-owned native Windows foundation evidence only; not a Windows support claim.',
     environment: { platform: 'win32', arch: 'x64', node: '22.19.0' },
     packageRootKind: kind,
@@ -229,7 +247,17 @@ function receipt(kind: 'source-tree' | 'packed-install') {
       finalReparseRefused: true,
       ancestorReparseRefused: true,
       boundedStableReads: true,
-      junctionTargetPreserved: true
+      junctionTargetPreserved: true,
+      privateDirectoryFirstVisibilityPrivate: true,
+      privateDirectoryOwnerCurrentUser: true,
+      privateDirectoryDaclPresentNonNullProtected: true,
+      privateDirectoryTrustedFullControl: true,
+      privateDirectoryNoReplace: true,
+      privateDirectoryParentStable: true,
+      privateDirectoryUnicodeName: true,
+      privateDirectoryInvalidNameRefusedBeforeMutation: true,
+      privateDirectoryReparseParentRefused: true,
+      privateDirectoryDirectChildLocalNtfs: true
     },
     failures: []
   };

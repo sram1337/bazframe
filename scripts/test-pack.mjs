@@ -107,7 +107,7 @@ try {
   assertExists(join(packageRoot, 'docs', 'releasing.md'));
   for (const relativePath of [
     'Cargo.lock', 'Cargo.toml', 'NOTICE.md', 'OPENCLAW-LICENSE', 'build.rs',
-    join('src', 'lib.rs'), join('src', 'non_windows.rs'), join('src', 'windows.rs')
+    join('src', 'component.rs'), join('src', 'lib.rs'), join('src', 'non_windows.rs'), join('src', 'windows.rs')
   ]) {
     const packagedPath = join(packageRoot, 'native', 'win32', relativePath);
     const trackedPath = join(projectRoot, 'native', 'win32', relativePath);

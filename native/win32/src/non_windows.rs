@@ -1,9 +1,22 @@
-use crate::{NativeResult, StableReadData, WindowsPathInspection, native_error};
+use crate::{
+    NativeResult, StableReadData, WindowsPathInspection, WindowsPrivateDirectoryCreationReceipt,
+    native_error,
+};
 
 pub(crate) fn inspect_windows_path(_path: &str) -> NativeResult<WindowsPathInspection> {
     Err(native_error(
         "ERR_WIN32_UNSUPPORTED_TARGET",
         "Bazframe native Windows path inspection requires win32-x64-msvc",
+    ))
+}
+
+pub(crate) fn create_windows_private_directory(
+    _parent_path: &str,
+    _final_component: &str,
+) -> NativeResult<WindowsPrivateDirectoryCreationReceipt> {
+    Err(native_error(
+        "ERR_WIN32_UNSUPPORTED_TARGET",
+        "Bazframe native private-directory creation requires win32-x64-msvc",
     ))
 }
 

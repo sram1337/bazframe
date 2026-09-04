@@ -4,10 +4,11 @@
 // @openclaw/fs-safe 0.7.2 (Copyright (c) 2026 openclaw, MIT). See ../NOTICE.md
 // and ../OPENCLAW-LICENSE. Bazframe owns this API and compiled artifact.
 
-use napi::bindgen_prelude::{AsyncTask, Buffer, Task};
+use napi::bindgen_prelude::{AsyncTask, Buffer, Task, Utf16String};
 use napi::{Env, Error, Result, Status};
 use napi_derive::napi;
 
+mod component;
 #[cfg(not(windows))]
 mod non_windows;
 #[cfg(windows)]
@@ -18,7 +19,7 @@ use non_windows as platform;
 #[cfg(windows)]
 use windows as platform;
 
-pub const NATIVE_CONTRACT_VERSION: u32 = 1;
+pub const NATIVE_CONTRACT_VERSION: u32 = 2;
 // Mirrors PROFILE_PORTABILITY_PRODUCTION_LIMITS.checkoutFileBytes. The native
 // boundary may lower a caller's bound but never allocates beyond this product
 // authority.
@@ -87,12 +88,34 @@ pub struct WindowsObjectObservation {
 }
 
 #[napi(object)]
+pub struct WindowsSecurityObservation {
+    pub descriptor_control: u32,
+    pub dacl_present: bool,
+    pub dacl_null: bool,
+    pub dacl_defaulted: bool,
+    pub dacl_bytes: Buffer,
+    pub owner_sid: String,
+    pub owner_defaulted: bool,
+    pub group_sid: String,
+    pub group_defaulted: bool,
+    pub current_user_sid: String,
+}
+
+#[napi(object)]
 pub struct WindowsPathInspection {
     pub canonical_path: String,
     pub kind: String,
     pub volume: WindowsVolumeObservation,
     pub object: WindowsObjectObservation,
+    pub security: WindowsSecurityObservation,
     pub ancestry_reparse_free: bool,
+}
+
+#[napi(object)]
+pub struct WindowsPrivateDirectoryCreationReceipt {
+    pub parent_before: WindowsPathInspection,
+    pub created: WindowsPathInspection,
+    pub parent_after: WindowsPathInspection,
 }
 
 #[napi(object)]
@@ -122,6 +145,21 @@ pub fn get_native_windows_info() -> NativeWindowsInfo {
 #[napi(js_name = "inspectWindowsPath")]
 pub fn inspect_windows_path(env: Env, path: String) -> Result<WindowsPathInspection> {
     into_napi(env, platform::inspect_windows_path(&path))
+}
+
+#[napi(js_name = "createWindowsPrivateDirectory")]
+pub fn create_windows_private_directory(
+    env: Env,
+    parent_path: String,
+    final_component: Utf16String,
+) -> Result<WindowsPrivateDirectoryCreationReceipt> {
+    let component = component::validate_final_component(&final_component);
+    into_napi(
+        env,
+        component.and_then(|component| {
+            platform::create_windows_private_directory(&parent_path, &component)
+        }),
+    )
 }
 
 pub struct StableReadTask {

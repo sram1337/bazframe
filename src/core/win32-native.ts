@@ -2,7 +2,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { BazframeError, errorCode } from './errors.js';
 
-export const BAZFRAME_WIN32_NATIVE_CONTRACT_VERSION = 1;
+export const BAZFRAME_WIN32_NATIVE_CONTRACT_VERSION = 2;
 export const BAZFRAME_WIN32_NATIVE_TARGET = 'win32-x64-msvc';
 // Must remain equal to native/win32/src/lib.rs and the authoritative profile
 // portability per-file production ceiling.
@@ -43,12 +43,32 @@ export interface WindowsObjectObservation {
   directory: boolean;
 }
 
+export interface WindowsSecurityObservation {
+  descriptorControl: number;
+  daclPresent: boolean;
+  daclNull: boolean;
+  daclDefaulted: boolean;
+  daclBytes: Buffer;
+  ownerSid: string;
+  ownerDefaulted: boolean;
+  groupSid: string;
+  groupDefaulted: boolean;
+  currentUserSid: string;
+}
+
 export interface WindowsPathInspection {
   canonicalPath: string;
   kind: 'regular-file' | 'directory';
   volume: WindowsVolumeObservation;
   object: WindowsObjectObservation;
+  security: WindowsSecurityObservation;
   ancestryReparseFree: true;
+}
+
+export interface WindowsPrivateDirectoryCreationReceipt {
+  parentBefore: WindowsPathInspection;
+  created: WindowsPathInspection;
+  parentAfter: WindowsPathInspection;
 }
 
 export interface WindowsStableReadReceipt {
@@ -60,12 +80,14 @@ export interface WindowsStableReadReceipt {
 
 export interface BazframeWin32NativeBackend {
   inspectPath(path: string): WindowsPathInspection;
+  createPrivateDirectory(parentPath: string, finalComponent: string): WindowsPrivateDirectoryCreationReceipt;
   readStableFile(path: string, maxBytes: number): Promise<WindowsStableReadReceipt>;
 }
 
 interface RawNativeModule {
   getNativeWindowsInfo: () => unknown;
   inspectWindowsPath: (path: string) => unknown;
+  createWindowsPrivateDirectory: (parentPath: string, finalComponent: string) => unknown;
   readWindowsFileStable: (path: string, maxBytes: number) => unknown;
 }
 
@@ -178,6 +200,28 @@ export function loadBazframeWin32Native(
       }
       return pathInspection(receipt);
     },
+    createPrivateDirectory(
+      parentPath: string,
+      finalComponent: string
+    ): WindowsPrivateDirectoryCreationReceipt {
+      requirePath(parentPath);
+      requireFinalComponent(finalComponent);
+      let receipt: unknown;
+      try {
+        receipt = native.createWindowsPrivateDirectory(parentPath, finalComponent);
+      } catch (error) {
+        throw nativeCreationFailure(error);
+      }
+      try {
+        return privateDirectoryCreationReceipt(receipt, finalComponent);
+      } catch (error) {
+        throw failure(
+          'WINDOWS_NATIVE_CREATE_AMBIGUOUS',
+          'The native Windows private-directory creation result is malformed; the created path must be inspected before reuse.',
+          error
+        );
+      }
+    },
     async readStableFile(path: string, maxBytes: number): Promise<WindowsStableReadReceipt> {
       requirePath(path);
       if (!Number.isSafeInteger(maxBytes) || maxBytes < 0
@@ -217,7 +261,12 @@ function installedPackageVersion(
 
 function nativeModule(value: unknown): RawNativeModule {
   const record = plainRecord(value);
-  for (const name of ['getNativeWindowsInfo', 'inspectWindowsPath', 'readWindowsFileStable'] as const) {
+  for (const name of [
+    'getNativeWindowsInfo',
+    'inspectWindowsPath',
+    'createWindowsPrivateDirectory',
+    'readWindowsFileStable'
+  ] as const) {
     if (typeof record[name] !== 'function') {
       throw failure(
         'WINDOWS_NATIVE_EXPORT_MISSING',
@@ -231,13 +280,14 @@ function nativeModule(value: unknown): RawNativeModule {
 function pathInspection(value: unknown): WindowsPathInspection {
   try {
     const record = exactRecord(value, [
-      'canonicalPath', 'kind', 'volume', 'object', 'ancestryReparseFree'
+      'canonicalPath', 'kind', 'volume', 'object', 'security', 'ancestryReparseFree'
     ], 'path inspection');
     if (typeof record.canonicalPath !== 'string' || record.canonicalPath.length === 0) invalid();
     if (record.kind !== 'regular-file' && record.kind !== 'directory') invalid();
     if (record.ancestryReparseFree !== true) invalid();
     const volume = volumeObservation(record.volume);
     const object = objectObservation(record.object);
+    const security = securityObservation(record.security);
     if (!record.canonicalPath.toLowerCase().startsWith(volume.canonicalVolumeGuidPath.toLowerCase())
       || object.volumeIdentity !== volume.identity || object.reparseTag !== null
       || object.deletePending || object.directory !== (record.kind === 'directory')) invalid();
@@ -246,11 +296,30 @@ function pathInspection(value: unknown): WindowsPathInspection {
       kind: record.kind,
       volume,
       object,
+      security,
       ancestryReparseFree: true
     };
   } catch (error) {
     throw receiptFailure('Native Windows path inspection is malformed or inadmissible.', error);
   }
+}
+
+function privateDirectoryCreationReceipt(
+  value: unknown,
+  finalComponent: string
+): WindowsPrivateDirectoryCreationReceipt {
+  const record = exactRecord(value, ['parentBefore', 'created', 'parentAfter'], 'private directory creation');
+  const parentBefore = pathInspection(record.parentBefore);
+  const created = pathInspection(record.created);
+  const parentAfter = pathInspection(record.parentAfter);
+  if (parentBefore.kind !== 'directory' || parentAfter.kind !== 'directory'
+    || created.kind !== 'directory' || !sameDirectoryIdentity(parentBefore, parentAfter)
+    || parentBefore.volume.identity !== created.volume.identity
+    || parentBefore.volume.identity !== parentAfter.volume.identity
+    || !isDirectCanonicalChild(parentBefore.canonicalPath, created.canonicalPath, finalComponent)) {
+    invalid();
+  }
+  return { parentBefore, created, parentAfter };
 }
 
 function stableReadReceipt(value: unknown, maxBytes: number): WindowsStableReadReceipt {
@@ -295,6 +364,26 @@ function volumeObservation(value: unknown): WindowsVolumeObservation {
   };
 }
 
+function securityObservation(value: unknown): WindowsSecurityObservation {
+  const record = exactRecord(value, [
+    'descriptorControl', 'daclPresent', 'daclNull', 'daclDefaulted', 'daclBytes',
+    'ownerSid', 'ownerDefaulted', 'groupSid', 'groupDefaulted', 'currentUserSid'
+  ], 'security observation');
+  if (!(record.daclBytes instanceof Uint8Array) || record.daclBytes.byteLength > 0xffff) invalid();
+  return {
+    descriptorControl: uint16(record.descriptorControl),
+    daclPresent: boolean(record.daclPresent),
+    daclNull: boolean(record.daclNull),
+    daclDefaulted: boolean(record.daclDefaulted),
+    daclBytes: Buffer.from(record.daclBytes),
+    ownerSid: canonicalSid(record.ownerSid),
+    ownerDefaulted: boolean(record.ownerDefaulted),
+    groupSid: canonicalSid(record.groupSid),
+    groupDefaulted: boolean(record.groupDefaulted),
+    currentUserSid: canonicalSid(record.currentUserSid)
+  };
+}
+
 function objectObservation(value: unknown): WindowsObjectObservation {
   const record = exactRecord(value, [
     'volumeIdentity', 'fileId', 'size', 'allocationSize', 'numberOfLinks',
@@ -317,6 +406,22 @@ function objectObservation(value: unknown): WindowsObjectObservation {
     directory: boolean(record.directory)
   };
   return observation;
+}
+
+function sameDirectoryIdentity(a: WindowsPathInspection, b: WindowsPathInspection): boolean {
+  return a.canonicalPath.toLowerCase() === b.canonicalPath.toLowerCase()
+    && a.kind === 'directory' && b.kind === 'directory'
+    && a.volume.identity === b.volume.identity
+    && a.object.volumeIdentity === b.object.volumeIdentity
+    && a.object.fileId === b.object.fileId
+    && a.object.reparseTag === null && b.object.reparseTag === null
+    && !a.object.deletePending && !b.object.deletePending
+    && a.object.directory && b.object.directory;
+}
+
+function isDirectCanonicalChild(parent: string, child: string, component: string): boolean {
+  const separator = parent.endsWith('\\') ? '' : '\\';
+  return child.toLowerCase() === `${parent}${separator}${component}`.toLowerCase();
 }
 
 function sameStableObservation(a: WindowsObjectObservation, b: WindowsObjectObservation): boolean {
@@ -354,9 +459,32 @@ function hex(value: unknown, pattern: RegExp): string {
   return value;
 }
 
+function uint16(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 0xffff) invalid();
+  return value;
+}
+
 function uint32(value: unknown): number {
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 0xffff_ffff) invalid();
   return value;
+}
+
+function canonicalSid(value: unknown): string {
+  if (typeof value !== 'string' || value.length > 184) invalid();
+  const parts = /^S-([0-9]+)-([0-9]+)((?:-[0-9]+)+)$/u.exec(value);
+  if (parts === null || parts[1] !== '1') invalid();
+  const authority = decimal(parts[2]!, 0xffff_ffff_ffffn);
+  const subauthorities = parts[3]!.slice(1).split('-');
+  if (subauthorities.length === 0 || subauthorities.length > 15
+    || subauthorities.some((part) => decimal(part, 0xffff_ffffn) === undefined)
+    || authority === undefined) invalid();
+  return value;
+}
+
+function decimal(value: string, maximum: bigint): bigint | undefined {
+  if (!/^(?:0|[1-9][0-9]*)$/u.test(value)) return undefined;
+  const parsed = BigInt(value);
+  return parsed <= maximum ? parsed : undefined;
 }
 
 function boolean(value: unknown): boolean {
@@ -370,6 +498,13 @@ function requirePath(path: string): void {
   }
 }
 
+function requireFinalComponent(value: string): void {
+  if (typeof value !== 'string' || value.length === 0 || value.includes('\0')
+    || value.includes('\\') || value.includes('/')) {
+    throw failure('WINDOWS_NATIVE_PATH_INVALID', 'The native Windows final path component is invalid.');
+  }
+}
+
 function invalid(): never {
   throw new Error('invalid native receipt');
 }
@@ -379,9 +514,24 @@ function receiptFailure(message: string, cause: unknown): BazframeError {
   return failure('WINDOWS_NATIVE_RECEIPT_INVALID', message, cause);
 }
 
+function nativeCreationFailure(error: unknown): BazframeError {
+  const mapped = nativeOperationFailure(error);
+  if (mapped.code !== 'WINDOWS_NATIVE_OPERATION_FAILED') return mapped;
+  return failure(
+    'WINDOWS_NATIVE_CREATE_AMBIGUOUS',
+    'The native Windows private-directory creation outcome is ambiguous; retain and inspect the destination.',
+    error
+  );
+}
+
 function nativeOperationFailure(error: unknown): BazframeError {
   const mapped: Record<string, { code: string; message?: string }> = {
     ERR_WIN32_ACCESS_DENIED: { code: 'WINDOWS_NATIVE_ACCESS_DENIED' },
+    ERR_WIN32_ALREADY_EXISTS: { code: 'WINDOWS_NATIVE_DIRECTORY_OCCUPIED' },
+    ERR_WIN32_CREATE_AMBIGUOUS: {
+      code: 'WINDOWS_NATIVE_CREATE_AMBIGUOUS',
+      message: 'The native Windows private-directory creation outcome is ambiguous; retain and inspect the destination.'
+    },
     ERR_WIN32_FILESYSTEM_UNSUPPORTED: { code: 'WINDOWS_NATIVE_FILESYSTEM_UNSUPPORTED' },
     ERR_WIN32_INVALID_PATH: { code: 'WINDOWS_NATIVE_PATH_INVALID' },
     ERR_WIN32_IO: { code: 'WINDOWS_NATIVE_IO_FAILED' },

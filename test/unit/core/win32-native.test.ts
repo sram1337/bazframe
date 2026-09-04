@@ -59,8 +59,9 @@ describe('Bazframe-owned Windows native loader', () => {
   });
 
   it.each([
-    ['missing export', { inspectWindowsPath: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
-    ['contract', { info: { contractVersion: 2 } }, 'WINDOWS_NATIVE_CONTRACT_MISMATCH'],
+    ['missing inspect export', { inspectWindowsPath: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
+    ['missing create export', { createWindowsPrivateDirectory: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
+    ['contract', { info: { contractVersion: 1 } }, 'WINDOWS_NATIVE_CONTRACT_MISMATCH'],
     ['version', { info: { packageVersion: '0.1.0-other' } }, 'WINDOWS_NATIVE_VERSION_MISMATCH'],
     ['target', { info: { target: 'win32-arm64-msvc' } }, 'WINDOWS_NATIVE_TARGET_MISMATCH'],
     ['limit', { info: { maxStableReadBytes: 1 } }, 'WINDOWS_NATIVE_CONTRACT_MISMATCH']
@@ -91,7 +92,12 @@ describe('Bazframe-owned Windows native loader', () => {
     ['ancestry', { ancestryReparseFree: false }],
     ['kind mismatch', { kind: 'directory', object: { directory: false } }],
     ['canonical volume mismatch', { canonicalPath: '\\\\?\\Volume{aaaaaaaa-1234-1234-1234-123456789abc}\\state' }],
-    ['malformed volume GUID', { volume: { canonicalVolumeGuidPath: '\\\\?\\Volume{123456781234-1234-1234-123456789abc}\\' } }]
+    ['malformed volume GUID', { volume: { canonicalVolumeGuidPath: '\\\\?\\Volume{123456781234-1234-1234-123456789abc}\\' } }],
+    ['missing security', { security: undefined }],
+    ['noncanonical owner SID', { security: { ownerSid: 'S-1-05-18' } }],
+    ['numeric current user SID', { security: { currentUserSid: 5 } }],
+    ['oversized descriptor control', { security: { descriptorControl: 0x1_0000 } }],
+    ['non-byte DACL', { security: { daclBytes: 'acl' } }]
   ])('rejects malformed or inadmissible path receipt: %s', (_label, receiptOverrides) => {
     const native = module({ inspection: inspection(receiptOverrides) });
     expect(() => load(native).inspectPath('C:\\state')).toThrow(expect.objectContaining({
@@ -135,6 +141,49 @@ describe('Bazframe-owned Windows native loader', () => {
       expect(read).not.toHaveBeenCalled();
     }
   );
+
+  it('validates private-directory mutation receipts and maps malformed success to ambiguity', () => {
+    const native = module();
+    const backend = load(native);
+    const receipt = backend.createPrivateDirectory('C:\\state', 'child');
+    expect(receipt.created.kind).toBe('directory');
+    expect(native.createWindowsPrivateDirectory).toBeTypeOf('function');
+
+    const malformed = module({ creation: { parentBefore: directoryInspection('state') } });
+    expect(() => load(malformed).createPrivateDirectory('C:\\state', 'child')).toThrow(
+      expect.objectContaining({ code: 'WINDOWS_NATIVE_CREATE_AMBIGUOUS' })
+    );
+  });
+
+  it('requires stable parent identity but allows timestamp changes in create receipts', () => {
+    const timestampOnly = creation();
+    timestampOnly.parentAfter = directoryInspection('state');
+    (timestampOnly.parentAfter as Record<string, unknown>).object = observation({
+      directory: true,
+      attributes: 16,
+      changeTime: '0000000000000002'
+    });
+    expect(() => load(module({ creation: timestampOnly })).createPrivateDirectory('C:\\state', 'child')).not.toThrow();
+
+    const identityDrift = creation();
+    identityDrift.parentAfter = directoryInspection('state', '00000000000000002000000000000009');
+    expect(() => load(module({ creation: identityDrift })).createPrivateDirectory('C:\\state', 'child')).toThrow(
+      expect.objectContaining({ code: 'WINDOWS_NATIVE_CREATE_AMBIGUOUS' })
+    );
+  });
+
+  it.each([
+    ['ERR_WIN32_ALREADY_EXISTS', 'WINDOWS_NATIVE_DIRECTORY_OCCUPIED'],
+    ['ERR_WIN32_CREATE_AMBIGUOUS', 'WINDOWS_NATIVE_CREATE_AMBIGUOUS'],
+    ['UNKNOWN_NATIVE_FAILURE', 'WINDOWS_NATIVE_CREATE_AMBIGUOUS']
+  ])('maps native create refusal %s distinctly', (nativeCode, expectedCode) => {
+    const native = module({
+      createWindowsPrivateDirectory: () => { throw coded(nativeCode); }
+    });
+    expect(() => load(native).createPrivateDirectory('C:\\state', 'child')).toThrow(
+      expect.objectContaining({ code: expectedCode })
+    );
+  });
 
   it('maps typed native operation refusal without exposing a weaker path', () => {
     const native = module({
@@ -189,7 +238,7 @@ function load(
 
 function module(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   const info = {
-    contractVersion: 1,
+    contractVersion: 2,
     packageVersion: VERSION,
     target: 'win32-x64-msvc',
     maxStableReadBytes: BAZFRAME_WIN32_NATIVE_MAX_STABLE_READ_BYTES,
@@ -198,8 +247,9 @@ function module(overrides: Record<string, unknown> = {}): Record<string, unknown
   return {
     getNativeWindowsInfo: () => info,
     inspectWindowsPath: () => overrides.inspection ?? inspection(),
+    createWindowsPrivateDirectory: () => overrides.creation ?? creation(),
     readWindowsFileStable: () => Promise.resolve(overrides.stableRead ?? stableRead()),
-    ...without(overrides, ['info', 'inspection', 'stableRead'])
+    ...without(overrides, ['info', 'inspection', 'creation', 'stableRead'])
   };
 }
 
@@ -216,8 +266,43 @@ function inspection(overrides: Record<string, unknown> = {}): Record<string, unk
       ...record(overrides.volume)
     },
     object: observation(record(overrides.object)),
+    security: Object.hasOwn(overrides, 'security') && overrides.security === undefined
+      ? undefined
+      : security(record(overrides.security)),
     ancestryReparseFree: true,
-    ...without(overrides, ['volume', 'object'])
+    ...without(overrides, ['volume', 'object', 'security'])
+  };
+}
+
+function creation(): Record<string, unknown> {
+  return {
+    parentBefore: directoryInspection('state'),
+    created: directoryInspection('state\\child', '00000000000000002000000000000002'),
+    parentAfter: directoryInspection('state')
+  };
+}
+
+function directoryInspection(path: string, fileId = FILE_ID): Record<string, unknown> {
+  return inspection({
+    canonicalPath: `\\\\?\\Volume{12345678-1234-1234-1234-123456789abc}\\${path}`,
+    kind: 'directory',
+    object: { directory: true, attributes: 16, fileId }
+  });
+}
+
+function security(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    descriptorControl: 0x1004,
+    daclPresent: true,
+    daclNull: false,
+    daclDefaulted: false,
+    daclBytes: Buffer.from([2, 0, 8, 0, 0, 0, 0, 0]),
+    ownerSid: 'S-1-5-21-1',
+    ownerDefaulted: false,
+    groupSid: 'S-1-5-21-1',
+    groupDefaulted: false,
+    currentUserSid: 'S-1-5-21-1',
+    ...overrides
   };
 }
 

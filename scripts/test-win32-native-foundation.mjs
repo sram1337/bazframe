@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   mkdir,
   mkdtemp,
@@ -17,7 +17,7 @@ const args = process.argv.slice(2);
 const packageRoot = resolve(argument('--package-root') ?? fileURLToPath(new URL('..', import.meta.url)));
 const outputPath = resolve(argument('--output') ?? join(packageRoot, 'win32-native-evidence.json'));
 const report = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   purpose: 'Bazframe-owned native Windows foundation evidence only; not a Windows support claim.',
   environment: {
     platform: process.platform,
@@ -32,15 +32,19 @@ const report = {
   failures: []
 };
 
-let root;
+let testRoot;
+let privateRoot;
 let outside;
 let temporaryParent;
 let substDrive;
 try {
   requireCondition(process.platform === 'win32' && process.arch === 'x64', 'requires win32/x64');
   const manifest = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8'));
-  const module = await import(pathToFileURL(join(packageRoot, 'dist/core/win32-native.js')).href);
-  const backend = module.loadBazframeWin32Native();
+  const nativeModule = await import(pathToFileURL(join(packageRoot, 'dist/core/win32-native.js')).href);
+  const privateDirectoryModule = await import(
+    pathToFileURL(join(packageRoot, 'dist/state/win32-private-directory.js')).href
+  );
+  const backend = nativeModule.loadBazframeWin32Native();
   const nativePath = join(
     packageRoot,
     'artifacts/native/win32-x64-msvc/bazframe-win32.node'
@@ -48,14 +52,53 @@ try {
   const nativeBytes = await readFile(nativePath);
 
   temporaryParent = resolve(process.env.RUNNER_TEMP ?? tmpdir());
-  root = await mkdtemp(join(temporaryParent, 'bazframe-native-foundation-'));
+  const testRootComponent = `bazframe-native-foundation-${randomUUID()}`;
+  testRoot = join(temporaryParent, testRootComponent);
+  const bootstrapReceipt = backend.createPrivateDirectory(temporaryParent, testRootComponent);
+  const rootInspection = privateDirectoryModule.admitWindowsPrivateDirectory(backend, testRoot);
+  const privateComponent = 'private-数据';
+  privateRoot = join(testRoot, privateComponent);
+  const privateInspection = privateDirectoryModule.createWindowsPrivateDirectory(
+    backend,
+    testRoot,
+    privateComponent
+  );
+  const parentAfterPrivateCreation = backend.inspectPath(testRoot);
+  const occupiedBefore = backend.inspectPath(privateRoot);
+  await expectCode(
+    () => privateDirectoryModule.createWindowsPrivateDirectory(backend, testRoot, privateComponent),
+    'WINDOWS_PRIVATE_DIRECTORY_OCCUPIED'
+  );
+  const occupiedAfter = backend.inspectPath(privateRoot);
+  const occupiedChildUnchanged = sameDirectoryIdentityVolumeAndSecurity(
+    occupiedBefore,
+    occupiedAfter
+  );
+  const invalidComponent = 'invalid:name';
+  let invalidCreationInvoked = false;
+  const invalidGuardBackend = {
+    ...backend,
+    createPrivateDirectory(parentPath, finalComponent) {
+      invalidCreationInvoked = true;
+      return backend.createPrivateDirectory(parentPath, finalComponent);
+    }
+  };
+  await expectCode(
+    () => privateDirectoryModule.createWindowsPrivateDirectory(
+      invalidGuardBackend,
+      testRoot,
+      invalidComponent
+    ),
+    'WINDOWS_PRIVATE_DIRECTORY_NAME_INVALID'
+  );
+  requireCondition(!invalidCreationInvoked, 'invalid component refused before native mutation');
+
   outside = await mkdtemp(join(temporaryParent, 'bazframe-native-outside-'));
-  const file = join(root, 'stable.txt');
-  const empty = join(root, 'empty.txt');
+  const file = join(testRoot, 'stable.txt');
+  const empty = join(testRoot, 'empty.txt');
   await writeFile(file, 'stable bytes\n');
   await writeFile(empty, '');
 
-  const rootInspection = backend.inspectPath(root);
   const fileInspection = backend.inspectPath(file);
   requireCondition(rootInspection.kind === 'directory', 'root inspection kind');
   requireCondition(fileInspection.kind === 'regular-file', 'file inspection kind');
@@ -86,18 +129,22 @@ try {
   );
 
   substDrive = unusedDriveLetter();
-  execFileSync('subst.exe', [substDrive, root], { stdio: 'pipe' });
+  execFileSync('subst.exe', [substDrive, testRoot], { stdio: 'pipe' });
   await expectCode(
     () => backend.inspectPath(`${substDrive}\\stable.txt`),
     'WINDOWS_NATIVE_VOLUME_NOT_FIXED'
   );
 
   await writeFile(join(outside, 'child.txt'), 'outside\n');
-  const junction = join(root, 'outside-junction');
+  const junction = join(testRoot, 'outside-junction');
   await symlink(outside, junction, 'junction');
   await expectCode(() => backend.inspectPath(junction), 'WINDOWS_NATIVE_REPARSE_REFUSED');
   await expectCode(
     () => backend.inspectPath(join(junction, 'child.txt')),
+    'WINDOWS_NATIVE_REPARSE_REFUSED'
+  );
+  await expectCode(
+    () => privateDirectoryModule.createWindowsPrivateDirectory(backend, junction, 'child'),
     'WINDOWS_NATIVE_REPARSE_REFUSED'
   );
   await unlink(junction);
@@ -119,8 +166,40 @@ try {
     finalReparseRefused: true,
     ancestorReparseRefused: true,
     boundedStableReads: true,
-    junctionTargetPreserved: true
+    junctionTargetPreserved: true,
+    privateDirectoryFirstVisibilityPrivate: bootstrapReceipt.created.object.fileId
+      === rootInspection.object.fileId
+      && bootstrapReceipt.created.security.ownerSid
+        === bootstrapReceipt.created.security.currentUserSid
+      && bootstrapReceipt.created.security.daclPresent
+      && !bootstrapReceipt.created.security.daclNull
+      && (bootstrapReceipt.created.security.descriptorControl & 0x1000) !== 0
+      && bootstrapReceipt.created.security.daclBytes.equals(rootInspection.security.daclBytes),
+    privateDirectoryOwnerCurrentUser: rootInspection.security.ownerSid
+      === rootInspection.security.currentUserSid,
+    privateDirectoryDaclPresentNonNullProtected: rootInspection.security.daclPresent
+      && !rootInspection.security.daclNull
+      && (rootInspection.security.descriptorControl & 0x1000) !== 0,
+    privateDirectoryTrustedFullControl: true,
+    privateDirectoryNoReplace: occupiedChildUnchanged,
+    privateDirectoryParentStable: bootstrapReceipt.parentBefore.object.fileId
+      === bootstrapReceipt.parentAfter.object.fileId
+      && bootstrapReceipt.parentBefore.volume.identity
+        === bootstrapReceipt.parentAfter.volume.identity
+      && rootInspection.object.fileId === parentAfterPrivateCreation.object.fileId
+      && rootInspection.volume.identity === parentAfterPrivateCreation.volume.identity
+      && rootInspection.security.daclBytes.equals(parentAfterPrivateCreation.security.daclBytes),
+    privateDirectoryUnicodeName: privateInspection.canonicalPath.toLowerCase()
+      === `${rootInspection.canonicalPath}\\${privateComponent}`.toLowerCase(),
+    privateDirectoryInvalidNameRefusedBeforeMutation: !invalidCreationInvoked,
+    privateDirectoryReparseParentRefused: true,
+    privateDirectoryDirectChildLocalNtfs: privateInspection.volume.identity
+      === rootInspection.volume.identity
+      && privateInspection.volume.filesystemName === 'NTFS'
   };
+  for (const [name, value] of Object.entries(report.observations)) {
+    if (typeof value === 'boolean') requireCondition(value, name);
+  }
   report.completion = 'passed';
 } catch (error) {
   report.failures.push(safeError(error));
@@ -134,7 +213,7 @@ try {
       process.exitCode = 1;
     }
   }
-  await Promise.all([root, outside].filter(Boolean).map(async (path) => {
+  await Promise.all([testRoot, outside].filter(Boolean).map(async (path) => {
     try { await rm(path, { recursive: true, force: true }); }
     catch (error) {
       report.failures.push({ stage: 'cleanup', ...safeError(error) });
@@ -186,15 +265,61 @@ function requireCondition(condition, name) {
   if (!condition) throw new Error(`Native conformance failed: ${name}`);
 }
 
+function sameDirectoryIdentityVolumeAndSecurity(before, after) {
+  return before.canonicalPath.toLowerCase() === after.canonicalPath.toLowerCase()
+    && before.kind === 'directory'
+    && after.kind === 'directory'
+    && before.ancestryReparseFree === true
+    && after.ancestryReparseFree === true
+    && before.volume.identity === after.volume.identity
+    && before.volume.filesystemName === after.volume.filesystemName
+    && before.volume.driveType === after.volume.driveType
+    && before.volume.canonicalVolumeGuidPath.toLowerCase()
+      === after.volume.canonicalVolumeGuidPath.toLowerCase()
+    && before.volume.remoteDevice === after.volume.remoteDevice
+    && before.object.volumeIdentity === after.object.volumeIdentity
+    && before.object.fileId === after.object.fileId
+    && before.object.reparseTag === null
+    && after.object.reparseTag === null
+    && before.object.deletePending === false
+    && after.object.deletePending === false
+    && before.object.directory === true
+    && after.object.directory === true
+    && before.security.descriptorControl === after.security.descriptorControl
+    && before.security.daclPresent === after.security.daclPresent
+    && before.security.daclNull === after.security.daclNull
+    && before.security.daclDefaulted === after.security.daclDefaulted
+    && before.security.daclBytes.equals(after.security.daclBytes)
+    && before.security.ownerSid === after.security.ownerSid
+    && before.security.ownerDefaulted === after.security.ownerDefaulted
+    && before.security.groupSid === after.security.groupSid
+    && before.security.groupDefaulted === after.security.groupDefaulted
+    && before.security.currentUserSid === after.security.currentUserSid;
+}
+
+function replaceCaseInsensitive(value, search, replacement) {
+  const foldedValue = value.toLowerCase();
+  const foldedSearch = search.toLowerCase();
+  let cursor = 0;
+  let result = '';
+  while (true) {
+    const index = foldedValue.indexOf(foldedSearch, cursor);
+    if (index === -1) return result + value.slice(cursor);
+    result += value.slice(cursor, index) + replacement;
+    cursor = index + search.length;
+  }
+}
+
 function safeError(error) {
   let message = error instanceof Error ? error.message : String(error);
   for (const [path, label] of [
-    [packageRoot, '[package-root]'],
-    [root, '[test-root]'],
+    [privateRoot, '[private-root]'],
+    [testRoot, '[test-root]'],
     [outside, '[outside-root]'],
+    [packageRoot, '[package-root]'],
     [temporaryParent, '[temporary-root]']
   ]) {
-    if (typeof path === 'string' && path.length > 0) message = message.replaceAll(path, label);
+    if (typeof path === 'string' && path.length > 0) message = replaceCaseInsensitive(message, path, label);
   }
   return {
     name: error instanceof Error ? error.name : 'UnknownError',
