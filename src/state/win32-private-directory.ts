@@ -48,6 +48,36 @@ export function admitWindowsPrivateDirectory(
   return revalidateChain(backend, chain)[0]!.inspection;
 }
 
+/** Admits one owner-private, single-link regular file beneath a private directory chain. */
+export function admitWindowsPrivateFile(
+  backend: BazframeWin32NativeBackend,
+  path: string
+): WindowsPathInspection {
+  requireDriveAbsolutePath(path);
+  const parentPath = win32.dirname(path);
+  const component = win32.basename(path);
+  if (parentPath.toLowerCase() === path.toLowerCase() || !isValidWindowsPathComponent(component)) {
+    throw fileInvalid('path does not name one valid child file');
+  }
+  const chain = inspectPrivateChain(backend, parentPath);
+  const admittedParent = revalidateChain(backend, chain)[0]!.inspection;
+  const before = backend.inspectPath(path);
+  assertPrivateFile(before);
+  requireDirectPrivateChild(admittedParent, before, component);
+  requireSameCurrentUser(admittedParent, before);
+
+  const afterChain = revalidateChain(backend, chain);
+  requireSameDirectory(admittedParent, afterChain[0]!.inspection);
+  requireSameSecurity(admittedParent.security, afterChain[0]!.inspection.security);
+  const after = backend.inspectPath(path);
+  assertPrivateFile(after);
+  requireSameRegularFile(before, after);
+  requireSameSecurity(before.security, after.security);
+  requireDirectPrivateChild(afterChain[0]!.inspection, after, component);
+  requireSameCurrentUser(afterChain[0]!.inspection, after);
+  return after;
+}
+
 /** Creates one protected, owner-private child without replacement or cleanup. */
 export function createWindowsPrivateDirectory(
   backend: BazframeWin32NativeBackend,
@@ -152,6 +182,17 @@ function assertNamespaceDirectory(inspection: WindowsPathInspection): void {
   assertNamespaceSecurity(inspection.security);
 }
 
+function assertPrivateFile(inspection: WindowsPathInspection): void {
+  if (inspection.kind !== 'regular-file' || inspection.object.directory
+    || inspection.object.reparseTag !== null || inspection.object.deletePending
+    || inspection.object.volumeIdentity !== inspection.volume.identity
+    || inspection.object.numberOfLinks !== '00000001'
+    || inspection.ancestryReparseFree !== true) {
+    throw fileInvalid('path is not an admitted single-link physical regular file');
+  }
+  assertPrivateFileSecurity(inspection.security);
+}
+
 function assertPhysicalDirectory(inspection: WindowsPathInspection): void {
   if (inspection.kind !== 'directory' || !inspection.object.directory
     || inspection.object.reparseTag !== null || inspection.object.deletePending
@@ -184,6 +225,36 @@ function assertPrivateSecurity(security: WindowsSecurityObservation): void {
     }
   }
   if (required.size !== 0) invalid('trusted principals do not have effective inheritable full control');
+}
+
+function assertPrivateFileSecurity(security: WindowsSecurityObservation): void {
+  let aces: ParsedAce[];
+  try {
+    assertSecurityDescriptor(security);
+    aces = parseAcl(security.daclBytes);
+  } catch (cause) {
+    throw fileInvalid('security descriptor or ACL is malformed', cause);
+  }
+  if (security.ownerSid !== security.currentUserSid) {
+    throw fileInvalid('file ownership is not private');
+  }
+  const trusted = new Set([
+    security.currentUserSid,
+    LOCAL_SYSTEM_SID,
+    BUILTIN_ADMINISTRATORS_SID
+  ]);
+  const required = new Set(trusted);
+  for (const ace of aces) {
+    if (ace.type === 'deny') throw fileInvalid('deny ACE cannot prove required private access');
+    if (!trusted.has(ace.sid)) throw fileInvalid('foreign allow ACE is not owner-private');
+    if ((ace.flags & INHERIT_ONLY_ACE) === 0
+      && (ace.mask & FILE_ALL_ACCESS) === FILE_ALL_ACCESS) {
+      required.delete(ace.sid);
+    }
+  }
+  if (required.size !== 0) {
+    throw fileInvalid('trusted principals do not have effective full control');
+  }
 }
 
 function assertNamespaceSecurity(security: WindowsSecurityObservation): void {
@@ -287,6 +358,26 @@ function requireSameDirectory(a: WindowsPathInspection, b: WindowsPathInspection
   }
 }
 
+function requireSameRegularFile(a: WindowsPathInspection, b: WindowsPathInspection): void {
+  if (a.canonicalPath.toLowerCase() !== b.canonicalPath.toLowerCase()
+    || a.kind !== 'regular-file' || b.kind !== 'regular-file'
+    || a.volume.identity !== b.volume.identity
+    || a.object.volumeIdentity !== b.object.volumeIdentity
+    || a.object.fileId !== b.object.fileId
+    || a.object.size !== b.object.size
+    || a.object.allocationSize !== b.object.allocationSize
+    || a.object.numberOfLinks !== b.object.numberOfLinks
+    || a.object.creationTime !== b.object.creationTime
+    || a.object.lastWriteTime !== b.object.lastWriteTime
+    || a.object.changeTime !== b.object.changeTime
+    || a.object.attributes !== b.object.attributes
+    || a.object.reparseTag !== null || b.object.reparseTag !== null
+    || a.object.deletePending || b.object.deletePending
+    || a.object.directory || b.object.directory) {
+    throw fileInvalid('file identity or stable metadata changed');
+  }
+}
+
 function requireSameSecurity(a: WindowsSecurityObservation, b: WindowsSecurityObservation): void {
   if (a.descriptorControl !== b.descriptorControl || a.daclPresent !== b.daclPresent
     || a.daclNull !== b.daclNull || a.daclDefaulted !== b.daclDefaulted
@@ -315,6 +406,19 @@ function requireSameCurrentUser(a: WindowsPathInspection, b: WindowsPathInspecti
   }
 }
 
+function requireDirectPrivateChild(
+  parent: WindowsPathInspection,
+  child: WindowsPathInspection,
+  component: string
+): void {
+  const separator = parent.canonicalPath.endsWith('\\') ? '' : '\\';
+  if (parent.volume.identity !== child.volume.identity
+    || child.canonicalPath.toLowerCase()
+      !== `${parent.canonicalPath}${separator}${component}`.toLowerCase()) {
+    throw fileInvalid('file is not the requested direct child');
+  }
+}
+
 function requireDirectChild(
   parent: WindowsPathInspection,
   child: WindowsPathInspection,
@@ -338,7 +442,8 @@ function requireDriveAbsolutePath(path: string): void {
   }
 }
 
-function validateFinalComponent(value: string): void {
+export function isValidWindowsPathComponent(value: string): boolean {
+  if (typeof value !== 'string') return false;
   let paired = true;
   let hasControlCharacter = false;
   for (let index = 0; index < value.length; index += 1) {
@@ -350,9 +455,13 @@ function validateFinalComponent(value: string): void {
       else index += 1;
     } else if (code >= 0xdc00 && code <= 0xdfff) paired = false;
   }
-  if (value.length === 0 || value.length > 255 || value === '.' || value === '..'
-    || hasControlCharacter || /[<>:"/\\|?*]/u.test(value) || /[ .]$/u.test(value)
-    || WINDOWS_RESERVED_COMPONENT.test(value) || !paired) {
+  return value.length > 0 && value.length <= 255 && value !== '.' && value !== '..'
+    && !hasControlCharacter && !/[<>:"/\\|?*]/u.test(value) && !/[ .]$/u.test(value)
+    && !WINDOWS_RESERVED_COMPONENT.test(value) && paired;
+}
+
+function validateFinalComponent(value: string): void {
+  if (!isValidWindowsPathComponent(value)) {
     throw failure(
       'WINDOWS_PRIVATE_DIRECTORY_NAME_INVALID',
       'The Windows private-directory name is invalid or reserved.'
@@ -364,6 +473,14 @@ function invalid(reason: string): never {
   throw failure(
     'WINDOWS_PRIVATE_DIRECTORY_PRIVACY_UNPROVED',
     `The directory cannot be proved owner-private: ${reason}.`
+  );
+}
+
+function fileInvalid(reason: string, cause?: unknown): BazframeError {
+  return failure(
+    'WINDOWS_PRIVATE_FILE_PRIVACY_UNPROVED',
+    `The file cannot be proved owner-private: ${reason}.`,
+    cause
   );
 }
 

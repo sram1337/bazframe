@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { runCli } from '../../../src/cli/run-cli.js';
 import {
+  BAZFRAME_WIN32_NATIVE_MAX_STABLE_DIRECTORY_ENTRIES,
   BAZFRAME_WIN32_NATIVE_MAX_STABLE_READ_BYTES,
   loadBazframeWin32Native
 } from '../../../src/core/win32-native.js';
@@ -61,10 +62,13 @@ describe('Bazframe-owned Windows native loader', () => {
   it.each([
     ['missing inspect export', { inspectWindowsPath: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
     ['missing create export', { createWindowsPrivateDirectory: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
+    ['missing enumerate export', { enumerateWindowsDirectoryStable: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
+    ['legacy contract v2', { info: { contractVersion: 2 } }, 'WINDOWS_NATIVE_CONTRACT_MISMATCH'],
     ['contract', { info: { contractVersion: 1 } }, 'WINDOWS_NATIVE_CONTRACT_MISMATCH'],
     ['version', { info: { packageVersion: '0.1.0-other' } }, 'WINDOWS_NATIVE_VERSION_MISMATCH'],
     ['target', { info: { target: 'win32-arm64-msvc' } }, 'WINDOWS_NATIVE_TARGET_MISMATCH'],
-    ['limit', { info: { maxStableReadBytes: 1 } }, 'WINDOWS_NATIVE_CONTRACT_MISMATCH']
+    ['read limit', { info: { maxStableReadBytes: 1 } }, 'WINDOWS_NATIVE_CONTRACT_MISMATCH'],
+    ['enumeration limit', { info: { maxStableDirectoryEntries: 1 } }, 'WINDOWS_NATIVE_CONTRACT_MISMATCH']
   ])('rejects native %s drift', (_label, overrides, expectedCode) => {
     expect(() => load(module(overrides))).toThrow(expect.objectContaining({ code: expectedCode }));
   });
@@ -205,6 +209,70 @@ describe('Bazframe-owned Windows native loader', () => {
     });
   });
 
+  it('accepts exact stable directory enumeration facts in UTF-16 ordinal order', async () => {
+    const receipt = enumeration({
+      entries: [entry({ name: 'a' }), entry({ name: '😀', fileId: '00000000000000002000000000000002' })]
+    });
+    await expect(load(module({ enumeration: receipt })).enumerateStableDirectory(
+      'C:\\state', 2
+    )).resolves.toMatchObject({
+      entries: [
+        { name: 'a', fileId: FILE_ID, reparseTag: null, directory: false },
+        { name: '😀', fileId: '00000000000000002000000000000002' }
+      ]
+    });
+  });
+
+  it.each([
+    ['extra receipt key', { extra: true }, 2],
+    ['over bound array', { entries: [entry()] }, 0],
+    ['duplicate names', { entries: [entry(), entry()] }, 2],
+    ['unsorted names', { entries: [entry({ name: 'b' }), entry({ name: 'a' })] }, 2],
+    ['separator name', { entries: [entry({ name: 'a\\\\b' })] }, 2],
+    ['unpaired UTF-16 name', { entries: [entry({ name: '\ud800' })] }, 2],
+    ['short file ID', { entries: [entry({ fileId: '1' })] }, 2],
+    ['directory flag mismatch', { entries: [entry({ directory: true })] }, 2],
+    ['reparse flag mismatch', { entries: [entry({ reparseTag: 0xa000000c })] }, 2]
+  ])('rejects malformed directory enumeration receipt: %s', async (_label, overrides, bound) => {
+    await expect(load(module({ enumeration: enumeration(overrides) })).enumerateStableDirectory(
+      'C:\\state', bound
+    )).rejects.toMatchObject({ code: 'WINDOWS_NATIVE_RECEIPT_INVALID' });
+  });
+
+  it('distinguishes changed directory receipts from malformed evidence', async () => {
+    const receipt = enumeration({
+      directoryAfter: directoryInspection('state', '00000000000000002000000000000009')
+    });
+    await expect(load(module({ enumeration: receipt })).enumerateStableDirectory(
+      'C:\\state', 0
+    )).rejects.toMatchObject({ code: 'WINDOWS_NATIVE_DIRECTORY_CHANGED' });
+  });
+
+  it.each([-1, -0, 1.5, Number.NaN, BAZFRAME_WIN32_NATIVE_MAX_STABLE_DIRECTORY_ENTRIES + 1])(
+    'rejects invalid caller enumeration bound %s before native invocation',
+    async (maxEntries) => {
+      const enumerate = vi.fn(() => enumeration());
+      const native = module({ enumerateWindowsDirectoryStable: enumerate });
+      await expect(load(native).enumerateStableDirectory('C:\\state', maxEntries)).rejects.toMatchObject({
+        code: 'WINDOWS_NATIVE_ENUMERATION_LIMIT_INVALID'
+      });
+      expect(enumerate).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([
+    ['ERR_WIN32_ENUMERATION_LIMIT', 'WINDOWS_NATIVE_ENUMERATION_LIMIT_EXCEEDED'],
+    ['ERR_WIN32_ENUMERATION_CHANGED', 'WINDOWS_NATIVE_DIRECTORY_CHANGED'],
+    ['ERR_WIN32_ENUMERATION_INCOMPLETE', 'WINDOWS_NATIVE_ENUMERATION_INCOMPLETE']
+  ])('maps native enumeration refusal %s', async (nativeCode, expectedCode) => {
+    const native = module({
+      enumerateWindowsDirectoryStable: () => Promise.reject(coded('GenericFailure', `${nativeCode}: refused`))
+    });
+    await expect(load(native).enumerateStableDirectory('C:\\state', 1)).rejects.toMatchObject({
+      code: expectedCode
+    });
+  });
+
   it('does not connect the internal loader seam to the public Windows CLI gate', async () => {
     const reached: string[] = [];
     let stderr = '';
@@ -238,10 +306,11 @@ function load(
 
 function module(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   const info = {
-    contractVersion: 2,
+    contractVersion: 3,
     packageVersion: VERSION,
     target: 'win32-x64-msvc',
     maxStableReadBytes: BAZFRAME_WIN32_NATIVE_MAX_STABLE_READ_BYTES,
+    maxStableDirectoryEntries: BAZFRAME_WIN32_NATIVE_MAX_STABLE_DIRECTORY_ENTRIES,
     ...record(overrides.info)
   };
   return {
@@ -249,7 +318,8 @@ function module(overrides: Record<string, unknown> = {}): Record<string, unknown
     inspectWindowsPath: () => overrides.inspection ?? inspection(),
     createWindowsPrivateDirectory: () => overrides.creation ?? creation(),
     readWindowsFileStable: () => Promise.resolve(overrides.stableRead ?? stableRead()),
-    ...without(overrides, ['info', 'inspection', 'creation', 'stableRead'])
+    enumerateWindowsDirectoryStable: () => Promise.resolve(overrides.enumeration ?? enumeration()),
+    ...without(overrides, ['info', 'inspection', 'creation', 'stableRead', 'enumeration'])
   };
 }
 
@@ -313,6 +383,31 @@ function stableRead(overrides: Record<string, unknown> = {}): Record<string, unk
     before: observation(record(overrides.before)),
     after: observation(record(overrides.after)),
     ...without(overrides, ['before', 'after'])
+  };
+}
+
+function enumeration(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    directoryBefore: directoryInspection('state'),
+    entries: [],
+    directoryAfter: directoryInspection('state'),
+    ...overrides
+  };
+}
+
+function entry(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    name: 'a',
+    fileId: FILE_ID,
+    size: '0000000000000003',
+    allocationSize: '0000000000001000',
+    creationTime: '0000000000000001',
+    lastWriteTime: '0000000000000001',
+    changeTime: '0000000000000001',
+    attributes: 32,
+    reparseTag: 0,
+    directory: false,
+    ...overrides
   };
 }
 

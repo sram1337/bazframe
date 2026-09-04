@@ -1,8 +1,9 @@
 // Windows HANDLE/reparse techniques are adapted from @openclaw/fs-safe 0.7.2
 // (Copyright (c) 2026 openclaw, MIT). See ../OPENCLAW-LICENSE.
 
+use std::collections::HashSet;
 use std::ffi::{OsStr, c_void};
-use std::mem::{size_of, zeroed};
+use std::mem::{align_of, offset_of, size_of, zeroed};
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::ptr::{null, null_mut};
@@ -10,8 +11,9 @@ use std::ptr::{null, null_mut};
 use napi::Error;
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS,
-    ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_PATH_NOT_FOUND, ERROR_SHARING_VIOLATION,
-    ERROR_SUCCESS, GENERIC_READ, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+    ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_FILES, ERROR_PATH_NOT_FOUND,
+    ERROR_SHARING_VIOLATION, ERROR_SUCCESS, GENERIC_READ, GetLastError, HANDLE,
+    INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
@@ -29,19 +31,20 @@ use windows_sys::Win32::Storage::FileSystem::{
     CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_SEQUENTIAL_SCAN,
-    FILE_ID_INFO, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FILE_STANDARD_INFO, FileAttributeTagInfo, FileBasicInfo, FileIdInfo,
-    FileStandardInfo, GetDriveTypeW, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
-    GetFullPathNameW, GetVolumeInformationByHandleW, OPEN_EXISTING, QueryDosDeviceW, READ_CONTROL,
-    ReadFile, VOLUME_NAME_GUID,
+    FILE_ID_EXTD_DIR_INFO, FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO,
+    FileAttributeTagInfo, FileBasicInfo, FileIdExtdDirectoryInfo, FileIdExtdDirectoryRestartInfo,
+    FileIdInfo, FileStandardInfo, GetDriveTypeW, GetFileInformationByHandleEx,
+    GetFinalPathNameByHandleW, GetFullPathNameW, GetVolumeInformationByHandleW, OPEN_EXISTING,
+    QueryDosDeviceW, READ_CONTROL, ReadFile, VOLUME_NAME_GUID,
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use crate::{
-    NativeResult, StableReadData, WindowsObjectObservation, WindowsPathInspection,
-    WindowsPrivateDirectoryCreationReceipt, WindowsSecurityObservation, WindowsVolumeObservation,
-    native_error,
+    DirectoryEntryData, DirectoryEnumerationData, NativeResult, StableReadData,
+    WindowsObjectObservation, WindowsPathInspection, WindowsPrivateDirectoryCreationReceipt,
+    WindowsSecurityObservation, WindowsVolumeObservation, native_error,
 };
 
 const DRIVE_FIXED: u32 = 3;
@@ -100,6 +103,20 @@ struct PrefixObservation {
     path: String,
     canonical_path: String,
     object: WindowsObjectObservation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RawDirectoryEntry {
+    name: Vec<u16>,
+    file_id: String,
+    size: String,
+    allocation_size: String,
+    creation_time: String,
+    last_write_time: String,
+    change_time: String,
+    attributes: u32,
+    reparse_tag: u32,
+    directory: bool,
 }
 
 pub(crate) fn inspect_windows_path(path: &str) -> NativeResult<WindowsPathInspection> {
@@ -306,6 +323,263 @@ pub(crate) fn read_windows_file_stable(path: &str, max_bytes: u32) -> NativeResu
         before,
         after,
     })
+}
+
+pub(crate) fn enumerate_windows_directory_stable(
+    path: &str,
+    max_entries: u32,
+) -> NativeResult<DirectoryEnumerationData> {
+    let opened = open_admitted_path(
+        path,
+        FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | READ_CONTROL,
+    )?;
+    let directory_before = inspect_opened_path(&opened)?;
+    if directory_before.kind != "directory" {
+        return Err(native_error(
+            "ERR_WIN32_NOT_DIRECTORY",
+            "stable directory enumeration requires a directory",
+        ));
+    }
+
+    let first = enumerate_directory_pass(opened.handle.0, max_entries)?;
+    let second = enumerate_directory_pass(opened.handle.0, max_entries)?;
+    if first != second {
+        return Err(native_error(
+            "ERR_WIN32_ENUMERATION_CHANGED",
+            "directory entries changed between stable enumeration passes",
+        ));
+    }
+
+    let directory_after = inspect_opened_path(&opened)?;
+    let current = inspect_windows_path(path)?;
+    if !same_path_inspection(&directory_before, &directory_after)
+        || !same_path_inspection(&directory_after, &current)
+    {
+        return Err(native_error(
+            "ERR_WIN32_ENUMERATION_CHANGED",
+            "directory identity, metadata, security, or ancestry changed during enumeration",
+        ));
+    }
+
+    Ok(DirectoryEnumerationData {
+        directory_before,
+        entries: second
+            .into_iter()
+            .map(|entry| DirectoryEntryData {
+                name: entry.name,
+                file_id: entry.file_id,
+                size: entry.size,
+                allocation_size: entry.allocation_size,
+                creation_time: entry.creation_time,
+                last_write_time: entry.last_write_time,
+                change_time: entry.change_time,
+                attributes: entry.attributes,
+                reparse_tag: entry.reparse_tag,
+                directory: entry.directory,
+            })
+            .collect(),
+        directory_after,
+    })
+}
+
+const DIRECTORY_ENUMERATION_BUFFER_BYTES: usize = 64 * 1024;
+
+fn enumerate_directory_pass(
+    handle: HANDLE,
+    max_entries: u32,
+) -> NativeResult<Vec<RawDirectoryEntry>> {
+    let word_count = DIRECTORY_ENUMERATION_BUFFER_BYTES.div_ceil(size_of::<usize>());
+    let mut storage = vec![0_usize; word_count];
+    let mut entries = Vec::new();
+    let mut names = HashSet::new();
+    let mut restart = true;
+    loop {
+        storage.fill(0);
+        let class = if restart {
+            FileIdExtdDirectoryRestartInfo
+        } else {
+            FileIdExtdDirectoryInfo
+        };
+        // SAFETY: storage is pointer-aligned, writable for its full fixed size,
+        // and the information class writes FILE_ID_EXTD_DIR_INFO records.
+        let success = unsafe {
+            GetFileInformationByHandleEx(
+                handle,
+                class,
+                storage.as_mut_ptr().cast(),
+                DIRECTORY_ENUMERATION_BUFFER_BYTES as u32,
+            )
+        };
+        restart = false;
+        if success == 0 {
+            // SAFETY: reads the error from the immediately preceding Win32 call.
+            let code = unsafe { GetLastError() };
+            if code == ERROR_NO_MORE_FILES {
+                break;
+            }
+            return Err(win_error(code, "enumerate Windows directory"));
+        }
+
+        let parsed = parse_directory_buffer(&storage)?;
+        if parsed.is_empty() {
+            return Err(native_error(
+                "ERR_WIN32_ENUMERATION_INCOMPLETE",
+                "Windows returned a successful empty directory-enumeration buffer",
+            ));
+        }
+        append_directory_entries(parsed, max_entries, &mut names, &mut entries)?;
+    }
+    sort_directory_entries(&mut entries);
+    Ok(entries)
+}
+
+fn sort_directory_entries(entries: &mut [RawDirectoryEntry]) {
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+}
+
+fn append_directory_entries(
+    parsed: Vec<RawDirectoryEntry>,
+    max_entries: u32,
+    names: &mut HashSet<Vec<u16>>,
+    entries: &mut Vec<RawDirectoryEntry>,
+) -> NativeResult<()> {
+    for entry in parsed {
+        if entry.name == [b'.' as u16] || entry.name == [b'.' as u16, b'.' as u16] {
+            continue;
+        }
+        if entries.len() >= max_entries as usize {
+            return Err(native_error(
+                "ERR_WIN32_ENUMERATION_LIMIT",
+                "directory contains more entries than the supplied bound",
+            ));
+        }
+        if !names.insert(entry.name.clone()) {
+            return Err(native_error(
+                "ERR_WIN32_ENUMERATION_INCOMPLETE",
+                "Windows returned a duplicate directory entry",
+            ));
+        }
+        entries.push(entry);
+    }
+    Ok(())
+}
+
+fn parse_directory_buffer(storage: &[usize]) -> NativeResult<Vec<RawDirectoryEntry>> {
+    let bytes = storage
+        .len()
+        .checked_mul(size_of::<usize>())
+        .ok_or_else(|| {
+            native_error(
+                "ERR_WIN32_ENUMERATION_INCOMPLETE",
+                "directory buffer size overflowed",
+            )
+        })?;
+    let base = storage.as_ptr().cast::<u8>();
+    let header = offset_of!(FILE_ID_EXTD_DIR_INFO, FileName);
+    let alignment = align_of::<FILE_ID_EXTD_DIR_INFO>();
+    let mut offset = 0_usize;
+    let mut result = Vec::new();
+    loop {
+        if offset % alignment != 0 || offset.checked_add(header).is_none_or(|end| end > bytes) {
+            return Err(native_error(
+                "ERR_WIN32_ENUMERATION_INCOMPLETE",
+                "Windows returned a truncated or misaligned directory record",
+            ));
+        }
+        // SAFETY: storage is aligned and the header range was checked above.
+        let record = unsafe { &*base.add(offset).cast::<FILE_ID_EXTD_DIR_INFO>() };
+        let name_bytes = record.FileNameLength as usize;
+        if name_bytes == 0 || name_bytes % 2 != 0 {
+            return Err(native_error(
+                "ERR_WIN32_ENUMERATION_INCOMPLETE",
+                "Windows returned an invalid directory entry name length",
+            ));
+        }
+        let record_bytes = header.checked_add(name_bytes).ok_or_else(|| {
+            native_error(
+                "ERR_WIN32_ENUMERATION_INCOMPLETE",
+                "directory entry length overflowed",
+            )
+        })?;
+        if offset
+            .checked_add(record_bytes)
+            .is_none_or(|end| end > bytes)
+        {
+            return Err(native_error(
+                "ERR_WIN32_ENUMERATION_INCOMPLETE",
+                "Windows returned a truncated directory entry name",
+            ));
+        }
+        let name_units = name_bytes / 2;
+        // SAFETY: the filename range was checked and WCHAR has u16 alignment.
+        let name = unsafe {
+            std::slice::from_raw_parts(base.add(offset + header).cast::<u16>(), name_units)
+        }
+        .to_vec();
+        if name.iter().any(|unit| *unit == 0) || String::from_utf16(&name).is_err() {
+            return Err(native_error(
+                "ERR_WIN32_ENUMERATION_INCOMPLETE",
+                "Windows returned an invalid UTF-16 directory entry name",
+            ));
+        }
+        if record.EndOfFile < 0 || record.AllocationSize < 0 {
+            return Err(native_error(
+                "ERR_WIN32_METADATA_UNAVAILABLE",
+                "Windows directory entry reported a negative size",
+            ));
+        }
+        let reparse = record.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+        if reparse && record.ReparsePointTag == 0 {
+            return Err(native_error(
+                "ERR_WIN32_ENUMERATION_INCOMPLETE",
+                "Windows returned a reparse entry without a reparse tag",
+            ));
+        }
+        result.push(RawDirectoryEntry {
+            name,
+            file_id: hex_bytes(&record.FileId.Identifier),
+            size: hex_u64(record.EndOfFile as u64),
+            allocation_size: hex_u64(record.AllocationSize as u64),
+            creation_time: hex_i64_bits(record.CreationTime),
+            last_write_time: hex_i64_bits(record.LastWriteTime),
+            change_time: hex_i64_bits(record.ChangeTime),
+            attributes: record.FileAttributes,
+            reparse_tag: if reparse { record.ReparsePointTag } else { 0 },
+            directory: record.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+        });
+
+        let next = record.NextEntryOffset as usize;
+        if next == 0 {
+            return Ok(result);
+        }
+        if next % alignment != 0 || next < record_bytes {
+            return Err(native_error(
+                "ERR_WIN32_ENUMERATION_INCOMPLETE",
+                "Windows returned an invalid next directory-entry offset",
+            ));
+        }
+        offset = offset.checked_add(next).ok_or_else(|| {
+            native_error(
+                "ERR_WIN32_ENUMERATION_INCOMPLETE",
+                "directory-entry offset overflowed",
+            )
+        })?;
+    }
+}
+
+fn same_path_inspection(a: &WindowsPathInspection, b: &WindowsPathInspection) -> bool {
+    a.canonical_path == b.canonical_path
+        && a.kind == "directory"
+        && b.kind == "directory"
+        && a.ancestry_reparse_free
+        && b.ancestry_reparse_free
+        && a.volume.identity == b.volume.identity
+        && a.volume.filesystem_name == b.volume.filesystem_name
+        && a.volume.drive_type == b.volume.drive_type
+        && a.volume.canonical_volume_guid_path == b.volume.canonical_volume_guid_path
+        && a.volume.remote_device == b.volume.remote_device
+        && same_stable_observation(&a.object, &b.object)
+        && same_security_observation(&a.security, &b.security)
 }
 
 fn open_admitted_path(path: &str, final_access: u32) -> NativeResult<OpenedPath> {
@@ -1144,6 +1418,159 @@ mod tests {
         assert!(same_stable_observation(&before, &access_only));
         access_only.change_time = "0000000000000002".to_owned();
         assert!(!same_stable_observation(&before, &access_only));
+    }
+
+    #[test]
+    fn parses_extended_directory_records_without_losing_utf16_or_identity() {
+        let storage = directory_buffer(&[
+            ("😀".encode_utf16().collect(), FILE_ATTRIBUTE_NORMAL, 0),
+            (
+                "link".encode_utf16().collect(),
+                FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT,
+                0xa000_0003,
+            ),
+        ]);
+        let entries = parse_directory_buffer(&storage).expect("valid records");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "😀".encode_utf16().collect::<Vec<_>>());
+        assert_eq!(entries[0].file_id, "000102030405060708090a0b0c0d0e0f");
+        assert_eq!(entries[1].reparse_tag, 0xa000_0003);
+        assert!(entries[1].directory);
+    }
+
+    #[test]
+    fn rejects_malformed_directory_record_offsets_lengths_utf16_and_tags() {
+        let mut offset =
+            directory_buffer(&[("a".encode_utf16().collect(), FILE_ATTRIBUTE_NORMAL, 0)]);
+        unsafe { (*offset.as_mut_ptr().cast::<FILE_ID_EXTD_DIR_INFO>()).NextEntryOffset = 2 };
+        assert_native_code(
+            parse_directory_buffer(&offset),
+            "ERR_WIN32_ENUMERATION_INCOMPLETE",
+        );
+
+        let mut odd = directory_buffer(&[("a".encode_utf16().collect(), FILE_ATTRIBUTE_NORMAL, 0)]);
+        unsafe { (*odd.as_mut_ptr().cast::<FILE_ID_EXTD_DIR_INFO>()).FileNameLength = 1 };
+        assert_native_code(
+            parse_directory_buffer(&odd),
+            "ERR_WIN32_ENUMERATION_INCOMPLETE",
+        );
+
+        let invalid_utf16 = directory_buffer(&[(vec![0xd800], FILE_ATTRIBUTE_NORMAL, 0)]);
+        assert_native_code(
+            parse_directory_buffer(&invalid_utf16),
+            "ERR_WIN32_ENUMERATION_INCOMPLETE",
+        );
+
+        let missing_tag = directory_buffer(&[(
+            "link".encode_utf16().collect(),
+            FILE_ATTRIBUTE_REPARSE_POINT,
+            0,
+        )]);
+        assert_native_code(
+            parse_directory_buffer(&missing_tag),
+            "ERR_WIN32_ENUMERATION_INCOMPLETE",
+        );
+    }
+
+    #[test]
+    fn applies_dot_duplicate_limit_and_raw_utf16_ordering_rules() {
+        let mut names = HashSet::new();
+        let mut entries = Vec::new();
+        append_directory_entries(
+            vec![raw("."), raw(".."), raw("😀"), raw("z")],
+            2,
+            &mut names,
+            &mut entries,
+        )
+        .expect("exact limit");
+        assert_eq!(entries.len(), 2);
+        sort_directory_entries(&mut entries);
+        assert_eq!(entries[0].name, "z".encode_utf16().collect::<Vec<_>>());
+        assert_eq!(entries[1].name, "😀".encode_utf16().collect::<Vec<_>>());
+
+        assert_native_code(
+            append_directory_entries(vec![raw("extra")], 2, &mut names, &mut entries),
+            "ERR_WIN32_ENUMERATION_LIMIT",
+        );
+
+        let mut duplicate_names = HashSet::new();
+        let mut duplicates = Vec::new();
+        assert_native_code(
+            append_directory_entries(
+                vec![raw("same"), raw("same")],
+                2,
+                &mut duplicate_names,
+                &mut duplicates,
+            ),
+            "ERR_WIN32_ENUMERATION_INCOMPLETE",
+        );
+    }
+
+    fn directory_buffer(records: &[(Vec<u16>, u32, u32)]) -> Vec<usize> {
+        let header = offset_of!(FILE_ID_EXTD_DIR_INFO, FileName);
+        let alignment = align_of::<FILE_ID_EXTD_DIR_INFO>();
+        let aligned = |value: usize| value.div_ceil(alignment) * alignment;
+        let sizes: Vec<usize> = records
+            .iter()
+            .map(|(name, _, _)| aligned(header + name.len() * 2))
+            .collect();
+        let bytes = sizes.iter().sum::<usize>().max(alignment);
+        let mut storage = vec![0_usize; bytes.div_ceil(size_of::<usize>())];
+        let mut offset = 0_usize;
+        for (index, (name, attributes, tag)) in records.iter().enumerate() {
+            let record = unsafe {
+                &mut *storage
+                    .as_mut_ptr()
+                    .cast::<u8>()
+                    .add(offset)
+                    .cast::<FILE_ID_EXTD_DIR_INFO>()
+            };
+            *record = FILE_ID_EXTD_DIR_INFO::default();
+            record.NextEntryOffset = if index + 1 == records.len() {
+                0
+            } else {
+                sizes[index] as u32
+            };
+            record.EndOfFile = 1;
+            record.AllocationSize = 1;
+            record.FileAttributes = *attributes;
+            record.FileNameLength = (name.len() * 2) as u32;
+            record.ReparsePointTag = *tag;
+            record.FileId.Identifier = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    name.as_ptr(),
+                    storage
+                        .as_mut_ptr()
+                        .cast::<u8>()
+                        .add(offset + header)
+                        .cast::<u16>(),
+                    name.len(),
+                )
+            };
+            offset += sizes[index];
+        }
+        storage
+    }
+
+    fn raw(name: &str) -> RawDirectoryEntry {
+        RawDirectoryEntry {
+            name: name.encode_utf16().collect(),
+            file_id: "000102030405060708090a0b0c0d0e0f".to_owned(),
+            size: "0000000000000001".to_owned(),
+            allocation_size: "0000000000000001".to_owned(),
+            creation_time: "0000000000000001".to_owned(),
+            last_write_time: "0000000000000001".to_owned(),
+            change_time: "0000000000000001".to_owned(),
+            attributes: FILE_ATTRIBUTE_NORMAL,
+            reparse_tag: 0,
+            directory: false,
+        }
+    }
+
+    fn assert_native_code<T>(result: NativeResult<T>, expected: &str) {
+        let error = result.err().expect("expected native refusal");
+        assert_eq!(error.status, expected);
     }
 
     fn observation() -> WindowsObjectObservation {

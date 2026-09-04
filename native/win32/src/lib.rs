@@ -19,11 +19,14 @@ use non_windows as platform;
 #[cfg(windows)]
 use windows as platform;
 
-pub const NATIVE_CONTRACT_VERSION: u32 = 2;
+pub const NATIVE_CONTRACT_VERSION: u32 = 3;
 // Mirrors PROFILE_PORTABILITY_PRODUCTION_LIMITS.checkoutFileBytes. The native
 // boundary may lower a caller's bound but never allocates beyond this product
 // authority.
 pub const MAX_STABLE_READ_BYTES: u32 = 64 * 1024 * 1024;
+// Mirrors PROFILE_PORTABILITY_PRODUCTION_LIMITS.stagingEntries. Recursive and
+// product-specific limits remain TypeScript-owned and may only lower this ceiling.
+pub const MAX_STABLE_DIRECTORY_ENTRIES: u32 = 32_768;
 
 pub(crate) type NativeResult<T> = std::result::Result<T, Error<String>>;
 
@@ -57,6 +60,7 @@ pub struct NativeWindowsInfo {
     pub package_version: String,
     pub target: String,
     pub max_stable_read_bytes: u32,
+    pub max_stable_directory_entries: u32,
 }
 
 #[napi(object)]
@@ -126,10 +130,50 @@ pub struct WindowsStableReadReceipt {
     pub after: WindowsObjectObservation,
 }
 
+#[napi(object)]
+pub struct WindowsDirectoryEntryObservation {
+    pub name: Utf16String,
+    pub file_id: String,
+    pub size: String,
+    pub allocation_size: String,
+    pub creation_time: String,
+    pub last_write_time: String,
+    pub change_time: String,
+    pub attributes: u32,
+    pub reparse_tag: u32,
+    pub directory: bool,
+}
+
+#[napi(object)]
+pub struct WindowsStableDirectoryEnumerationReceipt {
+    pub directory_before: WindowsPathInspection,
+    pub entries: Vec<WindowsDirectoryEntryObservation>,
+    pub directory_after: WindowsPathInspection,
+}
+
 pub struct StableReadData {
     pub bytes: Vec<u8>,
     pub before: WindowsObjectObservation,
     pub after: WindowsObjectObservation,
+}
+
+pub struct DirectoryEntryData {
+    pub name: Vec<u16>,
+    pub file_id: String,
+    pub size: String,
+    pub allocation_size: String,
+    pub creation_time: String,
+    pub last_write_time: String,
+    pub change_time: String,
+    pub attributes: u32,
+    pub reparse_tag: u32,
+    pub directory: bool,
+}
+
+pub struct DirectoryEnumerationData {
+    pub directory_before: WindowsPathInspection,
+    pub entries: Vec<DirectoryEntryData>,
+    pub directory_after: WindowsPathInspection,
 }
 
 #[napi(js_name = "getNativeWindowsInfo")]
@@ -139,6 +183,7 @@ pub fn get_native_windows_info() -> NativeWindowsInfo {
         package_version: env!("CARGO_PKG_VERSION").to_owned(),
         target: "win32-x64-msvc".to_owned(),
         max_stable_read_bytes: MAX_STABLE_READ_BYTES,
+        max_stable_directory_entries: MAX_STABLE_DIRECTORY_ENTRIES,
     }
 }
 
@@ -199,4 +244,63 @@ pub fn read_windows_file_stable(path: String, max_bytes: u32) -> Result<AsyncTas
         ));
     }
     Ok(AsyncTask::new(StableReadTask { path, max_bytes }))
+}
+
+pub struct StableDirectoryEnumerationTask {
+    path: String,
+    max_entries: u32,
+}
+
+impl Task for StableDirectoryEnumerationTask {
+    type Output = DirectoryEnumerationData;
+    type JsValue = WindowsStableDirectoryEnumerationReceipt;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        into_async_napi(platform::enumerate_windows_directory_stable(
+            &self.path,
+            self.max_entries,
+        ))
+    }
+
+    fn resolve(&mut self, _env: Env, data: Self::Output) -> Result<Self::JsValue> {
+        Ok(WindowsStableDirectoryEnumerationReceipt {
+            directory_before: data.directory_before,
+            entries: data
+                .entries
+                .into_iter()
+                .map(|entry| WindowsDirectoryEntryObservation {
+                    name: Utf16String::from(entry.name),
+                    file_id: entry.file_id,
+                    size: entry.size,
+                    allocation_size: entry.allocation_size,
+                    creation_time: entry.creation_time,
+                    last_write_time: entry.last_write_time,
+                    change_time: entry.change_time,
+                    attributes: entry.attributes,
+                    reparse_tag: entry.reparse_tag,
+                    directory: entry.directory,
+                })
+                .collect(),
+            directory_after: data.directory_after,
+        })
+    }
+}
+
+#[napi(js_name = "enumerateWindowsDirectoryStable")]
+pub fn enumerate_windows_directory_stable(
+    path: String,
+    max_entries: u32,
+) -> Result<AsyncTask<StableDirectoryEnumerationTask>> {
+    if max_entries > MAX_STABLE_DIRECTORY_ENTRIES {
+        return Err(Error::new(
+            Status::InvalidArg,
+            format!(
+                "ERR_WIN32_ENUMERATION_LIMIT: maxEntries exceeds the Bazframe native limit of {MAX_STABLE_DIRECTORY_ENTRIES} entries"
+            ),
+        ));
+    }
+    Ok(AsyncTask::new(StableDirectoryEnumerationTask {
+        path,
+        max_entries,
+    }))
 }

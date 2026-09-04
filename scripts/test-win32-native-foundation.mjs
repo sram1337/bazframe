@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
+  link,
   mkdir,
   mkdtemp,
   readFile,
@@ -17,7 +18,7 @@ const args = process.argv.slice(2);
 const packageRoot = resolve(argument('--package-root') ?? fileURLToPath(new URL('..', import.meta.url)));
 const outputPath = resolve(argument('--output') ?? join(packageRoot, 'win32-native-evidence.json'));
 const report = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   purpose: 'Bazframe-owned native Windows foundation evidence only; not a Windows support claim.',
   environment: {
     platform: process.platform,
@@ -43,6 +44,9 @@ try {
   const nativeModule = await import(pathToFileURL(join(packageRoot, 'dist/core/win32-native.js')).href);
   const privateDirectoryModule = await import(
     pathToFileURL(join(packageRoot, 'dist/state/win32-private-directory.js')).href
+  );
+  const directoryClosureModule = await import(
+    pathToFileURL(join(packageRoot, 'dist/state/win32-directory-closure.js')).href
   );
   const backend = nativeModule.loadBazframeWin32Native();
   const nativePath = join(
@@ -150,6 +154,136 @@ try {
   await unlink(junction);
   requireCondition(await readFile(join(outside, 'child.txt'), 'utf8') === 'outside\n', 'junction target preserved');
 
+  const closureComponent = 'closure-root';
+  const closureRoot = join(privateRoot, closureComponent);
+  privateDirectoryModule.createWindowsPrivateDirectory(backend, privateRoot, closureComponent);
+  privateDirectoryModule.createWindowsPrivateDirectory(backend, closureRoot, 'nested-数据');
+  privateDirectoryModule.createWindowsPrivateDirectory(backend, closureRoot, 'empty');
+  await writeFile(join(closureRoot, 'zeta.txt'), 'zeta\n');
+  await writeFile(join(closureRoot, 'alpha.txt'), 'alpha\n');
+  await writeFile(join(closureRoot, 'nested-数据', 'value.txt'), 'nested\n');
+
+  const enumeration = await backend.enumerateStableDirectory(closureRoot, 4);
+  const enumerationNames = enumeration.entries.map((entry) => entry.name);
+  requireCondition(
+    JSON.stringify(enumerationNames) === JSON.stringify([...enumerationNames].sort()),
+    'stable directory enumeration order'
+  );
+  requireCondition(enumeration.entries.length === 4, 'stable directory exact bound');
+  await expectCode(
+    () => backend.enumerateStableDirectory(closureRoot, 3),
+    'WINDOWS_NATIVE_ENUMERATION_LIMIT_EXCEEDED'
+  );
+  const secondEnumeration = await backend.enumerateStableDirectory(closureRoot, 4);
+  const emptyEnumeration = await backend.enumerateStableDirectory(join(closureRoot, 'empty'), 0);
+  requireCondition(emptyEnumeration.entries.length === 0, 'empty stable directory enumeration');
+
+  const manyComponent = 'enumeration-many';
+  const manyRoot = join(privateRoot, manyComponent);
+  privateDirectoryModule.createWindowsPrivateDirectory(backend, privateRoot, manyComponent);
+  const manyNames = Array.from(
+    { length: 400 },
+    (_, index) => `entry-${String(index).padStart(3, '0')}-${'x'.repeat(75)}`
+  );
+  requireCondition(
+    manyNames.reduce((bytes, name) => bytes + Buffer.byteLength(name, 'utf16le'), 0) > 64 * 1024,
+    'multi-buffer directory fixture exceeds one native buffer in names alone'
+  );
+  for (const name of manyNames) await writeFile(join(manyRoot, name), '');
+  const manyFirst = await backend.enumerateStableDirectory(manyRoot, manyNames.length);
+  const manySecond = await backend.enumerateStableDirectory(manyRoot, manyNames.length);
+  requireCondition(
+    JSON.stringify(manyFirst.entries) === JSON.stringify(manySecond.entries)
+      && JSON.stringify(manyFirst.entries.map((entry) => entry.name))
+        === JSON.stringify([...manyNames].sort()),
+    'multi-buffer directory enumeration is complete and deterministic'
+  );
+  await expectCode(
+    () => backend.enumerateStableDirectory(manyRoot, manyNames.length - 1),
+    'WINDOWS_NATIVE_ENUMERATION_LIMIT_EXCEEDED'
+  );
+
+  const closure = await directoryClosureModule.captureWindowsDirectoryClosure(
+    backend,
+    closureRoot,
+    { maxEntries: 6, maxDepth: 2, maxPathBytes: 256, maxFileBytes: 32, maxAggregateBytes: 64 }
+  );
+  const repeatedClosure = await directoryClosureModule.captureWindowsDirectoryClosure(
+    backend,
+    closureRoot,
+    { maxEntries: 6, maxDepth: 2, maxPathBytes: 256, maxFileBytes: 32, maxAggregateBytes: 64 }
+  );
+  const listedIdentities = new Map(enumeration.entries.map((entry) => [entry.name, entry.fileId]));
+  const closureTopLevel = closure.closure.entries.filter((entry) => !entry.path.includes('/'));
+  const closureIdentityReconciled = closureTopLevel.every(
+    (entry) => listedIdentities.get(entry.path) === entry.fileId
+  );
+  await expectCode(
+    () => directoryClosureModule.captureWindowsDirectoryClosure(
+      backend,
+      closureRoot,
+      { maxEntries: 7, maxDepth: 2, maxPathBytes: 256, maxFileBytes: 32, maxAggregateBytes: 64 },
+      { beforeSecondPass: () => writeFile(join(closureRoot, 'drift.txt'), 'drift\n') }
+    ),
+    'WINDOWS_DIRECTORY_CLOSURE_CHANGED'
+  );
+  await unlink(join(closureRoot, 'drift.txt'));
+
+  for (const lowerLimits of [
+    { maxEntries: 4 },
+    { maxDepth: 0 },
+    { maxPathBytes: 4 },
+    { maxFileBytes: 5 },
+    { maxAggregateBytes: 10 }
+  ]) {
+    await expectCode(
+      () => directoryClosureModule.captureWindowsDirectoryClosure(
+        backend,
+        closureRoot,
+        lowerLimits
+      ),
+      'WINDOWS_DIRECTORY_CLOSURE_LIMIT_EXCEEDED'
+    );
+  }
+
+  const hardLinkAlias = join(outside, 'closure-hard-link');
+  await link(join(closureRoot, 'alpha.txt'), hardLinkAlias);
+  await expectCode(
+    () => directoryClosureModule.captureWindowsDirectoryClosure(backend, closureRoot),
+    'WINDOWS_DIRECTORY_CLOSURE_INVALID'
+  );
+  await unlink(hardLinkAlias);
+
+  const broadAclComponent = 'broad-file-acl';
+  const broadAclRoot = join(privateRoot, broadAclComponent);
+  privateDirectoryModule.createWindowsPrivateDirectory(backend, privateRoot, broadAclComponent);
+  const broadAclFile = join(broadAclRoot, 'secret.txt');
+  await writeFile(broadAclFile, 'secret\n');
+  execFileSync('icacls.exe', [broadAclFile, '/grant', '*S-1-1-0:(R)'], { stdio: 'pipe' });
+  await expectCode(
+    () => directoryClosureModule.captureWindowsDirectoryClosure(backend, broadAclRoot),
+    'WINDOWS_DIRECTORY_CLOSURE_INVALID'
+  );
+
+  const closureJunction = join(closureRoot, 'outside-junction');
+  await symlink(outside, closureJunction, 'junction');
+  const reparseEnumeration = await backend.enumerateStableDirectory(closureRoot, 5);
+  const reparseEntry = reparseEnumeration.entries.find((entry) => entry.name === 'outside-junction');
+  requireCondition(reparseEntry?.reparseTag !== null, 'directory reparse observed as leaf');
+  await expectCode(
+    () => directoryClosureModule.captureWindowsDirectoryClosure(
+      backend,
+      closureRoot,
+      { maxEntries: 7, maxDepth: 2, maxPathBytes: 256, maxFileBytes: 32, maxAggregateBytes: 64 }
+    ),
+    'WINDOWS_DIRECTORY_CLOSURE_INVALID'
+  );
+  await unlink(closureJunction);
+  requireCondition(
+    await readFile(join(outside, 'child.txt'), 'utf8') === 'outside\n',
+    'enumerated reparse target preserved'
+  );
+
   report.observations = {
     binarySha256: createHash('sha256').update(nativeBytes).digest('hex'),
     packageVersion: manifest.version,
@@ -195,7 +329,26 @@ try {
     privateDirectoryReparseParentRefused: true,
     privateDirectoryDirectChildLocalNtfs: privateInspection.volume.identity
       === rootInspection.volume.identity
-      && privateInspection.volume.filesystemName === 'NTFS'
+      && privateInspection.volume.filesystemName === 'NTFS',
+    stableDirectoryEnumerationEmptyAndBounded: emptyEnumeration.entries.length === 0
+      && enumeration.entries.length === 4,
+    stableDirectoryEnumerationDeterministic: JSON.stringify(enumeration.entries)
+      === JSON.stringify(secondEnumeration.entries),
+    stableDirectoryEnumerationMultiBufferComplete: manyFirst.entries.length === manyNames.length
+      && JSON.stringify(manyFirst.entries) === JSON.stringify(manySecond.entries),
+    stableDirectoryEnumerationKeptIdentity: enumeration.directoryBefore.object.fileId
+      === enumeration.directoryAfter.object.fileId,
+    directoryEnumerationIdentityReconciled: closureIdentityReconciled,
+    directoryReparseObservedAsLeaf: reparseEntry?.reparseTag !== null,
+    boundedDirectoryClosure: closure.closure.entries.length === 5
+      && closure.closure.entries.some((entry) => entry.path === 'nested-数据/value.txt')
+      && /^[0-9a-f]{64}$/u.test(closure.closureSha256)
+      && JSON.stringify(closure) === JSON.stringify(repeatedClosure),
+    directoryClosureLimitsRefused: true,
+    directoryClosureHardLinkRefused: true,
+    directoryClosureForeignFileAclRefused: true,
+    directoryClosureDriftRefused: true,
+    directoryClosureReparseRefusedTargetPreserved: true
   };
   for (const [name, value] of Object.entries(report.observations)) {
     if (typeof value === 'boolean') requireCondition(value, name);

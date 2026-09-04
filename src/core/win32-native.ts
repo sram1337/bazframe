@@ -2,16 +2,19 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { BazframeError, errorCode } from './errors.js';
 
-export const BAZFRAME_WIN32_NATIVE_CONTRACT_VERSION = 2;
+export const BAZFRAME_WIN32_NATIVE_CONTRACT_VERSION = 3;
 export const BAZFRAME_WIN32_NATIVE_TARGET = 'win32-x64-msvc';
 // Must remain equal to native/win32/src/lib.rs and the authoritative profile
-// portability per-file production ceiling.
+// portability production ceilings.
 export const BAZFRAME_WIN32_NATIVE_MAX_STABLE_READ_BYTES = 64 * 1024 * 1024;
+export const BAZFRAME_WIN32_NATIVE_MAX_STABLE_DIRECTORY_ENTRIES = 32_768;
 
 const HEX_32 = /^[a-f0-9]{8}$/u;
 const HEX_64 = /^[a-f0-9]{16}$/u;
 const HEX_128 = /^[a-f0-9]{32}$/u;
 const VOLUME_GUID = /^\\\\\?\\Volume\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}\\$/u;
+const FILE_ATTRIBUTE_DIRECTORY = 0x10;
+const FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
 const requireFromHere = createRequire(import.meta.url);
 const nativeArtifactUrl = new URL(
   '../../artifacts/native/win32-x64-msvc/bazframe-win32.node',
@@ -78,10 +81,33 @@ export interface WindowsStableReadReceipt {
   after: WindowsObjectObservation;
 }
 
+export interface WindowsDirectoryEntryObservation {
+  name: string;
+  fileId: string;
+  size: string;
+  allocationSize: string;
+  creationTime: string;
+  lastWriteTime: string;
+  changeTime: string;
+  attributes: number;
+  reparseTag: number | null;
+  directory: boolean;
+}
+
+export interface WindowsStableDirectoryEnumerationReceipt {
+  directoryBefore: WindowsPathInspection;
+  entries: WindowsDirectoryEntryObservation[];
+  directoryAfter: WindowsPathInspection;
+}
+
 export interface BazframeWin32NativeBackend {
   inspectPath(path: string): WindowsPathInspection;
   createPrivateDirectory(parentPath: string, finalComponent: string): WindowsPrivateDirectoryCreationReceipt;
   readStableFile(path: string, maxBytes: number): Promise<WindowsStableReadReceipt>;
+  enumerateStableDirectory(
+    path: string,
+    maxEntries: number
+  ): Promise<WindowsStableDirectoryEnumerationReceipt>;
 }
 
 interface RawNativeModule {
@@ -89,6 +115,7 @@ interface RawNativeModule {
   inspectWindowsPath: (path: string) => unknown;
   createWindowsPrivateDirectory: (parentPath: string, finalComponent: string) => unknown;
   readWindowsFileStable: (path: string, maxBytes: number) => unknown;
+  enumerateWindowsDirectoryStable: (path: string, maxEntries: number) => unknown;
 }
 
 export interface Win32NativeLoadOptions {
@@ -159,7 +186,8 @@ export function loadBazframeWin32Native(
       'contractVersion',
       'packageVersion',
       'target',
-      'maxStableReadBytes'
+      'maxStableReadBytes',
+      'maxStableDirectoryEntries'
     ], 'native contract information');
   } catch (error) {
     throw receiptFailure('Native contract information is malformed.', error);
@@ -182,10 +210,11 @@ export function loadBazframeWin32Native(
       'The bundled Bazframe Windows native artifact reports an unexpected target.'
     );
   }
-  if (info.maxStableReadBytes !== BAZFRAME_WIN32_NATIVE_MAX_STABLE_READ_BYTES) {
+  if (info.maxStableReadBytes !== BAZFRAME_WIN32_NATIVE_MAX_STABLE_READ_BYTES
+    || info.maxStableDirectoryEntries !== BAZFRAME_WIN32_NATIVE_MAX_STABLE_DIRECTORY_ENTRIES) {
     throw failure(
       'WINDOWS_NATIVE_CONTRACT_MISMATCH',
-      'The bundled Bazframe Windows native read limit does not match this Bazframe build.'
+      'The bundled Bazframe Windows native limits do not match this Bazframe build.'
     );
   }
 
@@ -238,6 +267,26 @@ export function loadBazframeWin32Native(
         throw nativeOperationFailure(error);
       }
       return stableReadReceipt(receipt, maxBytes);
+    },
+    async enumerateStableDirectory(
+      path: string,
+      maxEntries: number
+    ): Promise<WindowsStableDirectoryEnumerationReceipt> {
+      requirePath(path);
+      if (!Number.isSafeInteger(maxEntries) || maxEntries < 0 || Object.is(maxEntries, -0)
+        || maxEntries > BAZFRAME_WIN32_NATIVE_MAX_STABLE_DIRECTORY_ENTRIES) {
+        throw failure(
+          'WINDOWS_NATIVE_ENUMERATION_LIMIT_INVALID',
+          'The Bazframe native stable-directory entry bound is invalid.'
+        );
+      }
+      let receipt: unknown;
+      try {
+        receipt = await Promise.resolve(native.enumerateWindowsDirectoryStable(path, maxEntries));
+      } catch (error) {
+        throw nativeOperationFailure(error);
+      }
+      return stableDirectoryEnumerationReceipt(receipt, maxEntries);
     }
   });
 }
@@ -265,7 +314,8 @@ function nativeModule(value: unknown): RawNativeModule {
     'getNativeWindowsInfo',
     'inspectWindowsPath',
     'createWindowsPrivateDirectory',
-    'readWindowsFileStable'
+    'readWindowsFileStable',
+    'enumerateWindowsDirectoryStable'
   ] as const) {
     if (typeof record[name] !== 'function') {
       throw failure(
@@ -347,6 +397,84 @@ function stableReadReceipt(value: unknown, maxBytes: number): WindowsStableReadR
   }
 }
 
+function stableDirectoryEnumerationReceipt(
+  value: unknown,
+  maxEntries: number
+): WindowsStableDirectoryEnumerationReceipt {
+  try {
+    const record = exactRecord(
+      value,
+      ['directoryBefore', 'entries', 'directoryAfter'],
+      'stable directory enumeration'
+    );
+    const directoryBefore = pathInspection(record.directoryBefore);
+    const directoryAfter = pathInspection(record.directoryAfter);
+    if (directoryBefore.kind !== 'directory' || directoryAfter.kind !== 'directory'
+      || !sameDirectoryIdentity(directoryBefore, directoryAfter)
+      || !sameStableObservation(directoryBefore.object, directoryAfter.object)
+      || !sameSecurityObservation(directoryBefore.security, directoryAfter.security)) {
+      throw failure(
+        'WINDOWS_NATIVE_DIRECTORY_CHANGED',
+        'The native stable-directory receipt reports changed directory state.'
+      );
+    }
+    if (!Array.isArray(record.entries) || record.entries.length > maxEntries) invalid();
+    const entries = record.entries.map((entry) => directoryEntryObservation(entry));
+    for (let index = 0; index < entries.length; index += 1) {
+      const current = entries[index]!;
+      if (index > 0 && compareUtf16(entries[index - 1]!.name, current.name) >= 0) invalid();
+    }
+    return { directoryBefore, entries, directoryAfter };
+  } catch (error) {
+    if (error instanceof BazframeError && error.code === 'WINDOWS_NATIVE_DIRECTORY_CHANGED') throw error;
+    throw receiptFailure('Native Windows stable-directory evidence is malformed.', error);
+  }
+}
+
+function directoryEntryObservation(value: unknown): WindowsDirectoryEntryObservation {
+  const record = exactRecord(value, [
+    'name', 'fileId', 'size', 'allocationSize', 'creationTime', 'lastWriteTime',
+    'changeTime', 'attributes', 'reparseTag', 'directory'
+  ], 'directory entry observation');
+  const name = directoryEntryName(record.name);
+  const attributes = uint32(record.attributes);
+  const rawTag = uint32(record.reparseTag);
+  const reparseTag = rawTag === 0 ? null : rawTag;
+  const directory = boolean(record.directory);
+  if (((attributes & FILE_ATTRIBUTE_DIRECTORY) !== 0) !== directory
+    || ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) !== 0) !== (reparseTag !== null)) invalid();
+  return {
+    name,
+    fileId: hex(record.fileId, HEX_128),
+    size: hex(record.size, HEX_64),
+    allocationSize: hex(record.allocationSize, HEX_64),
+    creationTime: hex(record.creationTime, HEX_64),
+    lastWriteTime: hex(record.lastWriteTime, HEX_64),
+    changeTime: hex(record.changeTime, HEX_64),
+    attributes,
+    reparseTag,
+    directory
+  };
+}
+
+function directoryEntryName(value: unknown): string {
+  if (typeof value !== 'string' || value.length === 0 || value === '.' || value === '..'
+    || value.includes('\0') || value.includes('\\') || value.includes('/')) invalid();
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) invalid();
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) invalid();
+  }
+  return value;
+}
+
+function compareUtf16(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function volumeObservation(value: unknown): WindowsVolumeObservation {
   const record = exactRecord(value, [
     'identity', 'filesystemName', 'driveType', 'canonicalVolumeGuidPath', 'remoteDevice'
@@ -417,6 +545,22 @@ function sameDirectoryIdentity(a: WindowsPathInspection, b: WindowsPathInspectio
     && a.object.reparseTag === null && b.object.reparseTag === null
     && !a.object.deletePending && !b.object.deletePending
     && a.object.directory && b.object.directory;
+}
+
+function sameSecurityObservation(
+  a: WindowsSecurityObservation,
+  b: WindowsSecurityObservation
+): boolean {
+  return a.descriptorControl === b.descriptorControl
+    && a.daclPresent === b.daclPresent
+    && a.daclNull === b.daclNull
+    && a.daclDefaulted === b.daclDefaulted
+    && a.daclBytes.equals(b.daclBytes)
+    && a.ownerSid === b.ownerSid
+    && a.ownerDefaulted === b.ownerDefaulted
+    && a.groupSid === b.groupSid
+    && a.groupDefaulted === b.groupDefaulted
+    && a.currentUserSid === b.currentUserSid;
 }
 
 function isDirectCanonicalChild(parent: string, child: string, component: string): boolean {
@@ -533,6 +677,9 @@ function nativeOperationFailure(error: unknown): BazframeError {
       message: 'The native Windows private-directory creation outcome is ambiguous; retain and inspect the destination.'
     },
     ERR_WIN32_FILESYSTEM_UNSUPPORTED: { code: 'WINDOWS_NATIVE_FILESYSTEM_UNSUPPORTED' },
+    ERR_WIN32_ENUMERATION_CHANGED: { code: 'WINDOWS_NATIVE_DIRECTORY_CHANGED' },
+    ERR_WIN32_ENUMERATION_INCOMPLETE: { code: 'WINDOWS_NATIVE_ENUMERATION_INCOMPLETE' },
+    ERR_WIN32_ENUMERATION_LIMIT: { code: 'WINDOWS_NATIVE_ENUMERATION_LIMIT_EXCEEDED' },
     ERR_WIN32_INVALID_PATH: { code: 'WINDOWS_NATIVE_PATH_INVALID' },
     ERR_WIN32_IO: { code: 'WINDOWS_NATIVE_IO_FAILED' },
     ERR_WIN32_METADATA_UNAVAILABLE: { code: 'WINDOWS_NATIVE_METADATA_UNAVAILABLE' },

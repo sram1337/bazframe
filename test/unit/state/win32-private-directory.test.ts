@@ -7,6 +7,7 @@ import type {
 } from '../../../src/core/win32-native.js';
 import {
   admitWindowsPrivateDirectory,
+  admitWindowsPrivateFile,
   createWindowsPrivateDirectory
 } from '../../../src/state/win32-private-directory.js';
 import { BazframeError } from '../../../src/core/errors.js';
@@ -43,6 +44,39 @@ describe('Windows private-directory composition', () => {
     const backend = fakeBackend(() => directory('C:\\state', { security: security(securityOverrides) }));
     expect(() => admitWindowsPrivateDirectory(backend, 'C:\\state')).toThrow(
       expect.objectContaining({ code: 'WINDOWS_PRIVATE_DIRECTORY_PRIVACY_UNPROVED' })
+    );
+  });
+
+  it('admits only owner-private, single-link files and revalidates their security', () => {
+    const accepted = fakeBackend((path) => path.endsWith('file.txt')
+      ? regularFile(path)
+      : directory(path));
+    expect(admitWindowsPrivateFile(accepted, 'C:\\state\\file.txt').kind).toBe('regular-file');
+
+    const linked = fakeBackend((path) => path.endsWith('file.txt')
+      ? regularFile(path, { numberOfLinks: '00000002' })
+      : directory(path));
+    expect(() => admitWindowsPrivateFile(linked, 'C:\\state\\file.txt')).toThrow(
+      expect.objectContaining({ code: 'WINDOWS_PRIVATE_FILE_PRIVACY_UNPROVED' })
+    );
+
+    const broad = fakeBackend((path) => path.endsWith('file.txt')
+      ? regularFile(path, { security: security({ daclBytes: privateAcl([ace(0, FOREIGN)]) }) })
+      : directory(path));
+    expect(() => admitWindowsPrivateFile(broad, 'C:\\state\\file.txt')).toThrow(
+      expect.objectContaining({ code: 'WINDOWS_PRIVATE_FILE_PRIVACY_UNPROVED' })
+    );
+
+    let fileInspections = 0;
+    const drift = fakeBackend((path) => {
+      if (!path.endsWith('file.txt')) return directory(path);
+      fileInspections += 1;
+      return regularFile(path, fileInspections === 1 ? {} : {
+        security: security({ daclBytes: privateAcl([ace(0, FOREIGN)]) })
+      });
+    });
+    expect(() => admitWindowsPrivateFile(drift, 'C:\\state\\file.txt')).toThrow(
+      expect.objectContaining({ code: 'WINDOWS_PRIVATE_FILE_PRIVACY_UNPROVED' })
     );
   });
 
@@ -240,7 +274,8 @@ function fakeBackend(
       return inspection;
     },
     createPrivateDirectory,
-    readStableFile: async () => { throw new Error('unexpected read'); }
+    readStableFile: async () => { throw new Error('unexpected read'); },
+    enumerateStableDirectory: async () => { throw new Error('unexpected enumeration'); }
   };
 }
 
@@ -288,6 +323,23 @@ function directory(
     },
     security: overrides.security ?? security(),
     ancestryReparseFree: true
+  };
+}
+
+function regularFile(
+  path: string,
+  overrides: { numberOfLinks?: string; security?: WindowsSecurityObservation } = {}
+): WindowsPathInspection {
+  const result = directory(path, { security: overrides.security });
+  return {
+    ...result,
+    kind: 'regular-file',
+    object: {
+      ...result.object,
+      numberOfLinks: overrides.numberOfLinks ?? '00000001',
+      attributes: 32,
+      directory: false
+    }
   };
 }
 

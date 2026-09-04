@@ -1,6 +1,6 @@
 use crate::{
-    NativeResult, StableReadData, WindowsPathInspection, WindowsPrivateDirectoryCreationReceipt,
-    native_error,
+    DirectoryEnumerationData, NativeResult, StableReadData, WindowsPathInspection,
+    WindowsPrivateDirectoryCreationReceipt, native_error,
 };
 
 pub(crate) fn inspect_windows_path(_path: &str) -> NativeResult<WindowsPathInspection> {
@@ -27,5 +27,15 @@ pub(crate) fn read_windows_file_stable(
     Err(native_error(
         "ERR_WIN32_UNSUPPORTED_TARGET",
         "Bazframe native stable reads require win32-x64-msvc",
+    ))
+}
+
+pub(crate) fn enumerate_windows_directory_stable(
+    _path: &str,
+    _max_entries: u32,
+) -> NativeResult<DirectoryEnumerationData> {
+    Err(native_error(
+        "ERR_WIN32_UNSUPPORTED_TARGET",
+        "Bazframe native stable directory enumeration requires win32-x64-msvc",
     ))
 }

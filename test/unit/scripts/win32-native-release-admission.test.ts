@@ -106,10 +106,10 @@ describe('Win32 native release admission', () => {
     ['wrong Node version', (fixture: EvidenceFixture) => { fixture.installed.environment.node = '24.0.0'; }],
     ['wrong Rust toolchain', (fixture: EvidenceFixture) => { fixture.aggregate.rust = fixture.rust.replace('1.88.0', '1.89.0'); }],
     ['wrong MSVC toolchain', (fixture: EvidenceFixture) => { fixture.aggregate.msvcToolsVersion = '14.45.0'; }],
-    ['old v1 evidence', (fixture: EvidenceFixture) => {
-      fixture.source.schemaVersion = 1;
-      fixture.installed.schemaVersion = 1;
-      fixture.aggregate.schemaVersion = 1;
+    ['old v2 evidence', (fixture: EvidenceFixture) => {
+      fixture.source.schemaVersion = 2;
+      fixture.installed.schemaVersion = 2;
+      fixture.aggregate.schemaVersion = 2;
     }],
     ['failed completion', (fixture: EvidenceFixture) => { fixture.source.completion = 'failed'; }],
     ['changed release boundary', (fixture: EvidenceFixture) => { fixture.installed.releaseAdmission = 'authorized'; }],
@@ -117,6 +117,9 @@ describe('Win32 native release admission', () => {
     ['failed observation', (fixture: EvidenceFixture) => { fixture.source.observations.localFixedNtfs = false; }],
     ['failed private-directory observation', (fixture: EvidenceFixture) => {
       fixture.source.observations.privateDirectoryFirstVisibilityPrivate = false;
+    }],
+    ['failed directory-closure observation', (fixture: EvidenceFixture) => {
+      fixture.source.observations.boundedDirectoryClosure = false;
     }],
     ['nested/external receipt mismatch', (fixture: EvidenceFixture) => { fixture.aggregate.sourceConformance.observations.stableByteCount = '000000000000000e'; }],
     ['extra schema field', (fixture: EvidenceFixture) => { fixture.installed.extra = true; }],
@@ -206,7 +209,7 @@ function evidenceFixture(): EvidenceFixture {
   const rust = 'rustc 1.88.0 (6b00bc388 2025-06-23)\r\nhost: x86_64-pc-windows-msvc\r\n';
   const msvc = 'Path=C:\\VS\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\cl.exe\r\n';
   const aggregate = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     purpose: 'Bazframe-owned native foundation evidence only; not release admission or a Windows support claim.',
     completion: 'passed',
     sourceCommit: commit,
@@ -227,7 +230,7 @@ function evidenceFixture(): EvidenceFixture {
 
 function receipt(kind: 'source-tree' | 'packed-install') {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     purpose: 'Bazframe-owned native Windows foundation evidence only; not a Windows support claim.',
     environment: { platform: 'win32', arch: 'x64', node: '22.19.0' },
     packageRootKind: kind,
@@ -257,7 +260,19 @@ function receipt(kind: 'source-tree' | 'packed-install') {
       privateDirectoryUnicodeName: true,
       privateDirectoryInvalidNameRefusedBeforeMutation: true,
       privateDirectoryReparseParentRefused: true,
-      privateDirectoryDirectChildLocalNtfs: true
+      privateDirectoryDirectChildLocalNtfs: true,
+      stableDirectoryEnumerationEmptyAndBounded: true,
+      stableDirectoryEnumerationDeterministic: true,
+      stableDirectoryEnumerationMultiBufferComplete: true,
+      stableDirectoryEnumerationKeptIdentity: true,
+      directoryEnumerationIdentityReconciled: true,
+      directoryReparseObservedAsLeaf: true,
+      boundedDirectoryClosure: true,
+      directoryClosureLimitsRefused: true,
+      directoryClosureHardLinkRefused: true,
+      directoryClosureForeignFileAclRefused: true,
+      directoryClosureDriftRefused: true,
+      directoryClosureReparseRefusedTargetPreserved: true
     },
     failures: []
   };

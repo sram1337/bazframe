@@ -74,6 +74,7 @@ try {
   assertExists(join(packageRoot, 'dist', 'providers', 'managed-git-source.js'));
   assertExists(join(packageRoot, 'dist', 'state', 'bounded-file-read.js'));
   assertExists(join(packageRoot, 'dist', 'state', 'read-only-path-anchor.js'));
+  assertExists(join(packageRoot, 'dist', 'state', 'win32-directory-closure.js'));
   assertMissing(join(packageRoot, 'dist', 'sources'));
   assertMissing(join(packageRoot, 'dist', 'source-units'));
   assertMissing(join(packageRoot, 'dist', 'profiles', 'profile-source-reference.js'));
