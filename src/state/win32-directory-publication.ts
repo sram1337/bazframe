@@ -547,10 +547,13 @@ async function appendJournal(
     if (!same(persisted, next)) throw journalInvalid('persisted record differs from intended state');
     return persisted;
   } catch (error) {
+    const cause = writeError ?? error;
+    const stage = writeError === undefined ? 'read-back' : 'append-reconciliation';
+    const causeCode = diagnosticErrorCode(cause);
     throw new BazframeError(
       'WINDOWS_DIRECTORY_PUBLICATION_JOURNAL_WRITE_AMBIGUOUS',
-      'The publication journal write could not be proved; private transaction state was retained.',
-      { cause: writeError ?? error }
+      `The publication journal write could not be proved during ${stage} (${causeCode}); private transaction state was retained.`,
+      { cause: cause instanceof Error ? cause : undefined }
     );
   }
 }
@@ -1123,6 +1126,15 @@ function result(
 function isRetainedRetry(error: unknown): boolean {
   return error instanceof BazframeError
     && error.code === 'WINDOWS_DIRECTORY_PUBLICATION_RETRY_REQUIRED';
+}
+
+function diagnosticErrorCode(error: unknown): string {
+  if (error instanceof BazframeError) return error.code;
+  if (error !== null && typeof error === 'object' && 'code' in error
+    && typeof error.code === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/u.test(error.code)) {
+    return error.code;
+  }
+  return 'UNCLASSIFIED';
 }
 
 function isPublicationAmbiguity(error: unknown): boolean {
