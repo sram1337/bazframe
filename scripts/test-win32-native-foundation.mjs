@@ -1454,7 +1454,7 @@ function replaceCaseInsensitive(value, search, replacement) {
   }
 }
 
-function safeError(error) {
+function safeError(error, depth = 0) {
   let message = error instanceof Error ? error.message : String(error);
   message = message.replace(/S-[0-9]+(?:-[0-9]+)+/giu, '[sid]');
   for (const [path, label] of [
@@ -1466,11 +1466,15 @@ function safeError(error) {
   ]) {
     if (typeof path === 'string' && path.length > 0) message = replaceCaseInsensitive(message, path, label);
   }
+  const cause = depth < 4 && error instanceof Error && error.cause !== undefined
+    ? safeError(error.cause, depth + 1)
+    : undefined;
   return {
     name: error instanceof Error ? error.name : 'UnknownError',
     code: error !== null && typeof error === 'object' && typeof error.code === 'string'
       ? error.code
       : null,
-    message
+    message,
+    ...(cause === undefined ? {} : { cause })
   };
 }
