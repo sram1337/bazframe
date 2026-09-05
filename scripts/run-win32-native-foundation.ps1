@@ -163,19 +163,11 @@ try {
     $env:BAZFRAME_WIN32_NATIVE_PACK_MODE = 'foundation-evidence'
     & $npmCommand run build
     Assert-NativeExit -Operation 'TypeScript build'
-    & $npxCommand vitest run --config vitest.config.ts test/unit/core/win32-native.test.ts test/unit/state/win32-private-directory.test.ts test/unit/state/win32-directory-closure.test.ts test/unit/state/win32-directory-publication.test.ts test/unit/state/win32-operation-lock.test.ts test/unit/state/win32-skill-membership.test.ts test/unit/skills/added-skill-platform-services.test.ts test/unit/skills/added-skill-product-lifecycle.test.ts test/unit/scripts/win32-added-skill-evidence.test.ts test/unit/profiles/win32-profile-provisioning.test.ts test/unit/profiles/win32-profile-selection.test.ts test/unit/state/win32-atomic-file.test.ts test/unit/profile-publishing/win32-profile-activation.test.ts test/unit/cli/platform-support.test.ts
+    & $npxCommand vitest run --config vitest.config.ts test/unit/core/win32-native.test.ts test/unit/state/win32-private-directory.test.ts test/unit/state/win32-directory-closure.test.ts test/unit/state/win32-directory-publication.test.ts test/unit/state/win32-operation-lock.test.ts test/unit/state/win32-skill-membership.test.ts test/unit/skills/added-skill-platform-services.test.ts test/unit/skills/added-skill-product-lifecycle.test.ts test/unit/scripts/win32-added-skill-evidence.test.ts test/unit/scripts/win32-qualification.test.ts test/unit/profiles/win32-profile-provisioning.test.ts test/unit/profiles/win32-profile-selection.test.ts test/unit/state/win32-atomic-file.test.ts test/unit/profile-publishing/win32-profile-activation.test.ts test/unit/cli/platform-support.test.ts
     Assert-NativeExit -Operation 'Native contract tests'
 
-    $env:BAZFRAME_WIN32_NATIVE_TEST_PARENT = $temporaryRoot
-    $sourceEvidencePath = Join-Path $evidenceRoot 'native-source-evidence.json'
-    & $nodeCommand .\scripts\test-win32-native-foundation.mjs --output $sourceEvidencePath
-    Assert-NativeExit -Operation 'Source-tree native conformance'
-    $productSourceEvidencePath = Join-Path $evidenceRoot 'win32-product-source-evidence.json'
-    & $nodeCommand .\scripts\test-win32-added-skill-lifecycle.mjs --output $productSourceEvidencePath
-    Assert-NativeExit -Operation 'Source-tree Windows inactive-profile onboarding and added-Skill product slice'
-
     New-Item -ItemType Directory -Path $packRoot | Out-Null
-    $packText = & $npmCommand pack --json --silent --pack-destination $packRoot
+    $packText = & $npmCommand pack --ignore-scripts --json --silent --pack-destination $packRoot
     Assert-NativeExit -Operation 'npm pack'
     $pack = $packText | ConvertFrom-Json
     if ($pack.Count -ne 1) {
@@ -196,12 +188,16 @@ try {
     }
 
     $env:npm_config_offline = 'true'
+    $env:BAZFRAME_WIN32_NATIVE_TEST_PARENT = $temporaryRoot
+    $sourceEvidencePath = Join-Path $evidenceRoot 'native-source-evidence.json'
     $installedEvidencePath = Join-Path $evidenceRoot 'native-installed-evidence.json'
-    & $nodeCommand .\scripts\test-win32-native-foundation.mjs --package-root $installed --output $installedEvidencePath
-    Assert-NativeExit -Operation 'Installed native conformance'
+    $productSourceEvidencePath = Join-Path $evidenceRoot 'win32-product-source-evidence.json'
     $productInstalledEvidencePath = Join-Path $evidenceRoot 'win32-product-installed-evidence.json'
-    & $nodeCommand .\scripts\test-win32-added-skill-lifecycle.mjs --package-root $installed --output $productInstalledEvidencePath
-    Assert-NativeExit -Operation 'Installed Windows inactive-profile onboarding and added-Skill product slice'
+    & $nodeCommand .\scripts\run-win32-qualification.mjs `
+        --source-root $repository --installed-root $installed `
+        --foundation-source-output $sourceEvidencePath --foundation-installed-output $installedEvidencePath `
+        --product-source-output $productSourceEvidencePath --product-installed-output $productInstalledEvidencePath
+    Assert-NativeExit -Operation 'Settled source and installed foundation/product qualification'
 
     $sourceEvidence = Get-Content -LiteralPath $sourceEvidencePath -Raw | ConvertFrom-Json
     $installedEvidence = Get-Content -LiteralPath $installedEvidencePath -Raw | ConvertFrom-Json

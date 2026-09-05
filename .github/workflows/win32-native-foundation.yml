@@ -54,6 +54,8 @@ on:
       - 'scripts/test-win32-directory-publication-child.mjs'
       - 'scripts/test-win32-operation-lock-child.mjs'
       - 'scripts/run-win32-native-foundation.ps1'
+      - 'scripts/run-win32-qualification.mjs'
+      - 'test/unit/scripts/win32-qualification.test.ts'
       - 'scripts/test-pack.mjs'
       - 'scripts/build.mjs'
       - 'package.json'
@@ -103,6 +105,8 @@ on:
       - 'scripts/test-win32-directory-publication-child.mjs'
       - 'scripts/test-win32-operation-lock-child.mjs'
       - 'scripts/run-win32-native-foundation.ps1'
+      - 'scripts/run-win32-qualification.mjs'
+      - 'test/unit/scripts/win32-qualification.test.ts'
       - 'scripts/test-pack.mjs'
       - 'scripts/build.mjs'
       - 'package.json'
@@ -193,10 +197,10 @@ jobs:
           $ErrorActionPreference = 'Stop'
           npm run build
           if ($LASTEXITCODE -ne 0) { throw "npm build failed with exit $LASTEXITCODE" }
-          npx vitest run --config vitest.config.ts test/unit/core/win32-native.test.ts test/unit/state/win32-private-directory.test.ts test/unit/state/win32-directory-closure.test.ts test/unit/state/win32-directory-publication.test.ts test/unit/state/win32-operation-lock.test.ts test/unit/state/win32-skill-membership.test.ts test/unit/skills/added-skill-platform-services.test.ts test/unit/skills/added-skill-product-lifecycle.test.ts test/unit/scripts/win32-added-skill-evidence.test.ts test/unit/profiles/win32-profile-provisioning.test.ts test/unit/profiles/win32-profile-selection.test.ts test/unit/state/win32-atomic-file.test.ts test/unit/profile-publishing/win32-profile-activation.test.ts test/unit/cli/platform-support.test.ts
+          npx vitest run --config vitest.config.ts test/unit/core/win32-native.test.ts test/unit/state/win32-private-directory.test.ts test/unit/state/win32-directory-closure.test.ts test/unit/state/win32-directory-publication.test.ts test/unit/state/win32-operation-lock.test.ts test/unit/state/win32-skill-membership.test.ts test/unit/skills/added-skill-platform-services.test.ts test/unit/skills/added-skill-product-lifecycle.test.ts test/unit/scripts/win32-added-skill-evidence.test.ts test/unit/scripts/win32-qualification.test.ts test/unit/profiles/win32-profile-provisioning.test.ts test/unit/profiles/win32-profile-selection.test.ts test/unit/state/win32-atomic-file.test.ts test/unit/profile-publishing/win32-profile-activation.test.ts test/unit/cli/platform-support.test.ts
           if ($LASTEXITCODE -ne 0) { throw "native contract tests failed with exit $LASTEXITCODE" }
 
-      - name: Exercise native local-NTFS foundation from the source tree
+      - name: Admit independent private conformance roots
         run: |
           $ErrorActionPreference = 'Stop'
           $testParent = $env:LOCALAPPDATA
@@ -207,21 +211,16 @@ jobs:
           }
           $env:BAZFRAME_WIN32_NATIVE_TEST_PARENT = $testParent
           "BAZFRAME_WIN32_NATIVE_TEST_PARENT=$testParent" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          node ./scripts/test-win32-native-foundation.mjs --output ./native-source-evidence.json
-          if ($LASTEXITCODE -ne 0) { throw "source-tree native conformance failed with exit $LASTEXITCODE" }
           $productEvidenceRoot = Join-Path $env:RUNNER_TEMP 'win32-native-evidence-product'
           if (Test-Path -LiteralPath $productEvidenceRoot) {
             Remove-Item -LiteralPath $productEvidenceRoot -Recurse -Force
           }
           New-Item -ItemType Directory -Path $productEvidenceRoot | Out-Null
-          $productSourcePath = Join-Path $productEvidenceRoot 'source.json'
-          node ./scripts/test-win32-added-skill-lifecycle.mjs --output $productSourcePath
-          if ($LASTEXITCODE -ne 0) { throw "source-tree Windows product slice failed with exit $LASTEXITCODE" }
 
-      - name: Pack once and exercise the installed root-bundled binary offline
+      - name: Pack once, install, then qualify independent lanes offline
         run: |
           $ErrorActionPreference = 'Stop'
-          $pack = npm pack --json --silent | ConvertFrom-Json
+          $pack = npm pack --ignore-scripts --json --silent | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) { throw "npm pack failed with exit $LASTEXITCODE" }
           if ($pack.Count -ne 1) { throw 'Expected exactly one Bazframe tarball.' }
           $tarball = Join-Path $PWD $pack[0].filename
@@ -235,13 +234,16 @@ jobs:
           $installedHash = (Get-FileHash $installedNative -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($installedHash -ne $expectedHash) { throw 'Packed native binary does not match the reviewed build output.' }
           $env:npm_config_offline = 'true'
-          node ./scripts/test-win32-native-foundation.mjs --package-root $installed --output ./native-installed-evidence.json
-          if ($LASTEXITCODE -ne 0) { throw "installed native conformance failed with exit $LASTEXITCODE" }
           $productEvidenceRoot = Join-Path $env:RUNNER_TEMP 'win32-native-evidence-product'
           $productSourcePath = Join-Path $productEvidenceRoot 'source.json'
           $productInstalledPath = Join-Path $productEvidenceRoot 'installed.json'
-          node ./scripts/test-win32-added-skill-lifecycle.mjs --package-root $installed --output $productInstalledPath
-          if ($LASTEXITCODE -ne 0) { throw "installed Windows product slice failed with exit $LASTEXITCODE" }
+          $sourceEvidencePath = Join-Path $PWD 'native-source-evidence.json'
+          $installedEvidencePath = Join-Path $PWD 'native-installed-evidence.json'
+          node ./scripts/run-win32-qualification.mjs `
+            --source-root $PWD.Path --installed-root $installed `
+            --foundation-source-output $sourceEvidencePath --foundation-installed-output $installedEvidencePath `
+            --product-source-output $productSourcePath --product-installed-output $productInstalledPath
+          if ($LASTEXITCODE -ne 0) { throw "source/installed qualification lanes failed with exit $LASTEXITCODE" }
           $sourceReceipt = Get-Content native-source-evidence.json -Raw | ConvertFrom-Json
           $installedReceipt = Get-Content native-installed-evidence.json -Raw | ConvertFrom-Json
           if ($sourceReceipt.completion -ne 'passed' -or $installedReceipt.completion -ne 'passed') {
@@ -354,8 +356,8 @@ jobs:
             native-rust-version.txt
             native-msvc-version.txt
 
-      - name: Upload failed-run diagnostics
-        if: failure()
+      - name: Upload failed or cancelled-run diagnostics
+        if: failure() || cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: bazframe-win32-native-foundation-failed-${{ github.sha }}
