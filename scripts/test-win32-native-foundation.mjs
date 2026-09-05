@@ -245,6 +245,7 @@ try {
     && membershipDriftRefused;
   const membershipLinkSecurityBasics = membershipProof.link.security.daclPresent
     && !membershipProof.link.security.daclNull
+    && (membershipProof.link.security.descriptorControl & 0x1000) !== 0
     && membershipProof.link.security.daclBytes.byteLength > 0
     && membershipProof.link.security.ownerSid === membershipProof.link.security.currentUserSid
     && membershipProof.link.security.currentUserSid
@@ -272,16 +273,14 @@ try {
     () => membershipModule.createWindowsSkillMembership(membershipOptions('case-skill')),
     'WINDOWS_NATIVE_MEMBERSHIP_LINK_INVALID'
   );
-  const exactExistingPath = join(membershipParent, 'existing-skill');
-  await symlink(membershipTarget, exactExistingPath, 'junction');
+  backend.createPrivateJunction(membershipParent, 'existing-skill', membershipTarget);
   const exactExisting = await membershipModule.createWindowsSkillMembership(
     membershipOptions('existing-skill')
   );
   const otherMembershipTarget = join(outside, 'other-membership-target');
   await mkdir(otherMembershipTarget);
   await writeFile(join(otherMembershipTarget, 'other.txt'), 'other\n');
-  const wrongTargetPath = join(membershipParent, 'wrong-target');
-  await symlink(otherMembershipTarget, wrongTargetPath, 'junction');
+  backend.createPrivateJunction(membershipParent, 'wrong-target', otherMembershipTarget);
   await expectCode(
     () => membershipModule.createWindowsSkillMembership(membershipOptions('wrong-target')),
     'WINDOWS_SKILL_MEMBERSHIP_INVALID'
@@ -290,11 +289,10 @@ try {
   const racedCreationRefused = await expectCode(
     () => membershipModule.createWindowsSkillMembership(
       membershipOptions('raced-skill', membershipTarget, {
-        async symlink(target, path, type) {
-          await writeFile(path, 'raced occupant\n');
-          await symlink(target, path, type);
-        },
-        unlink
+        async createJunction(selectedBackend, parentPath, skillId, targetPath) {
+          await writeFile(join(parentPath, skillId), 'raced occupant\n');
+          return selectedBackend.createPrivateJunction(parentPath, skillId, targetPath);
+        }
       })
     ),
     'WINDOWS_SKILL_MEMBERSHIP_CREATE_AMBIGUOUS'
@@ -302,19 +300,17 @@ try {
   const beforeCreateRefused = await expectCode(
     () => membershipModule.createWindowsSkillMembership(
       membershipOptions('before-create-error', membershipTarget, {
-        async symlink() { throw new Error('injected before-effect creation failure'); },
-        unlink
+        async createJunction() { throw new Error('injected before-effect creation failure'); }
       })
     ),
     'WINDOWS_SKILL_MEMBERSHIP_CREATE_FAILED'
   );
   const afterCreateResult = await membershipModule.createWindowsSkillMembership(
     membershipOptions('after-create-error', membershipTarget, {
-      async symlink(target, path, type) {
-        await symlink(target, path, type);
+      async createJunction(selectedBackend, parentPath, skillId, targetPath) {
+        selectedBackend.createPrivateJunction(parentPath, skillId, targetPath);
         throw new Error('injected after-effect creation failure');
-      },
-      unlink
+      }
     })
   );
   const membershipJunctionNoReplace = exactExisting.action === 'current'
@@ -354,7 +350,7 @@ try {
     'WINDOWS_NATIVE_MEMBERSHIP_TARGET_INVALID'
   );
   const foreignAclMembership = join(membershipParent, 'foreign-acl-skill');
-  await symlink(membershipTarget, foreignAclMembership, 'junction');
+  backend.createPrivateJunction(membershipParent, 'foreign-acl-skill', membershipTarget);
   execFileSync('icacls.exe', [
     foreignAclMembership,
     '/L',
@@ -387,14 +383,12 @@ try {
   await membershipModule.createWindowsSkillMembership(membershipOptions('before-error'));
   const beforeErrorRemoval = await membershipModule.removeWindowsSkillMembership(
     membershipOptions('before-error', membershipTarget, {
-      symlink,
       async unlink() { throw new Error('injected before-effect unlink failure'); }
     })
   );
   await membershipModule.createWindowsSkillMembership(membershipOptions('after-error'));
   const afterErrorRemoval = await membershipModule.removeWindowsSkillMembership(
     membershipOptions('after-error', membershipTarget, {
-      symlink,
       async unlink(path) {
         await unlink(path);
         throw new Error('injected after-effect unlink failure');

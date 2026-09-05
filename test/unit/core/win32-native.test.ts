@@ -62,6 +62,7 @@ describe('Bazframe-owned Windows native loader', () => {
   it.each([
     ['missing inspect export', { inspectWindowsPath: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
     ['missing membership inspect export', { inspectWindowsMembershipLink: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
+    ['missing junction-create export', { createWindowsPrivateJunction: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
     ['missing create export', { createWindowsPrivateDirectory: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
     ['missing file-create export', { createWindowsPrivateFile: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
     ['missing lock-acquire export', { acquireWindowsFileLock: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
@@ -190,6 +191,26 @@ describe('Bazframe-owned Windows native loader', () => {
     expect(() => load(native).inspectMembershipLink('C:\\state\\membership'))
       .toThrow(expect.objectContaining({ code: expectedCode }));
     expect(inspect).toHaveBeenCalledTimes(1);
+  });
+
+  it('validates private-junction mutation receipts and maps malformed success to ambiguity', () => {
+    const backend = load(module());
+    expect(backend.createPrivateJunction('C:\\state', 'membership', 'C:\\target'))
+      .toMatchObject({
+        parentBefore: { kind: 'directory' },
+        created: { object: { reparseTag: 0xa0000003 } },
+        parentAfter: { kind: 'directory' }
+      });
+
+    for (const malformed of [
+      { extra: true },
+      { parentAfter: directoryInspection('other-parent') },
+      { created: membershipInspection({ canonicalPath: '\\\\?\\Volume{12345678-1234-1234-1234-123456789abc}\\state\\other' }) }
+    ]) {
+      expect(() => load(module({ junctionCreation: junctionCreation(malformed) }))
+        .createPrivateJunction('C:\\state', 'membership', 'C:\\target'))
+        .toThrow(expect.objectContaining({ code: 'WINDOWS_NATIVE_CREATE_AMBIGUOUS' }));
+    }
   });
 
   it('validates private-directory mutation receipts and maps malformed success to ambiguity', () => {
@@ -443,6 +464,7 @@ function module(overrides: Record<string, unknown> = {}): Record<string, unknown
     getNativeWindowsInfo: () => info,
     inspectWindowsPath: () => overrides.inspection ?? inspection(),
     inspectWindowsMembershipLink: () => overrides.membershipInspection ?? membershipInspection(),
+    createWindowsPrivateJunction: () => overrides.junctionCreation ?? junctionCreation(),
     createWindowsPrivateDirectory: () => overrides.creation ?? creation(),
     createWindowsPrivateFile: () => overrides.privateFileCreation ?? privateFileCreation(),
     acquireWindowsFileLock: vi.fn(() => overrides.lockAcquisition ?? lockAcquisition()),
@@ -452,7 +474,7 @@ function module(overrides: Record<string, unknown> = {}): Record<string, unknown
     readWindowsFileStable: () => Promise.resolve(overrides.stableRead ?? stableRead()),
     enumerateWindowsDirectoryStable: () => Promise.resolve(overrides.enumeration ?? enumeration()),
     ...without(overrides, [
-      'info', 'inspection', 'membershipInspection', 'creation', 'privateFileCreation',
+      'info', 'inspection', 'membershipInspection', 'junctionCreation', 'creation', 'privateFileCreation',
       'lockAcquisition', 'processInspection', 'stableRead', 'enumeration'
     ])
   };
@@ -502,6 +524,15 @@ function membershipInspection(overrides: Record<string, unknown> = {}): Record<s
     targetVolumeIdentity: VOLUME,
     targetFileId: FILE_ID,
     ...without(overrides, ['volume', 'object', 'security'])
+  };
+}
+
+function junctionCreation(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    parentBefore: directoryInspection('state'),
+    created: membershipInspection(),
+    parentAfter: directoryInspection('state'),
+    ...overrides
   };
 }
 

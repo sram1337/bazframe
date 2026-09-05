@@ -177,6 +177,13 @@ pub struct WindowsMembershipLinkInspection {
 }
 
 #[napi(object)]
+pub struct WindowsPrivateJunctionCreationReceipt {
+    pub parent_before: WindowsPathInspection,
+    pub created: WindowsMembershipLinkInspection,
+    pub parent_after: WindowsPathInspection,
+}
+
+#[napi(object)]
 pub struct WindowsDirectoryEntryObservation {
     pub name: Utf16String,
     pub file_id: String,
@@ -244,6 +251,22 @@ pub fn inspect_windows_membership_link(
     path: String,
 ) -> Result<WindowsMembershipLinkInspection> {
     into_napi(env, platform::inspect_windows_membership_link(&path))
+}
+
+#[napi(js_name = "createWindowsPrivateJunction")]
+pub fn create_windows_private_junction(
+    env: Env,
+    parent_path: String,
+    final_component: Utf16String,
+    target_path: String,
+) -> Result<WindowsPrivateJunctionCreationReceipt> {
+    let component = component::validate_final_component(&final_component);
+    into_napi(
+        env,
+        component.and_then(|component| {
+            platform::create_windows_private_junction(&parent_path, &component, &target_path)
+        }),
+    )
 }
 
 #[napi(js_name = "createWindowsPrivateDirectory")]

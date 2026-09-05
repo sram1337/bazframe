@@ -1,9 +1,10 @@
-import { symlink, unlink } from 'node:fs/promises';
+import { unlink } from 'node:fs/promises';
 import { win32 } from 'node:path';
 import type {
   BazframeWin32NativeBackend,
   WindowsMembershipLinkInspection,
   WindowsPathInspection,
+  WindowsPrivateJunctionCreationReceipt,
   WindowsSecurityObservation
 } from '../core/win32-native.js';
 import { BazframeError, errorCode } from '../core/errors.js';
@@ -15,8 +16,13 @@ import {
 } from './win32-private-directory.js';
 
 export interface WindowsSkillMembershipIo {
-  symlink(target: string, path: string, type: 'junction'): Promise<void>;
-  unlink(path: string): Promise<void>;
+  createJunction?(
+    backend: BazframeWin32NativeBackend,
+    parentPath: string,
+    skillId: string,
+    targetPath: string
+  ): WindowsPrivateJunctionCreationReceipt | Promise<WindowsPrivateJunctionCreationReceipt>;
+  unlink?(path: string): Promise<void>;
 }
 
 export interface WindowsSkillMembershipOptions {
@@ -43,10 +49,14 @@ export type WindowsSkillMembershipRemoval =
   | { outcome: 'absent'; effect: 'already-absent' | 'removed' }
   | { outcome: 'present'; proof: WindowsSkillMembershipProof };
 
-const defaultIo: WindowsSkillMembershipIo = {
-  symlink: (target, path, type) => symlink(target, path, type),
-  unlink: (path) => unlink(path)
-};
+const defaultCreateJunction: NonNullable<WindowsSkillMembershipIo['createJunction']> = (
+  backend,
+  parentPath,
+  skillId,
+  targetPath
+) => backend.createPrivateJunction(parentPath, skillId, targetPath);
+
+const defaultUnlink: NonNullable<WindowsSkillMembershipIo['unlink']> = (path) => unlink(path);
 
 /** Internal Windows composition seam. It does not bypass the public platform gate. */
 export function inspectWindowsSkillMembership(
@@ -78,12 +88,14 @@ export async function createWindowsSkillMembership(
   requireSameParent(inputs.parent, beforeParent);
   requireSameTarget(inputs.target, beforeTarget);
 
+  let mutationReceipt: WindowsPrivateJunctionCreationReceipt | undefined;
   let mutationError: unknown;
   try {
-    await (options.io ?? defaultIo).symlink(
-      inputs.targetPath,
-      inputs.membershipPath,
-      'junction'
+    mutationReceipt = await (options.io?.createJunction ?? defaultCreateJunction)(
+      options.backend,
+      inputs.parentPath,
+      inputs.skillId,
+      inputs.targetPath
     );
   } catch (error) {
     mutationError = error;
@@ -94,13 +106,28 @@ export async function createWindowsSkillMembership(
     const afterTarget = inspectTarget(options.backend, inputs.targetPath);
     requireSameParent(beforeParent, afterParent);
     requireSameTarget(beforeTarget, afterTarget);
+    if (mutationReceipt !== undefined) {
+      requireSameParent(beforeParent, mutationReceipt.parentBefore);
+      requireSameParent(mutationReceipt.parentBefore, mutationReceipt.parentAfter);
+      const receiptProof = prove({
+        ...inputs,
+        parent: mutationReceipt.parentAfter,
+        target: beforeTarget
+      }, mutationReceipt.created);
+      requireSameParent(mutationReceipt.parentAfter, afterParent);
+      requireSameTarget(receiptProof.target, afterTarget);
+    }
     const after = inspectState(options.backend, {
       ...inputs,
       parent: afterParent,
       target: afterTarget
     });
     if (after.kind === 'present') {
-      return { action: 'added', proof: revalidateProof(options.backend, inputs, after.proof) };
+      const proof = revalidateProof(options.backend, inputs, after.proof);
+      if (mutationReceipt !== undefined && !sameLink(mutationReceipt.created, proof.link)) {
+        throw new Error('created membership differs from the native creation receipt');
+      }
+      return { action: 'added', proof };
     }
     if (mutationError !== undefined) {
       throw failure(
@@ -134,7 +161,7 @@ export async function removeWindowsSkillMembership(
 
   let mutationError: unknown;
   try {
-    await (options.io ?? defaultIo).unlink(inputs.membershipPath);
+    await (options.io?.unlink ?? defaultUnlink)(inputs.membershipPath);
   } catch (error) {
     mutationError = error;
   }

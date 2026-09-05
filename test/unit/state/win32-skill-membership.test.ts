@@ -3,6 +3,7 @@ import type {
   BazframeWin32NativeBackend,
   WindowsMembershipLinkInspection,
   WindowsPathInspection,
+  WindowsPrivateJunctionCreationReceipt,
   WindowsSecurityObservation
 } from '../../../src/core/win32-native.js';
 import { BazframeError } from '../../../src/core/errors.js';
@@ -29,7 +30,11 @@ describe('Windows Skill membership composition', () => {
       action: 'added',
       proof: { membershipPath: MEMBER, target: { canonicalPath: canonical(TARGET) } }
     });
-    expect(fixture.io.symlink).toHaveBeenCalledWith(TARGET, MEMBER, 'junction');
+    expect(fixture.createPrivateJunction).toHaveBeenCalledWith(
+      PARENT,
+      'demo-skill',
+      TARGET
+    );
     expect(inspectWindowsSkillMembership(fixture.options).link.normalizedTarget).toBe(canonical(TARGET));
 
     await expect(removeWindowsSkillMembership(fixture.options)).resolves.toEqual({
@@ -48,7 +53,7 @@ describe('Windows Skill membership composition', () => {
       return result;
     };
     await expect(createWindowsSkillMembership(fixture.options)).resolves.toMatchObject({ action: 'current' });
-    expect(fixture.io.symlink).not.toHaveBeenCalled();
+    expect(fixture.createPrivateJunction).not.toHaveBeenCalled();
   });
 
   it('refuses a foreign or parent-user-mismatched link ACL', () => {
@@ -133,7 +138,7 @@ describe('Windows Skill membership composition', () => {
     const fixture = setup();
     fixture.backend.inspectMembershipLink = () => { throw new BazframeError(code, 'refused'); };
     await expect(createWindowsSkillMembership(fixture.options)).rejects.toMatchObject({ code });
-    expect(fixture.io.symlink).not.toHaveBeenCalled();
+    expect(fixture.createPrivateJunction).not.toHaveBeenCalled();
   });
 
   it('detects parent and link substitution during immediate revalidation', () => {
@@ -193,7 +198,7 @@ describe('Windows Skill membership composition', () => {
 
   it('fails ambiguous when successful creation cannot be proved', async () => {
     const fixture = setup();
-    fixture.io.symlink.mockImplementation(async () => undefined);
+    fixture.createPrivateJunction.mockImplementation(() => junctionReceipt(membership(TARGET)));
     await expect(createWindowsSkillMembership(fixture.options)).rejects.toMatchObject({
       code: 'WINDOWS_SKILL_MEMBERSHIP_CREATE_AMBIGUOUS'
     });
@@ -216,7 +221,7 @@ describe('Windows Skill membership composition', () => {
     }
     await expect(createWindowsSkillMembership({ ...fixture.options, targetPath: 'relative' }))
       .rejects.toMatchObject({ code: 'WINDOWS_SKILL_MEMBERSHIP_PATH_INVALID' });
-    expect(fixture.io.symlink).not.toHaveBeenCalled();
+    expect(fixture.createPrivateJunction).not.toHaveBeenCalled();
   });
 });
 
@@ -228,6 +233,16 @@ function setup(options: {
 } = {}) {
   let link = options.present ? membership(options.linkTarget ?? TARGET) : undefined;
   const inspectPath = vi.fn((path: string) => directory(path));
+  const createPrivateJunction = vi.fn((
+    parentPath: string,
+    skillId: string,
+    targetPath: string
+  ) => {
+    expect(parentPath).toBe(PARENT);
+    expect(skillId).toBe('demo-skill');
+    link = membership(options.linkTarget ?? targetPath);
+    return junctionReceipt(link);
+  });
   const backend: BazframeWin32NativeBackend = {
     inspectPath,
     inspectMembershipLink(path) {
@@ -238,18 +253,28 @@ function setup(options: {
       result.security.daclBytes = Buffer.from(link.security.daclBytes);
       return result;
     },
+    createPrivateJunction,
     createPrivateDirectory: () => { throw new Error('unexpected create directory'); },
     createPrivateFile: () => { throw new Error('unexpected create file'); },
     renameDirectoryNoReplace: async () => { throw new Error('unexpected rename'); },
     readStableFile: async () => { throw new Error('unexpected read'); },
     enumerateStableDirectory: async () => { throw new Error('unexpected enumeration'); }
   };
-  const io = {
-    symlink: vi.fn(async () => {
+  const createJunction = options.createError === undefined
+    ? undefined
+    : vi.fn(async (
+      selectedBackend: BazframeWin32NativeBackend,
+      parentPath: string,
+      skillId: string,
+      targetPath: string
+    ) => {
       if (options.createError === 'before') throw new Error('before create');
-      link = membership(options.linkTarget ?? TARGET);
+      const receipt = selectedBackend.createPrivateJunction(parentPath, skillId, targetPath);
       if (options.createError === 'after') throw new Error('after create');
-    }),
+      return receipt;
+    });
+  const io = {
+    ...(createJunction === undefined ? {} : { createJunction }),
     unlink: vi.fn(async () => {
       if (options.unlinkError === 'before') throw new Error('before unlink');
       link = undefined;
@@ -259,8 +284,19 @@ function setup(options: {
   return {
     backend,
     io,
+    createPrivateJunction,
     inspectPath,
     options: { backend, parentPath: PARENT, skillId: 'demo-skill', targetPath: TARGET, io }
+  };
+}
+
+function junctionReceipt(
+  created: WindowsMembershipLinkInspection
+): WindowsPrivateJunctionCreationReceipt {
+  return {
+    parentBefore: directory(PARENT),
+    created,
+    parentAfter: directory(PARENT)
   };
 }
 

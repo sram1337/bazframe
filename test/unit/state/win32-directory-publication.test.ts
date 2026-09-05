@@ -547,6 +547,7 @@ function harness(options: { destination?: TestNode; oldFile?: string } = {}) {
       return inspection(path, node);
     },
     inspectMembershipLink() { throw new Error('unexpected membership inspection'); },
+    createPrivateJunction() { throw new Error('unexpected membership mutation'); },
     createPrivateDirectory(parentPath, finalComponent) {
       const parent = required(nodes, parentPath);
       const path = win32.join(parentPath, finalComponent);

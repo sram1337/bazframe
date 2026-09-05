@@ -92,6 +92,12 @@ export interface WindowsMembershipLinkInspection {
   targetFileId: string;
 }
 
+export interface WindowsPrivateJunctionCreationReceipt {
+  parentBefore: WindowsPathInspection;
+  created: WindowsMembershipLinkInspection;
+  parentAfter: WindowsPathInspection;
+}
+
 export interface WindowsStableReadReceipt {
   bytes: Buffer;
   byteCount: string;
@@ -148,6 +154,11 @@ export interface WindowsStableDirectoryEnumerationReceipt {
 export interface BazframeWin32NativeBackend {
   inspectPath(path: string): WindowsPathInspection;
   inspectMembershipLink(path: string): WindowsMembershipLinkInspection;
+  createPrivateJunction(
+    parentPath: string,
+    finalComponent: string,
+    targetPath: string
+  ): WindowsPrivateJunctionCreationReceipt;
   createPrivateDirectory(parentPath: string, finalComponent: string): WindowsPrivateDirectoryCreationReceipt;
   createPrivateFile(parentPath: string, finalComponent: string): WindowsPrivateFileCreationReceipt;
   renameDirectoryNoReplace(
@@ -171,6 +182,11 @@ interface RawNativeModule {
   getNativeWindowsInfo: () => unknown;
   inspectWindowsPath: (path: string) => unknown;
   inspectWindowsMembershipLink: (path: string) => unknown;
+  createWindowsPrivateJunction: (
+    parentPath: string,
+    finalComponent: string,
+    targetPath: string
+  ) => unknown;
   createWindowsPrivateDirectory: (parentPath: string, finalComponent: string) => unknown;
   createWindowsPrivateFile: (parentPath: string, finalComponent: string) => unknown;
   acquireWindowsFileLock: (guardPath: string) => unknown;
@@ -305,6 +321,34 @@ export function loadBazframeWin32Native(
         throw nativeOperationFailure(error);
       }
       return membershipLinkInspection(receipt);
+    },
+    createPrivateJunction(
+      parentPath: string,
+      finalComponent: string,
+      targetPath: string
+    ): WindowsPrivateJunctionCreationReceipt {
+      requirePath(parentPath);
+      requireFinalComponent(finalComponent);
+      requirePath(targetPath);
+      let receipt: unknown;
+      try {
+        receipt = native.createWindowsPrivateJunction(
+          parentPath,
+          finalComponent,
+          targetPath
+        );
+      } catch (error) {
+        throw nativeCreationFailure(error);
+      }
+      try {
+        return privateJunctionCreationReceipt(receipt, finalComponent);
+      } catch (error) {
+        throw failure(
+          'WINDOWS_NATIVE_CREATE_AMBIGUOUS',
+          'The native Windows private-junction creation result is malformed; the created path must be inspected before reuse.',
+          error
+        );
+      }
     },
     createPrivateDirectory(
       parentPath: string,
@@ -524,6 +568,7 @@ function nativeModule(value: unknown): RawNativeModule {
     'getNativeWindowsInfo',
     'inspectWindowsPath',
     'inspectWindowsMembershipLink',
+    'createWindowsPrivateJunction',
     'createWindowsPrivateDirectory',
     'createWindowsPrivateFile',
     'acquireWindowsFileLock',
@@ -611,6 +656,26 @@ function canonicalVolumePath(value: unknown): string {
   const remainder = value.slice(match[0].length);
   if (remainder.split('\\').some((component) => component === '.' || component === '..')) invalid();
   return value;
+}
+
+function privateJunctionCreationReceipt(
+  value: unknown,
+  finalComponent: string
+): WindowsPrivateJunctionCreationReceipt {
+  const record = exactRecord(value, [
+    'parentBefore', 'created', 'parentAfter'
+  ], 'private junction creation');
+  const parentBefore = pathInspection(record.parentBefore);
+  const created = membershipLinkInspection(record.created);
+  const parentAfter = pathInspection(record.parentAfter);
+  if (parentBefore.kind !== 'directory' || parentAfter.kind !== 'directory'
+    || !sameDirectoryIdentity(parentBefore, parentAfter)
+    || !sameSecurityObservation(parentBefore.security, parentAfter.security)
+    || parentBefore.volume.identity !== created.volume.identity
+    || !isDirectCanonicalChild(parentBefore.canonicalPath, created.canonicalPath, finalComponent)) {
+    invalid();
+  }
+  return { parentBefore, created, parentAfter };
 }
 
 function privateDirectoryCreationReceipt(
@@ -967,7 +1032,7 @@ function nativeCreationFailure(error: unknown): BazframeError {
   if (mapped.code !== 'WINDOWS_NATIVE_OPERATION_FAILED') return mapped;
   return failure(
     'WINDOWS_NATIVE_CREATE_AMBIGUOUS',
-    'The native Windows private-directory creation outcome is ambiguous; retain and inspect the destination.',
+    'The native Windows private-object creation outcome is ambiguous; retain and inspect the destination.',
     error
   );
 }
@@ -978,7 +1043,7 @@ function nativeOperationFailure(error: unknown): BazframeError {
     ERR_WIN32_ALREADY_EXISTS: { code: 'WINDOWS_NATIVE_DIRECTORY_OCCUPIED' },
     ERR_WIN32_CREATE_AMBIGUOUS: {
       code: 'WINDOWS_NATIVE_CREATE_AMBIGUOUS',
-      message: 'The native Windows private-directory creation outcome is ambiguous; retain and inspect the destination.'
+      message: 'The native Windows private-object creation outcome is ambiguous; retain and inspect the destination.'
     },
     ERR_WIN32_FILESYSTEM_UNSUPPORTED: { code: 'WINDOWS_NATIVE_FILESYSTEM_UNSUPPORTED' },
     ERR_WIN32_ENUMERATION_CHANGED: { code: 'WINDOWS_NATIVE_DIRECTORY_CHANGED' },

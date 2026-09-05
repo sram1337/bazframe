@@ -321,6 +321,7 @@ function fakeBackend(
       return inspection;
     },
     inspectMembershipLink() { throw new Error('unexpected membership inspection'); },
+    createPrivateJunction() { throw new Error('unexpected membership mutation'); },
     createPrivateDirectory,
     createPrivateFile,
     renameDirectoryNoReplace: async () => { throw new Error('unexpected rename'); },

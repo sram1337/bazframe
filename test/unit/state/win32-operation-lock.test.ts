@@ -342,6 +342,7 @@ function createFixture() {
   const backend: BazframeWin32NativeBackend & BazframeWin32LockBackend = {
     inspectPath: inspection,
     inspectMembershipLink() { throw new Error('unexpected membership inspection'); },
+    createPrivateJunction() { throw new Error('unexpected membership mutation'); },
     createPrivateDirectory(parentPath, finalComponent): WindowsPrivateDirectoryCreationReceipt {
       const path = `${parentPath}\\${finalComponent}`;
       if (directories.has(path) || files.has(path)) {

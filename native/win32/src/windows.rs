@@ -43,7 +43,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     QueryDosDeviceW, READ_CONTROL, ReadFile, UnlockFileEx, VOLUME_NAME_GUID,
 };
 use windows_sys::Win32::System::IO::{DeviceIoControl, IO_STATUS_BLOCK, OVERLAPPED};
-use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
+use windows_sys::Win32::System::Ioctl::{FSCTL_GET_REPARSE_POINT, FSCTL_SET_REPARSE_POINT};
 use windows_sys::Win32::System::SystemServices::IO_REPARSE_TAG_MOUNT_POINT;
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentProcessId, GetProcessTimes, OpenProcess, OpenProcessToken,
@@ -54,9 +54,9 @@ use crate::{
     DirectoryEntryData, DirectoryEnumerationData, NativeResult, StableReadData,
     WindowsFileLockAcquisitionReceipt, WindowsMembershipLinkInspection, WindowsObjectObservation,
     WindowsPathInspection, WindowsPrivateDirectoryCreationReceipt,
-    WindowsPrivateFileCreationReceipt, WindowsProcessInstance,
-    WindowsProcessInstanceInspectionReceipt, WindowsSecurityObservation, WindowsVolumeObservation,
-    native_error,
+    WindowsPrivateFileCreationReceipt, WindowsPrivateJunctionCreationReceipt,
+    WindowsProcessInstance, WindowsProcessInstanceInspectionReceipt, WindowsSecurityObservation,
+    WindowsVolumeObservation, native_error,
 };
 
 const DRIVE_FIXED: u32 = 3;
@@ -162,6 +162,117 @@ pub(crate) fn inspect_windows_membership_link(
         ));
     }
     Ok(second)
+}
+
+pub(crate) fn create_windows_private_junction(
+    parent_path: &str,
+    final_component: &str,
+    target_path: &str,
+) -> NativeResult<WindowsPrivateJunctionCreationReceipt> {
+    let parent = open_admitted_path(parent_path, FILE_READ_ATTRIBUTES | READ_CONTROL)?;
+    let parent_before = inspect_opened_path(&parent)?;
+    if parent_before.kind != "directory" {
+        return Err(native_error(
+            "ERR_WIN32_NOT_DIRECTORY",
+            "private-junction creation requires a directory parent",
+        ));
+    }
+    let target_before = inspect_windows_path(target_path).map_err(|_| {
+        native_error(
+            "ERR_WIN32_MEMBERSHIP_TARGET_INVALID",
+            "private-junction creation requires an admitted physical target",
+        )
+    })?;
+    if target_before.kind != "directory" {
+        return Err(native_error(
+            "ERR_WIN32_MEMBERSHIP_TARGET_INVALID",
+            "private-junction creation requires a physical directory target",
+        ));
+    }
+    let normalized_target = full_path(target_path)?;
+    let reparse_data = build_mount_point_reparse_data(&normalized_target)?;
+
+    let junction_path = join_direct_child(parent_path, final_component);
+    let junction_extended = extended_drive_path(&junction_path)?;
+    let descriptor = private_security_descriptor(&parent_before.security.current_user_sid)?;
+    let mut attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: 0,
+    };
+    let encoded = wide(&junction_extended);
+    // SAFETY: the direct-child path and explicit security descriptor remain valid for the
+    // complete no-replace creation call. A successful call is first visibility.
+    let created = unsafe { CreateDirectoryW(encoded.as_ptr(), &mut attributes) };
+    if created == 0 {
+        return Err(last_win_error(
+            "create protected Windows junction placeholder",
+        ));
+    }
+
+    (|| -> NativeResult<WindowsPrivateJunctionCreationReceipt> {
+        let created_handle = open_existing_with_share(
+            &junction_path,
+            GENERIC_WRITE | FILE_READ_ATTRIBUTES | READ_CONTROL,
+            0,
+        )?;
+        let mut returned = 0_u32;
+        // SAFETY: the retained handle is the just-created private directory, the bounded
+        // reparse buffer is immutable for the synchronous request, and no output is requested.
+        let set = unsafe {
+            DeviceIoControl(
+                created_handle.0,
+                FSCTL_SET_REPARSE_POINT,
+                reparse_data.as_ptr().cast(),
+                reparse_data.len() as u32,
+                null_mut(),
+                0,
+                &mut returned,
+                null_mut(),
+            )
+        };
+        if set == 0 {
+            return Err(last_win_error("set protected Windows junction data"));
+        }
+        drop(created_handle);
+
+        let parent_after = inspect_opened_path(&parent)?;
+        let created = inspect_windows_membership_link(&junction_path)?;
+        let separator = if parent_before.canonical_path.ends_with('\\') {
+            ""
+        } else {
+            "\\"
+        };
+        let expected_child = format!(
+            "{}{}{}",
+            parent_before.canonical_path, separator, final_component
+        );
+        if !same_directory_identity(&parent_before, &parent_after)
+            || !same_security_observation(&parent_before.security, &parent_after.security)
+            || created.canonical_path != expected_child
+            || created.volume.identity != parent_before.volume.identity
+            || created.object.volume_identity != parent_before.object.volume_identity
+            || created.normalized_target != target_before.canonical_path
+            || created.target_volume_identity != target_before.object.volume_identity
+            || created.target_file_id != target_before.object.file_id
+        {
+            return Err(native_error(
+                "ERR_WIN32_CREATE_AMBIGUOUS",
+                "private-junction creation result was not the requested stable direct child",
+            ));
+        }
+        Ok(WindowsPrivateJunctionCreationReceipt {
+            parent_before,
+            created,
+            parent_after,
+        })
+    })()
+    .map_err(|_| {
+        native_error(
+            "ERR_WIN32_CREATE_AMBIGUOUS",
+            "private-junction creation became visible but its result could not be proved",
+        )
+    })
 }
 
 pub(crate) fn create_windows_private_directory(
@@ -1277,6 +1388,68 @@ fn read_junction_target(handle: HANDLE) -> NativeResult<String> {
     parse_mount_point_reparse_data(&buffer[..bytes])
 }
 
+fn build_mount_point_reparse_data(target: &str) -> NativeResult<Vec<u8>> {
+    let substitute = format!("\\??\\{target}");
+    let substitute = substitute
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    let print = target
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    let substitute_length = u16::try_from(substitute.len()).map_err(|_| {
+        native_error(
+            "ERR_WIN32_INVALID_PATH",
+            "Windows junction target is too long for a mount-point reparse buffer",
+        )
+    })?;
+    let print_offset = substitute_length.checked_add(2).ok_or_else(|| {
+        native_error(
+            "ERR_WIN32_INVALID_PATH",
+            "Windows junction target offset overflowed",
+        )
+    })?;
+    let print_length = u16::try_from(print.len()).map_err(|_| {
+        native_error(
+            "ERR_WIN32_INVALID_PATH",
+            "Windows junction target is too long for a print name",
+        )
+    })?;
+    let data_length = 8usize
+        .checked_add(substitute.len())
+        .and_then(|size| size.checked_add(2))
+        .and_then(|size| size.checked_add(print.len()))
+        .and_then(|size| size.checked_add(2))
+        .and_then(|size| u16::try_from(size).ok())
+        .ok_or_else(|| {
+            native_error(
+                "ERR_WIN32_INVALID_PATH",
+                "Windows junction reparse data length overflowed",
+            )
+        })?;
+    let total = usize::from(data_length) + 8;
+    if total > MAXIMUM_REPARSE_DATA_BUFFER_SIZE {
+        return Err(native_error(
+            "ERR_WIN32_INVALID_PATH",
+            "Windows junction target exceeds the native reparse-data bound",
+        ));
+    }
+    let mut data = Vec::with_capacity(total);
+    data.extend_from_slice(&IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
+    data.extend_from_slice(&data_length.to_le_bytes());
+    data.extend_from_slice(&0u16.to_le_bytes());
+    data.extend_from_slice(&0u16.to_le_bytes());
+    data.extend_from_slice(&substitute_length.to_le_bytes());
+    data.extend_from_slice(&print_offset.to_le_bytes());
+    data.extend_from_slice(&print_length.to_le_bytes());
+    data.extend_from_slice(&substitute);
+    data.extend_from_slice(&0u16.to_le_bytes());
+    data.extend_from_slice(&print);
+    data.extend_from_slice(&0u16.to_le_bytes());
+    Ok(data)
+}
+
 fn parse_mount_point_reparse_data(buffer: &[u8]) -> NativeResult<String> {
     let bytes = buffer.len();
     if bytes < 16 {
@@ -1425,39 +1598,7 @@ mod membership_reparse_tests {
     }
 
     fn mount_point_data(target: &str) -> Vec<u8> {
-        let substitute = format!("\\??\\{target}");
-        let substitute = utf16_bytes(&substitute);
-        let print = utf16_bytes(target);
-        let substitute_length = u16::try_from(substitute.len()).expect("substitute length");
-        let print_offset = substitute_length.checked_add(2).expect("print offset");
-        let print_length = u16::try_from(print.len()).expect("print length");
-        let data_length = 8usize
-            .checked_add(substitute.len())
-            .and_then(|size| size.checked_add(2))
-            .and_then(|size| size.checked_add(print.len()))
-            .and_then(|size| size.checked_add(2))
-            .and_then(|size| u16::try_from(size).ok())
-            .expect("reparse data length");
-        let mut data = Vec::with_capacity(usize::from(data_length) + 8);
-        data.extend_from_slice(&IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
-        data.extend_from_slice(&data_length.to_le_bytes());
-        data.extend_from_slice(&0u16.to_le_bytes());
-        data.extend_from_slice(&0u16.to_le_bytes());
-        data.extend_from_slice(&substitute_length.to_le_bytes());
-        data.extend_from_slice(&print_offset.to_le_bytes());
-        data.extend_from_slice(&print_length.to_le_bytes());
-        data.extend_from_slice(&substitute);
-        data.extend_from_slice(&0u16.to_le_bytes());
-        data.extend_from_slice(&print);
-        data.extend_from_slice(&0u16.to_le_bytes());
-        data
-    }
-
-    fn utf16_bytes(value: &str) -> Vec<u8> {
-        value
-            .encode_utf16()
-            .flat_map(u16::to_le_bytes)
-            .collect::<Vec<_>>()
+        build_mount_point_reparse_data(target).expect("bounded reparse data")
     }
 }
 

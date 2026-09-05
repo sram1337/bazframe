@@ -297,6 +297,7 @@ function tree(initial: Record<string, TestNode>) {
       return backend.inspectOverride?.(path, base) ?? base;
     },
     inspectMembershipLink() { throw new Error('unexpected membership inspection'); },
+    createPrivateJunction() { throw new Error('unexpected membership mutation'); },
     createPrivateDirectory() { throw new Error('unexpected mutation'); },
     createPrivateFile() { throw new Error('unexpected mutation'); },
     async renameDirectoryNoReplace() { throw new Error('unexpected mutation'); },
