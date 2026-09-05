@@ -26,6 +26,10 @@ on:
       - 'src/profiles/profile-skill-membership.ts'
       - 'src/profiles/profile-skill-reference-index.ts'
       - 'src/profiles/profile-store.ts'
+      - 'src/profiles/profile-management.ts'
+      - 'src/profiles/win32-profile-provisioning.ts'
+      - 'test/unit/profiles/win32-profile-provisioning.test.ts'
+      - 'test/helpers/windows-provisioning-fixture.ts'
       - 'test/unit/core/win32-native.test.ts'
       - 'test/unit/state/win32-private-directory.test.ts'
       - 'test/unit/state/win32-directory-closure.test.ts'
@@ -37,6 +41,7 @@ on:
       - 'test/unit/scripts/win32-added-skill-evidence.test.ts'
       - 'scripts/test-win32-native-foundation.mjs'
       - 'scripts/test-win32-added-skill-lifecycle.mjs'
+      - 'scripts/test-win32-profile-provisioning-child.mjs'
       - 'scripts/verify-win32-added-skill-evidence.mjs'
       - 'scripts/test-win32-directory-publication-child.mjs'
       - 'scripts/test-win32-operation-lock-child.mjs'
@@ -62,6 +67,10 @@ on:
       - 'src/profiles/profile-skill-membership.ts'
       - 'src/profiles/profile-skill-reference-index.ts'
       - 'src/profiles/profile-store.ts'
+      - 'src/profiles/profile-management.ts'
+      - 'src/profiles/win32-profile-provisioning.ts'
+      - 'test/unit/profiles/win32-profile-provisioning.test.ts'
+      - 'test/helpers/windows-provisioning-fixture.ts'
       - 'test/unit/core/win32-native.test.ts'
       - 'test/unit/state/win32-private-directory.test.ts'
       - 'test/unit/state/win32-directory-closure.test.ts'
@@ -73,6 +82,7 @@ on:
       - 'test/unit/scripts/win32-added-skill-evidence.test.ts'
       - 'scripts/test-win32-native-foundation.mjs'
       - 'scripts/test-win32-added-skill-lifecycle.mjs'
+      - 'scripts/test-win32-profile-provisioning-child.mjs'
       - 'scripts/verify-win32-added-skill-evidence.mjs'
       - 'scripts/test-win32-directory-publication-child.mjs'
       - 'scripts/test-win32-operation-lock-child.mjs'
@@ -167,7 +177,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           npm run build
           if ($LASTEXITCODE -ne 0) { throw "npm build failed with exit $LASTEXITCODE" }
-          npx vitest run --config vitest.config.ts test/unit/core/win32-native.test.ts test/unit/state/win32-private-directory.test.ts test/unit/state/win32-directory-closure.test.ts test/unit/state/win32-directory-publication.test.ts test/unit/state/win32-operation-lock.test.ts test/unit/state/win32-skill-membership.test.ts test/unit/skills/added-skill-platform-services.test.ts test/unit/skills/added-skill-product-lifecycle.test.ts test/unit/scripts/win32-added-skill-evidence.test.ts test/unit/cli/platform-support.test.ts
+          npx vitest run --config vitest.config.ts test/unit/core/win32-native.test.ts test/unit/state/win32-private-directory.test.ts test/unit/state/win32-directory-closure.test.ts test/unit/state/win32-directory-publication.test.ts test/unit/state/win32-operation-lock.test.ts test/unit/state/win32-skill-membership.test.ts test/unit/skills/added-skill-platform-services.test.ts test/unit/skills/added-skill-product-lifecycle.test.ts test/unit/scripts/win32-added-skill-evidence.test.ts test/unit/profiles/win32-profile-provisioning.test.ts test/unit/cli/platform-support.test.ts
           if ($LASTEXITCODE -ne 0) { throw "native contract tests failed with exit $LASTEXITCODE" }
 
       - name: Exercise native local-NTFS foundation from the source tree
@@ -233,7 +243,7 @@ jobs:
           }
           $productSource = Get-Content -LiteralPath $productSourcePath -Raw | ConvertFrom-Json
           $productInstalled = Get-Content -LiteralPath $productInstalledPath -Raw | ConvertFrom-Json
-          if ($productSource.schemaVersion -ne 1 -or $productInstalled.schemaVersion -ne 1 -or
+          if ($productSource.schemaVersion -ne 2 -or $productInstalled.schemaVersion -ne 2 -or
               $productSource.completion -ne 'passed' -or $productInstalled.completion -ne 'passed' -or
               $productSource.releaseAdmission -ne 'not-authorized' -or
               $productInstalled.releaseAdmission -ne 'not-authorized' -or

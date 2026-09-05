@@ -5,6 +5,7 @@ const args = process.argv.slice(2);
 const sourcePath = required('--source');
 const installedPath = required('--installed');
 const expectedBinarySha256 = required('--binary-sha256');
+if (!/^[a-f0-9]{64}$/u.test(expectedBinarySha256)) throw new Error('Invalid expected binary digest.');
 const source = await receipt(sourcePath, 'source-tree', expectedBinarySha256);
 const installed = await receipt(installedPath, 'packed-install', expectedBinarySha256);
 if (JSON.stringify(source.observations) !== JSON.stringify(installed.observations)) {
@@ -26,8 +27,8 @@ async function receipt(path, packageRootKind, binarySha256) {
     'observations',
     'failures'
   ]);
-  if (value.schemaVersion !== 1
-    || value.purpose !== 'Internal healthy local added-Skill Windows product-slice evidence only.'
+  if (value.schemaVersion !== 2
+    || value.purpose !== 'Internal inactive-profile onboarding and healthy local added-Skill Windows product-slice evidence only.'
     || value.packageRootKind !== packageRootKind
     || value.completion !== 'passed'
     || value.releaseAdmission !== 'not-authorized'
@@ -39,6 +40,30 @@ async function receipt(path, packageRootKind, binarySha256) {
   }
   const names = [
     'binarySha256',
+    'absentHomeReadOnly',
+    'privateBootstrap',
+    'missingIntermediateBootstrap',
+    'emptyInactiveProfileAdded',
+    'profileAddIdempotent',
+    'profileAddAfterMembershipCurrent',
+    'profilesListedLexically',
+    'inactiveProfileIsolation',
+    'selectionAndFavoritesAbsent',
+    'bootstrapContentionSerialized',
+    'bootstrapContentionRetryCurrent',
+    'freshPublicationPlannedRetry',
+    'freshPublicationCandidateReadyRetry',
+    'freshPublicationRenameIntentRetry',
+    'freshPublicationAfterRenameRetry',
+    'freshPublicationRenameProvenRetry',
+    'freshPublicationDependentStateRetry',
+    'freshPublicationCommittedRetry',
+    'readOnlyListingNoRecovery',
+    'occupiedDestinationRefusedUnchanged',
+    'candidateDriftAmbiguityRetained',
+    'existingCrlfSelectionPreserved',
+    'existingFavoritesPreserved',
+    'editedProfileInstructionsPreserved',
     'healthyCatalogAdded',
     'catalogIdempotent',
     'healthyProfileAttached',

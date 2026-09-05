@@ -15,7 +15,7 @@ import { assertSafeProfileId } from './profile-id.js';
 
 const ACTIVE_PROFILE_FILE = 'active-profile';
 const ADDED_SKILL_NAMESPACE_ENTRY_LIMIT = 1024;
-const MAX_STATE_BYTES = 1024;
+export const MAX_ACTIVE_PROFILE_STATE_BYTES = 1024;
 
 export interface Profile {
   id: string;
@@ -253,30 +253,30 @@ export async function readOptionalActiveProfileSnapshot(
       if (errorCode(error) === 'ELOOP') {
         throw new BazframeError(
           'INVALID_ACTIVE_PROFILE_STATE',
-          `Active-profile state must be a regular UTF-8 file no larger than ${MAX_STATE_BYTES} bytes: ${statePath}`,
+          `Active-profile state must be a regular UTF-8 file no larger than ${MAX_ACTIVE_PROFILE_STATE_BYTES} bytes: ${statePath}`,
           { cause: error }
         );
       }
       throw error;
     }
     const before = await handle.stat({ bigint: true });
-    if (!before.isFile() || before.size > BigInt(MAX_STATE_BYTES)) {
+    if (!before.isFile() || before.size > BigInt(MAX_ACTIVE_PROFILE_STATE_BYTES)) {
       throw new BazframeError(
         'INVALID_ACTIVE_PROFILE_STATE',
-        `Active-profile state must be a regular UTF-8 file no larger than ${MAX_STATE_BYTES} bytes: ${statePath}`
+        `Active-profile state must be a regular UTF-8 file no larger than ${MAX_ACTIVE_PROFILE_STATE_BYTES} bytes: ${statePath}`
       );
     }
     await options.testHooks?.afterInitialStat?.();
-    const bytes = await readAtMostOneBeyond(handle, MAX_STATE_BYTES);
+    const bytes = await readAtMostOneBeyond(handle, MAX_ACTIVE_PROFILE_STATE_BYTES);
     const afterRead = await handle.stat({ bigint: true });
     const current = await lstat(statePath, { bigint: true });
     await options.testHooks?.afterPathStat?.();
     const final = await handle.stat({ bigint: true });
     const finalPath = await lstat(statePath, { bigint: true });
-    if (bytes.byteLength > MAX_STATE_BYTES) {
+    if (bytes.byteLength > MAX_ACTIVE_PROFILE_STATE_BYTES) {
       throw new BazframeError(
         'INVALID_ACTIVE_PROFILE_STATE',
-        `Active-profile state exceeds ${MAX_STATE_BYTES} bytes: ${statePath}`
+        `Active-profile state exceeds ${MAX_ACTIVE_PROFILE_STATE_BYTES} bytes: ${statePath}`
       );
     }
     if (!afterRead.isFile()
@@ -312,28 +312,7 @@ export async function readOptionalActiveProfileSnapshot(
       );
     }
 
-    let text: string;
-    try {
-      text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-    } catch (error) {
-      throw new BazframeError(
-        'INVALID_ACTIVE_PROFILE_STATE',
-        `Active-profile state is not valid UTF-8: ${statePath}`,
-        { cause: error }
-      );
-    }
-    if (text.includes('\0')) {
-      throw new BazframeError(
-        'INVALID_ACTIVE_PROFILE_STATE',
-        `Active-profile state contains a NUL byte: ${statePath}`
-      );
-    }
-    const profileId = text.endsWith('\r\n')
-      ? text.slice(0, -2)
-      : text.endsWith('\n')
-        ? text.slice(0, -1)
-        : text;
-    assertSafeProfileId(profileId);
+    const profileId = decodeActiveProfileState(bytes, statePath);
     snapshot = {
       profileId,
       path: statePath,
@@ -354,6 +333,36 @@ export async function readOptionalActiveProfileSnapshot(
   }
   if (operationError !== undefined) throw operationError;
   return snapshot;
+}
+
+/** Shared byte codec, independent of platform identity authorization. */
+export function decodeActiveProfileState(bytes: Uint8Array, statePath: string): string {
+  if (bytes.byteLength > MAX_ACTIVE_PROFILE_STATE_BYTES) {
+    throw new BazframeError('INVALID_ACTIVE_PROFILE_STATE', 'Active-profile state exceeds its byte limit.');
+  }
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch (error) {
+    throw new BazframeError(
+      'INVALID_ACTIVE_PROFILE_STATE',
+      `Active-profile state is not valid UTF-8: ${statePath}`,
+      { cause: error }
+    );
+  }
+  if (text.includes('\0')) {
+    throw new BazframeError(
+      'INVALID_ACTIVE_PROFILE_STATE',
+      `Active-profile state contains a NUL byte: ${statePath}`
+    );
+  }
+  const profileId = text.endsWith('\r\n')
+    ? text.slice(0, -2)
+    : text.endsWith('\n')
+      ? text.slice(0, -1)
+      : text;
+  assertSafeProfileId(profileId);
+  return profileId;
 }
 
 export async function readActiveProfile(bazframeHome: string): Promise<string> {

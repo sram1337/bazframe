@@ -63,11 +63,25 @@ export interface ProfileRemovalSnapshotAuthorization {
   expectedIdentity: ProfileRemovalIdentity;
 }
 
+/** Explicit internal dependency; public dispatch never constructs it. */
+export interface ProfileProvisioningServices {
+  addProfile(bazframeHome: string, profileId: string): Promise<ProfileLifecycleResult<ProfileAddAction>>;
+  listProfiles(bazframeHome: string): Promise<ProfileListResult>;
+}
+
+export interface ProfileProvisioningOptions {
+  provisioningServices?: ProfileProvisioningServices;
+}
+
 export async function addProfile(
   bazframeHome: string,
-  profileId: string
+  profileId: string,
+  options: ProfileProvisioningOptions = {}
 ): Promise<ProfileLifecycleResult<ProfileAddAction>> {
   assertSafeProfileId(profileId);
+  if (options.provisioningServices !== undefined) {
+    return options.provisioningServices.addProfile(bazframeHome, profileId);
+  }
   return withGlobalStateLock(bazframeHome, 'bazframe profile add', async () => {
     const profilesRoot = join(bazframeHome, 'profiles');
     const directory = profileDirectory(bazframeHome, profileId);
@@ -331,7 +345,11 @@ export async function renameProfile(
   });
 }
 
-export async function listProfiles(bazframeHome: string): Promise<ProfileListResult> {
+export async function listProfiles(
+  bazframeHome: string,
+  options: ProfileProvisioningOptions = {}
+): Promise<ProfileListResult> {
+  if (options.provisioningServices !== undefined) return options.provisioningServices.listProfiles(bazframeHome);
   const profilesRoot = join(bazframeHome, 'profiles');
   const rootMetadata = await pathMetadata(profilesRoot);
   if (rootMetadata === undefined) return { profileIds: [], diagnostics: [] };

@@ -10,7 +10,8 @@ import {
   admitWindowsPrivateDirectory,
   admitWindowsPrivateFile,
   createWindowsPrivateDirectory,
-  createWindowsPrivateFile
+  createWindowsPrivateFile,
+  ensureWindowsPrivateDirectoryPath
 } from '../../../src/state/win32-private-directory.js';
 import { BazframeError } from '../../../src/core/errors.js';
 
@@ -25,6 +26,47 @@ const FILE_GENERIC_READ = 0x00120089;
 const VOLUME = '0020000000000001';
 
 describe('Windows private-directory composition', () => {
+  it('bootstraps missing components beneath namespace-safe non-private ancestors without ACL repair', () => {
+    const nodes = new Map([
+      ['C:\\', directory('C:\\')],
+      ['C:\\ordinary', directory('C:\\ordinary', { security: security({
+        ownerSid: SYSTEM, daclBytes: privateAcl([ace(0, FOREIGN, FILE_GENERIC_READ, 0)])
+      }) })]
+    ]);
+    const create = vi.fn((parent: string, component: string) => {
+      const child = directory(`${parent}\\${component}`);
+      nodes.set(`${parent}\\${component}`, child);
+      return creation(nodes.get(parent)!, child);
+    });
+    const backend = fakeBackend((path) => {
+      const node = nodes.get(path);
+      if (node === undefined) throw new BazframeError('WINDOWS_NATIVE_PATH_NOT_FOUND', 'absent');
+      return node;
+    }, create);
+    expect(ensureWindowsPrivateDirectoryPath(backend, 'C:\\ordinary\\missing\\home').kind).toBe('directory');
+    expect(create.mock.calls).toEqual([['C:\\ordinary', 'missing'], ['C:\\ordinary\\missing', 'home']]);
+    expect(nodes.get('C:\\ordinary')!.security.ownerSid).toBe(SYSTEM);
+    expect(() => ensureWindowsPrivateDirectoryPath(backend, 'C:\\ordinary')).toThrow();
+  });
+
+  it.each(['C:\\ordinary\\..\\home', 'C:\\ordinary\\CON\\home', 'C:\\ordinary\\bad.\\home']) (
+    'refuses the complete unsafe bootstrap spelling before creating any component: %s', (path) => {
+      const create = vi.fn();
+      expect(() => ensureWindowsPrivateDirectoryPath(fakeBackend((name) => directory(name), create), path)).toThrow();
+      expect(create).not.toHaveBeenCalled();
+    }
+  );
+
+  it('refuses namespace-takeover ancestry before missing-directory creation', () => {
+    const create = vi.fn();
+    const backend = fakeBackend((path) => {
+      if (path.endsWith('home')) throw new BazframeError('WINDOWS_NATIVE_PATH_NOT_FOUND', 'absent');
+      return directory(path, { security: security({ daclBytes: privateAcl([ace(0, FOREIGN, FILE_DELETE_CHILD, 0)]) }) });
+    }, create);
+    expect(() => ensureWindowsPrivateDirectoryPath(backend, 'C:\\ordinary\\home')).toThrow();
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it('admits and revalidates a protected owner-private directory', () => {
     const inspectPath = vi.fn(() => directory('C:\\state'));
     const backend = fakeBackend(inspectPath);

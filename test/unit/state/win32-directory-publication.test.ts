@@ -42,6 +42,50 @@ type TestNode = {
 };
 
 describe('Windows directory publication composition', () => {
+  it('publishes only the exact generated file and empty physical directory closure', async () => {
+    const f = harness();
+    const result = await executeWindowsDirectoryPublication({
+      ...f.executeOptions('fresh'),
+      async materialize(writer) {
+        await writer.createPrivateFile('AGENTS.md', Buffer.alloc(0));
+        await writer.createEmptyPrivateDirectory('skills');
+      }
+    });
+    expect(result.action).toBe('committed');
+    expect(f.file(`${f.destination}\\skills`).kind).toBe('directory');
+    expect(f.file(`${f.destination}\\AGENTS.md`).bytes).toEqual(Buffer.alloc(0));
+  });
+
+  it.each(['collision', 'entry-bound', 'path-bound', 'expired', 'drift'] as const)(
+    'refuses empty-directory materialization %s without publishing', async (mode) => {
+      const f = harness();
+      let retained: Parameters<ExecuteWindowsDirectoryPublicationOptions['materialize']>[0] | undefined;
+      const operation = executeWindowsDirectoryPublication({
+        ...f.executeOptions('fresh'),
+        ...(mode === 'entry-bound' ? { candidateLimits: { maxEntries: 0 } } : {}),
+        ...(mode === 'path-bound' ? { candidateLimits: { maxPathBytes: 0 } } : {}),
+        async materialize(writer) {
+          retained = writer;
+          // Unawaited failures still drain and refuse the entire candidate.
+          if (mode === 'entry-bound' || mode === 'path-bound') {
+            void writer.createEmptyPrivateDirectory('skills');
+            return;
+          }
+          await writer.createEmptyPrivateDirectory('skills');
+          if (mode === 'collision') void writer.createPrivateFile('SKILLS', Buffer.alloc(0));
+          if (mode === 'drift') f.file(`${f.candidate}\\skills`).id += 1;
+          if (mode === 'expired') throw new Error('stop');
+        }
+      });
+      await expect(operation).rejects.toThrow();
+      expect(f.has(f.destination)).toBe(false);
+      await expect(retained!.createEmptyPrivateDirectory('late')).rejects.toMatchObject({
+        code: 'WINDOWS_DIRECTORY_PUBLICATION_AUTHORITY_INVALID'
+      });
+      expect(f.has(`${f.candidate}\\late`)).toBe(false);
+    }
+  );
+
   it('publishes a fresh private candidate with append-only intent and predicate proofs', async () => {
     const fixture = harness();
     const result = await executeWindowsDirectoryPublication(fixture.executeOptions('fresh'));

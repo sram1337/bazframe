@@ -96,7 +96,15 @@ export function createWindowsPrivateDirectory(
   finalComponent: string
 ): WindowsPathInspection {
   validateFinalComponent(finalComponent);
-  const chain = inspectPrivateChain(backend, parentPath);
+  return createPrivateDirectoryUnderChain(backend, parentPath, finalComponent, inspectPrivateChain(backend, parentPath));
+}
+
+function createPrivateDirectoryUnderChain(
+  backend: BazframeWin32NativeBackend,
+  parentPath: string,
+  finalComponent: string,
+  chain: ChainEntry[]
+): WindowsPathInspection {
   const admittedChain = revalidateChain(backend, chain);
   const admittedParent = admittedChain[0]!.inspection;
   let receipt;
@@ -133,6 +141,77 @@ export function createWindowsPrivateDirectory(
     return child;
   } catch (error) {
     throw ambiguous(error);
+  }
+}
+
+/** Bootstrap only: existing ancestors need namespace safety, never ACL repair.
+ * Every missing component is protected from first visibility. Occupancy requires
+ * fresh private admission and exact spelling, not an ownership assumption.
+ */
+export function ensureWindowsPrivateDirectoryPath(
+  backend: BazframeWin32NativeBackend,
+  path: string
+): WindowsPathInspection {
+  requireDriveAbsolutePath(path);
+  const components = path.slice(3).split('\\');
+  if (components.length === 0 || components.some((name) => !isValidWindowsPathComponent(name))) {
+    throw failure('WINDOWS_PRIVATE_DIRECTORY_PATH_INVALID', 'The Windows bootstrap path spelling is invalid.');
+  }
+  const missing: string[] = [];
+  let current = path;
+  while (true) {
+    try {
+      backend.inspectPath(current);
+      break;
+    } catch (error) {
+      if (errorCode(error) !== 'WINDOWS_NATIVE_PATH_NOT_FOUND') throw error;
+      missing.unshift(win32.basename(current));
+      const parent = win32.dirname(current);
+      if (parent === current) throw error;
+      current = parent;
+    }
+  }
+  if (missing.length === 0) {
+    const admitted = admitWindowsPrivateDirectory(backend, path);
+    assertExactSpelling(backend, path);
+    return admitted;
+  }
+  const chain: ChainEntry[] = [];
+  let ancestor = current;
+  while (true) {
+    const inspection = backend.inspectPath(ancestor);
+    assertNamespaceDirectory(inspection);
+    chain.push({ path: ancestor, inspection, proof: 'namespace' });
+    const parent = win32.dirname(ancestor);
+    if (parent === ancestor) break;
+    ancestor = parent;
+  }
+  requireChainRelationships(chain);
+  assertExactSpelling(backend, current);
+  let proof = revalidateChain(backend, chain);
+  for (const component of missing) {
+    const child = win32.join(current, component);
+    try {
+      createPrivateDirectoryUnderChain(backend, current, component, proof);
+    } catch (error) {
+      if (errorCode(error) !== 'WINDOWS_PRIVATE_DIRECTORY_OCCUPIED') throw error;
+      revalidateChain(backend, proof);
+      admitWindowsPrivateDirectory(backend, child);
+    }
+    assertExactSpelling(backend, child);
+    current = child;
+    proof = inspectPrivateChain(backend, current);
+  }
+  return admitWindowsPrivateDirectory(backend, path);
+}
+
+function assertExactSpelling(backend: BazframeWin32NativeBackend, path: string): void {
+  let current = path;
+  while (win32.dirname(current) !== current) {
+    if (win32.basename(backend.inspectPath(current).canonicalPath) !== win32.basename(current)) {
+      throw failure('WINDOWS_PRIVATE_DIRECTORY_PATH_INVALID', 'The Windows bootstrap path uses an alias spelling.');
+    }
+    current = win32.dirname(current);
   }
 }
 
