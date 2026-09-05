@@ -124,7 +124,7 @@ const SCENARIOS = new Set([
 ]);
 const SUBSTEPS = new Set([
   'activation-outcome-onboarding', 'activation-deferred-refusal', 'selection-malformed',
-  'selection-profile-drift', 'selection-postcommit', 'current-selected-missing',
+  'selection-profile-drift', 'selection-postcommit', 'current-selected-missing', 'selection-reset-after-missing',
   'activation-modules', 'current-missing', 'managed-activation', 'active-switch', 'activation-contention',
   'selection-outcomes', 'selection-sharing', 'selection-ambiguity', 'activation-interruption',
   'activation-BEFORE_REPLACEMENT', 'activation-AFTER_REPLACEMENT', 'activation-BEFORE_RETURN',

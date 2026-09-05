@@ -2,15 +2,19 @@ import { EventEmitter } from 'node:events';
 import { spawn, spawnSync, type SpawnOptions } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, resolve, win32 } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-const { qualificationArguments, runWindowsQualification } = await import(pathToFileURL(
+import { windowsProvisioningFixture } from '../../helpers/windows-provisioning-fixture.js';
+import * as privateDirectory from '../../../src/state/win32-private-directory.js';
+import { enumerateWindowsPrivateDirectory } from '../../../src/skills/added-skill-platform-services.js';
+
+const { qualificationArguments, runWindowsQualification, prepareWindowsQualificationParents } = await import(pathToFileURL(
   resolve('scripts/run-win32-qualification.mjs')
 ).href);
 const roots: string[] = [];
-afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
+afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); vi.unstubAllEnvs(); });
 
 async function fixture(mode = 'overlap') {
   const root = await mkdtemp(join(tmpdir(), 'bazframe-qualification-'));
@@ -34,7 +38,7 @@ if (mode === 'overlap') await new Promise((done) => {
   check();
 });
 if (lane === 'foundation-installed' && !existsSync(join(root, 'foundation-source.done')) && mode !== 'source-spawn-failed') process.exit(9);
-await writeFile(process.argv[process.argv.indexOf('--output') + 1], JSON.stringify({ lane, offline: process.env.npm_config_offline }));
+await writeFile(process.argv[process.argv.indexOf('--output') + 1], JSON.stringify({ lane, offline: process.env.npm_config_offline, testParent: process.env.BAZFRAME_WIN32_NATIVE_TEST_PARENT }));
 await writeFile(join(root, lane + '.done'), 'settled');
 console.error('PRIVATE-CHILD-ERROR ' + root);
 if (mode === lane + '-fail') process.exit(7);
@@ -43,31 +47,51 @@ if (mode === lane + '-fail') process.exit(7);
   const args = ['--source-root', source, '--installed-root', installed,
     '--foundation-source-output', join(root, 'foundation-source.json'), '--foundation-installed-output', join(root, 'foundation-installed.json'),
     '--product-source-output', join(root, 'product-source.json'), '--product-installed-output', join(root, 'product-installed.json')];
-  return { root, source, installed, args };
+  const parents = { 'product-source': join(root, 'product-source-parent'),
+    'product-installed': join(root, 'product-installed-parent'), foundation: join(root, 'foundation-parent') };
+  let prepared = false;
+  const prepareLaneParents = async (sourceRoot: string) => {
+    expect(sourceRoot).toBe(source);
+    // Test-only host boundary creation substitutes for native protected preparation.
+    for (const path of Object.values(parents)) await mkdir(path);
+    prepared = true;
+    return parents;
+  };
+  return { root, source, installed, args, parents, prepareLaneParents, isPrepared: () => prepared };
 }
 
 describe('native qualification coordinator', () => {
   it('overlaps independent products with one sequential source-to-installed foundation lane', async () => {
     const f = await fixture();
+    vi.stubEnv('npm_config_offline', 'true');
+    vi.stubEnv('QUALIFICATION_TEST_UNRELATED', 'preserved');
+    const originalEnvironment = { ...process.env };
     const labels: string[] = [];
     const calls: Array<{ executable: string; args: string[]; options: SpawnOptions }> = [];
-    const result = await runWindowsQualification(f.args, { log: (label: string) => labels.push(label),
+    const result = await runWindowsQualification(f.args, { prepareLaneParents: f.prepareLaneParents, log: (label: string) => labels.push(label),
       spawnProcess(executable: string, args: string[], options: SpawnOptions) {
+        expect(f.isPrepared()).toBe(true);
         calls.push({ executable, args, options });
         return spawn(executable, args, options);
       }
     });
     expect(result.passed).toBe(true);
     expect(result.outcomes).toHaveLength(4);
-    expect(labels.slice(0, 3)).toEqual(['qualification:product-source:start', 'qualification:product-installed:start', 'qualification:foundation-source:start']);
+    expect(labels.filter((label) => label.endsWith(':start')).slice(0, 3)).toEqual(['qualification:product-source:start', 'qualification:product-installed:start', 'qualification:foundation-source:start']);
     expect(labels.indexOf('qualification:foundation-source:end:passed')).toBeLessThan(labels.indexOf('qualification:foundation-installed:start'));
-    expect(labels).toHaveLength(8);
+    expect(labels).toHaveLength(10);
+    expect(labels.slice(0, 2)).toEqual(['qualification:parents:preparing', 'qualification:parents:prepared']);
+    expect(process.env).toEqual(originalEnvironment);
     for (const call of calls) {
       expect(call.executable).toBe(process.execPath);
       expect(call.options).toMatchObject({ cwd: f.source, shell: false, windowsHide: true, stdio: ['ignore', 'ignore', 'ignore'] });
-      expect(call.options.env).toBe(process.env);
+
       const receipt = JSON.parse(await readFile(call.args.at(-1)!, 'utf8'));
       expect(receipt.lane).toMatch(/^(foundation|product)-(source|installed)$/u);
+      const expectedParent = f.parents[receipt.lane.startsWith('foundation') ? 'foundation' : receipt.lane as 'product-source' | 'product-installed'];
+      expect(receipt.testParent).toBe(expectedParent);
+      expect(receipt.offline).toBe('true');
+      expect(call.options.env).toEqual({ ...originalEnvironment, BAZFRAME_WIN32_NATIVE_TEST_PARENT: expectedParent });
       expect(call.args).toEqual([join(f.source, 'scripts', receipt.lane.startsWith('product') ? 'test-win32-added-skill-lifecycle.mjs' : 'test-win32-native-foundation.mjs'),
         '--package-root', receipt.lane.endsWith('installed') ? f.installed : f.source, '--output', join(f.root, `${receipt.lane}.json`)]);
     }
@@ -75,10 +99,36 @@ describe('native qualification coordinator', () => {
     expect(labels.join('\n')).not.toContain(f.root);
   });
 
+  it('finishes protected namespace preparation before real child launch and never mutates those parents while lanes run', async () => {
+    const f = await fixture();
+    const native = windowsProvisioningFixture();
+    let preparedSnapshot: string | undefined;
+    let calls = 0;
+    const result = await runWindowsQualification(f.args, { log() {},
+      async prepareLaneParents(sourceRoot: string) {
+        const parents = await prepareWindowsQualificationParents(sourceRoot, 'C:\\boundary', {
+          backend: native.backend, privateDirectory, enumerate: enumerateWindowsPrivateDirectory
+        });
+        preparedSnapshot = native.snapshot();
+        return parents;
+      },
+      spawnProcess(executable: string, args: string[], options: SpawnOptions) {
+        expect(preparedSnapshot).toBeDefined();
+        expect(native.snapshot()).toBe(preparedSnapshot);
+        expect(native.writes).toHaveLength(4);
+        calls += 1;
+        return spawn(executable, args, options);
+      }
+    });
+    expect(result.passed).toBe(true);
+    expect(calls).toBe(4);
+    expect(native.snapshot()).toBe(preparedSnapshot);
+  });
+
   it.each(['product-source-fail', 'foundation-source-fail'])('settles every lane after %s, and refuses qualification', async (mode) => {
     const f = await fixture(mode);
     const labels: string[] = [];
-    const result = await runWindowsQualification(f.args, { log: (label: string) => labels.push(label) });
+    const result = await runWindowsQualification(f.args, { prepareLaneParents: f.prepareLaneParents, log: (label: string) => labels.push(label) });
     expect(result.passed).toBe(false);
     expect(result.outcomes.filter((value: { outcome: string }) => value.outcome === 'nonzero')).toHaveLength(1);
     expect(labels.filter((label) => label.includes(':end:'))).toHaveLength(4);
@@ -90,7 +140,7 @@ describe('native qualification coordinator', () => {
     const f = await fixture('basic');
     const labels: string[] = [];
     let first = true;
-    const result = await runWindowsQualification(f.args, { log: (label: string) => labels.push(label),
+    const result = await runWindowsQualification(f.args, { prepareLaneParents: f.prepareLaneParents, log: (label: string) => labels.push(label),
       spawnProcess(executable: string, args: string[], options: SpawnOptions) {
         if (first) {
           first = false;
@@ -110,7 +160,7 @@ describe('native qualification coordinator', () => {
   it('settles a genuinely signaled child and the remaining real processes', async () => {
     const f = await fixture('basic');
     let first = true;
-    const result = await runWindowsQualification(f.args, { log() {},
+    const result = await runWindowsQualification(f.args, { prepareLaneParents: f.prepareLaneParents, log() {},
       spawnProcess(executable: string, args: string[], options: SpawnOptions) {
         const child = spawn(executable, args, options);
         if (first) { first = false; child.once('spawn', () => child.kill('SIGTERM')); }
@@ -125,7 +175,7 @@ describe('native qualification coordinator', () => {
   it.each(['process-error', 'signaled'])('waits for close and distinguishes %s without leaking event details', async (outcome) => {
     const f = await fixture();
     const processes: EventEmitter[] = [], labels: string[] = [];
-    const result = runWindowsQualification(f.args, {
+    const result = runWindowsQualification(f.args, { prepareLaneParents: f.prepareLaneParents,
       log: (label: string) => labels.push(label),
       spawnProcess() {
         const child = new EventEmitter(); processes.push(child);
@@ -150,7 +200,7 @@ describe('native qualification coordinator', () => {
     const f = await fixture();
     await writeFile(f.args[5]!, 'retained');
     let spawned = false;
-    await expect(runWindowsQualification(f.args, { spawnProcess() { spawned = true; } })).rejects.toThrow('Qualification output occupied.');
+    await expect(runWindowsQualification(f.args, { prepareLaneParents: f.prepareLaneParents, spawnProcess() { spawned = true; } })).rejects.toThrow('Qualification output occupied.');
     expect(spawned).toBe(false);
     expect(await readFile(f.args[5]!, 'utf8')).toBe('retained');
   });
@@ -169,11 +219,81 @@ describe('native qualification coordinator', () => {
     expect(() => qualificationArguments(args)).toThrow('Invalid qualification arguments.');
   });
 
+  it('does not start a child or log private details if any parent preparation fails', async () => {
+    const f = await fixture();
+    const labels: string[] = [];
+    let spawned = false;
+    const failure = new Error(`private parent failure ${f.root}`);
+    await expect(runWindowsQualification(f.args, { log: (label: string) => labels.push(label),
+      async prepareLaneParents() { throw failure; }, spawnProcess() { spawned = true; }
+    })).rejects.toBe(failure);
+    expect(spawned).toBe(false);
+    expect(labels).toEqual(['qualification:parents:preparing']);
+  });
+
   it('uses a non-identifying nonzero CLI failure for malformed input', () => {
     const result = spawnSync(process.execPath, ['scripts/run-win32-qualification.mjs', '--private-path'], { encoding: 'utf8' });
     expect(result.status).toBe(1);
     expect(result.stdout).toBe('');
     expect(result.stderr.trim()).toBe('qualification:refused');
+  });
+});
+
+describe('protected qualification outer-boundary preparation', () => {
+  it('creates and privately admits exactly three empty, distinct lane parents with bounded enumeration', async () => {
+    const f = windowsProvisioningFixture();
+    const enumerations: Array<{ path: string; max: number }> = [];
+    const parents = await prepareWindowsQualificationParents('unused', 'C:\\boundary', {
+      backend: f.backend, privateDirectory,
+      async enumerate(backend: typeof f.backend, path: string, max: number) {
+        enumerations.push({ path, max });
+        return enumerateWindowsPrivateDirectory(backend, path, max);
+      }
+    });
+    expect(Object.keys(parents)).toEqual(['product-source', 'product-installed', 'foundation']);
+    expect(new Set(Object.values(parents)).size).toBe(3);
+    const boundary = win32.dirname(parents.foundation);
+    expect(win32.basename(boundary)).toMatch(/^bazframe-qualification-[a-f0-9-]{36}$/u);
+    expect(f.writes).toEqual([boundary, parents['product-source'], parents['product-installed'], parents.foundation]);
+    expect(enumerations.map(({ max }) => max)).toEqual([0, 3, 0, 0, 0]);
+    for (const path of Object.values(parents) as string[]) {
+      expect(win32.dirname(path)).toBe(boundary);
+      const proof = privateDirectory.admitWindowsPrivateDirectory(f.backend, path);
+      expect(proof.security.descriptorControl & 0x1000).toBe(0x1000);
+      expect((await enumerateWindowsPrivateDirectory(f.backend, path, 0)).names).toEqual([]);
+    }
+    // No product home/profile/selection, repair, or cleanup was performed.
+    expect([...f.nodes.keys()]).toHaveLength(6);
+  });
+
+  it.each(['occupied', 'ownership', 'identity', 'reparse', 'unknown-entry'] as const)('refuses %s during admission without cleanup or retries', async (kind) => {
+    const f = windowsProvisioningFixture();
+    const create = f.backend.createPrivateDirectory;
+    f.backend.createPrivateDirectory = (parent, name) => {
+      const receipt = create(parent, name);
+      if (name === 'foundation') {
+        const target = win32.join(parent, 'product-source');
+        if (kind === 'occupied') f.file(win32.join(target, 'unexpected'), 'keep');
+        if (kind === 'ownership') f.nodes.get(target)!.security = { ...f.backend.inspectPath(target).security, ownerSid: 'S-1-5-21-2' };
+        if (kind === 'reparse') f.nodes.get(target)!.reparseTag = 0xa0000003;
+        if (kind === 'identity') f.nodes.get(target)!.id += 100;
+        if (kind === 'unknown-entry') f.file(win32.join(parent, 'unexpected'), 'keep');
+      }
+      return receipt;
+    };
+    await expect(prepareWindowsQualificationParents('unused', 'C:\\boundary', {
+      backend: f.backend, privateDirectory, enumerate: enumerateWindowsPrivateDirectory
+    })).rejects.toThrow();
+    expect(f.writes).toHaveLength(4);
+    expect([...f.nodes.keys()].some((path) => path.endsWith('product-source'))).toBe(true);
+  });
+
+  it('refuses an absent caller temporary-parent input without native creation', async () => {
+    const f = windowsProvisioningFixture();
+    await expect(prepareWindowsQualificationParents('unused', undefined, {
+      backend: f.backend, privateDirectory, enumerate: enumerateWindowsPrivateDirectory
+    })).rejects.toThrow('Qualification temporary parent unavailable.');
+    expect(f.writes).toEqual([]);
   });
 });
 

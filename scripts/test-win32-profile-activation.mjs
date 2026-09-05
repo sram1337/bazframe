@@ -195,13 +195,14 @@ export async function runWindowsProfileActivationEvidence(context) {
     && same(beforeProfileDrift, await read(scenarioHome));
   mark('selection-postcommit');
   let postcommitCandidate;
-  observations.postcommitFailureReported = await code(() => use('focused', { onCandidate(value) { postcommitCandidate = value; }, hooks: { async afterReplacement() { await writeFile(join(scenarioHome, 'profiles', 'focused', 'AGENTS.md'), '# drift\n'); } } }, scenarioHome), 'WINDOWS_PROFILE_ACTIVATION_COMMITTED_CHECK_FAILED')
+  observations.postcommitFailureReported = await code(() => use('focused', { onCandidate(value) { postcommitCandidate = value; }, hooks: { async afterReplacement() { await writeFile(join(scenarioHome, 'profiles', 'focused', 'AGENTS.md'), '# drift\n'); } } }, scenarioHome), 'WINDOWS_PROFILE_ACTIVATION_COMMITTED_CHECK_FAILED', 'WINDOWS_PROFILE_ACTIVATION_CHANGED')
     && await current(scenarioHome) === 'focused'
     && selectionCandidateCommitted(postcommitCandidate.snapshot, await read(scenarioHome), await optionalCandidate(postcommitCandidate.path));
   mark('current-selected-missing');
   await writeFile(statePath, 'missing\r\n');
   const missingBefore = await read(scenarioHome);
   observations.currentSelectedMissingReadOnly = await current(scenarioHome) === 'missing' && same(missingBefore, await read(scenarioHome));
+  mark('selection-reset-after-missing');
   await use('alpha', undefined, scenarioHome);
   mark('activation-interruption');
   let currentNoRecovery = true;
@@ -282,7 +283,14 @@ export async function observeActivationChildStop(child, stage, observeCandidate)
   return candidate;
 }
 function same(left, right) { return left.digest === right.digest && left.bytes.equals(right.bytes); }
-async function code(operation, expected) { try { await operation(); return false; } catch (error) { return error?.code === expected; } }
+/** Preserve the first unexpected refusal and its original causal chain for the existing sanitizer. */
+export async function code(operation, expected, expectedCause) {
+  try { await operation(); return false; }
+  catch (error) {
+    if (error?.code !== expected || (expectedCause !== undefined && error?.cause?.code !== expectedCause)) throw error;
+    return true;
+  }
+}
 function requireCondition(condition) { if (!condition) throw new Error('activation evidence condition failed'); }
 async function withSharingDenied(path, operation) {
   const command = `$f=[System.IO.File]::Open('${path.replaceAll("'", "''")}',[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite); try { [Console]::Out.WriteLine('ready'); [Console]::Out.Flush(); [Console]::In.ReadLine() | Out-Null } finally { $f.Dispose() }`;

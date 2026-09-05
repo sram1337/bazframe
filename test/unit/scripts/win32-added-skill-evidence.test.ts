@@ -12,7 +12,7 @@ const { trackProvisioningChild, sanitizeProductError, sanitizeProductFailure } =
 ).href);
 
 const { sameSelectionCandidateObject, selectionCandidateCommitted, selectionCandidateRetained,
-  newSelectionCandidateName, observeActivationChildStop } = await import(pathToFileURL(
+  newSelectionCandidateName, observeActivationChildStop, code: expectActivationCode } = await import(pathToFileURL(
   join(process.cwd(), 'scripts', 'test-win32-profile-activation.mjs')
 ).href);
 
@@ -494,5 +494,64 @@ describe('independent activation candidate tuple evidence', () => {
     process.emit('message', { event: 'paused', phase: 'BEFORE_REPLACEMENT' });
     await expect(result).rejects.toThrow('product child closed');
     await child.exited;
+  });
+});
+
+
+describe('activation first-refusal diagnostics', () => {
+  const physicalCode = 'WINDOWS_PROFILE_ACTIVATION_CHANGED';
+  const committedCode = 'WINDOWS_PROFILE_ACTIVATION_COMMITTED_CHECK_FAILED';
+  const failure = (code: string, cause?: unknown) => Object.assign(new Error('PRIVATE-DIAGNOSTIC-CONTENT', { cause }), { code });
+
+  it('accepts the expected refusal and retains the existing false verdict for unexpected success', async () => {
+    expect(await expectActivationCode(async () => { throw failure('NO_ACTIVE_PROFILE'); }, 'NO_ACTIVE_PROFILE')).toBe(true);
+    expect(await expectActivationCode(async () => undefined, 'NO_ACTIVE_PROFILE')).toBe(false);
+  });
+
+  it.each(['WINDOWS_OPERATION_LOCK_ANNOUNCEMENT_AMBIGUOUS', 'WINDOWS_OPERATION_LOCK_RELEASE_AMBIGUOUS', 'WINDOWS_NATIVE_READ_CHANGED'])(
+    'propagates the first unexpected %s with its original cause and prevents later steps', async (code) => {
+      const original = failure(code, failure('WINDOWS_NATIVE_READ_CHANGED'));
+      let proceeded = false;
+      const operation = async () => {
+        await expectActivationCode(async () => { throw original; }, 'WINDOWS_SELECTION_NO_EFFECT');
+        proceeded = true;
+      };
+      await expect(operation()).rejects.toBe(original);
+      expect(proceeded).toBe(false);
+      const sanitized = sanitizeProductFailure(original, { scenario: 'activation', substep: 'selection-sharing' });
+      expect(sanitized).toMatchObject({ scenario: 'activation', substep: 'selection-sharing', code,
+        cause: { code: 'WINDOWS_NATIVE_READ_CHANGED' } });
+      expect(JSON.stringify(sanitized)).not.toContain('PRIVATE-DIAGNOSTIC-CONTENT');
+    }
+  );
+
+  it('requires the intended immediate physical-change cause for induced postcommit drift', async () => {
+    const original = failure(committedCode, failure(physicalCode));
+    expect(await expectActivationCode(async () => { throw original; }, committedCode, physicalCode)).toBe(true);
+  });
+
+  it.each(['missing-cause', 'lock-release', 'nested-physical', 'wrong-top'] as const)('does not accept postcommit %s as the expected physical drift', async (kind) => {
+    const cause = kind === 'missing-cause' ? undefined
+      : kind === 'nested-physical' ? failure('WINDOWS_OPERATION_LOCK_RELEASE_AMBIGUOUS', failure(physicalCode))
+        : failure('WINDOWS_OPERATION_LOCK_RELEASE_AMBIGUOUS');
+    const original = failure(kind === 'wrong-top' ? physicalCode : committedCode, cause);
+    await expect(expectActivationCode(async () => { throw original; }, committedCode, physicalCode)).rejects.toBe(original);
+    expect(JSON.stringify(sanitizeProductError(original))).not.toContain('PRIVATE-DIAGNOSTIC-CONTENT');
+  });
+
+  it.each([undefined, null, 'PRIVATE-NON-ERROR'])('does not swallow unexpected non-Error rejection %j', async (original) => {
+    await expect(expectActivationCode(async () => { throw original; }, 'NO_ACTIVE_PROFILE')).rejects.toBe(original);
+  });
+
+  it('attributes the reset activation after selected-missing current to a separate fixed stage', async () => {
+    const source = await readFile('scripts/test-win32-profile-activation.mjs', 'utf8');
+    const start = source.indexOf('observations.currentSelectedMissingReadOnly =');
+    const stage = source.indexOf("mark('selection-reset-after-missing')", start);
+    expect(stage).toBeGreaterThan(start);
+    expect(stage).toBeLessThan(source.indexOf("await use('alpha', undefined, scenarioHome)", start));
+    expect(source).toContain("'WINDOWS_PROFILE_ACTIVATION_COMMITTED_CHECK_FAILED', 'WINDOWS_PROFILE_ACTIVATION_CHANGED')");
+    expect(sanitizeProductFailure(failure('WINDOWS_OPERATION_LOCK_ANNOUNCEMENT_AMBIGUOUS'), {
+      scenario: 'activation', substep: 'selection-reset-after-missing'
+    })).toMatchObject({ scenario: 'activation', substep: 'selection-reset-after-missing', code: 'WINDOWS_OPERATION_LOCK_ANNOUNCEMENT_AMBIGUOUS' });
   });
 });
