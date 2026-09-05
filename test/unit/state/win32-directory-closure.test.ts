@@ -31,6 +31,69 @@ type TestNode = {
 };
 
 describe('Windows directory closure composition', () => {
+  it('diagnoses directory enumeration-versus-open differences using field names only', async () => {
+    const backend = tree({ 'C:\\state': dir(1), 'C:\\state\\sensitive-name': dir(2) });
+    const listed = entry('sensitive-name', dir(2));
+    listed.size = '0000000000000040';
+    listed.allocationSize = '0000000000001000';
+    backend.entryOverride = [listed];
+    await expect(captureWindowsDirectoryClosure(backend, 'C:\\state')).rejects.toMatchObject({
+      code: 'WINDOWS_DIRECTORY_CLOSURE_CHANGED',
+      cause: {
+        code: 'WINDOWS_DIRECTORY_CLOSURE_COMPARISON',
+        message: 'entry-vs-directory-open', objectKind: 'directory',
+        differingFields: ['size', 'allocationSize']
+      }
+    });
+  });
+
+  it.each(['fileId', 'lastWriteTime', 'allocationSize'] as const)('preserves refusal and diagnoses directory %s drift', async (field) => {
+    const backend = tree({ 'C:\\state': dir(1) });
+    const enumerate = backend.enumerateStableDirectory;
+    backend.enumerateStableDirectory = async (path, maximum) => {
+      const receipt = await enumerate(path, maximum);
+      receipt.directoryBefore.object[field] = field === 'fileId' ? 'f'.repeat(32) : 'f'.repeat(16);
+      return receipt;
+    };
+    await expect(captureWindowsDirectoryClosure(backend, 'C:\\state')).rejects.toMatchObject({
+      code: 'WINDOWS_DIRECTORY_CLOSURE_CHANGED',
+      cause: {
+        code: 'WINDOWS_DIRECTORY_CLOSURE_COMPARISON',
+        message: 'expected-vs-enumeration-before', objectKind: 'directory',
+        differingFields: [`object.${field}`]
+      }
+    });
+  });
+
+  it('diagnoses final enumeration differences without disclosing names or identities', async () => {
+    const backend = tree({ 'C:\\state': dir(1), 'C:\\state\\sensitive-name': file(2, 'secret bytes') });
+    backend.onEnumerate = (_path, count) => {
+      if (count === 2) backend.entryOverride = [entry('sensitive-name', file(9, 'secret bytes'))];
+    };
+    await expect(captureWindowsDirectoryClosure(backend, 'C:\\state')).rejects.toMatchObject({
+      code: 'WINDOWS_DIRECTORY_CLOSURE_CHANGED',
+      cause: {
+        code: 'WINDOWS_DIRECTORY_CLOSURE_COMPARISON',
+        message: 'initial-vs-final-enumeration', objectKind: 'directory',
+        differingFields: ['entries.fileId', 'entries.serialization']
+      }
+    });
+  });
+
+  it('distinguishes listed-file versus stable-read metadata drift', async () => {
+    const backend = tree({ 'C:\\state': dir(1), 'C:\\state\\file': file(2, 'secret') });
+    backend.readOverride = async (path, maximum) => {
+      const receipt = await backend.baseRead(path, maximum);
+      return { ...receipt, before: { ...receipt.before, changeTime: 'f'.repeat(16) } };
+    };
+    await expect(captureWindowsDirectoryClosure(backend, 'C:\\state')).rejects.toMatchObject({
+      code: 'WINDOWS_DIRECTORY_CLOSURE_CHANGED', cause: {
+        code: 'WINDOWS_DIRECTORY_CLOSURE_COMPARISON',
+        message: 'entry-vs-file-read-before', objectKind: 'file', differingFields: ['changeTime']
+      }
+    });
+  });
+
   it('captures deterministic nested files and empty directories with path-free identities', async () => {
     const backend = tree({
       'C:\\state': dir(1),

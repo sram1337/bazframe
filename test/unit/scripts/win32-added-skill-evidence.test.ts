@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
 import { pathToFileURL } from 'node:url';
 import { fork, spawnSync } from 'node:child_process';
@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
 
-const { trackProvisioningChild } = await import(pathToFileURL(
+const { trackProvisioningChild, sanitizeProductError, sanitizeProductFailure } = await import(pathToFileURL(
   join(process.cwd(), 'scripts', 'test-win32-profile-provisioning-child.mjs')
 ).href);
 
@@ -210,6 +210,129 @@ describe('Windows product child IPC settlement', () => {
     process.emit('message', { event: 'unexpected' });
     await expect(child.next('result')).rejects.toThrow('unexpected product child event');
     process.emit('close', 0, null);
+    await child.exited;
+  });
+});
+
+
+describe('Windows failed-product diagnostic privacy', () => {
+  it('persists fixed failure context without synthesizing passing observations', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'bazframe-win-product-diagnostic-'));
+    roots.push(root);
+    const output = join(root, 'failed.json');
+    const result = spawnSync(process.execPath, [
+      'scripts/test-win32-added-skill-lifecycle.mjs', '--package-root', root, '--output', output
+    ], { encoding: 'utf8' });
+    expect(result.status).toBe(1);
+    const receipt = JSON.parse(await readFile(output, 'utf8'));
+    expect(receipt).toMatchObject({ schemaVersion: 2, completion: 'failed', observations: {}, windowsSupportClaim: false });
+    expect(receipt.failures).toHaveLength(1);
+    expect(receipt.failures[0]).toMatchObject({ scenario: 'startup', substep: process.platform === 'win32' ? 'nativeModule' : 'start' });
+    expect(JSON.stringify(receipt)).not.toContain(root);
+  });
+
+  it('retains only fixed scenario, substep, closure reason, comparison, kind, and differing fields', () => {
+    const cause = Object.assign(new Error('entry-vs-directory-open'), {
+      code: 'WINDOWS_DIRECTORY_CLOSURE_COMPARISON', objectKind: 'directory',
+      differingFields: ['allocationSize', 'size', 'C:\\secret', 'S-1-5-21-99', 'private-content', 'f'.repeat(32)],
+      path: 'C:\\secret', ownerSid: 'S-1-5-21-99', identity: 'f'.repeat(32)
+    });
+    const error = Object.assign(new Error('Windows directory closure changed: listed child identity or metadata changed before it was consumed.', { cause }), {
+      code: 'WINDOWS_DIRECTORY_CLOSURE_CHANGED'
+    });
+    const result = sanitizeProductFailure(error, {
+      scenario: 'onboarding', substep: 'firstAdd', publicationPhase: 'PLANNED'
+    });
+    expect(result).toEqual({
+      scenario: 'onboarding', substep: 'firstAdd', name: 'Error', message: 'sanitized product-slice failure',
+      code: 'WINDOWS_DIRECTORY_CLOSURE_CHANGED',
+      closureReason: 'listed-child-identity-or-metadata-changed-before-it-was-consumed',
+      cause: {
+        name: 'Error', message: 'sanitized product-slice failure', code: 'WINDOWS_DIRECTORY_CLOSURE_COMPARISON',
+        comparison: 'entry-vs-directory-open', objectKind: 'directory', differingFields: ['size', 'allocationSize']
+      },
+      publicationPhase: 'PLANNED'
+    });
+    for (const secret of ['C:\\secret', 'S-1-5-21-99', 'private-content', 'f'.repeat(32)]) {
+      expect(JSON.stringify(result)).not.toContain(secret);
+    }
+  });
+
+  it('refuses raw message/stack/code/context and injected comparison values', () => {
+    const error = {
+      name: 'sensitive-name', code: 'SECRET_CODE', message: 'sensitive path', stack: 'sensitive stack',
+      closureReason: 'sensitive reason', publicationPhase: 'sensitive phase', snapshotRole: 'sensitive role',
+      cause: {
+        code: 'WINDOWS_DIRECTORY_CLOSURE_COMPARISON', message: 'sensitive message',
+        comparison: 'sensitive comparison', objectKind: 'sensitive kind', differingFields: ['sensitive field']
+      }
+    };
+    const result = sanitizeProductFailure(error, { scenario: 'sensitive scenario', substep: 'sensitive step', publicationPhase: 'sensitive phase' });
+    expect(result).toEqual({
+      scenario: 'unclassified', substep: 'unclassified', name: 'Error', message: 'sanitized product-slice failure',
+      cause: { name: 'Error', message: 'sanitized product-slice failure', code: 'WINDOWS_DIRECTORY_CLOSURE_COMPARISON', differingFields: [] }
+    });
+    expect(JSON.stringify(result)).not.toMatch(/sensitive|SECRET_CODE/u);
+  });
+
+  it('allowlists every static closure refusal reason without copying arbitrary messages', async () => {
+    const source = await readFile('src/state/win32-directory-closure.ts', 'utf8');
+    const categories = {
+      changed: ['WINDOWS_DIRECTORY_CLOSURE_CHANGED', 'Windows directory closure changed: '],
+      invalid: ['WINDOWS_DIRECTORY_CLOSURE_INVALID', 'Invalid Windows directory closure: '],
+      limit: ['WINDOWS_DIRECTORY_CLOSURE_LIMIT_EXCEEDED', 'Windows directory closure limit exceeded: ']
+    } as const;
+    for (const match of source.matchAll(/(?:throw |return )(changed|invalid|limit)\('([^']+)'/gu)) {
+      const [code, prefix] = categories[match[1] as keyof typeof categories];
+      expect(sanitizeProductError({ code, message: `${prefix}${match[2]}.` }).closureReason).toBeDefined();
+    }
+  });
+
+  it('does not convert an arbitrary closure error message into an admitted reason', () => {
+    expect(sanitizeProductError({ code: 'WINDOWS_DIRECTORY_CLOSURE_CHANGED', message: 'Windows directory closure changed: secret-path.' }))
+      .toEqual({ name: 'Error', message: 'sanitized product-slice failure', code: 'WINDOWS_DIRECTORY_CLOSURE_CHANGED' });
+  });
+
+  it('settles child failures with malformed non-string messages without coercion', async () => {
+    const process = new EventEmitter();
+    const child = trackProvisioningChild(process);
+    const waiting = child.next('paused').catch((error: unknown) => error);
+    const failure = {
+      code: 'WINDOWS_DIRECTORY_CLOSURE_CHANGED',
+      message: { toString: null, valueOf: null }
+    };
+    expect(sanitizeProductError(failure)).toEqual({
+      name: 'Error', message: 'sanitized product-slice failure', code: failure.code
+    });
+    expect(() => process.emit('message', { event: 'result', action: 'refused', failure })).not.toThrow();
+    const settled = sanitizeProductError(await waiting);
+    expect(settled.cause).toEqual(sanitizeProductError(failure));
+    expect(sanitizeProductError(await child.next('result').catch((error: unknown) => error))).toEqual(settled);
+    process.emit('close', 1, null);
+    await child.exited;
+  });
+
+  it('carries and revalidates child closure failure causes through close and future waits', async () => {
+    const process = new EventEmitter();
+    const child = trackProvisioningChild(process);
+    const waiting = child.next('paused').catch((error: unknown) => error);
+    process.emit('message', { event: 'result', action: 'refused', failure: {
+      code: 'WINDOWS_DIRECTORY_CLOSURE_CHANGED', closureReason: 'listed-child-identity-or-metadata-changed-before-it-was-consumed',
+      publicationPhase: 'CANDIDATE_READY', path: 'must-not-escape',
+      cause: {
+        code: 'WINDOWS_DIRECTORY_CLOSURE_COMPARISON', comparison: 'entry-vs-directory-open',
+        objectKind: 'directory', differingFields: ['size', 'must-not-escape']
+      }
+    } });
+    process.emit('close', 1, null);
+    const failure = sanitizeProductError(await waiting);
+    expect(failure.cause).toMatchObject({
+      code: 'WINDOWS_DIRECTORY_CLOSURE_CHANGED', publicationPhase: 'CANDIDATE_READY',
+      closureReason: 'listed-child-identity-or-metadata-changed-before-it-was-consumed',
+      cause: { comparison: 'entry-vs-directory-open', objectKind: 'directory', differingFields: ['size'] }
+    });
+    expect(JSON.stringify(failure)).not.toContain('must-not-escape');
+    expect(sanitizeProductError(await child.next('result').catch((error: unknown) => error))).toEqual(failure);
     await child.exited;
   });
 });

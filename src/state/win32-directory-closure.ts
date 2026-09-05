@@ -92,7 +92,8 @@ export async function captureWindowsDirectoryClosure(
   }
   const finalRoot = admitWindowsPrivateDirectory(backend, rootPath);
   if (!sameDirectoryInspection(initialRoot, finalRoot)) {
-    throw changed('directory root or private ancestry changed while capturing its closure');
+    throw changed('directory root or private ancestry changed while capturing its closure',
+      comparisonDiagnostic('initial-vs-final-root', 'directory', directoryDifferences(initialRoot, finalRoot)));
   }
   const rootIdentity = identity(initialRoot.object);
   return {
@@ -170,8 +171,8 @@ async function walkDirectory(
   } catch (error) {
     throw mapEnumerationFailure(error);
   }
-  requireSameDirectory(expectedDirectory, receipt.directoryBefore);
-  requireSameDirectory(receipt.directoryBefore, receipt.directoryAfter);
+  requireSameDirectory(expectedDirectory, receipt.directoryBefore, 'expected-vs-enumeration-before');
+  requireSameDirectory(receipt.directoryBefore, receipt.directoryAfter, 'enumeration-before-vs-after');
 
   const relativePaths = new Map<WindowsDirectoryEntryObservation, string>();
   for (const entry of receipt.entries) {
@@ -214,7 +215,7 @@ async function walkDirectory(
         throw changed('listed directory could not be admitted after enumeration', error);
       }
       requireDirectChild(receipt.directoryBefore, child, entry.name);
-      requireEntryMatchesObject(entry, child.object);
+      requireEntryMatchesObject(entry, child.object, 'entry-vs-directory-open');
       traversal.entries.push({
         path: relativePath,
         kind: 'directory',
@@ -243,7 +244,7 @@ async function walkDirectory(
       throw changed('listed file could not be admitted after enumeration', error);
     }
     requireDirectChild(receipt.directoryBefore, inspected, entry.name);
-    requireEntryMatchesObject(entry, inspected.object);
+    requireEntryMatchesObject(entry, inspected.object, 'entry-vs-file-open');
     const size = hexToBoundedNumber(entry.size);
     if (size > policy.maxFileBytes) throw limit('directory closure file exceeds its byte limit');
     const remainingBytes = policy.maxAggregateBytes - traversal.aggregateBytes;
@@ -254,8 +255,8 @@ async function walkDirectory(
     } catch (error) {
       throw changed('directory closure file could not be read with its listed state', error);
     }
-    requireEntryMatchesObject(entry, stable.before);
-    requireEntryMatchesObject(entry, stable.after);
+    requireEntryMatchesObject(entry, stable.before, 'entry-vs-file-read-before');
+    requireEntryMatchesObject(entry, stable.after, 'entry-vs-file-read-after');
     if (!sameObject(inspected.object, stable.before)
       || !sameObject(stable.before, stable.after)
       || stable.bytes.byteLength !== size) {
@@ -268,7 +269,7 @@ async function walkDirectory(
       throw changed('directory closure file privacy or identity changed while reading', error);
     }
     requireDirectChild(receipt.directoryBefore, afterRead, entry.name);
-    requireEntryMatchesObject(entry, afterRead.object);
+    requireEntryMatchesObject(entry, afterRead.object, 'entry-vs-file-final-open');
     if (!sameObject(stable.after, afterRead.object)
       || !sameSecurity(inspected.security, afterRead.security)) {
       throw changed('directory closure file security changed while reading');
@@ -291,12 +292,16 @@ async function walkDirectory(
     throw changed('directory entries changed after their closure was read', error);
   }
   if (!sameEnumeration(receipt, after)) {
-    throw changed('directory entries changed after their closure was read');
+    throw changed('directory entries changed after their closure was read',
+      comparisonDiagnostic('initial-vs-final-enumeration', 'directory', enumerationDifferences(receipt, after)));
   }
 }
 
-function requireSameDirectory(a: WindowsPathInspection, b: WindowsPathInspection): void {
-  if (!sameDirectoryInspection(a, b)) throw changed('directory identity or metadata changed');
+function requireSameDirectory(
+  a: WindowsPathInspection, b: WindowsPathInspection, comparison: ClosureComparison
+): void {
+  if (!sameDirectoryInspection(a, b)) throw changed('directory identity or metadata changed',
+    comparisonDiagnostic(comparison, 'directory', directoryDifferences(a, b)));
 }
 
 function sameDirectoryInspection(a: WindowsPathInspection, b: WindowsPathInspection): boolean {
@@ -322,7 +327,8 @@ function requireDirectChild(
 
 function requireEntryMatchesObject(
   entry: WindowsDirectoryEntryObservation,
-  object: WindowsObjectObservation
+  object: WindowsObjectObservation,
+  comparison: ClosureComparison
 ): void {
   if (entry.fileId !== object.fileId
     || entry.size !== object.size
@@ -334,7 +340,11 @@ function requireEntryMatchesObject(
     || entry.reparseTag !== object.reparseTag
     || entry.directory !== object.directory
     || object.deletePending) {
-    throw changed('listed child identity or metadata changed before it was consumed');
+    throw changed('listed child identity or metadata changed before it was consumed', comparisonDiagnostic(
+      comparison, object.directory ? 'directory' : 'file',
+      [...ENTRY_OBJECT_FIELDS.filter((field) => entry[field] !== object[field]),
+        ...(object.deletePending ? ['deletePending'] : [])]
+    ));
   }
 }
 
@@ -373,6 +383,59 @@ function sameSecurity(a: WindowsSecurityObservation, b: WindowsSecurityObservati
     && a.groupSid === b.groupSid
     && a.groupDefaulted === b.groupDefaulted
     && a.currentUserSid === b.currentUserSid;
+}
+
+// Diagnostics run only after the unchanged authorization comparisons fail.
+// Enumerate static field names; never include observed values or entry names.
+const ENTRY_OBJECT_FIELDS = [
+  'fileId', 'size', 'allocationSize', 'creationTime', 'lastWriteTime',
+  'changeTime', 'attributes', 'reparseTag', 'directory'
+] as const;
+const OBJECT_FIELDS = [
+  'volumeIdentity', ...ENTRY_OBJECT_FIELDS, 'numberOfLinks', 'deletePending'
+] as const;
+const SECURITY_FIELDS = [
+  'descriptorControl', 'daclPresent', 'daclNull', 'daclDefaulted', 'ownerSid',
+  'ownerDefaulted', 'groupSid', 'groupDefaulted', 'currentUserSid'
+] as const;
+type ClosureComparison =
+  | 'initial-vs-final-root' | 'expected-vs-enumeration-before' | 'enumeration-before-vs-after'
+  | 'entry-vs-directory-open' | 'entry-vs-file-open' | 'entry-vs-file-read-before'
+  | 'entry-vs-file-read-after' | 'entry-vs-file-final-open' | 'initial-vs-final-enumeration';
+
+function comparisonDiagnostic(comparison: ClosureComparison, objectKind: 'directory' | 'file', differingFields: string[]): BazframeError {
+  return Object.assign(new BazframeError('WINDOWS_DIRECTORY_CLOSURE_COMPARISON', comparison), {
+    objectKind, differingFields
+  });
+}
+
+function directoryDifferences(a: WindowsPathInspection, b: WindowsPathInspection): string[] {
+  return [
+    ...(a.canonicalPath.toLowerCase() !== b.canonicalPath.toLowerCase() ? ['canonicalPath'] : []),
+    ...(a.kind !== 'directory' || b.kind !== 'directory' ? ['kind'] : []),
+    ...(a.volume.identity !== b.volume.identity ? ['volume.identity'] : []),
+    ...OBJECT_FIELDS.filter((field) => a.object[field] !== b.object[field]).map((field) => `object.${field}`),
+    ...SECURITY_FIELDS.filter((field) => a.security[field] !== b.security[field]).map((field) => `security.${field}`),
+    ...(!a.security.daclBytes.equals(b.security.daclBytes) ? ['security.daclBytes'] : [])
+  ];
+}
+
+function enumerationDifferences(a: WindowsStableDirectoryEnumerationReceipt, b: WindowsStableDirectoryEnumerationReceipt): string[] {
+  const fields = [
+    ...directoryDifferences(a.directoryBefore, b.directoryBefore).map((field) => `directoryBefore.${field}`),
+    ...directoryDifferences(a.directoryAfter, b.directoryAfter).map((field) => `directoryAfter.${field}`)
+  ];
+  if (a.entries.length !== b.entries.length) fields.push('entries.length');
+  const entryFields = ['name', ...ENTRY_OBJECT_FIELDS] as const;
+  for (const field of entryFields) {
+    if (a.entries.some((entry, index) => b.entries[index] !== undefined && entry[field] !== b.entries[index]![field])) {
+      fields.push(`entries.${field}`);
+    }
+  }
+  // Preserve visibility of the original exact serialized-enumeration comparison,
+  // including any ordering/shape discrepancy not represented by field equality.
+  if (JSON.stringify(a.entries) !== JSON.stringify(b.entries)) fields.push('entries.serialization');
+  return fields;
 }
 
 function identity(object: WindowsObjectObservation): string {
