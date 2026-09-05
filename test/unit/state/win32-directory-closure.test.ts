@@ -31,23 +31,93 @@ type TestNode = {
 };
 
 describe('Windows directory closure composition', () => {
-  it('diagnoses directory enumeration-versus-open differences using field names only', async () => {
-    const backend = tree({ 'C:\\state': dir(1), 'C:\\state\\sensitive-name': dir(2) });
-    const listed = entry('sensitive-name', dir(2));
-    listed.size = '0000000000000040';
-    listed.allocationSize = '0000000000001000';
+  it('admits stable separate directory length domains without normalizing either receipt', async () => {
+    const backend = tree({ 'C:\\state': dir(1), 'C:\\state\\empty': dir(2) });
+    const enumerate = backend.enumerateStableDirectory;
+    const listedEntries: WindowsDirectoryEntryObservation[] = [];
+    backend.enumerateStableDirectory = async (path, maximum) => {
+      const receipt = await enumerate(path, maximum);
+      if (path === 'C:\\state') {
+        receipt.entries[0]!.size = '0000000000000040';
+        receipt.entries[0]!.allocationSize = '0000000000001000';
+        listedEntries.push(receipt.entries[0]!);
+      }
+      return receipt;
+    };
+    const closure = await captureWindowsDirectoryClosure(backend, 'C:\\state');
+    expect(closure.closure.entries).toEqual([
+      { path: 'empty', kind: 'directory', volumeIdentity: VOLUME, fileId: fileId(2) }
+    ]);
+    expect(listedEntries).toHaveLength(4); // before/after in both complete passes
+    expect(listedEntries.every((entry) => entry.size === '0000000000000040'
+      && entry.allocationSize === '0000000000001000')).toBe(true);
+    expect(backend.inspectPath('C:\\state\\empty').object).toMatchObject({
+      size: '0000000000000000', allocationSize: '0000000000000000'
+    });
+  });
+
+  it.each(['size', 'allocationSize'] as const)('still refuses file cross-domain %s mismatch', async (field) => {
+    const backend = tree({ 'C:\\state': dir(1), 'C:\\state\\file': file(2, 'data') });
+    const listed = entry('file', file(2, 'data'));
+    listed[field] = '0000000000001000';
     backend.entryOverride = [listed];
     await expect(captureWindowsDirectoryClosure(backend, 'C:\\state')).rejects.toMatchObject({
       code: 'WINDOWS_DIRECTORY_CLOSURE_CHANGED',
-      cause: {
-        code: 'WINDOWS_DIRECTORY_CLOSURE_COMPARISON',
-        message: 'entry-vs-directory-open', objectKind: 'directory',
-        differingFields: ['size', 'allocationSize']
+      cause: { message: 'entry-vs-file-open', objectKind: 'file', differingFields: [field] }
+    });
+  });
+
+  it.each(['size', 'allocationSize'] as const)('still refuses directory %s drift within enumeration receipts', async (field) => {
+    const backend = tree({ 'C:\\state': dir(1), 'C:\\state\\empty': dir(2) });
+    const enumerate = backend.enumerateStableDirectory;
+    let rootEnumerations = 0;
+    backend.enumerateStableDirectory = async (path, maximum) => {
+      const receipt = await enumerate(path, maximum);
+      if (path === 'C:\\state') {
+        rootEnumerations += 1;
+        receipt.entries[0]![field] = rootEnumerations === 1 ? '0000000000000040' : '0000000000001000';
+      }
+      return receipt;
+    };
+    await expect(captureWindowsDirectoryClosure(backend, 'C:\\state')).rejects.toMatchObject({
+      code: 'WINDOWS_DIRECTORY_CLOSURE_CHANGED', cause: {
+        message: 'initial-vs-final-enumeration', objectKind: 'directory',
+        differingFields: [`entries.${field}`, 'entries.serialization']
       }
     });
   });
 
-  it.each(['fileId', 'lastWriteTime', 'allocationSize'] as const)('preserves refusal and diagnoses directory %s drift', async (field) => {
+  it.each(['fileId', 'creationTime', 'lastWriteTime', 'changeTime', 'attributes'] as const)(
+    'still refuses directory cross-domain %s mismatch and reports only compared fields', async (field) => {
+      const backend = tree({ 'C:\\state': dir(1), 'C:\\state\\empty': dir(2) });
+      const listed = entry('empty', dir(2));
+      listed.size = '0000000000000040';
+      listed.allocationSize = '0000000000001000';
+      if (field === 'attributes') listed.attributes = 0x11;
+      else listed[field] = field === 'fileId' ? 'f'.repeat(32) : 'f'.repeat(16);
+      backend.entryOverride = [listed];
+      await expect(captureWindowsDirectoryClosure(backend, 'C:\\state')).rejects.toMatchObject({
+        code: 'WINDOWS_DIRECTORY_CLOSURE_CHANGED', cause: {
+          message: 'entry-vs-directory-open', objectKind: 'directory', differingFields: [field]
+        }
+      });
+    }
+  );
+
+  it('does not exempt lengths when only the opened observation claims to be a directory', async () => {
+    const backend = tree({ 'C:\\state': dir(1), 'C:\\state\\file': file(2, 'data') });
+    backend.readOverride = async (path, maximum) => {
+      const receipt = await backend.baseRead(path, maximum);
+      return { ...receipt, before: { ...receipt.before, directory: true, size: '0000000000001000', allocationSize: '0000000000002000' } };
+    };
+    await expect(captureWindowsDirectoryClosure(backend, 'C:\\state')).rejects.toMatchObject({
+      code: 'WINDOWS_DIRECTORY_CLOSURE_CHANGED', cause: {
+        message: 'entry-vs-file-read-before', differingFields: ['size', 'allocationSize', 'directory']
+      }
+    });
+  });
+
+  it.each(['fileId', 'lastWriteTime', 'size', 'allocationSize'] as const)('preserves refusal and diagnoses opened-directory %s drift', async (field) => {
     const backend = tree({ 'C:\\state': dir(1) });
     const enumerate = backend.enumerateStableDirectory;
     backend.enumerateStableDirectory = async (path, maximum) => {

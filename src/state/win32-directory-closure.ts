@@ -330,9 +330,14 @@ function requireEntryMatchesObject(
   object: WindowsObjectObservation,
   comparison: ClosureComparison
 ): void {
+  // NTFS enumeration lengths (FILE_ID_EXTD_DIR_INFO) and opened-directory
+  // lengths (FILE_STANDARD_INFO) are distinct observation domains. Only files
+  // authorize cross-domain length equality; both sources retain full independent
+  // stability checks, and their receipts are never normalized.
+  const compareLengths = !entry.directory || !object.directory;
   if (entry.fileId !== object.fileId
-    || entry.size !== object.size
-    || entry.allocationSize !== object.allocationSize
+    || (compareLengths && entry.size !== object.size)
+    || (compareLengths && entry.allocationSize !== object.allocationSize)
     || entry.creationTime !== object.creationTime
     || entry.lastWriteTime !== object.lastWriteTime
     || entry.changeTime !== object.changeTime
@@ -342,7 +347,8 @@ function requireEntryMatchesObject(
     || object.deletePending) {
     throw changed('listed child identity or metadata changed before it was consumed', comparisonDiagnostic(
       comparison, object.directory ? 'directory' : 'file',
-      [...ENTRY_OBJECT_FIELDS.filter((field) => entry[field] !== object[field]),
+      [...ENTRY_OBJECT_FIELDS.filter((field) => entry[field] !== object[field]
+        && (compareLengths || (field !== 'size' && field !== 'allocationSize'))),
         ...(object.deletePending ? ['deletePending'] : [])]
     ));
   }
