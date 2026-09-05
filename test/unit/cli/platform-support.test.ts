@@ -201,6 +201,15 @@ describe('native Windows pre-acceptance platform gate', () => {
     expect(windows.reached).toEqual([]);
   });
 
+  it('does not import or construct the internal Windows added-Skill service from public dispatch', async () => {
+    const [dispatcher, gate] = await Promise.all([
+      readFile(new URL('../../../src/cli/run-cli.ts', import.meta.url), 'utf8'),
+      readFile(new URL('../../../src/core/platform-support.ts', import.meta.url), 'utf8')
+    ]);
+    expect(dispatcher).not.toContain('added-skill-platform-services');
+    expect(gate).not.toContain('added-skill-platform-services');
+  });
+
   it('uses the same built dispatcher for bazframe and bzf', async () => {
     const manifest = JSON.parse(await readFile(new URL('../../../package.json', import.meta.url), 'utf8')) as {
       bin: Record<string, string>;

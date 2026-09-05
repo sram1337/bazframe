@@ -2,15 +2,19 @@ import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { join } from 'node:path';
 import { lstat, open, readdir, stat, type FileHandle } from 'node:fs/promises';
-import { readUtf8InstructionFile } from '../core/content.js';
+import { MAX_EFFECTIVE_INSTRUCTION_BYTES, readUtf8InstructionFile } from '../core/content.js';
 import { BazframeError, errorCode } from '../core/errors.js';
 import { writeFileAtomic } from '../state/atomic-file.js';
 import { readAtMostOneBeyond } from '../state/bounded-file-read.js';
 import { withStateLock } from '../state/lock.js';
 export { resolveBazframeHome } from '../state/paths.js';
+import type { AddedSkillPlatformServices } from '../skills/added-skill-platform-services.js';
+import { readDefaultSkillRegistration } from '../skills/default-skill-catalog.js';
+import { isSafeSkillId } from '../skills/skill-id.js';
 import { assertSafeProfileId } from './profile-id.js';
 
 const ACTIVE_PROFILE_FILE = 'active-profile';
+const ADDED_SKILL_NAMESPACE_ENTRY_LIMIT = 1024;
 const MAX_STATE_BYTES = 1024;
 
 export interface Profile {
@@ -26,11 +30,20 @@ export function profileDirectory(bazframeHome: string, profileId: string): strin
   return join(bazframeHome, 'profiles', profileId);
 }
 
+export interface ProfileLoadOptions {
+  /** Internal Windows product-slice dependency; it does not bypass the public platform gate. */
+  platformServices?: AddedSkillPlatformServices;
+}
+
 export async function loadProfile(
   bazframeHome: string,
-  profileId: string
+  profileId: string,
+  options: ProfileLoadOptions = {}
 ): Promise<Profile> {
   const directory = profileDirectory(bazframeHome, profileId);
+  if (options.platformServices !== undefined) {
+    return loadWindowsProfile(bazframeHome, profileId, directory, options.platformServices);
+  }
   let metadata;
   try {
     metadata = await stat(directory);
@@ -68,6 +81,96 @@ export async function loadProfile(
     instructions,
     skillDirectories
   };
+}
+
+async function loadWindowsProfile(
+  bazframeHome: string,
+  profileId: string,
+  directory: string,
+  platformServices: AddedSkillPlatformServices
+): Promise<Profile> {
+  try {
+    platformServices.inspectPrivateDirectory(directory);
+  } catch (error) {
+    if (errorCode(error) === 'WINDOWS_NATIVE_PATH_NOT_FOUND') {
+      throw new BazframeError(
+        'PROFILE_NOT_FOUND',
+        `Profile ${JSON.stringify(profileId)} does not exist at ${directory}.`
+      );
+    }
+    throw new BazframeError(
+      'PROFILE_READ_FAILED',
+      `Could not inspect profile ${JSON.stringify(profileId)} at ${directory}${formatErrorCode(error)}`,
+      { cause: error }
+    );
+  }
+  const instructionsPath = join(directory, 'AGENTS.md');
+  const instructions = await platformServices.readStableUtf8File(
+    instructionsPath,
+    `Profile ${JSON.stringify(profileId)} instructions`,
+    MAX_EFFECTIVE_INSTRUCTION_BYTES
+  );
+  const skillsRoot = join(directory, 'skills');
+  let enumeration;
+  try {
+    enumeration = await platformServices.enumeratePrivateDirectory(
+      skillsRoot,
+      ADDED_SKILL_NAMESPACE_ENTRY_LIMIT
+    );
+  } catch (error) {
+    if (errorCode(error) === 'WINDOWS_NATIVE_PATH_NOT_FOUND') {
+      enumeration = { names: [], entries: [], identity: 'absent' };
+    }
+    else throw new BazframeError(
+      'SKILLS_READ_FAILED',
+      `Could not inspect profile skills directory: ${skillsRoot}${formatErrorCode(error)}`,
+      { cause: error }
+    );
+  }
+  const skillDirectories: string[] = [];
+  for (const skillId of enumeration.names) {
+    if (!isSafeSkillId(skillId)) {
+      throw new BazframeError(
+        'SKILL_READ_FAILED',
+        `Could not inspect unsafe profile skill candidate: ${join(skillsRoot, skillId)}`
+      );
+    }
+    let registration;
+    try {
+      registration = await readDefaultSkillRegistration(
+        bazframeHome,
+        skillId,
+        { platformServices }
+      );
+      const membership = platformServices.inspectSkillLink(
+        skillsRoot,
+        skillId,
+        registration.target
+      );
+      if (membership.kind !== 'current') throw new Error('membership disappeared');
+    } catch (error) {
+      throw new BazframeError(
+        'SKILL_READ_FAILED',
+        `Could not prove catalog-backed profile skill candidate: ${join(skillsRoot, skillId)}${formatErrorCode(error)}`,
+        { cause: error }
+      );
+    }
+    skillDirectories.push(registration.target);
+  }
+  if (enumeration.identity !== 'absent') {
+    const after = await platformServices.enumeratePrivateDirectory(
+      skillsRoot,
+      ADDED_SKILL_NAMESPACE_ENTRY_LIMIT
+    );
+    if (after.identity !== enumeration.identity
+      || after.names.join('\0') !== enumeration.names.join('\0')) {
+      throw new BazframeError(
+        'SKILLS_READ_FAILED',
+        `Profile skills directory changed while being inspected: ${skillsRoot}`
+      );
+    }
+  }
+  return { id: profileId, directory, instructionsPath, instructions, skillDirectories };
 }
 
 export async function discoverSkillDirectories(skillsRoot: string): Promise<string[]> {

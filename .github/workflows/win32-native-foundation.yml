@@ -20,13 +20,24 @@ on:
       - 'src/state/win32-directory-publication.ts'
       - 'src/state/win32-operation-lock.ts'
       - 'src/state/win32-skill-membership.ts'
+      - 'src/skills/added-skill-platform-services.ts'
+      - 'src/skills/default-skill-catalog.ts'
+      - 'src/skills/skill-metadata.ts'
+      - 'src/profiles/profile-skill-membership.ts'
+      - 'src/profiles/profile-skill-reference-index.ts'
+      - 'src/profiles/profile-store.ts'
       - 'test/unit/core/win32-native.test.ts'
       - 'test/unit/state/win32-private-directory.test.ts'
       - 'test/unit/state/win32-directory-closure.test.ts'
       - 'test/unit/state/win32-directory-publication.test.ts'
       - 'test/unit/state/win32-operation-lock.test.ts'
       - 'test/unit/state/win32-skill-membership.test.ts'
+      - 'test/unit/skills/added-skill-platform-services.test.ts'
+      - 'test/unit/skills/added-skill-product-lifecycle.test.ts'
+      - 'test/unit/scripts/win32-added-skill-evidence.test.ts'
       - 'scripts/test-win32-native-foundation.mjs'
+      - 'scripts/test-win32-added-skill-lifecycle.mjs'
+      - 'scripts/verify-win32-added-skill-evidence.mjs'
       - 'scripts/test-win32-directory-publication-child.mjs'
       - 'scripts/test-win32-operation-lock-child.mjs'
       - 'scripts/run-win32-native-foundation.ps1'
@@ -45,13 +56,24 @@ on:
       - 'src/state/win32-directory-publication.ts'
       - 'src/state/win32-operation-lock.ts'
       - 'src/state/win32-skill-membership.ts'
+      - 'src/skills/added-skill-platform-services.ts'
+      - 'src/skills/default-skill-catalog.ts'
+      - 'src/skills/skill-metadata.ts'
+      - 'src/profiles/profile-skill-membership.ts'
+      - 'src/profiles/profile-skill-reference-index.ts'
+      - 'src/profiles/profile-store.ts'
       - 'test/unit/core/win32-native.test.ts'
       - 'test/unit/state/win32-private-directory.test.ts'
       - 'test/unit/state/win32-directory-closure.test.ts'
       - 'test/unit/state/win32-directory-publication.test.ts'
       - 'test/unit/state/win32-operation-lock.test.ts'
       - 'test/unit/state/win32-skill-membership.test.ts'
+      - 'test/unit/skills/added-skill-platform-services.test.ts'
+      - 'test/unit/skills/added-skill-product-lifecycle.test.ts'
+      - 'test/unit/scripts/win32-added-skill-evidence.test.ts'
       - 'scripts/test-win32-native-foundation.mjs'
+      - 'scripts/test-win32-added-skill-lifecycle.mjs'
+      - 'scripts/verify-win32-added-skill-evidence.mjs'
       - 'scripts/test-win32-directory-publication-child.mjs'
       - 'scripts/test-win32-operation-lock-child.mjs'
       - 'scripts/run-win32-native-foundation.ps1'
@@ -145,7 +167,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           npm run build
           if ($LASTEXITCODE -ne 0) { throw "npm build failed with exit $LASTEXITCODE" }
-          npx vitest run --config vitest.config.ts test/unit/core/win32-native.test.ts test/unit/state/win32-private-directory.test.ts test/unit/state/win32-directory-closure.test.ts test/unit/state/win32-directory-publication.test.ts test/unit/state/win32-operation-lock.test.ts test/unit/state/win32-skill-membership.test.ts test/unit/cli/platform-support.test.ts
+          npx vitest run --config vitest.config.ts test/unit/core/win32-native.test.ts test/unit/state/win32-private-directory.test.ts test/unit/state/win32-directory-closure.test.ts test/unit/state/win32-directory-publication.test.ts test/unit/state/win32-operation-lock.test.ts test/unit/state/win32-skill-membership.test.ts test/unit/skills/added-skill-platform-services.test.ts test/unit/skills/added-skill-product-lifecycle.test.ts test/unit/scripts/win32-added-skill-evidence.test.ts test/unit/cli/platform-support.test.ts
           if ($LASTEXITCODE -ne 0) { throw "native contract tests failed with exit $LASTEXITCODE" }
 
       - name: Exercise native local-NTFS foundation from the source tree
@@ -161,6 +183,14 @@ jobs:
           "BAZFRAME_WIN32_NATIVE_TEST_PARENT=$testParent" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           node ./scripts/test-win32-native-foundation.mjs --output ./native-source-evidence.json
           if ($LASTEXITCODE -ne 0) { throw "source-tree native conformance failed with exit $LASTEXITCODE" }
+          $productEvidenceRoot = Join-Path $env:RUNNER_TEMP 'win32-native-evidence-product'
+          if (Test-Path -LiteralPath $productEvidenceRoot) {
+            Remove-Item -LiteralPath $productEvidenceRoot -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $productEvidenceRoot | Out-Null
+          $productSourcePath = Join-Path $productEvidenceRoot 'source.json'
+          node ./scripts/test-win32-added-skill-lifecycle.mjs --output $productSourcePath
+          if ($LASTEXITCODE -ne 0) { throw "source-tree Windows product slice failed with exit $LASTEXITCODE" }
 
       - name: Pack once and exercise the installed root-bundled binary offline
         run: |
@@ -181,6 +211,11 @@ jobs:
           $env:npm_config_offline = 'true'
           node ./scripts/test-win32-native-foundation.mjs --package-root $installed --output ./native-installed-evidence.json
           if ($LASTEXITCODE -ne 0) { throw "installed native conformance failed with exit $LASTEXITCODE" }
+          $productEvidenceRoot = Join-Path $env:RUNNER_TEMP 'win32-native-evidence-product'
+          $productSourcePath = Join-Path $productEvidenceRoot 'source.json'
+          $productInstalledPath = Join-Path $productEvidenceRoot 'installed.json'
+          node ./scripts/test-win32-added-skill-lifecycle.mjs --package-root $installed --output $productInstalledPath
+          if ($LASTEXITCODE -ne 0) { throw "installed Windows product slice failed with exit $LASTEXITCODE" }
           $sourceReceipt = Get-Content native-source-evidence.json -Raw | ConvertFrom-Json
           $installedReceipt = Get-Content native-installed-evidence.json -Raw | ConvertFrom-Json
           if ($sourceReceipt.completion -ne 'passed' -or $installedReceipt.completion -ne 'passed') {
@@ -196,6 +231,27 @@ jobs:
               $installedReceipt.observations.binarySha256 -ne $expectedHash) {
             throw 'Native conformance receipt digests do not match the reviewed binary.'
           }
+          $productSource = Get-Content -LiteralPath $productSourcePath -Raw | ConvertFrom-Json
+          $productInstalled = Get-Content -LiteralPath $productInstalledPath -Raw | ConvertFrom-Json
+          if ($productSource.schemaVersion -ne 1 -or $productInstalled.schemaVersion -ne 1 -or
+              $productSource.completion -ne 'passed' -or $productInstalled.completion -ne 'passed' -or
+              $productSource.releaseAdmission -ne 'not-authorized' -or
+              $productInstalled.releaseAdmission -ne 'not-authorized' -or
+              $productSource.windowsSupportClaim -ne $false -or
+              $productInstalled.windowsSupportClaim -ne $false -or
+              $productSource.publicWindowsGate -ne 'closed' -or
+              $productInstalled.publicWindowsGate -ne 'closed' -or
+              $productSource.observations.binarySha256 -ne $expectedHash -or
+              $productInstalled.observations.binarySha256 -ne $expectedHash) {
+            throw 'Windows product-slice receipts changed their closed support boundary.'
+          }
+          $sourceObservations = $productSource.observations | ConvertTo-Json -Compress
+          $installedObservations = $productInstalled.observations | ConvertTo-Json -Compress
+          if ($sourceObservations -ne $installedObservations) {
+            throw 'Windows product-slice source and packed observations differ.'
+          }
+          node ./scripts/verify-win32-added-skill-evidence.mjs --source $productSourcePath --installed $productInstalledPath --binary-sha256 $expectedHash
+          if ($LASTEXITCODE -ne 0) { throw "Windows product-slice evidence verification failed with exit $LASTEXITCODE" }
           $finalCommit = (& git rev-parse HEAD).Trim()
           if ($LASTEXITCODE -ne 0) { throw "final Git revision inspection failed with exit $LASTEXITCODE" }
           $finalWorktreeState = & git status --porcelain=v1 --untracked-files=all
@@ -246,6 +302,16 @@ jobs:
           Get-Content native-foundation-evidence.json
           if ($completion -ne 'passed') { throw 'Native foundation evidence is incomplete or failed.' }
 
+      - name: Upload successful internal product-slice evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bazframe-win32-added-skill-product-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/win32-native-evidence-product/source.json
+            ${{ runner.temp }}/win32-native-evidence-product/installed.json
+
       - name: Upload successful binary and evidence
         id: upload-success
         if: success()
@@ -272,5 +338,7 @@ jobs:
             native-foundation-evidence.json
             native-source-evidence.json
             native-installed-evidence.json
+            ${{ runner.temp }}/win32-native-evidence-product/source.json
+            ${{ runner.temp }}/win32-native-evidence-product/installed.json
             native-rust-version.txt
             native-msvc-version.txt

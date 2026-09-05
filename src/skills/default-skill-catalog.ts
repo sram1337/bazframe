@@ -10,6 +10,12 @@ import { withStateLock } from '../state/lock.js';
 import { assertSafeSkillId, isSafeSkillId } from './skill-id.js';
 import { readSkillDeclaredName } from './skill-metadata.js';
 import { managedGitRecordForRoot } from '../providers/managed-git-record.js';
+import type {
+  AddedSkillMutationAuthority,
+  AddedSkillPlatformServices
+} from './added-skill-platform-services.js';
+
+const ADDED_SKILL_NAMESPACE_ENTRY_LIMIT = 1024;
 
 export const DEFAULT_SKILL_SOURCE_ID = 'default';
 export const DEFAULT_SKILL_SOURCE_LABEL = '(default)';
@@ -17,6 +23,7 @@ export const DEFAULT_SKILL_SOURCE_LABEL = '(default)';
 export interface DefaultSkillRegistration {
   id: string;
   registrationPath: string;
+  /** Usable absolute target spelling; injected Windows policy binds it to native canonical identity. */
   target: string;
 }
 
@@ -51,6 +58,12 @@ export interface DefaultSkillCatalogTestHooks {
   beforePublish?: () => void | Promise<void>;
   /** Internal seam for a managed-provider operation already holding the global state lock. */
   stateLockHeld?: boolean;
+  /** Internal Windows product-slice dependency; it does not bypass the public platform gate. */
+  platformServices?: AddedSkillPlatformServices;
+}
+
+export interface DefaultSkillCatalogReadOptions {
+  platformServices?: AddedSkillPlatformServices;
 }
 
 interface DirectoryIdentity { device: bigint; inode: bigint }
@@ -61,7 +74,13 @@ export function defaultSkillCatalogRoot(bazframeHome: string): string {
   return join(bazframeHome, 'skills');
 }
 
-export async function inspectDefaultSkillCatalog(bazframeHome: string): Promise<DefaultSkillCatalog> {
+export async function inspectDefaultSkillCatalog(
+  bazframeHome: string,
+  options: DefaultSkillCatalogReadOptions = {}
+): Promise<DefaultSkillCatalog> {
+  if (options.platformServices !== undefined) {
+    return inspectWindowsDefaultSkillCatalog(bazframeHome, options.platformServices);
+  }
   const rootPath = defaultSkillCatalogRoot(bazframeHome);
   const root = await openCatalogRoot(bazframeHome, false);
   if (root === undefined) return { root: rootPath, registrations: [], skillIds: [], diagnostics: [] };
@@ -89,9 +108,13 @@ export async function inspectDefaultSkillCatalog(bazframeHome: string): Promise<
 
 export async function readDefaultSkillRegistration(
   bazframeHome: string,
-  skillId: string
+  skillId: string,
+  options: DefaultSkillCatalogReadOptions = {}
 ): Promise<DefaultSkillRegistration> {
   assertSafeSkillId(skillId);
+  if (options.platformServices !== undefined) {
+    return readWindowsDefaultSkillRegistration(bazframeHome, skillId, options.platformServices);
+  }
   const root = await openCatalogRoot(bazframeHome, false);
   if (root === undefined) throw notFound(skillId);
   try {
@@ -216,9 +239,13 @@ export function sameDefaultSkillRegistrationSnapshot(
 
 export async function readDefaultSkillRegistrationLink(
   bazframeHome: string,
-  skillId: string
+  skillId: string,
+  options: DefaultSkillCatalogReadOptions = {}
 ): Promise<DefaultSkillRegistration> {
   assertSafeSkillId(skillId);
+  if (options.platformServices !== undefined) {
+    return readWindowsDefaultSkillRegistration(bazframeHome, skillId, options.platformServices);
+  }
   const root = await openCatalogRoot(bazframeHome, false);
   if (root === undefined) throw notFound(skillId);
   try {
@@ -238,6 +265,13 @@ export async function addDefaultSkill(
   enteredRoot: string,
   testHooks: DefaultSkillCatalogTestHooks = {}
 ): Promise<DefaultSkillCatalogResult> {
+  if (testHooks.platformServices !== undefined) {
+    return addWindowsDefaultSkill(
+      bazframeHome,
+      enteredRoot,
+      { ...testHooks, platformServices: testHooks.platformServices }
+    );
+  }
   if (!isAbsolute(enteredRoot) || enteredRoot.length === 0 || enteredRoot.includes('\0')) {
     throw new BazframeError('INVALID_SKILL_ROOT', 'Skill root must be a non-empty absolute path without NUL bytes.');
   }
@@ -304,6 +338,13 @@ export async function removeDefaultSkill(
   testHooks: DefaultSkillCatalogTestHooks = {}
 ): Promise<DefaultSkillCatalogResult> {
   assertSafeSkillId(skillId);
+  if (testHooks.platformServices !== undefined) {
+    return removeWindowsDefaultSkill(
+      bazframeHome,
+      skillId,
+      { ...testHooks, platformServices: testHooks.platformServices }
+    );
+  }
   const registrationPath = join(defaultSkillCatalogRoot(bazframeHome), skillId);
   return withCatalogLock(
     bazframeHome,
@@ -347,6 +388,257 @@ export async function removeDefaultSkill(
         await root.handle.close().catch(() => undefined);
       }
     }
+  );
+}
+
+async function inspectWindowsDefaultSkillCatalog(
+  bazframeHome: string,
+  platformServices: AddedSkillPlatformServices
+): Promise<DefaultSkillCatalog> {
+  const root = defaultSkillCatalogRoot(bazframeHome);
+  let enumeration;
+  try {
+    enumeration = await platformServices.enumeratePrivateDirectory(
+      root,
+      ADDED_SKILL_NAMESPACE_ENTRY_LIMIT
+    );
+  } catch (error) {
+    if (errorCode(error) === 'WINDOWS_NATIVE_PATH_NOT_FOUND') {
+      return { root, registrations: [], skillIds: [], diagnostics: [] };
+    }
+    throw new BazframeError(
+      'DEFAULT_SKILL_CATALOG_READ_FAILED',
+      `Could not inspect default skill catalog: ${root}${formatCode(error)}`,
+      { cause: error }
+    );
+  }
+  const registrations: DefaultSkillRegistration[] = [];
+  const diagnostics: string[] = [];
+  for (const id of enumeration.names) {
+    if (!isSafeSkillId(id)) {
+      diagnostics.push(`Skipping unsafe default skill entry ${JSON.stringify(id)}.`);
+      continue;
+    }
+    try {
+      registrations.push(await readWindowsDefaultSkillRegistration(
+        bazframeHome,
+        id,
+        platformServices
+      ));
+    } catch (error) {
+      diagnostics.push(`Skipping invalid default skill ${JSON.stringify(id)}: ${message(error)}`);
+    }
+  }
+  const after = await platformServices.enumeratePrivateDirectory(
+    root,
+    ADDED_SKILL_NAMESPACE_ENTRY_LIMIT
+  );
+  if (after.identity !== enumeration.identity
+    || after.names.join('\0') !== enumeration.names.join('\0')) {
+    throw new BazframeError(
+      'DEFAULT_SKILL_CATALOG_CHANGED',
+      `Default skill catalog changed while in use: ${root}`
+    );
+  }
+  return { root, registrations, skillIds: registrations.map((item) => item.id), diagnostics };
+}
+
+async function readWindowsDefaultSkillRegistration(
+  bazframeHome: string,
+  skillId: string,
+  platformServices: AddedSkillPlatformServices
+): Promise<DefaultSkillRegistration> {
+  const root = defaultSkillCatalogRoot(bazframeHome);
+  platformServices.inspectPrivateDirectory(root);
+  const link = await platformServices.readSkillLink(root, skillId);
+  if (link.kind === 'absent') throw notFound(skillId);
+  const target = link.targetPath;
+  const targetProof = platformServices.inspectPhysicalDirectory(target);
+  if (link.canonicalTargetPath.toLowerCase() !== targetProof.canonicalPath.toLowerCase()) {
+    throw new BazframeError(
+      'DEFAULT_SKILL_CHANGED',
+      `Default skill target identity changed while reading: ${join(root, skillId)}`
+    );
+  }
+  if (basename(targetProof.canonicalPath) !== skillId) {
+    throw new BazframeError(
+      'DEFAULT_SKILL_NAME_MISMATCH',
+      `Default skill target basename does not match ${JSON.stringify(skillId)}: ${target}`
+    );
+  }
+  assertWindowsAllowedSkillLocation(
+    platformServices,
+    bazframeHome,
+    targetProof.canonicalPath
+  );
+  const declared = await readSkillDeclaredName(target, platformServices);
+  if (declared !== skillId) {
+    throw new BazframeError(
+      'DEFAULT_SKILL_NAME_MISMATCH',
+      `Default skill ${JSON.stringify(skillId)} declares name ${JSON.stringify(declared)}.`
+    );
+  }
+  const current = platformServices.inspectSkillLink(root, skillId, target);
+  if (current.kind !== 'current' || current.identity !== link.identity
+    || current.canonicalTargetPath.toLowerCase() !== targetProof.canonicalPath.toLowerCase()
+    || platformServices.inspectPhysicalDirectory(target).identity !== targetProof.identity) {
+    throw new BazframeError(
+      'DEFAULT_SKILL_CHANGED',
+      `Default skill registration changed while reading: ${join(root, skillId)}`
+    );
+  }
+  return { id: skillId, registrationPath: join(root, skillId), target };
+}
+
+function inspectWindowsSkillTarget(
+  platformServices: AddedSkillPlatformServices,
+  enteredRoot: string,
+  target: string
+) {
+  try { return platformServices.inspectPhysicalDirectory(target); }
+  catch (error) {
+    throw new BazframeError(
+      'SKILL_ROOT_READ_FAILED',
+      `Could not resolve skill root: ${enteredRoot}${formatCode(error)}`,
+      { cause: error }
+    );
+  }
+}
+
+async function addWindowsDefaultSkill(
+  bazframeHome: string,
+  enteredRoot: string,
+  options: DefaultSkillCatalogTestHooks & { platformServices: AddedSkillPlatformServices }
+): Promise<DefaultSkillCatalogResult> {
+  if (!isAbsolute(enteredRoot) || enteredRoot.length === 0 || enteredRoot.includes('\0')) {
+    throw new BazframeError('INVALID_SKILL_ROOT', 'Skill root must be a non-empty absolute path without NUL bytes.');
+  }
+  const target = resolve(enteredRoot);
+  const targetProof = inspectWindowsSkillTarget(
+    options.platformServices,
+    enteredRoot,
+    target
+  );
+  const id = basename(targetProof.canonicalPath);
+  assertSafeSkillId(id);
+  assertWindowsAllowedSkillLocation(
+    options.platformServices,
+    bazframeHome,
+    targetProof.canonicalPath
+  );
+  const declared = await readSkillDeclaredName(target, options.platformServices);
+  if (declared !== id) {
+    throw new BazframeError(
+      'SKILL_NAME_MISMATCH',
+      `Skill root ${target} declares name ${JSON.stringify(declared)} instead of canonical basename ${JSON.stringify(id)}.`
+    );
+  }
+  const registrationPath = join(defaultSkillCatalogRoot(bazframeHome), id);
+  return windowsCatalogLock(options, bazframeHome, 'bazframe skill add', registrationPath, async (authority) => {
+    options.platformServices.ensurePrivateDirectory(bazframeHome, 'skills');
+    const root = defaultSkillCatalogRoot(bazframeHome);
+    const before = options.platformServices.inspectSkillLink(root, id, target);
+    if (before.kind === 'current') {
+      await readWindowsDefaultSkillRegistration(bazframeHome, id, options.platformServices);
+      return { action: 'current', id, registrationPath, target };
+    }
+    await options.beforeCommit?.();
+    if (options.platformServices.inspectPhysicalDirectory(target).identity !== targetProof.identity) {
+      throw new BazframeError('DEFAULT_SKILL_CHANGED', `Default skill target identity changed: ${target}`);
+    }
+    if (await readSkillDeclaredName(target, options.platformServices) !== id) {
+      throw new BazframeError('DEFAULT_SKILL_CHANGED', `Default skill target identity changed: ${target}`);
+    }
+    await options.beforePublish?.();
+    const finalTarget = options.platformServices.inspectPhysicalDirectory(target);
+    if (finalTarget.identity !== targetProof.identity
+      || finalTarget.canonicalPath.toLowerCase() !== targetProof.canonicalPath.toLowerCase()
+      || await readSkillDeclaredName(target, options.platformServices) !== id) {
+      throw new BazframeError('DEFAULT_SKILL_CHANGED', `Default skill target identity changed: ${target}`);
+    }
+    const action = await options.platformServices.createSkillLink(authority, root, id, target);
+    return { action, id, registrationPath, target };
+  });
+}
+
+async function removeWindowsDefaultSkill(
+  bazframeHome: string,
+  skillId: string,
+  options: DefaultSkillCatalogTestHooks & { platformServices: AddedSkillPlatformServices }
+): Promise<DefaultSkillCatalogResult> {
+  const root = defaultSkillCatalogRoot(bazframeHome);
+  const registrationPath = join(root, skillId);
+  return windowsCatalogLock(options, bazframeHome, 'bazframe skill remove', registrationPath, async (authority) => {
+    let before: DefaultSkillRegistration;
+    try {
+      before = await readWindowsDefaultSkillRegistration(bazframeHome, skillId, options.platformServices);
+    } catch (error) {
+      if (error instanceof BazframeError && error.code === 'DEFAULT_SKILL_NOT_FOUND') {
+        return { action: 'absent', id: skillId, registrationPath, target: '' };
+      }
+      throw error;
+    }
+    const indexOptions = { platformServices: options.platformServices };
+    const index = await captureProfileSkillReferenceIndex(
+      bazframeHome,
+      skillId,
+      before.target,
+      indexOptions
+    );
+    if (index.diagnostics.length > 0) {
+      throw new BazframeError(
+        'DEFAULT_SKILL_REFERENCE_INDEX_INVALID',
+        `Refusing to remove ${JSON.stringify(skillId)} because profile skill references could not be verified.`
+      );
+    }
+    if (index.profileIds.length > 0) {
+      throw new BazframeError(
+        'DEFAULT_SKILL_REFERENCED',
+        `Refusing to remove ${JSON.stringify(skillId)} because it is referenced by profiles: ${index.profileIds.join(', ')}.`
+      );
+    }
+    await options.beforeCommit?.();
+    const current = await readWindowsDefaultSkillRegistration(bazframeHome, skillId, options.platformServices);
+    const currentIndex = await captureProfileSkillReferenceIndex(
+      bazframeHome,
+      skillId,
+      before.target,
+      indexOptions
+    );
+    if (current.target !== before.target || currentIndex.diagnostics.length > 0
+      || !sameProfileSkillReferenceIndex(index, currentIndex)) {
+      throw new BazframeError(
+        'DEFAULT_SKILL_CHANGED',
+        `Refusing to remove changed default skill registration: ${registrationPath}`
+      );
+    }
+    const action = await options.platformServices.removeSkillLink(
+      authority,
+      root,
+      skillId,
+      before.target
+    );
+    return { action, id: skillId, registrationPath, target: before.target };
+  });
+}
+
+function windowsCatalogLock<T>(
+  options: DefaultSkillCatalogTestHooks & { platformServices: AddedSkillPlatformServices },
+  bazframeHome: string,
+  command: string,
+  target: string,
+  operation: (authority: AddedSkillMutationAuthority) => Promise<T>
+): Promise<T> {
+  if (options.stateLockHeld === true) {
+    throw new BazframeError(
+      'WINDOWS_ADDED_SKILL_LOCK_REQUIRED',
+      'The internal Windows added-Skill slice requires its native global lock authority.'
+    );
+  }
+  return options.platformServices.withLock(
+    join(bazframeHome, 'locks', 'state.lock'),
+    { command, target },
+    operation
   );
 }
 
@@ -467,6 +759,20 @@ function occupiedRegistration(path: string, raw: RawRegistration | undefined): B
   const detail = raw?.kind === 'link' ? `targets ${JSON.stringify(raw.target)}` : 'is a physical or unreadable entry';
   return new BazframeError('DEFAULT_SKILL_OCCUPIED', `Default skill registration is occupied: ${path} ${detail}.`);
 }
+function assertWindowsAllowedSkillLocation(
+  platformServices: AddedSkillPlatformServices,
+  home: string,
+  canonicalTarget: string
+): void {
+  const canonicalHome = platformServices.inspectPrivateDirectory(home).canonicalPath;
+  if (!isWithin(canonicalHome, canonicalTarget)
+    && !isWithin(canonicalTarget, canonicalHome)) return;
+  throw new BazframeError(
+    'DEFAULT_SKILL_TARGET_OVERLAPS_BAZFRAME_HOME',
+    `Default skill target and BAZFRAME_HOME must not overlap: ${canonicalTarget}`
+  );
+}
+
 async function assertAllowedSkillLocation(home: string, target: string, id: string): Promise<void> {
   const canonicalHome = await canonicalExistingPath(home);
   if (!isWithin(canonicalHome, target) && !isWithin(target, canonicalHome)) return;

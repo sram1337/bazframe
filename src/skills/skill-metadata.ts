@@ -5,11 +5,26 @@ import { assertSafeSkillId } from './skill-id.js';
 
 export const SKILL_DEFINITION = 'SKILL.md';
 
-export async function readSkillDeclaredName(skillDirectory: string): Promise<string> {
+export interface SkillMetadataReader {
+  readStableUtf8File(path: string, label: string, maxBytes: number): Promise<string>;
+}
+
+export async function readSkillDeclaredName(
+  skillDirectory: string,
+  reader?: SkillMetadataReader
+): Promise<string> {
   const definitionPath = join(skillDirectory, SKILL_DEFINITION);
-  const contents = await readUtf8InstructionFile(definitionPath, 'Skill definition');
+  const contents = reader === undefined
+    ? await readUtf8InstructionFile(definitionPath, 'Skill definition')
+    : await reader.readStableUtf8File(
+      definitionPath,
+      'Skill definition',
+      MAX_SKILL_DEFINITION_BYTES
+    );
   return parseSkillDeclaredName(contents, definitionPath);
 }
+
+const MAX_SKILL_DEFINITION_BYTES = 1024 * 1024;
 
 export function parseSkillDeclaredName(contents: string, definitionPath: string): string {
   const normalized = contents.replace(/\r\n?/gu, '\n');

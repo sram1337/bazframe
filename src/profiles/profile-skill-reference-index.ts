@@ -3,6 +3,8 @@ import { constants } from 'node:fs';
 import { lstat, open, readlink, readdir, type FileHandle } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { errorCode } from '../core/errors.js';
+import type { AddedSkillPlatformServices } from '../skills/added-skill-platform-services.js';
+import { isSafeSkillId } from '../skills/skill-id.js';
 import { isSafeProfileId } from './profile-id.js';
 
 export interface ProfileSkillReferenceDiagnostic {
@@ -20,7 +22,11 @@ export interface ProfileSkillReferenceIndex {
 export interface ProfileSkillReferenceIndexTestHooks {
   afterProfileOpened?: (profileId: string) => void | Promise<void>;
   afterSkillsOpened?: (profileId: string) => void | Promise<void>;
+  /** Internal Windows product-slice dependency; it does not bypass the public platform gate. */
+  platformServices?: AddedSkillPlatformServices;
 }
+
+const ADDED_SKILL_NAMESPACE_ENTRY_LIMIT = 1024;
 
 interface DirectoryIdentity { device: bigint; inode: bigint }
 interface OpenDirectory { path: string; handle: FileHandle; identity: DirectoryIdentity }
@@ -31,6 +37,15 @@ export async function captureProfileSkillReferenceIndex(
   expectedTarget: string,
   testHooks: ProfileSkillReferenceIndexTestHooks = {}
 ): Promise<ProfileSkillReferenceIndex> {
+  if (testHooks.platformServices !== undefined) {
+    return captureWindowsProfileSkillReferenceIndex(
+      home,
+      skillId,
+      expectedTarget,
+      testHooks.platformServices,
+      testHooks
+    );
+  }
   const profilesRoot = join(home, 'profiles');
   let rootMetadata;
   try { rootMetadata = await lstat(profilesRoot, { bigint: true }); }
@@ -128,6 +143,110 @@ export async function captureProfileSkillReferenceIndex(
   }
 }
 
+async function captureWindowsProfileSkillReferenceIndex(
+  home: string,
+  skillId: string,
+  expectedTarget: string,
+  platformServices: AddedSkillPlatformServices,
+  testHooks: ProfileSkillReferenceIndexTestHooks
+): Promise<ProfileSkillReferenceIndex> {
+  const profilesRoot = join(home, 'profiles');
+  let root;
+  try {
+    root = await platformServices.enumeratePrivateDirectory(
+      profilesRoot,
+      ADDED_SKILL_NAMESPACE_ENTRY_LIMIT
+    );
+  } catch (error) {
+    if (errorCode(error) === 'WINDOWS_NATIVE_PATH_NOT_FOUND') {
+      return indexed([], [], ['profiles:absent']);
+    }
+    return invalidIndex(profilesRoot);
+  }
+  const profileIds: string[] = [];
+  const diagnostics: ProfileSkillReferenceDiagnostic[] = [];
+  const identityParts = [`profiles:${root.identity}`];
+  for (const profileId of root.names) {
+    const profilePath = join(profilesRoot, profileId);
+    if (!isSafeProfileId(profileId)) {
+      diagnostics.push({ profileId: '<unknown-profile>', path: profilePath });
+      identityParts.push(`profile:${profileId}:unsafe`);
+      continue;
+    }
+    try {
+      const profile = platformServices.inspectPrivateDirectory(profilePath);
+      identityParts.push(`profile:${profileId}:${profile.identity}`);
+      await testHooks.afterProfileOpened?.(profileId);
+      const skillsPath = join(profilePath, 'skills');
+      let skills;
+      try {
+        skills = await platformServices.enumeratePrivateDirectory(
+          skillsPath,
+          ADDED_SKILL_NAMESPACE_ENTRY_LIMIT
+        );
+      } catch (error) {
+        if (errorCode(error) === 'WINDOWS_NATIVE_PATH_NOT_FOUND') {
+          identityParts.push(`skills:${profileId}:absent`);
+          if (platformServices.inspectPrivateDirectory(profilePath).identity !== profile.identity) {
+            throw new Error('profile changed', { cause: error });
+          }
+          continue;
+        }
+        throw error;
+      }
+      identityParts.push(`skills:${profileId}:${skills.identity}`);
+      for (const entry of skills.entries) {
+        if (!isSafeSkillId(entry.name)
+          || !entry.directory
+          || entry.reparseTag !== 0xa0000003) {
+          diagnostics.push({ profileId, path: join(skillsPath, entry.name) });
+          identityParts.push(`skills-entry:${profileId}:${entry.name}:unsupported`);
+        }
+      }
+      await testHooks.afterSkillsOpened?.(profileId);
+      const aliases = skills.names.filter((name) => portableKey(name) === portableKey(skillId));
+      if (aliases.length === 0) {
+        identityParts.push(`membership:${profileId}:absent`);
+      } else if (aliases.length !== 1 || aliases[0] !== skillId) {
+        diagnostics.push({ profileId, path: join(skillsPath, aliases[0] ?? skillId) });
+        identityParts.push(`membership:${profileId}:ambiguous`);
+      } else {
+        const membership = platformServices.inspectSkillLink(
+          skillsPath,
+          skillId,
+          expectedTarget
+        );
+        identityParts.push(`membership:${profileId}:${membership.identity}`);
+        if (membership.kind !== 'current') throw new Error('membership disappeared');
+        profileIds.push(profileId);
+      }
+      const skillsAfter = await platformServices.enumeratePrivateDirectory(
+        skillsPath,
+        ADDED_SKILL_NAMESPACE_ENTRY_LIMIT
+      );
+      if (!sameEnumeration(skills, skillsAfter)) throw new Error('skills changed');
+      if (platformServices.inspectPrivateDirectory(profilePath).identity !== profile.identity) {
+        throw new Error('profile changed');
+      }
+    } catch {
+      diagnostics.push({ profileId, path: profilePath });
+      identityParts.push(`profile:${profileId}:unstable`);
+    }
+  }
+  try {
+    const after = await platformServices.enumeratePrivateDirectory(
+      profilesRoot,
+      ADDED_SKILL_NAMESPACE_ENTRY_LIMIT
+    );
+    if (after.identity !== root.identity || after.names.join('\0') !== root.names.join('\0')) {
+      return invalidIndex(profilesRoot);
+    }
+  } catch {
+    return invalidIndex(profilesRoot);
+  }
+  return indexed(profileIds, diagnostics, identityParts);
+}
+
 export function sameProfileSkillReferenceIndex(
   left: ProfileSkillReferenceIndex,
   right: ProfileSkillReferenceIndex
@@ -195,4 +314,11 @@ function identityText(value: DirectoryIdentity): string { return `${value.device
 function kind(metadata: { isSymbolicLink(): boolean; isDirectory(): boolean; isFile(): boolean }): string {
   return metadata.isSymbolicLink() ? 'link' : metadata.isDirectory() ? 'directory' : metadata.isFile() ? 'file' : 'other';
 }
+function sameEnumeration(
+  left: { names: string[]; identity: string },
+  right: { names: string[]; identity: string }
+): boolean {
+  return left.identity === right.identity && left.names.join('\0') === right.names.join('\0');
+}
+function portableKey(value: string): string { return value.normalize('NFC').toLowerCase(); }
 function compare(left: string, right: string): number { return left < right ? -1 : left > right ? 1 : 0; }
