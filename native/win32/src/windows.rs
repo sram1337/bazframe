@@ -42,7 +42,9 @@ use windows_sys::Win32::Storage::FileSystem::{
     LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx, MoveFileExW, OPEN_EXISTING,
     QueryDosDeviceW, READ_CONTROL, ReadFile, UnlockFileEx, VOLUME_NAME_GUID,
 };
-use windows_sys::Win32::System::IO::{IO_STATUS_BLOCK, OVERLAPPED};
+use windows_sys::Win32::System::IO::{DeviceIoControl, IO_STATUS_BLOCK, OVERLAPPED};
+use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
+use windows_sys::Win32::System::SystemServices::IO_REPARSE_TAG_MOUNT_POINT;
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentProcessId, GetProcessTimes, OpenProcess, OpenProcessToken,
     PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, WaitForSingleObject,
@@ -50,10 +52,11 @@ use windows_sys::Win32::System::Threading::{
 
 use crate::{
     DirectoryEntryData, DirectoryEnumerationData, NativeResult, StableReadData,
-    WindowsFileLockAcquisitionReceipt, WindowsObjectObservation, WindowsPathInspection,
-    WindowsPrivateDirectoryCreationReceipt, WindowsPrivateFileCreationReceipt,
-    WindowsProcessInstance, WindowsProcessInstanceInspectionReceipt, WindowsSecurityObservation,
-    WindowsVolumeObservation, native_error,
+    WindowsFileLockAcquisitionReceipt, WindowsMembershipLinkInspection, WindowsObjectObservation,
+    WindowsPathInspection, WindowsPrivateDirectoryCreationReceipt,
+    WindowsPrivateFileCreationReceipt, WindowsProcessInstance,
+    WindowsProcessInstanceInspectionReceipt, WindowsSecurityObservation, WindowsVolumeObservation,
+    native_error,
 };
 
 const DRIVE_FIXED: u32 = 3;
@@ -61,6 +64,7 @@ const FILE_PERSISTENT_ACLS: u32 = 0x0000_0008;
 const FILE_DEVICE_DISK: u32 = 0x0000_0007;
 const FILE_REMOTE_DEVICE: u32 = 0x0000_0010;
 const FILE_FS_DEVICE_INFORMATION_CLASS: i32 = 4;
+const MAXIMUM_REPARSE_DATA_BUFFER_SIZE: usize = 16 * 1024;
 
 static FILE_LOCK_HANDLES: OnceLock<Mutex<HashMap<u64, RetainedFileLock>>> = OnceLock::new();
 static NEXT_FILE_LOCK_TOKEN: AtomicU64 = AtomicU64::new(1);
@@ -139,6 +143,25 @@ struct RawDirectoryEntry {
 pub(crate) fn inspect_windows_path(path: &str) -> NativeResult<WindowsPathInspection> {
     let opened = open_admitted_path(path, FILE_READ_ATTRIBUTES | READ_CONTROL)?;
     inspect_opened_path(&opened)
+}
+
+pub(crate) fn inspect_windows_membership_link(
+    path: &str,
+) -> NativeResult<WindowsMembershipLinkInspection> {
+    let first = inspect_membership_link_once(path)?;
+    let second = inspect_membership_link_once(path).map_err(|_| {
+        native_error(
+            "ERR_WIN32_MEMBERSHIP_CHANGED",
+            "Windows membership link changed while it was inspected",
+        )
+    })?;
+    if !same_membership_link_inspection(&first, &second) {
+        return Err(native_error(
+            "ERR_WIN32_MEMBERSHIP_CHANGED",
+            "Windows membership link changed while it was inspected",
+        ));
+    }
+    Ok(second)
 }
 
 pub(crate) fn create_windows_private_directory(
@@ -1011,6 +1034,431 @@ fn same_path_inspection(a: &WindowsPathInspection, b: &WindowsPathInspection) ->
         && a.volume.remote_device == b.volume.remote_device
         && same_stable_observation(&a.object, &b.object)
         && same_security_observation(&a.security, &b.security)
+}
+
+fn inspect_membership_link_once(path: &str) -> NativeResult<WindowsMembershipLinkInspection> {
+    validate_input_path(path)?;
+    let full = full_path(path)?;
+    let (drive_root, prefixes) = admitted_prefixes(&full)?;
+    reject_subst_or_device_alias(&drive_root)?;
+    let last = prefixes.len().checked_sub(1).ok_or_else(|| {
+        native_error(
+            "ERR_WIN32_INVALID_PATH",
+            "absolute Windows membership path has no openable root",
+        )
+    })?;
+    let mut ancestors = Vec::with_capacity(last);
+    for prefix in &prefixes[..last] {
+        let handle = open_existing(prefix, FILE_READ_ATTRIBUTES).map_err(|_| {
+            native_error(
+                "ERR_WIN32_MEMBERSHIP_LINK_INVALID",
+                "Windows membership ancestry could not be proved",
+            )
+        })?;
+        let tag = attribute_tag(handle.0)?;
+        if tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
+        {
+            return Err(native_error(
+                "ERR_WIN32_MEMBERSHIP_LINK_INVALID",
+                "Windows membership ancestry is not a physical directory chain",
+            ));
+        }
+        ancestors.push(PrefixObservation {
+            path: prefix.clone(),
+            canonical_path: final_path(handle.0)?,
+            object: snapshot(handle.0)?,
+        });
+    }
+
+    let link_path = prefixes
+        .last()
+        .expect("nonempty prefix list has a final membership path");
+    let link = match open_existing(link_path, FILE_READ_ATTRIBUTES | READ_CONTROL) {
+        Ok(link) => link,
+        Err(error) if error.status == "ERR_WIN32_PATH_NOT_FOUND" => {
+            revalidate_membership_ancestors(&ancestors)?;
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
+    let tag = attribute_tag(link.0)?;
+    if tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
+        || tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
+        || tag.ReparseTag != IO_REPARSE_TAG_MOUNT_POINT
+    {
+        return Err(native_error(
+            "ERR_WIN32_MEMBERSHIP_LINK_INVALID",
+            "Windows membership entry is not an NTFS directory junction",
+        ));
+    }
+    let canonical_path = final_path(link.0)?;
+    let object = snapshot_membership_link(link.0)?;
+    let volume = inspect_volume(link.0, &canonical_path, &object)?;
+    let security = inspect_security(link.0)?;
+    let target_path = read_junction_target(link.0)?;
+    let target =
+        open_admitted_path(&target_path, FILE_READ_ATTRIBUTES | READ_CONTROL).map_err(|_| {
+            native_error(
+                "ERR_WIN32_MEMBERSHIP_TARGET_INVALID",
+                "Windows membership junction target is not an admitted physical directory",
+            )
+        })?;
+    let target_inspection = inspect_opened_path(&target).map_err(|_| {
+        native_error(
+            "ERR_WIN32_MEMBERSHIP_TARGET_INVALID",
+            "Windows membership junction target could not be proved",
+        )
+    })?;
+    if target_inspection.kind != "directory" {
+        return Err(native_error(
+            "ERR_WIN32_MEMBERSHIP_TARGET_INVALID",
+            "Windows membership junction target is not a physical directory",
+        ));
+    }
+
+    revalidate_membership_ancestors(&ancestors)?;
+    let reopened_link =
+        open_existing(link_path, FILE_READ_ATTRIBUTES | READ_CONTROL).map_err(|_| {
+            native_error(
+                "ERR_WIN32_MEMBERSHIP_CHANGED",
+                "Windows membership junction changed while it was inspected",
+            )
+        })?;
+    let reopened_link_state = (|| -> NativeResult<_> {
+        Ok((
+            final_path(reopened_link.0)?,
+            snapshot_membership_link(reopened_link.0)?,
+            inspect_security(reopened_link.0)?,
+            read_junction_target(reopened_link.0)?,
+        ))
+    })()
+    .map_err(|_| {
+        native_error(
+            "ERR_WIN32_MEMBERSHIP_CHANGED",
+            "Windows membership junction changed while it was inspected",
+        )
+    })?;
+    if reopened_link_state.0 != canonical_path
+        || !same_stable_observation(&reopened_link_state.1, &object)
+        || !same_security_observation(&reopened_link_state.2, &security)
+        || reopened_link_state.3 != target_path
+    {
+        return Err(native_error(
+            "ERR_WIN32_MEMBERSHIP_CHANGED",
+            "Windows membership junction changed while it was inspected",
+        ));
+    }
+    let reopened_target = open_admitted_path(&target_path, FILE_READ_ATTRIBUTES | READ_CONTROL)
+        .and_then(|opened| inspect_opened_path(&opened))
+        .map_err(|_| {
+            native_error(
+                "ERR_WIN32_MEMBERSHIP_CHANGED",
+                "Windows membership junction target changed while it was inspected",
+            )
+        })?;
+    if !same_path_inspection(&target_inspection, &reopened_target) {
+        return Err(native_error(
+            "ERR_WIN32_MEMBERSHIP_CHANGED",
+            "Windows membership junction target changed while it was inspected",
+        ));
+    }
+
+    Ok(WindowsMembershipLinkInspection {
+        canonical_path,
+        volume,
+        object,
+        security,
+        ancestry_reparse_free: true,
+        normalized_target: target_inspection.canonical_path,
+        target_volume_identity: target_inspection.object.volume_identity,
+        target_file_id: target_inspection.object.file_id,
+    })
+}
+
+fn revalidate_membership_ancestors(ancestors: &[PrefixObservation]) -> NativeResult<()> {
+    for expected in ancestors {
+        let reopened = open_existing(&expected.path, FILE_READ_ATTRIBUTES).map_err(|_| {
+            native_error(
+                "ERR_WIN32_MEMBERSHIP_CHANGED",
+                "Windows membership ancestry changed while it was inspected",
+            )
+        })?;
+        let reopened_state = (|| -> NativeResult<_> {
+            Ok((
+                attribute_tag(reopened.0)?,
+                final_path(reopened.0)?,
+                snapshot(reopened.0)?,
+            ))
+        })()
+        .map_err(|_| {
+            native_error(
+                "ERR_WIN32_MEMBERSHIP_CHANGED",
+                "Windows membership ancestry changed while it was inspected",
+            )
+        })?;
+        if reopened_state.0.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || reopened_state.0.FileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
+            || reopened_state.1 != expected.canonical_path
+            || !same_stable_observation(&reopened_state.2, &expected.object)
+        {
+            return Err(native_error(
+                "ERR_WIN32_MEMBERSHIP_CHANGED",
+                "Windows membership ancestry changed while it was inspected",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn snapshot_membership_link(handle: HANDLE) -> NativeResult<WindowsObjectObservation> {
+    let tag = attribute_tag(handle)?;
+    if tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
+        || tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
+        || tag.ReparseTag != IO_REPARSE_TAG_MOUNT_POINT
+    {
+        return Err(native_error(
+            "ERR_WIN32_MEMBERSHIP_LINK_INVALID",
+            "Windows membership entry is not an NTFS directory junction",
+        ));
+    }
+    let id: FILE_ID_INFO = query_file_information(handle, FileIdInfo, "query membership identity")?;
+    let basic: FILE_BASIC_INFO =
+        query_file_information(handle, FileBasicInfo, "query membership metadata")?;
+    let standard: FILE_STANDARD_INFO =
+        query_file_information(handle, FileStandardInfo, "query membership sizing")?;
+    if standard.EndOfFile < 0 || standard.AllocationSize < 0 || standard.DeletePending {
+        return Err(native_error(
+            "ERR_WIN32_MEMBERSHIP_LINK_INVALID",
+            "Windows membership junction metadata is invalid",
+        ));
+    }
+    Ok(WindowsObjectObservation {
+        volume_identity: hex_u64(id.VolumeSerialNumber),
+        file_id: hex_bytes(&id.FileId.Identifier),
+        size: hex_u64(standard.EndOfFile as u64),
+        allocation_size: hex_u64(standard.AllocationSize as u64),
+        number_of_links: format!("{:08x}", standard.NumberOfLinks),
+        creation_time: hex_i64_bits(basic.CreationTime),
+        last_access_time: hex_i64_bits(basic.LastAccessTime),
+        last_write_time: hex_i64_bits(basic.LastWriteTime),
+        change_time: hex_i64_bits(basic.ChangeTime),
+        attributes: basic.FileAttributes,
+        reparse_tag: IO_REPARSE_TAG_MOUNT_POINT,
+        delete_pending: false,
+        directory: true,
+    })
+}
+
+fn read_junction_target(handle: HANDLE) -> NativeResult<String> {
+    let mut buffer = [0_u8; MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
+    let mut returned = 0_u32;
+    // SAFETY: the opened handle names the reparse object itself and the fixed output buffer and
+    // returned-byte pointer remain writable for the complete synchronous control operation.
+    let ok = unsafe {
+        DeviceIoControl(
+            handle,
+            FSCTL_GET_REPARSE_POINT,
+            null(),
+            0,
+            buffer.as_mut_ptr().cast(),
+            buffer.len() as u32,
+            &mut returned,
+            null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(last_win_error("read Windows membership junction data"));
+    }
+    let bytes = returned as usize;
+    if bytes > buffer.len() {
+        return Err(malformed_junction());
+    }
+    parse_mount_point_reparse_data(&buffer[..bytes])
+}
+
+fn parse_mount_point_reparse_data(buffer: &[u8]) -> NativeResult<String> {
+    let bytes = buffer.len();
+    if bytes < 16 {
+        return Err(malformed_junction());
+    }
+    let tag = u32::from_le_bytes(buffer[0..4].try_into().expect("fixed reparse tag"));
+    let data_length =
+        u16::from_le_bytes(buffer[4..6].try_into().expect("fixed reparse length")) as usize;
+    let reserved = u16::from_le_bytes(buffer[6..8].try_into().expect("fixed reserved field"));
+    if tag != IO_REPARSE_TAG_MOUNT_POINT
+        || data_length.checked_add(8) != Some(bytes)
+        || data_length < 8
+        || reserved != 0
+    {
+        return Err(malformed_junction());
+    }
+    let substitute_offset =
+        u16::from_le_bytes(buffer[8..10].try_into().expect("fixed substitute offset")) as usize;
+    let substitute_length =
+        u16::from_le_bytes(buffer[10..12].try_into().expect("fixed substitute length")) as usize;
+    let print_offset =
+        u16::from_le_bytes(buffer[12..14].try_into().expect("fixed print offset")) as usize;
+    let print_length =
+        u16::from_le_bytes(buffer[14..16].try_into().expect("fixed print length")) as usize;
+    let path_bytes = data_length - 8;
+    if substitute_offset != 0
+        || substitute_length == 0
+        || substitute_length % 2 != 0
+        || print_length % 2 != 0
+        || print_offset != substitute_length + 2
+        || print_offset
+            .checked_add(print_length)
+            .and_then(|end| end.checked_add(2))
+            != Some(path_bytes)
+    {
+        return Err(malformed_junction());
+    }
+    let path_buffer = &buffer[16..bytes];
+    if path_buffer[substitute_length..substitute_length + 2] != [0, 0]
+        || path_buffer[print_offset + print_length..print_offset + print_length + 2] != [0, 0]
+    {
+        return Err(malformed_junction());
+    }
+    let substitute = decode_utf16_bytes(&path_buffer[..substitute_length])?;
+    let print = decode_utf16_bytes(&path_buffer[print_offset..print_offset + print_length])?;
+    let target = substitute
+        .strip_prefix("\\??\\")
+        .ok_or_else(malformed_junction)?;
+    validate_input_path(target).map_err(|_| malformed_junction())?;
+    if !print.is_empty() && !print.eq_ignore_ascii_case(target) {
+        return Err(malformed_junction());
+    }
+    Ok(target.to_owned())
+}
+
+fn decode_utf16_bytes(bytes: &[u8]) -> NativeResult<String> {
+    if bytes.len() % 2 != 0 {
+        return Err(malformed_junction());
+    }
+    let units = bytes
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect::<Vec<_>>();
+    if units.iter().any(|unit| *unit == 0) {
+        return Err(malformed_junction());
+    }
+    String::from_utf16(&units).map_err(|_| malformed_junction())
+}
+
+fn malformed_junction() -> Error<String> {
+    native_error(
+        "ERR_WIN32_MEMBERSHIP_LINK_INVALID",
+        "Windows membership junction data is malformed or ambiguous",
+    )
+}
+
+fn same_membership_link_inspection(
+    a: &WindowsMembershipLinkInspection,
+    b: &WindowsMembershipLinkInspection,
+) -> bool {
+    a.canonical_path == b.canonical_path
+        && a.ancestry_reparse_free
+        && b.ancestry_reparse_free
+        && a.volume.identity == b.volume.identity
+        && a.volume.filesystem_name == b.volume.filesystem_name
+        && a.volume.drive_type == b.volume.drive_type
+        && a.volume.canonical_volume_guid_path == b.volume.canonical_volume_guid_path
+        && a.volume.remote_device == b.volume.remote_device
+        && same_stable_observation(&a.object, &b.object)
+        && same_security_observation(&a.security, &b.security)
+        && a.normalized_target == b.normalized_target
+        && a.target_volume_identity == b.target_volume_identity
+        && a.target_file_id == b.target_file_id
+}
+
+#[cfg(test)]
+mod membership_reparse_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_exact_mount_point_data() {
+        let data = mount_point_data("C:\\physical\\skill");
+        assert_eq!(
+            parse_mount_point_reparse_data(&data).expect("valid mount point"),
+            "C:\\physical\\skill"
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_mount_point_boundaries() {
+        let mut wrong_tag = mount_point_data("C:\\physical\\skill");
+        wrong_tag[0..4].copy_from_slice(&0xa000_000cu32.to_le_bytes());
+        assert!(parse_mount_point_reparse_data(&wrong_tag).is_err());
+
+        let mut wrong_length = mount_point_data("C:\\physical\\skill");
+        let length = u16::from_le_bytes(wrong_length[4..6].try_into().expect("length"));
+        wrong_length[4..6].copy_from_slice(&(length - 2).to_le_bytes());
+        assert!(parse_mount_point_reparse_data(&wrong_length).is_err());
+
+        let mut nonzero_reserved = mount_point_data("C:\\physical\\skill");
+        nonzero_reserved[6..8].copy_from_slice(&1u16.to_le_bytes());
+        assert!(parse_mount_point_reparse_data(&nonzero_reserved).is_err());
+
+        let mut wrong_offset = mount_point_data("C:\\physical\\skill");
+        wrong_offset[8..10].copy_from_slice(&2u16.to_le_bytes());
+        assert!(parse_mount_point_reparse_data(&wrong_offset).is_err());
+
+        let mut missing_terminator = mount_point_data("C:\\physical\\skill");
+        let substitute_length = u16::from_le_bytes(
+            missing_terminator[10..12]
+                .try_into()
+                .expect("substitute length"),
+        ) as usize;
+        missing_terminator[16 + substitute_length] = 1;
+        assert!(parse_mount_point_reparse_data(&missing_terminator).is_err());
+
+        let mut invalid_utf16 = mount_point_data("C:\\physical\\skill");
+        invalid_utf16[24..26].copy_from_slice(&0xd800u16.to_le_bytes());
+        assert!(parse_mount_point_reparse_data(&invalid_utf16).is_err());
+
+        let mut wrong_prefix = mount_point_data("C:\\physical\\skill");
+        wrong_prefix[16..18].copy_from_slice(&(b'X' as u16).to_le_bytes());
+        assert!(parse_mount_point_reparse_data(&wrong_prefix).is_err());
+
+        assert!(parse_mount_point_reparse_data(&mount_point_data("relative\\skill")).is_err());
+    }
+
+    fn mount_point_data(target: &str) -> Vec<u8> {
+        let substitute = format!("\\??\\{target}");
+        let substitute = utf16_bytes(&substitute);
+        let print = utf16_bytes(target);
+        let substitute_length = u16::try_from(substitute.len()).expect("substitute length");
+        let print_offset = substitute_length.checked_add(2).expect("print offset");
+        let print_length = u16::try_from(print.len()).expect("print length");
+        let data_length = 8usize
+            .checked_add(substitute.len())
+            .and_then(|size| size.checked_add(2))
+            .and_then(|size| size.checked_add(print.len()))
+            .and_then(|size| size.checked_add(2))
+            .and_then(|size| u16::try_from(size).ok())
+            .expect("reparse data length");
+        let mut data = Vec::with_capacity(usize::from(data_length) + 8);
+        data.extend_from_slice(&IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
+        data.extend_from_slice(&data_length.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&substitute_length.to_le_bytes());
+        data.extend_from_slice(&print_offset.to_le_bytes());
+        data.extend_from_slice(&print_length.to_le_bytes());
+        data.extend_from_slice(&substitute);
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&print);
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data
+    }
+
+    fn utf16_bytes(value: &str) -> Vec<u8> {
+        value
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>()
+    }
 }
 
 fn open_admitted_path(path: &str, final_access: u32) -> NativeResult<OpenedPath> {

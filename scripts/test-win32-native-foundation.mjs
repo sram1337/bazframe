@@ -9,6 +9,7 @@ import {
   lstat,
   readFile,
   rm,
+  rmdir,
   symlink,
   unlink,
   writeFile
@@ -21,7 +22,7 @@ const args = process.argv.slice(2);
 const packageRoot = resolve(argument('--package-root') ?? fileURLToPath(new URL('..', import.meta.url)));
 const outputPath = resolve(argument('--output') ?? join(packageRoot, 'win32-native-evidence.json'));
 const report = {
-  schemaVersion: 5,
+  schemaVersion: 6,
   purpose: 'Bazframe-owned native Windows foundation evidence only; not a Windows support claim.',
   environment: {
     platform: process.platform,
@@ -56,6 +57,9 @@ try {
   );
   const operationLockModule = await import(
     pathToFileURL(join(packageRoot, 'dist/state/win32-operation-lock.js')).href
+  );
+  const membershipModule = await import(
+    pathToFileURL(join(packageRoot, 'dist/state/win32-skill-membership.js')).href
   );
   const backend = nativeModule.loadBazframeWin32Native();
   const nativePath = join(
@@ -171,6 +175,240 @@ try {
   );
   await unlink(junction);
   requireCondition(await readFile(join(outside, 'child.txt'), 'utf8') === 'outside\n', 'junction target preserved');
+
+  const membershipParentComponent = 'skill-memberships';
+  const membershipParent = join(privateRoot, membershipParentComponent);
+  privateDirectoryModule.createWindowsPrivateDirectory(
+    backend,
+    privateRoot,
+    membershipParentComponent
+  );
+  const membershipTarget = join(outside, 'membership-target');
+  await mkdir(membershipTarget);
+  const membershipMarker = join(membershipTarget, 'marker.txt');
+  await writeFile(membershipMarker, 'membership target\n');
+  const membershipTargetBefore = backend.inspectPath(membershipTarget);
+  const membershipOptions = (skillId, targetPath = membershipTarget, io = undefined) => ({
+    backend,
+    parentPath: membershipParent,
+    skillId,
+    targetPath,
+    ...(io === undefined ? {} : { io })
+  });
+  const membershipCreated = await membershipModule.createWindowsSkillMembership(
+    membershipOptions('direct-skill')
+  );
+  const membershipProof = membershipModule.inspectWindowsSkillMembership(
+    membershipOptions('direct-skill')
+  );
+  const membershipPath = join(membershipParent, 'direct-skill');
+  const membershipJunctionDirectTarget = membershipCreated.action === 'added'
+    && membershipProof.link.object.reparseTag === 0xa0000003
+    && membershipProof.link.normalizedTarget.toLowerCase()
+      === membershipTargetBefore.canonicalPath.toLowerCase()
+    && membershipProof.link.targetVolumeIdentity === membershipTargetBefore.object.volumeIdentity
+    && membershipProof.link.targetFileId === membershipTargetBefore.object.fileId
+    && await readFile(join(membershipPath, 'marker.txt'), 'utf8') === 'membership target\n';
+  const membershipJunctionExactInspection = membershipProof.link.canonicalPath.toLowerCase()
+    === `${backend.inspectPath(membershipParent).canonicalPath}\\direct-skill`.toLowerCase();
+  const repeatedMembershipProof = membershipModule.inspectWindowsSkillMembership(
+    membershipOptions('direct-skill')
+  );
+  const repeatedMembershipStable = repeatedMembershipProof.link.object.fileId
+    === membershipProof.link.object.fileId
+    && repeatedMembershipProof.target.object.fileId === membershipProof.target.object.fileId;
+  let driftReads = 0;
+  const driftingMembershipBackend = {
+    ...backend,
+    inspectMembershipLink(path) {
+      const result = backend.inspectMembershipLink(path);
+      if (++driftReads < 2) return result;
+      return {
+        ...result,
+        security: {
+          ...result.security,
+          groupSid: result.security.groupSid === 'S-1-5-18'
+            ? 'S-1-5-32-544'
+            : 'S-1-5-18'
+        }
+      };
+    }
+  };
+  const membershipDriftRefused = await expectCode(
+    () => membershipModule.inspectWindowsSkillMembership({
+      ...membershipOptions('direct-skill'),
+      backend: driftingMembershipBackend
+    }),
+    'WINDOWS_SKILL_MEMBERSHIP_CHANGED'
+  );
+  const membershipJunctionImmediateRevalidation = repeatedMembershipStable
+    && membershipDriftRefused;
+  const membershipLinkSecurityBasics = membershipProof.link.security.daclPresent
+    && !membershipProof.link.security.daclNull
+    && membershipProof.link.security.daclBytes.byteLength > 0
+    && membershipProof.link.security.ownerSid === membershipProof.link.security.currentUserSid
+    && membershipProof.link.security.currentUserSid
+      === membershipProof.parent.security.currentUserSid;
+
+  const occupiedMembershipFile = join(membershipParent, 'occupied-file');
+  await writeFile(occupiedMembershipFile, 'occupied\n');
+  await expectCode(
+    () => membershipModule.createWindowsSkillMembership(membershipOptions('occupied-file')),
+    'WINDOWS_NATIVE_MEMBERSHIP_LINK_INVALID'
+  );
+  const occupiedMembershipDirectory = join(membershipParent, 'occupied-directory');
+  privateDirectoryModule.createWindowsPrivateDirectory(
+    backend,
+    membershipParent,
+    'occupied-directory'
+  );
+  await expectCode(
+    () => membershipModule.createWindowsSkillMembership(membershipOptions('occupied-directory')),
+    'WINDOWS_NATIVE_MEMBERSHIP_LINK_INVALID'
+  );
+  const caseEquivalentMembership = join(membershipParent, 'Case-Skill');
+  await writeFile(caseEquivalentMembership, 'case occupant\n');
+  await expectCode(
+    () => membershipModule.createWindowsSkillMembership(membershipOptions('case-skill')),
+    'WINDOWS_NATIVE_MEMBERSHIP_LINK_INVALID'
+  );
+  const exactExistingPath = join(membershipParent, 'existing-skill');
+  await symlink(membershipTarget, exactExistingPath, 'junction');
+  const exactExisting = await membershipModule.createWindowsSkillMembership(
+    membershipOptions('existing-skill')
+  );
+  const otherMembershipTarget = join(outside, 'other-membership-target');
+  await mkdir(otherMembershipTarget);
+  await writeFile(join(otherMembershipTarget, 'other.txt'), 'other\n');
+  const wrongTargetPath = join(membershipParent, 'wrong-target');
+  await symlink(otherMembershipTarget, wrongTargetPath, 'junction');
+  await expectCode(
+    () => membershipModule.createWindowsSkillMembership(membershipOptions('wrong-target')),
+    'WINDOWS_SKILL_MEMBERSHIP_INVALID'
+  );
+  const racedMembershipPath = join(membershipParent, 'raced-skill');
+  const racedCreationRefused = await expectCode(
+    () => membershipModule.createWindowsSkillMembership(
+      membershipOptions('raced-skill', membershipTarget, {
+        async symlink(target, path, type) {
+          await writeFile(path, 'raced occupant\n');
+          await symlink(target, path, type);
+        },
+        unlink
+      })
+    ),
+    'WINDOWS_SKILL_MEMBERSHIP_CREATE_AMBIGUOUS'
+  );
+  const beforeCreateRefused = await expectCode(
+    () => membershipModule.createWindowsSkillMembership(
+      membershipOptions('before-create-error', membershipTarget, {
+        async symlink() { throw new Error('injected before-effect creation failure'); },
+        unlink
+      })
+    ),
+    'WINDOWS_SKILL_MEMBERSHIP_CREATE_FAILED'
+  );
+  const afterCreateResult = await membershipModule.createWindowsSkillMembership(
+    membershipOptions('after-create-error', membershipTarget, {
+      async symlink(target, path, type) {
+        await symlink(target, path, type);
+        throw new Error('injected after-effect creation failure');
+      },
+      unlink
+    })
+  );
+  const membershipJunctionNoReplace = exactExisting.action === 'current'
+    && racedCreationRefused
+    && beforeCreateRefused
+    && afterCreateResult.action === 'added'
+    && await readFile(occupiedMembershipFile, 'utf8') === 'occupied\n'
+    && (await lstat(occupiedMembershipDirectory)).isDirectory()
+    && await readFile(caseEquivalentMembership, 'utf8') === 'case occupant\n'
+    && await readFile(racedMembershipPath, 'utf8') === 'raced occupant\n'
+    && !await pathExists(join(membershipParent, 'before-create-error'))
+    && await readFile(join(membershipParent, 'after-create-error', 'marker.txt'), 'utf8')
+      === 'membership target\n'
+    && await readFile(join(otherMembershipTarget, 'other.txt'), 'utf8') === 'other\n'
+    && await readFile(membershipMarker, 'utf8') === 'membership target\n';
+
+  const chainedTarget = join(outside, 'chained-membership-target');
+  await symlink(membershipTarget, chainedTarget, 'junction');
+  await symlink(chainedTarget, join(membershipParent, 'chained-skill'), 'junction');
+  const chainedMembershipRefused = await expectCode(
+    () => backend.inspectMembershipLink(join(membershipParent, 'chained-skill')),
+    'WINDOWS_NATIVE_MEMBERSHIP_TARGET_INVALID'
+  );
+  const directorySymlink = join(membershipParent, 'directory-symlink');
+  await symlink(membershipTarget, directorySymlink, 'dir');
+  const directorySymlinkRefused = await expectCode(
+    () => backend.inspectMembershipLink(directorySymlink),
+    'WINDOWS_NATIVE_MEMBERSHIP_LINK_INVALID'
+  );
+  const danglingTarget = join(outside, 'dangling-membership-target');
+  const danglingMembership = join(membershipParent, 'dangling-skill');
+  await mkdir(danglingTarget);
+  await symlink(danglingTarget, danglingMembership, 'junction');
+  await rmdir(danglingTarget);
+  const danglingMembershipRefused = await expectCode(
+    () => backend.inspectMembershipLink(danglingMembership),
+    'WINDOWS_NATIVE_MEMBERSHIP_TARGET_INVALID'
+  );
+  const foreignAclMembership = join(membershipParent, 'foreign-acl-skill');
+  await symlink(membershipTarget, foreignAclMembership, 'junction');
+  execFileSync('icacls.exe', [
+    foreignAclMembership,
+    '/L',
+    '/inheritance:r',
+    '/grant:r',
+    '*S-1-1-0:(F)'
+  ], { stdio: 'pipe' });
+  const foreignAclRefused = await expectCode(
+    () => membershipModule.inspectWindowsSkillMembership(
+      membershipOptions('foreign-acl-skill')
+    ),
+    'WINDOWS_SKILL_MEMBERSHIP_LINK_SECURITY_INVALID'
+  );
+  const membershipTargetAfterForeignAcl = backend.inspectPath(membershipTarget);
+  const membershipForeignReparseRefused = chainedMembershipRefused
+    && directorySymlinkRefused
+    && danglingMembershipRefused
+    && await readFile(membershipMarker, 'utf8') === 'membership target\n';
+  const membershipLinkSecurityAdmitted = membershipLinkSecurityBasics
+    && foreignAclRefused
+    && membershipTargetAfterForeignAcl.object.fileId === membershipTargetBefore.object.fileId
+    && membershipTargetAfterForeignAcl.security.daclBytes.equals(
+      membershipTargetBefore.security.daclBytes
+    )
+    && await readFile(membershipMarker, 'utf8') === 'membership target\n';
+
+  const normalRemoval = await membershipModule.removeWindowsSkillMembership(
+    membershipOptions('direct-skill')
+  );
+  await membershipModule.createWindowsSkillMembership(membershipOptions('before-error'));
+  const beforeErrorRemoval = await membershipModule.removeWindowsSkillMembership(
+    membershipOptions('before-error', membershipTarget, {
+      symlink,
+      async unlink() { throw new Error('injected before-effect unlink failure'); }
+    })
+  );
+  await membershipModule.createWindowsSkillMembership(membershipOptions('after-error'));
+  const afterErrorRemoval = await membershipModule.removeWindowsSkillMembership(
+    membershipOptions('after-error', membershipTarget, {
+      symlink,
+      async unlink(path) {
+        await unlink(path);
+        throw new Error('injected after-effect unlink failure');
+      }
+    })
+  );
+  const membershipTargetAfter = backend.inspectPath(membershipTarget);
+  const membershipLinkOnlyRemoval = normalRemoval.outcome === 'absent'
+    && normalRemoval.effect === 'removed'
+    && membershipTargetBefore.object.fileId === membershipTargetAfter.object.fileId
+    && await readFile(membershipMarker, 'utf8') === 'membership target\n';
+  const membershipRemovalReconciled = beforeErrorRemoval.outcome === 'present'
+    && afterErrorRemoval.outcome === 'absent'
+    && afterErrorRemoval.effect === 'removed';
 
   const closureComponent = 'closure-root';
   const closureRoot = join(privateRoot, closureComponent);
@@ -849,6 +1087,14 @@ try {
     ancestorReparseRefused: true,
     boundedStableReads: true,
     junctionTargetPreserved: true,
+    membershipJunctionDirectTarget,
+    membershipJunctionNoReplace,
+    membershipJunctionExactInspection,
+    membershipJunctionImmediateRevalidation,
+    membershipLinkSecurityAdmitted,
+    membershipForeignReparseRefused,
+    membershipLinkOnlyRemoval,
+    membershipRemovalReconciled,
     privateDirectoryFirstVisibilityPrivate: bootstrapReceipt.created.object.fileId
       === rootInspection.object.fileId
       && bootstrapReceipt.created.security.ownerSid
@@ -1111,7 +1357,7 @@ async function expectCode(operation, expected) {
   try {
     await operation();
   } catch (error) {
-    if (error !== null && typeof error === 'object' && error.code === expected) return;
+    if (error !== null && typeof error === 'object' && error.code === expected) return true;
     throw new Error(
       `Expected ${expected}, received ${safeError(error).code ?? safeError(error).message}`,
       { cause: error }

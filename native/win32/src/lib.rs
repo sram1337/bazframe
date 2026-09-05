@@ -22,7 +22,7 @@ use non_windows as platform;
 #[cfg(windows)]
 use windows as platform;
 
-pub const NATIVE_CONTRACT_VERSION: u32 = 5;
+pub const NATIVE_CONTRACT_VERSION: u32 = 6;
 // Mirrors PROFILE_PORTABILITY_PRODUCTION_LIMITS.checkoutFileBytes. The native
 // boundary may lower a caller's bound but never allocates beyond this product
 // authority.
@@ -90,7 +90,7 @@ pub struct WindowsObjectObservation {
     pub last_write_time: String,
     pub change_time: String,
     pub attributes: u32,
-    /// Zero means no reparse tag; nonzero values are refused before success.
+    /// Zero means no reparse tag; specialized receipts may admit one exact nonzero tag.
     pub reparse_tag: u32,
     pub delete_pending: bool,
     pub directory: bool,
@@ -165,6 +165,18 @@ pub struct WindowsProcessInstanceInspectionReceipt {
 }
 
 #[napi(object)]
+pub struct WindowsMembershipLinkInspection {
+    pub canonical_path: String,
+    pub volume: WindowsVolumeObservation,
+    pub object: WindowsObjectObservation,
+    pub security: WindowsSecurityObservation,
+    pub ancestry_reparse_free: bool,
+    pub normalized_target: String,
+    pub target_volume_identity: String,
+    pub target_file_id: String,
+}
+
+#[napi(object)]
 pub struct WindowsDirectoryEntryObservation {
     pub name: Utf16String,
     pub file_id: String,
@@ -224,6 +236,14 @@ pub fn get_native_windows_info() -> NativeWindowsInfo {
 #[napi(js_name = "inspectWindowsPath")]
 pub fn inspect_windows_path(env: Env, path: String) -> Result<WindowsPathInspection> {
     into_napi(env, platform::inspect_windows_path(&path))
+}
+
+#[napi(js_name = "inspectWindowsMembershipLink")]
+pub fn inspect_windows_membership_link(
+    env: Env,
+    path: String,
+) -> Result<WindowsMembershipLinkInspection> {
+    into_napi(env, platform::inspect_windows_membership_link(&path))
 }
 
 #[napi(js_name = "createWindowsPrivateDirectory")]

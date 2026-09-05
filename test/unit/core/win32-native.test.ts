@@ -61,6 +61,7 @@ describe('Bazframe-owned Windows native loader', () => {
 
   it.each([
     ['missing inspect export', { inspectWindowsPath: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
+    ['missing membership inspect export', { inspectWindowsMembershipLink: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
     ['missing create export', { createWindowsPrivateDirectory: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
     ['missing file-create export', { createWindowsPrivateFile: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
     ['missing lock-acquire export', { acquireWindowsFileLock: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
@@ -68,7 +69,7 @@ describe('Bazframe-owned Windows native loader', () => {
     ['missing process-inspection export', { inspectWindowsProcessInstance: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
     ['missing rename export', { renameWindowsDirectoryNoReplace: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
     ['missing enumerate export', { enumerateWindowsDirectoryStable: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
-    ['legacy contract v4', { info: { contractVersion: 4 } }, 'WINDOWS_NATIVE_CONTRACT_MISMATCH'],
+    ['legacy contract v5', { info: { contractVersion: 5 } }, 'WINDOWS_NATIVE_CONTRACT_MISMATCH'],
     ['contract', { info: { contractVersion: 1 } }, 'WINDOWS_NATIVE_CONTRACT_MISMATCH'],
     ['version', { info: { packageVersion: '0.1.0-other' } }, 'WINDOWS_NATIVE_VERSION_MISMATCH'],
     ['target', { info: { target: 'win32-arm64-msvc' } }, 'WINDOWS_NATIVE_TARGET_MISMATCH'],
@@ -150,6 +151,46 @@ describe('Bazframe-owned Windows native loader', () => {
       expect(read).not.toHaveBeenCalled();
     }
   );
+
+  it('accepts only exact no-follow junction membership receipts', () => {
+    const backend = load(module());
+    expect(backend.inspectMembershipLink('C:\\state\\membership')).toMatchObject({
+      object: { reparseTag: 0xa0000003, directory: true },
+      normalizedTarget: expect.stringContaining('\\target'),
+      targetVolumeIdentity: VOLUME,
+      targetFileId: FILE_ID
+    });
+
+    for (const malformed of [
+      { extra: true },
+      { ancestryReparseFree: false },
+      { normalizedTarget: 'C:\\target' },
+      { targetVolumeIdentity: '1' },
+      { targetFileId: '1' },
+      { security: { extra: true } },
+      { security: { ownerSid: 'not-a-sid' } },
+      { object: { reparseTag: 0xa000000c } },
+      { object: { reparseTag: 0x8000001b } },
+      { object: { attributes: 16 } },
+      { object: { deletePending: true } }
+    ]) {
+      expect(() => load(module({ membershipInspection: membershipInspection(malformed) }))
+        .inspectMembershipLink('C:\\state\\membership'))
+        .toThrow(expect.objectContaining({ code: 'WINDOWS_NATIVE_RECEIPT_INVALID' }));
+    }
+  });
+
+  it.each([
+    ['ERR_WIN32_MEMBERSHIP_LINK_INVALID', 'WINDOWS_NATIVE_MEMBERSHIP_LINK_INVALID'],
+    ['ERR_WIN32_MEMBERSHIP_TARGET_INVALID', 'WINDOWS_NATIVE_MEMBERSHIP_TARGET_INVALID'],
+    ['ERR_WIN32_MEMBERSHIP_CHANGED', 'WINDOWS_NATIVE_MEMBERSHIP_CHANGED']
+  ])('maps native membership refusal %s without fallback', (nativeCode, expectedCode) => {
+    const inspect = vi.fn(() => { throw coded(nativeCode); });
+    const native = module({ inspectWindowsMembershipLink: inspect });
+    expect(() => load(native).inspectMembershipLink('C:\\state\\membership'))
+      .toThrow(expect.objectContaining({ code: expectedCode }));
+    expect(inspect).toHaveBeenCalledTimes(1);
+  });
 
   it('validates private-directory mutation receipts and maps malformed success to ambiguity', () => {
     const native = module();
@@ -391,7 +432,7 @@ function load(
 
 function module(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   const info = {
-    contractVersion: 5,
+    contractVersion: 6,
     packageVersion: VERSION,
     target: 'win32-x64-msvc',
     maxStableReadBytes: BAZFRAME_WIN32_NATIVE_MAX_STABLE_READ_BYTES,
@@ -401,6 +442,7 @@ function module(overrides: Record<string, unknown> = {}): Record<string, unknown
   return {
     getNativeWindowsInfo: () => info,
     inspectWindowsPath: () => overrides.inspection ?? inspection(),
+    inspectWindowsMembershipLink: () => overrides.membershipInspection ?? membershipInspection(),
     createWindowsPrivateDirectory: () => overrides.creation ?? creation(),
     createWindowsPrivateFile: () => overrides.privateFileCreation ?? privateFileCreation(),
     acquireWindowsFileLock: vi.fn(() => overrides.lockAcquisition ?? lockAcquisition()),
@@ -410,8 +452,8 @@ function module(overrides: Record<string, unknown> = {}): Record<string, unknown
     readWindowsFileStable: () => Promise.resolve(overrides.stableRead ?? stableRead()),
     enumerateWindowsDirectoryStable: () => Promise.resolve(overrides.enumeration ?? enumeration()),
     ...without(overrides, [
-      'info', 'inspection', 'creation', 'privateFileCreation', 'lockAcquisition',
-      'processInspection', 'stableRead', 'enumeration'
+      'info', 'inspection', 'membershipInspection', 'creation', 'privateFileCreation',
+      'lockAcquisition', 'processInspection', 'stableRead', 'enumeration'
     ])
   };
 }
@@ -433,6 +475,32 @@ function inspection(overrides: Record<string, unknown> = {}): Record<string, unk
       ? undefined
       : security(record(overrides.security)),
     ancestryReparseFree: true,
+    ...without(overrides, ['volume', 'object', 'security'])
+  };
+}
+
+function membershipInspection(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    canonicalPath: '\\\\?\\Volume{12345678-1234-1234-1234-123456789abc}\\state\\membership',
+    volume: {
+      identity: VOLUME,
+      filesystemName: 'NTFS',
+      driveType: 'fixed',
+      canonicalVolumeGuidPath: '\\\\?\\Volume{12345678-1234-1234-1234-123456789abc}\\',
+      remoteDevice: false,
+      ...record(overrides.volume)
+    },
+    object: observation({
+      directory: true,
+      attributes: 0x410,
+      reparseTag: 0xa0000003,
+      ...record(overrides.object)
+    }),
+    security: security(record(overrides.security)),
+    ancestryReparseFree: true,
+    normalizedTarget: '\\\\?\\Volume{12345678-1234-1234-1234-123456789abc}\\target',
+    targetVolumeIdentity: VOLUME,
+    targetFileId: FILE_ID,
     ...without(overrides, ['volume', 'object', 'security'])
   };
 }

@@ -320,6 +320,7 @@ function fakeBackend(
       }
       return inspection;
     },
+    inspectMembershipLink() { throw new Error('unexpected membership inspection'); },
     createPrivateDirectory,
     createPrivateFile,
     renameDirectoryNoReplace: async () => { throw new Error('unexpected rename'); },

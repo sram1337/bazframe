@@ -2,7 +2,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { BazframeError, errorCode } from './errors.js';
 
-export const BAZFRAME_WIN32_NATIVE_CONTRACT_VERSION = 5;
+export const BAZFRAME_WIN32_NATIVE_CONTRACT_VERSION = 6;
 export const BAZFRAME_WIN32_NATIVE_TARGET = 'win32-x64-msvc';
 // Must remain equal to native/win32/src/lib.rs and the authoritative profile
 // portability production ceilings.
@@ -15,6 +15,7 @@ const HEX_128 = /^[a-f0-9]{32}$/u;
 const VOLUME_GUID = /^\\\\\?\\Volume\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}\\$/u;
 const FILE_ATTRIBUTE_DIRECTORY = 0x10;
 const FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
+const IO_REPARSE_TAG_MOUNT_POINT = 0xa0000003;
 const requireFromHere = createRequire(import.meta.url);
 const nativeArtifactUrl = new URL(
   '../../artifacts/native/win32-x64-msvc/bazframe-win32.node',
@@ -80,6 +81,17 @@ export interface WindowsPrivateFileCreationReceipt {
   parentAfter: WindowsPathInspection;
 }
 
+export interface WindowsMembershipLinkInspection {
+  canonicalPath: string;
+  volume: WindowsVolumeObservation;
+  object: WindowsObjectObservation;
+  security: WindowsSecurityObservation;
+  ancestryReparseFree: true;
+  normalizedTarget: string;
+  targetVolumeIdentity: string;
+  targetFileId: string;
+}
+
 export interface WindowsStableReadReceipt {
   bytes: Buffer;
   byteCount: string;
@@ -135,6 +147,7 @@ export interface WindowsStableDirectoryEnumerationReceipt {
 
 export interface BazframeWin32NativeBackend {
   inspectPath(path: string): WindowsPathInspection;
+  inspectMembershipLink(path: string): WindowsMembershipLinkInspection;
   createPrivateDirectory(parentPath: string, finalComponent: string): WindowsPrivateDirectoryCreationReceipt;
   createPrivateFile(parentPath: string, finalComponent: string): WindowsPrivateFileCreationReceipt;
   renameDirectoryNoReplace(
@@ -157,6 +170,7 @@ export interface BazframeWin32LockBackend {
 interface RawNativeModule {
   getNativeWindowsInfo: () => unknown;
   inspectWindowsPath: (path: string) => unknown;
+  inspectWindowsMembershipLink: (path: string) => unknown;
   createWindowsPrivateDirectory: (parentPath: string, finalComponent: string) => unknown;
   createWindowsPrivateFile: (parentPath: string, finalComponent: string) => unknown;
   acquireWindowsFileLock: (guardPath: string) => unknown;
@@ -281,6 +295,16 @@ export function loadBazframeWin32Native(
         throw nativeOperationFailure(error);
       }
       return pathInspection(receipt);
+    },
+    inspectMembershipLink(path: string): WindowsMembershipLinkInspection {
+      requirePath(path);
+      let receipt: unknown;
+      try {
+        receipt = native.inspectWindowsMembershipLink(path);
+      } catch (error) {
+        throw nativeOperationFailure(error);
+      }
+      return membershipLinkInspection(receipt);
     },
     createPrivateDirectory(
       parentPath: string,
@@ -499,6 +523,7 @@ function nativeModule(value: unknown): RawNativeModule {
   for (const name of [
     'getNativeWindowsInfo',
     'inspectWindowsPath',
+    'inspectWindowsMembershipLink',
     'createWindowsPrivateDirectory',
     'createWindowsPrivateFile',
     'acquireWindowsFileLock',
@@ -543,6 +568,49 @@ function pathInspection(value: unknown): WindowsPathInspection {
   } catch (error) {
     throw receiptFailure('Native Windows path inspection is malformed or inadmissible.', error);
   }
+}
+
+function membershipLinkInspection(value: unknown): WindowsMembershipLinkInspection {
+  try {
+    const record = exactRecord(value, [
+      'canonicalPath', 'volume', 'object', 'security', 'ancestryReparseFree',
+      'normalizedTarget', 'targetVolumeIdentity', 'targetFileId'
+    ], 'membership link inspection');
+    if (record.ancestryReparseFree !== true) invalid();
+    const volume = volumeObservation(record.volume);
+    const object = objectObservation(record.object);
+    const security = securityObservation(record.security);
+    const canonicalPath = canonicalVolumePath(record.canonicalPath);
+    const normalizedTarget = canonicalVolumePath(record.normalizedTarget);
+    const targetVolumeIdentity = hex(record.targetVolumeIdentity, HEX_64);
+    const targetFileId = hex(record.targetFileId, HEX_128);
+    if (!canonicalPath.toLowerCase().startsWith(volume.canonicalVolumeGuidPath.toLowerCase())
+      || object.volumeIdentity !== volume.identity || !object.directory || object.deletePending
+      || object.reparseTag !== IO_REPARSE_TAG_MOUNT_POINT
+      || (object.attributes & FILE_ATTRIBUTE_DIRECTORY) === 0
+      || (object.attributes & FILE_ATTRIBUTE_REPARSE_POINT) === 0) invalid();
+    return {
+      canonicalPath,
+      volume,
+      object,
+      security,
+      ancestryReparseFree: true,
+      normalizedTarget,
+      targetVolumeIdentity,
+      targetFileId
+    };
+  } catch (error) {
+    throw receiptFailure('Native Windows membership-link evidence is malformed.', error);
+  }
+}
+
+function canonicalVolumePath(value: unknown): string {
+  if (typeof value !== 'string' || value.includes('\0') || value.includes('/')) invalid();
+  const match = /^\\\\\?\\Volume\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}\\/u.exec(value);
+  if (match === null) invalid();
+  const remainder = value.slice(match[0].length);
+  if (remainder.split('\\').some((component) => component === '.' || component === '..')) invalid();
+  return value;
 }
 
 function privateDirectoryCreationReceipt(
@@ -923,6 +991,9 @@ function nativeOperationFailure(error: unknown): BazframeError {
     ERR_WIN32_LOCK_GUARD_INVALID: { code: 'WINDOWS_NATIVE_LOCK_GUARD_INVALID' },
     ERR_WIN32_LOCK_NOT_HELD: { code: 'WINDOWS_NATIVE_LOCK_NOT_HELD' },
     ERR_WIN32_LOCK_STATE: { code: 'WINDOWS_NATIVE_LOCK_STATE_INVALID' },
+    ERR_WIN32_MEMBERSHIP_CHANGED: { code: 'WINDOWS_NATIVE_MEMBERSHIP_CHANGED' },
+    ERR_WIN32_MEMBERSHIP_LINK_INVALID: { code: 'WINDOWS_NATIVE_MEMBERSHIP_LINK_INVALID' },
+    ERR_WIN32_MEMBERSHIP_TARGET_INVALID: { code: 'WINDOWS_NATIVE_MEMBERSHIP_TARGET_INVALID' },
     ERR_WIN32_METADATA_UNAVAILABLE: { code: 'WINDOWS_NATIVE_METADATA_UNAVAILABLE' },
     ERR_WIN32_NOT_DIRECTORY: { code: 'WINDOWS_NATIVE_NOT_DIRECTORY' },
     ERR_WIN32_NOT_REGULAR_FILE: { code: 'WINDOWS_NATIVE_NOT_REGULAR_FILE' },

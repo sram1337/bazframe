@@ -48,6 +48,17 @@ export function admitWindowsPrivateDirectory(
   return revalidateChain(backend, chain)[0]!.inspection;
 }
 
+/** Reuses the effective owner-private directory ACL policy for a no-follow child object. */
+export function assertWindowsOwnerPrivateSecurity(
+  security: WindowsSecurityObservation,
+  expectedCurrentUserSid: string
+): void {
+  assertPrivateSecurity(security);
+  if (security.currentUserSid !== expectedCurrentUserSid) {
+    invalid('current-user security identity changed');
+  }
+}
+
 /** Admits one owner-private, single-link regular file beneath a private directory chain. */
 export function admitWindowsPrivateFile(
   backend: BazframeWin32NativeBackend,

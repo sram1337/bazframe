@@ -546,6 +546,7 @@ function harness(options: { destination?: TestNode; oldFile?: string } = {}) {
       if (node.kind === 'reparse') throw new BazframeError('WINDOWS_NATIVE_REPARSE_REFUSED', 'reparse');
       return inspection(path, node);
     },
+    inspectMembershipLink() { throw new Error('unexpected membership inspection'); },
     createPrivateDirectory(parentPath, finalComponent) {
       const parent = required(nodes, parentPath);
       const path = win32.join(parentPath, finalComponent);

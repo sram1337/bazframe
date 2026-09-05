@@ -1,6 +1,6 @@
 use crate::{
     DirectoryEnumerationData, NativeResult, StableReadData, WindowsFileLockAcquisitionReceipt,
-    WindowsPathInspection, WindowsPrivateDirectoryCreationReceipt,
+    WindowsMembershipLinkInspection, WindowsPathInspection, WindowsPrivateDirectoryCreationReceipt,
     WindowsPrivateFileCreationReceipt, WindowsProcessInstanceInspectionReceipt, native_error,
 };
 
@@ -8,6 +8,15 @@ pub(crate) fn inspect_windows_path(_path: &str) -> NativeResult<WindowsPathInspe
     Err(native_error(
         "ERR_WIN32_UNSUPPORTED_TARGET",
         "Bazframe native Windows path inspection requires win32-x64-msvc",
+    ))
+}
+
+pub(crate) fn inspect_windows_membership_link(
+    _path: &str,
+) -> NativeResult<WindowsMembershipLinkInspection> {
+    Err(native_error(
+        "ERR_WIN32_UNSUPPORTED_TARGET",
+        "Bazframe native Windows membership inspection requires win32-x64-msvc",
     ))
 }
 
