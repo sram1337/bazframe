@@ -312,7 +312,7 @@ function sameDirectoryInspection(a: WindowsPathInspection, b: WindowsPathInspect
     && sameSecurity(a.security, b.security);
 }
 
-function requireDirectChild(
+export function requireDirectChild(
   parent: WindowsPathInspection,
   child: WindowsPathInspection,
   component: string
@@ -325,7 +325,7 @@ function requireDirectChild(
   }
 }
 
-function requireEntryMatchesObject(
+export function requireEntryMatchesObject(
   entry: WindowsDirectoryEntryObservation,
   object: WindowsObjectObservation,
   comparison: ClosureComparison

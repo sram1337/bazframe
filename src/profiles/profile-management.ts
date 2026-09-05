@@ -29,7 +29,7 @@ import {
   staleProfileRemovalAuthorization,
   type ProfileRemovalIdentity
 } from './profile-removal-identity.js';
-import { loadProfile, profileDirectory, readActiveProfile } from './profile-store.js';
+import { loadProfile, profileDirectory, readActiveProfile, type ActiveProfileReadServices } from './profile-store.js';
 
 const DIRECTORY_MODE = 0o700;
 const FILE_MODE = 0o600;
@@ -383,8 +383,8 @@ export async function listProfiles(
   return { profileIds, diagnostics };
 }
 
-export function currentProfile(bazframeHome: string): Promise<string> {
-  return readActiveProfile(bazframeHome);
+export function currentProfile(bazframeHome: string, services?: ActiveProfileReadServices): Promise<string> {
+  return readActiveProfile(bazframeHome, services);
 }
 
 function sameRemovalIdentity(

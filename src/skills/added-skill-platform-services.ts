@@ -6,6 +6,7 @@ import type {
   BazframeWin32LockBackend,
   BazframeWin32NativeBackend,
   WindowsObjectObservation,
+  WindowsDirectoryEntryObservation,
   WindowsPathInspection,
   WindowsSecurityObservation
 } from '../core/win32-native.js';
@@ -140,45 +141,8 @@ export function createWindowsAddedSkillPlatformServicesForInternalTesting(
         || maxEntries > ADDED_SKILL_NAMESPACE_ENTRY_LIMIT) {
         throw failure('WINDOWS_ADDED_SKILL_ENUMERATION_LIMIT_INVALID', 'The internal Windows added-Skill enumeration bound is invalid.');
       }
-      const before = admitWindowsPrivateDirectory(backend, path);
-      const receipt = await backend.enumerateStableDirectory(path, maxEntries);
-      requireSameDirectory(before, receipt.directoryBefore);
-      requireSameDirectory(receipt.directoryBefore, receipt.directoryAfter);
-      const after = admitWindowsPrivateDirectory(backend, path);
-      requireSameDirectory(receipt.directoryAfter, after);
-      const entries = [...receipt.entries].sort((left, right) => compare(left.name, right.name));
-      const names = entries.map((entry) => entry.name);
-      if (names.length > maxEntries || new Set(names.map(portableKey)).size !== names.length) {
-        throw failure('WINDOWS_ADDED_SKILL_NAMESPACE_INVALID', 'The internal Windows added-Skill namespace is ambiguous.');
-      }
-      const closure = {
-        root: exactInspection(after),
-        entries: entries.map((entry) => ({
-          nameUtf16: utf16Hex(entry.name),
-          volumeIdentity: after.object.volumeIdentity,
-          fileId: entry.fileId,
-          size: entry.size,
-          allocationSize: entry.allocationSize,
-          creationTime: entry.creationTime,
-          lastWriteTime: entry.lastWriteTime,
-          changeTime: entry.changeTime,
-          attributes: entry.attributes,
-          reparseTag: entry.reparseTag,
-          directory: entry.directory
-        }))
-      };
-      return {
-        names,
-        entries: entries.map((entry) => ({
-          name: entry.name,
-          directory: entry.directory,
-          reparseTag: entry.reparseTag
-        })),
-        identity: createHash('sha256')
-          .update('bazframe-added-skill-direct-directory-v1\0')
-          .update(JSON.stringify(closure))
-          .digest('hex')
-      };
+      const { names, entries, identity } = await enumerateWindowsPrivateDirectory(backend, path, maxEntries);
+      return { names, entries, identity };
     },
 
     async readStableUtf8File(path, label, maxBytes) {
@@ -438,4 +402,48 @@ function portableKey(value: string): string {
 function compare(left: string, right: string): number { return left < right ? -1 : left > right ? 1 : 0; }
 function failure(code: string, message: string, cause?: unknown): BazframeError {
   return new BazframeError(code, message, cause === undefined ? undefined : { cause });
+}
+
+/** Native observation shared by bounded internal profile readers; callers own their domain ceiling. */
+export async function enumerateWindowsPrivateDirectory(backend: BazframeWin32NativeBackend, path: string, maxEntries: number): Promise<AddedSkillDirectoryEnumeration & { nativeEntries: WindowsDirectoryEntryObservation[]; inspection: WindowsPathInspection }> {
+  const before = admitWindowsPrivateDirectory(backend, path);
+  const receipt = await backend.enumerateStableDirectory(path, maxEntries);
+  requireSameDirectory(before, receipt.directoryBefore);
+  requireSameDirectory(receipt.directoryBefore, receipt.directoryAfter);
+  const after = admitWindowsPrivateDirectory(backend, path);
+  requireSameDirectory(receipt.directoryAfter, after);
+  const entries = [...receipt.entries].sort((left, right) => compare(left.name, right.name));
+  const names = entries.map((entry) => entry.name);
+  if (names.length > maxEntries || new Set(names.map(portableKey)).size !== names.length) {
+    throw failure('WINDOWS_ADDED_SKILL_NAMESPACE_INVALID', 'The internal Windows added-Skill namespace is ambiguous.');
+  }
+  const closure = {
+    root: exactInspection(after),
+    entries: entries.map((entry) => ({
+      nameUtf16: utf16Hex(entry.name),
+      volumeIdentity: after.object.volumeIdentity,
+      fileId: entry.fileId,
+      size: entry.size,
+      allocationSize: entry.allocationSize,
+      creationTime: entry.creationTime,
+      lastWriteTime: entry.lastWriteTime,
+      changeTime: entry.changeTime,
+      attributes: entry.attributes,
+      reparseTag: entry.reparseTag,
+      directory: entry.directory
+    }))
+  };
+  return {
+    nativeEntries: entries, inspection: after,
+    names,
+    entries: entries.map((entry) => ({
+      name: entry.name,
+      directory: entry.directory,
+      reparseTag: entry.reparseTag
+    })),
+    identity: createHash('sha256')
+      .update('bazframe-added-skill-direct-directory-v1\0')
+      .update(JSON.stringify(closure))
+      .digest('hex')
+  };
 }

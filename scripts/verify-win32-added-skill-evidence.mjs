@@ -27,8 +27,8 @@ async function receipt(path, packageRootKind, binarySha256) {
     'observations',
     'failures'
   ]);
-  if (value.schemaVersion !== 2
-    || value.purpose !== 'Internal inactive-profile onboarding and healthy local added-Skill Windows product-slice evidence only.'
+  if (value.schemaVersion !== 3
+    || value.purpose !== 'Internal managed profile activation, current selection, onboarding and healthy local added-Skill Windows product-slice evidence only.'
     || value.packageRootKind !== packageRootKind
     || value.completion !== 'passed'
     || value.releaseAdmission !== 'not-authorized'
@@ -83,7 +83,35 @@ async function receipt(path, packageRootKind, binarySha256) {
     'linkLeavesAbsent',
     'sourcePreserved',
     'nativeLockNamespacesPersist',
-    'publicWindowsGateClosed'
+    'publicWindowsGateClosed',
+    'currentMissingNoWrites',
+    'activeMissingSelectionRefused',
+    'selectionProtectedFirstVisibility',
+    'managedActivationAndCurrent',
+    'activationLockOrder',
+    'actualJunctionClosureAndProjection',
+    'repeatedSelectionReplacesIdentity',
+    'activeMalformedExplicitIndependent',
+    'activeTargetResolvedInsideStateLock',
+    'activeExplicitIsolation',
+    'activationPreservesProfiles',
+    'activationAndMembershipContention',
+    'killedActivationOwnerRetry',
+    'occupiedOtherProfileRefused',
+    'selectionExactNoEffect',
+    'selectionAfterEffectErrorCommitted',
+    'selectionMalformedRefused',
+    'selectionSharingNoEffect',
+    'selectionSubstitutionAmbiguous',
+    'selectionDriftBeforeEffect',
+    'profileDriftBeforeSelectionEffect',
+    'postcommitFailureReported',
+    'currentSelectedMissingReadOnly',
+    'interruptedBeforeReplacementRetained',
+    'interruptedAfterReplacementComplete',
+    'interruptedBeforeReturnComplete',
+    'currentPendingNoRecovery',
+    'interruptedActivationExplicitRetry'
   ];
   exact(value.observations, names);
   if (value.observations.binarySha256 !== binarySha256

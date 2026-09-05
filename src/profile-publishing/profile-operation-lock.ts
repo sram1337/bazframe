@@ -24,11 +24,8 @@ export async function tryWithProfileOperationLocks<T>(home: string, keys: readon
 
 export async function withProfileOperationLocks<T>(home: string, keys: readonly string[], operation: (authority: OperationMutationAuthority) => Promise<T>, transactionId = randomBytes(16).toString('hex')): Promise<T> {
   if (process.platform !== 'darwin' && process.platform !== 'linux') throw new BazframeError('PROFILE_OPERATION_LOCK_PLATFORM_UNSUPPORTED', 'Profile operation locks require macOS or Linux.');
-  if (!TRANSACTION.test(transactionId)) throw invalid('transaction ID is invalid');
   const canonicalHome = resolve(home);
-  const ordered = [...new Set(keys)];
-  if (ordered.length === 0 || ordered.length !== keys.length || ordered.some((key) => !isOperationKey(key))) throw invalid('lock keys must be nonempty, unique, and canonical');
-  ordered.sort();
+  const ordered = orderedProfileOperationKeys(keys, transactionId);
   const held: HeldOperationLock[] = [];
   const authority = {} as OperationMutationAuthority;
   let value: T | undefined;
@@ -238,3 +235,11 @@ function heldLocksStillOwned(held: readonly HeldOperationLock[]): boolean {
 function isOperationKey(key: string): boolean { return key === '@store' || (KEY.test(key) && isSafeProfileId(key)); }
 function busy(key: string): BazframeError { return new BazframeError('PROFILE_OPERATION_LOCK_BUSY', `Profile operation lock is busy for ${JSON.stringify(key)}.`); }
 function invalid(detail: string): BazframeError { return new BazframeError('PROFILE_OPERATION_LOCK_INVALID', `Invalid profile operation lock: ${detail}.`); }
+
+/** Shared logical key/transaction validation; physical lock representations remain platform-specific. */
+export function orderedProfileOperationKeys(keys: readonly string[], transactionId: string): string[] {
+  if (!TRANSACTION.test(transactionId)) throw invalid('transaction ID is invalid');
+  const ordered = [...new Set(keys)];
+  if (ordered.length === 0 || ordered.length !== keys.length || ordered.some((key) => !isOperationKey(key))) throw invalid('lock keys must be nonempty, unique, and canonical');
+  return ordered.sort();
+}

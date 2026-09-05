@@ -19,7 +19,7 @@ export type TestNode = {
 export function windowsProvisioningFixture() {
   const nodes = new Map<string, TestNode>([['C:\\', dir(1)], ['C:\\boundary', dir(2)]]);
   let nextId = 3;
-  let held = false;
+  const held = new Set<string>();
   const writes: string[] = [];
   const normalize = (path: string) => win32.normalize(path);
   const lookup = (path: string) => {
@@ -66,11 +66,11 @@ export function windowsProvisioningFixture() {
     acquireFileLock(path) {
       const common = { guardBefore: inspect(path), guardAfter: inspect(path),
         currentProcess: { pid: 1234, creationTime: '0000000000000001' } };
-      if (held) return { ...common, state: 'busy' };
-      held = true;
+      if (held.has(path)) return { ...common, state: 'busy' };
+      held.add(path);
       return { ...common, state: 'acquired', capability: {
-        assertHeld() { if (!held) throw new Error('expired'); },
-        release() { held = false; }
+        assertHeld() { if (!held.has(path)) throw new Error('expired'); },
+        release() { held.delete(path); }
       } };
     },
     inspectProcessInstance() { return { state: 'exited' }; }

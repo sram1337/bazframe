@@ -16,7 +16,7 @@ import type {
 import { assertSafeSkillId } from '../skills/skill-id.js';
 import { withStateLock } from '../state/lock.js';
 import { assertSafeProfileId } from './profile-id.js';
-import { profileDirectory, readActiveProfile } from './profile-store.js';
+import { profileDirectory, readActiveProfile, type ActiveProfileReadServices } from './profile-store.js';
 
 export { readSkillDeclaredName } from '../skills/skill-metadata.js';
 export type ProfileSkillMembershipAction = 'added' | 'current' | 'removed' | 'absent';
@@ -37,6 +37,7 @@ export interface ProfileSkillMembershipOptions {
   testHooks?: ProfileSkillMembershipTestHooks;
   /** Internal Windows product-slice dependency; it does not bypass the public platform gate. */
   platformServices?: AddedSkillPlatformServices;
+  selectionReadServices?: ActiveProfileReadServices;
 }
 
 interface DirectoryIdentity { device: bigint; inode: bigint }
@@ -57,7 +58,7 @@ export async function addProfileSkill(options: ProfileSkillMembershipOptions, pr
 }
 async function addProfileSkillFor(options: ProfileSkillMembershipOptions, profileId: string | undefined, skillId: string): Promise<ProfileSkillMembershipResult> {
   if (options.platformServices !== undefined) {
-    if (profileId === undefined) throw windowsExplicitProfileRequired();
+    if (profileId === undefined && options.selectionReadServices === undefined) throw windowsExplicitProfileRequired();
     return addWindowsProfileSkill(
       { ...options, platformServices: options.platformServices },
       profileId,
@@ -97,7 +98,7 @@ export async function removeProfileSkill(options: ProfileSkillMembershipOptions,
 }
 async function removeProfileSkillFor(options: ProfileSkillMembershipOptions, profileId: string | undefined, skillId: string): Promise<ProfileSkillMembershipResult> {
   if (options.platformServices !== undefined) {
-    if (profileId === undefined) throw windowsExplicitProfileRequired();
+    if (profileId === undefined && options.selectionReadServices === undefined) throw windowsExplicitProfileRequired();
     return removeWindowsProfileSkill(
       { ...options, platformServices: options.platformServices },
       profileId,
@@ -126,7 +127,7 @@ async function removeProfileSkillFor(options: ProfileSkillMembershipOptions, pro
 
 async function addWindowsProfileSkill(
   options: ProfileSkillMembershipOptions & { platformServices: AddedSkillPlatformServices },
-  profileId: string,
+  profileId: string | undefined,
   skillId: string
 ): Promise<ProfileSkillMembershipResult> {
   return withWindowsProfileMembershipLock(
@@ -134,7 +135,7 @@ async function addWindowsProfileSkill(
     profileId,
     skillId,
     'bazframe profile skill add',
-    async (membershipPath, skillsDirectory, authority, namespaceIdentity) => {
+    async (membershipPath, skillsDirectory, authority, namespaceIdentity, resolvedProfileId) => {
       const registration = await resolveRegistration(
         options.bazframeHome,
         skillId,
@@ -146,7 +147,7 @@ async function addWindowsProfileSkill(
         registration.target
       );
       if (existing.kind === 'current') {
-        return windowsResult(profileId, membershipPath, registration.target, skillId, 'current');
+        return windowsResult(resolvedProfileId, membershipPath, registration.target, skillId, 'current');
       }
       await options.testHooks?.beforeCommit?.();
       const current = await readDefaultSkillRegistration(
@@ -167,14 +168,14 @@ async function addWindowsProfileSkill(
         skillId,
         registration.target
       );
-      return windowsResult(profileId, membershipPath, registration.target, skillId, action);
+      return windowsResult(resolvedProfileId, membershipPath, registration.target, skillId, action);
     }
   );
 }
 
 async function removeWindowsProfileSkill(
   options: ProfileSkillMembershipOptions & { platformServices: AddedSkillPlatformServices },
-  profileId: string,
+  profileId: string | undefined,
   skillId: string
 ): Promise<ProfileSkillMembershipResult> {
   return withWindowsProfileMembershipLock(
@@ -182,7 +183,7 @@ async function removeWindowsProfileSkill(
     profileId,
     skillId,
     'bazframe profile skill remove',
-    async (membershipPath, skillsDirectory, authority, namespaceIdentity) => {
+    async (membershipPath, skillsDirectory, authority, namespaceIdentity, resolvedProfileId) => {
       const registration = await readDefaultSkillRegistrationLink(
         options.bazframeHome,
         skillId,
@@ -194,7 +195,7 @@ async function removeWindowsProfileSkill(
         registration.target
       );
       if (existing.kind === 'absent') {
-        return windowsResult(profileId, membershipPath, registration.target, skillId, 'absent');
+        return windowsResult(resolvedProfileId, membershipPath, registration.target, skillId, 'absent');
       }
       await options.testHooks?.beforeCommit?.();
       const current = await readDefaultSkillRegistrationLink(
@@ -215,49 +216,46 @@ async function removeWindowsProfileSkill(
         skillId,
         registration.target
       );
-      return windowsResult(profileId, membershipPath, registration.target, skillId, action);
+      return windowsResult(resolvedProfileId, membershipPath, registration.target, skillId, action);
     }
   );
 }
 
 async function withWindowsProfileMembershipLock<T>(
   options: ProfileSkillMembershipOptions & { platformServices: AddedSkillPlatformServices },
-  profileId: string,
+  profileId: string | undefined,
   skillId: string,
   command: string,
   operation: (
     membershipPath: string,
     skillsDirectory: string,
     authority: AddedSkillMutationAuthority,
-    namespaceIdentity: string
+    namespaceIdentity: string,
+    resolvedProfileId: string
   ) => Promise<T>
 ): Promise<T> {
-  const directory = profileDirectory(options.bazframeHome, profileId);
-  const skillsDirectory = join(directory, 'skills');
-  const membershipPath = join(skillsDirectory, skillId);
   return options.platformServices.withLock(
     join(options.bazframeHome, 'locks', 'state.lock'),
-    { command, target: directory },
-    async () => options.platformServices!.withLock(
-      join(options.bazframeHome, 'locks', 'profiles', `${profileId}.skills.lock`),
-      { command, target: membershipPath },
-      async (authority) => {
-        options.platformServices!.inspectPrivateDirectory(join(options.bazframeHome, 'profiles'));
-        options.platformServices!.inspectPrivateDirectory(directory);
-        await options.platformServices!.readStableUtf8File(
-          join(directory, 'AGENTS.md'),
-          `Profile ${JSON.stringify(profileId)} instructions`,
-          MAX_EFFECTIVE_INSTRUCTION_BYTES
-        );
-        const namespace = options.platformServices!.inspectPrivateDirectory(skillsDirectory);
-        return operation(
-          membershipPath,
-          skillsDirectory,
-          authority,
-          namespace.identity
-        );
-      }
-    )
+    { command, target: profileId === undefined ? join(options.bazframeHome, 'active-profile') : profileDirectory(options.bazframeHome, profileId) },
+    async (stateAuthority) => {
+      const resolvedProfileId = profileId ?? await readActiveProfile(options.bazframeHome, options.selectionReadServices);
+      const directory = profileDirectory(options.bazframeHome, resolvedProfileId);
+      const skillsDirectory = join(directory, 'skills');
+      const membershipPath = join(skillsDirectory, skillId);
+      return options.platformServices.withLock(
+        join(options.bazframeHome, 'locks', 'profiles', `${resolvedProfileId}.skills.lock`),
+        { command, target: membershipPath },
+        async (profileAuthority) => {
+          const authority = { assertHeld() { stateAuthority.assertHeld(); profileAuthority.assertHeld(); } };
+          authority.assertHeld();
+          options.platformServices.inspectPrivateDirectory(join(options.bazframeHome, 'profiles'));
+          options.platformServices.inspectPrivateDirectory(directory);
+          await options.platformServices.readStableUtf8File(join(directory, 'AGENTS.md'), `Profile ${JSON.stringify(resolvedProfileId)} instructions`, MAX_EFFECTIVE_INSTRUCTION_BYTES);
+          const namespace = options.platformServices.inspectPrivateDirectory(skillsDirectory);
+          return operation(membershipPath, skillsDirectory, authority, namespace.identity, resolvedProfileId);
+        }
+      );
+    }
   );
 }
 

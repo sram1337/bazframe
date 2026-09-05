@@ -5,9 +5,15 @@ import { fork, spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
+import { windowsProvisioningFixture } from '../../helpers/windows-provisioning-fixture.js';
 
 const { trackProvisioningChild, sanitizeProductError, sanitizeProductFailure } = await import(pathToFileURL(
   join(process.cwd(), 'scripts', 'test-win32-profile-provisioning-child.mjs')
+).href);
+
+const { sameSelectionCandidateObject, selectionCandidateCommitted, selectionCandidateRetained,
+  newSelectionCandidateName, observeActivationChildStop } = await import(pathToFileURL(
+  join(process.cwd(), 'scripts', 'test-win32-profile-activation.mjs')
 ).href);
 
 const roots: string[] = [];
@@ -41,7 +47,35 @@ describe('Windows added-Skill product evidence verifier', () => {
 
   it.each([
     'occupiedDestinationRefusedUnchanged', 'candidateDriftAmbiguityRetained',
-    'existingCrlfSelectionPreserved', 'existingFavoritesPreserved', 'editedProfileInstructionsPreserved'
+    'existingCrlfSelectionPreserved', 'existingFavoritesPreserved', 'editedProfileInstructionsPreserved',
+    'currentMissingNoWrites',
+    'activeMissingSelectionRefused',
+    'selectionProtectedFirstVisibility',
+    'managedActivationAndCurrent',
+    'activationLockOrder',
+    'actualJunctionClosureAndProjection',
+    'repeatedSelectionReplacesIdentity',
+    'activeMalformedExplicitIndependent',
+    'activeTargetResolvedInsideStateLock',
+    'activeExplicitIsolation',
+    'activationPreservesProfiles',
+    'activationAndMembershipContention',
+    'killedActivationOwnerRetry',
+    'occupiedOtherProfileRefused',
+    'selectionExactNoEffect',
+    'selectionAfterEffectErrorCommitted',
+    'selectionMalformedRefused',
+    'selectionSharingNoEffect',
+    'selectionSubstitutionAmbiguous',
+    'selectionDriftBeforeEffect',
+    'profileDriftBeforeSelectionEffect',
+    'postcommitFailureReported',
+    'currentSelectedMissingReadOnly',
+    'interruptedBeforeReplacementRetained',
+    'interruptedAfterReplacementComplete',
+    'interruptedBeforeReturnComplete',
+    'currentPendingNoRecovery',
+    'interruptedActivationExplicitRetry'
   ] as const)('requires native observation %s to be present and true', async (name) => {
     const root = await mkdtemp(join(tmpdir(), 'bazframe-win-product-evidence-'));
     roots.push(root);
@@ -84,8 +118,8 @@ function run(source: string, installed: string) {
 
 function receipt(packageRootKind: 'source-tree' | 'packed-install') {
   return {
-    schemaVersion: 2,
-    purpose: 'Internal inactive-profile onboarding and healthy local added-Skill Windows product-slice evidence only.',
+    schemaVersion: 3,
+    purpose: 'Internal managed profile activation, current selection, onboarding and healthy local added-Skill Windows product-slice evidence only.',
     packageRootKind,
     completion: 'passed',
     releaseAdmission: 'not-authorized',
@@ -136,7 +170,35 @@ function receipt(packageRootKind: 'source-tree' | 'packed-install') {
       linkLeavesAbsent: true,
       sourcePreserved: true,
       nativeLockNamespacesPersist: true,
-      publicWindowsGateClosed: true
+      publicWindowsGateClosed: true,
+      currentMissingNoWrites: true,
+      activeMissingSelectionRefused: true,
+      selectionProtectedFirstVisibility: true,
+      managedActivationAndCurrent: true,
+      activationLockOrder: true,
+      actualJunctionClosureAndProjection: true,
+      repeatedSelectionReplacesIdentity: true,
+      activeMalformedExplicitIndependent: true,
+      activeTargetResolvedInsideStateLock: true,
+      activeExplicitIsolation: true,
+      activationPreservesProfiles: true,
+      activationAndMembershipContention: true,
+      killedActivationOwnerRetry: true,
+      occupiedOtherProfileRefused: true,
+      selectionExactNoEffect: true,
+      selectionAfterEffectErrorCommitted: true,
+      selectionMalformedRefused: true,
+      selectionSharingNoEffect: true,
+      selectionSubstitutionAmbiguous: true,
+      selectionDriftBeforeEffect: true,
+      profileDriftBeforeSelectionEffect: true,
+      postcommitFailureReported: true,
+      currentSelectedMissingReadOnly: true,
+      interruptedBeforeReplacementRetained: true,
+      interruptedAfterReplacementComplete: true,
+      interruptedBeforeReturnComplete: true,
+      currentPendingNoRecovery: true,
+      interruptedActivationExplicitRetry: true
     },
     failures: []
   };
@@ -225,7 +287,7 @@ describe('Windows failed-product diagnostic privacy', () => {
     ], { encoding: 'utf8' });
     expect(result.status).toBe(1);
     const receipt = JSON.parse(await readFile(output, 'utf8'));
-    expect(receipt).toMatchObject({ schemaVersion: 2, completion: 'failed', observations: {}, windowsSupportClaim: false });
+    expect(receipt).toMatchObject({ schemaVersion: 3, completion: 'failed', observations: {}, windowsSupportClaim: false });
     expect(receipt.failures).toHaveLength(1);
     expect(receipt.failures[0]).toMatchObject({ scenario: 'startup', substep: process.platform === 'win32' ? 'nativeModule' : 'start' });
     expect(JSON.stringify(receipt)).not.toContain(root);
@@ -333,6 +395,104 @@ describe('Windows failed-product diagnostic privacy', () => {
     });
     expect(JSON.stringify(failure)).not.toContain('must-not-escape');
     expect(sanitizeProductError(await child.next('result').catch((error: unknown) => error))).toEqual(failure);
+    await child.exited;
+  });
+});
+
+
+describe('independent activation candidate tuple evidence', () => {
+  function snapshot() {
+    const fixture = windowsProvisioningFixture();
+    const path = 'C:\\boundary\\selection-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.tmp';
+    fixture.file(path, 'focused\n');
+    return { bytes: Buffer.from('focused\n'), inspection: fixture.backend.inspectPath(path) };
+  }
+
+  it('binds first visibility to the written candidate while permitting its expected byte growth', () => {
+    const written = snapshot();
+    const empty = { ...written, bytes: Buffer.alloc(0), inspection: { ...written.inspection,
+      object: { ...written.inspection.object, size: '0000000000000000', allocationSize: '0000000000000000' } } };
+    expect(sameSelectionCandidateObject(empty, written)).toBe(true);
+    const substituted = { ...written, inspection: { ...written.inspection, object: { ...written.inspection.object, fileId: 'f'.repeat(32) } } };
+    expect(sameSelectionCandidateObject(empty, substituted)).toBe(false);
+  });
+
+  it('proves rename by immutable identity/security and exact bytes, not the changed pathname or change time', () => {
+    const candidate = snapshot();
+    const destination = { ...candidate, inspection: { ...candidate.inspection,
+      canonicalPath: 'final-private-selection', object: { ...candidate.inspection.object, changeTime: '0000000000000002' } } };
+    expect(selectionCandidateCommitted(candidate, destination, undefined)).toBe(true);
+    expect(selectionCandidateRetained(candidate, candidate)).toBe(true);
+    expect(selectionCandidateRetained(candidate, destination)).toBe(false);
+  });
+
+  it.each(['identity', 'volume', 'security', 'bytes', 'retained-temp', 'missing-candidate', 'missing-destination'] as const)(
+    'rejects a falsely claimed commit with %s mismatch', (kind) => {
+      const candidate = snapshot();
+      const destination = snapshot();
+      if (kind === 'identity') destination.inspection.object.fileId = 'f'.repeat(32);
+      if (kind === 'volume') destination.inspection.object.volumeIdentity = 'f'.repeat(16);
+      if (kind === 'security') destination.inspection.security.daclBytes = Buffer.from('different');
+      if (kind === 'bytes') destination.bytes = Buffer.from('other\n');
+      expect(selectionCandidateCommitted(kind === 'missing-candidate' ? undefined : candidate,
+        kind === 'missing-destination' ? undefined : destination,
+        kind === 'retained-temp' ? candidate : undefined)).toBe(false);
+    }
+  );
+
+  it.each(['missing', 'identity', 'security', 'bytes', 'metadata'] as const)('rejects %s retained-candidate mismatch after sharing denial or interruption', (kind) => {
+    const candidate = snapshot();
+    const retained = snapshot();
+    if (kind === 'identity') retained.inspection.object.fileId = 'f'.repeat(32);
+    if (kind === 'security') retained.inspection.security.ownerSid = 'different';
+    if (kind === 'bytes') retained.bytes = Buffer.from('other\n');
+    if (kind === 'metadata') retained.inspection.object.changeTime = '0000000000000002';
+    expect(selectionCandidateRetained(candidate, kind === 'missing' ? undefined : retained)).toBe(false);
+  });
+
+  it('never mistakes an orphan for the new candidate and refuses missing/ambiguous new names', () => {
+    const old = `selection-${'a'.repeat(32)}.tmp`;
+    const fresh = `selection-${'b'.repeat(32)}.tmp`;
+    expect(newSelectionCandidateName([old], [old, fresh, 'active-profile'])).toBe(fresh);
+    expect(() => newSelectionCandidateName([old], [old])).toThrow('activation evidence condition failed');
+    expect(() => newSelectionCandidateName([], [old, fresh])).toThrow('activation evidence condition failed');
+  });
+
+  it.each(['BEFORE_REPLACEMENT', 'AFTER_REPLACEMENT', 'BEFORE_RETURN'])('observes candidate before permitting %s, with token-only IPC', async (stage) => {
+    const sent: string[] = [];
+    const process = Object.assign(new EventEmitter(), { send(token: string) {
+      sent.push(token);
+      process.emit('message', { event: 'paused', phase: stage });
+    } });
+    const child = trackProvisioningChild(process);
+    const candidate = { path: 'private-path', snapshot: snapshot() };
+    const result = observeActivationChildStop(child, stage, async () => {
+      expect(sent).toEqual([]);
+      return candidate;
+    });
+    process.emit('message', { event: 'paused', phase: 'BEFORE_REPLACEMENT' });
+    expect(await result).toBe(candidate);
+    expect(sent).toEqual(stage === 'BEFORE_REPLACEMENT' ? [] : ['continue']);
+    process.emit('close', 0, null);
+    await child.exited;
+  });
+
+  it('refuses an after-rename pause without the prior independent candidate observation', async () => {
+    const process = Object.assign(new EventEmitter(), { send() { throw new Error('must not continue'); } });
+    const child = trackProvisioningChild(process);
+    const result = observeActivationChildStop(child, 'AFTER_REPLACEMENT', async () => { throw new Error('must not observe late'); });
+    process.emit('message', { event: 'paused', phase: 'AFTER_REPLACEMENT' });
+    await expect(result).rejects.toThrow('activation evidence condition failed');
+    process.emit('close', 0, null);
+    await child.exited;
+  });
+
+  it('settles a child that closes between candidate observation and the final pause, without a new timer', async () => {
+    const process = Object.assign(new EventEmitter(), { send() { process.emit('close', 1, null); } });
+    const child = trackProvisioningChild(process);
+    const result = observeActivationChildStop(child, 'BEFORE_RETURN', async () => snapshot());
+    process.emit('message', { event: 'paused', phase: 'BEFORE_REPLACEMENT' });
+    await expect(result).rejects.toThrow('product child closed');
     await child.exited;
   });
 });

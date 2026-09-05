@@ -149,33 +149,79 @@ export async function renameManagedProfile(home: string, oldName: string, newNam
   }, transactionId);
 }
 
-export async function inspectManagedProfileActivation(home: string, profileName: string): Promise<ManagedProfileActivationInspection> {
+export interface ManagedProfileActivationAuthority { assertHeld(home?: string, profileName?: string): void }
+export interface ManagedProfileActivationServices {
+  captureExpectation: typeof capturePhysicalProfileExpectation;
+  assertExpectation: typeof assertPhysicalProfileExpectation;
+  readSystemView: typeof readProfileSystemView;
+  withOperationLocks<T>(home: string, keys: readonly string[], transactionId: string, operation: (authority: ManagedProfileActivationAuthority) => Promise<T>): Promise<T>;
+  withStateLock<T>(home: string, profileName: string, operation: (authority: ManagedProfileActivationAuthority) => Promise<T>): Promise<T>;
+  publishSelection(home: string, profileName: string, authority: ManagedProfileActivationAuthority, expectation: PhysicalProfileExpectation): Promise<void>;
+  readSelection(home: string): Promise<string | undefined>;
+  beforeReturn?(): void | Promise<void>;
+}
+const defaultActivationServices: ManagedProfileActivationServices = {
+  captureExpectation: capturePhysicalProfileExpectation,
+  assertExpectation: assertPhysicalProfileExpectation,
+  readSystemView: readProfileSystemView,
+  withOperationLocks: (home, keys, transactionId, operation) => withProfileOperationLocks(home, keys,
+    (authority) => operation({ assertHeld: () => assertOperationMutationAuthority(authority, home, keys, transactionId) }), transactionId),
+  withStateLock: (home, profileName, operation) => withStateLock(join(home, 'locks', 'state.lock'),
+    { command: 'profile-managed-use', target: profileName }, () => operation({ assertHeld() {} }), { managedRoot: home }),
+  publishSelection: (home, profileName) => writeFileAtomic(join(home, 'active-profile'), `${profileName}\n`, { managedRoot: home, commitOnRename: true }),
+  async readSelection(home) { return (await readOptionalActiveProfileSnapshot(home))?.profileId; }
+};
+
+export async function inspectManagedProfileActivation(home: string, profileName: string, services?: ManagedProfileActivationServices): Promise<ManagedProfileActivationInspection> {
   assertSafeProfileId(profileName);
-  const expectation = await capturePhysicalProfileExpectation(home, profileName);
-  let view;try{view=await readProfileSystemView(home);}catch(error){
-    if(expectation.sidecarSha256!==null)throw error;
-    await assertPhysicalProfileExpectation(home,profileName,expectation);
-    const profile:ProfileDomainView={name:profileName,profileInstanceId:null,publication:null,publicationVersionState:'unpublished',incomplete:false,missingResources:[],resourceIdentities:[]};
-    return{profile,incomplete:false,warning:null,expectation};
+  const reads = services ?? defaultActivationServices;
+  const expectation = await reads.captureExpectation(home, profileName);
+  let view;
+  try { view = await reads.readSystemView(home); }
+  catch (error) {
+    // Supported-platform legacy fallback stays unchanged; injected read failures never hide state.
+    if (services !== undefined || expectation.sidecarSha256 !== null) throw error;
+    await reads.assertExpectation(home, profileName, expectation);
+    const profile: ProfileDomainView = { name: profileName, profileInstanceId: null, publication: null, publicationVersionState: 'unpublished', incomplete: false, missingResources: [], resourceIdentities: [] };
+    return { profile, incomplete: false, warning: null, expectation };
   }
   const profile = view.profiles.find((candidate) => candidate.name === profileName);
   if (profile === undefined) throw changed('profile disappeared while inspecting activation');
-  await assertPhysicalProfileExpectation(home, profileName, expectation);
+  await reads.assertExpectation(home, profileName, expectation);
   return { profile: structuredClone(profile), incomplete: profile.incomplete, warning: projectActivationProfileApplication(view, profileName, null).activationWarning, expectation };
 }
 
-export async function useManagedProfile(home: string, profileName: string): Promise<ManagedProfileActivationResult> {
-  const inspection = await inspectManagedProfileActivation(home, profileName);
+export async function useManagedProfile(home: string, profileName: string, services?: ManagedProfileActivationServices): Promise<ManagedProfileActivationResult> {
+  const reads = services ?? defaultActivationServices;
+  const inspection = await inspectManagedProfileActivation(home, profileName, services);
   const transactionId = newTransactionId();
-  await withProfileOperationLocks(home, [profileName, '@store'], async (authority) => {
-    await withStateLock(join(home, 'locks', 'state.lock'), { command: 'profile-managed-use', target: profileName }, async () => {
-      await assertPhysicalProfileExpectation(home, profileName, inspection.expectation);
-      assertOperationMutationAuthority(authority, home, [profileName, '@store'], transactionId);
-      await writeFileAtomic(join(home, 'active-profile'), `${profileName}\n`, { managedRoot: home, commitOnRename: true });
-      await assertPhysicalProfileExpectation(home, profileName, inspection.expectation);
-      if ((await readOptionalActiveProfileSnapshot(home))?.profileId !== profileName) throw changed('active selection did not converge');
-    }, { managedRoot: home });
-  }, transactionId);
+  let committed = false;
+  try {
+    await reads.withOperationLocks(home, [profileName, '@store'], transactionId, async (operationAuthority) => {
+      await reads.withStateLock(home, profileName, async (stateAuthority) => {
+        const authority = { assertHeld(requestedHome = home, requestedProfile = profileName) {
+          if (requestedHome !== home || requestedProfile !== profileName) throw changed('activation authority binding changed');
+          operationAuthority.assertHeld(home, profileName); stateAuthority.assertHeld(home, profileName);
+        } };
+        await reads.assertExpectation(home, profileName, inspection.expectation);
+        if (services !== undefined) {
+          const finalView = await reads.readSystemView(home);
+          if (JSON.stringify(finalView.profiles.find((profile) => profile.name === profileName)) !== JSON.stringify(inspection.profile)) throw changed('activation projection changed');
+          await reads.assertExpectation(home, profileName, inspection.expectation);
+        }
+        authority.assertHeld();
+        await reads.publishSelection(home, profileName, authority, inspection.expectation);
+        committed = true;
+        await reads.assertExpectation(home, profileName, inspection.expectation);
+        if (await reads.readSelection(home) !== profileName) throw changed('active selection did not converge');
+        authority.assertHeld();
+        await reads.beforeReturn?.();
+      });
+    });
+  } catch (error) {
+    if (services !== undefined && committed) throw new BazframeError('WINDOWS_PROFILE_ACTIVATION_COMMITTED_CHECK_FAILED', 'Selection committed, but dependent profile validation or lock release failed. No rollback was attempted; inspect current selection before retry.', { cause: error });
+    throw error;
+  }
   return { ...inspection, active: true };
 }
 

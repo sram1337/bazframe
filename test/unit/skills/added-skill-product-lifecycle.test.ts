@@ -16,6 +16,8 @@ import {
 } from '../../../src/skills/default-skill-catalog.js';
 import {
   addProfileSkill,
+  addActiveProfileSkill,
+  removeActiveProfileSkill,
   removeProfileSkill
 } from '../../../src/profiles/profile-skill-membership.js';
 import { captureProfileSkillReferenceIndex } from '../../../src/profiles/profile-skill-reference-index.js';
@@ -71,6 +73,28 @@ describe('internal Windows added-Skill product lifecycle', () => {
     const global = fixture.lockEvents.lastIndexOf(`enter:${join(fixture.home, 'locks', 'state.lock')}`, nested);
     expect(global).toBeGreaterThanOrEqual(0);
     expect(nested).toBeGreaterThan(global);
+  });
+
+  it('resolves active membership inside state lock and keeps explicit targeting selection-independent', async () => {
+    const fixture = await setup();
+    const options = { platformServices: fixture.services };
+    await addDefaultSkill(fixture.home, fixture.target, options);
+    let reads = 0;
+    const selectionReadServices = { async readSelectedProfileId() {
+      reads += 1;
+      expect(fixture.lockEvents.at(-1)).toBe(`enter:${join(fixture.home, 'locks', 'state.lock')}`);
+      return 'focused';
+    } };
+    const membership = { bazframeHome: fixture.home, ...options, selectionReadServices };
+    expect(await addActiveProfileSkill(membership, 'demo-skill')).toMatchObject({ profileId: 'focused', action: 'added' });
+    expect(await addActiveProfileSkill(membership, 'demo-skill')).toMatchObject({ profileId: 'focused', action: 'current' });
+    expect(reads).toBe(2);
+    await removeProfileSkill({ ...membership, selectionReadServices: { async readSelectedProfileId() { throw new Error('must not read'); } } }, 'focused', 'demo-skill');
+    expect(await removeActiveProfileSkill(membership, 'demo-skill')).toMatchObject({ profileId: 'focused', action: 'absent' });
+    expect(reads).toBe(3);
+    const before = [...fixture.links];
+    await expect(addActiveProfileSkill({ ...membership, selectionReadServices: { async readSelectedProfileId() { return undefined; } } }, 'demo-skill')).rejects.toMatchObject({ code: 'NO_ACTIVE_PROFILE' });
+    expect([...fixture.links]).toEqual(before);
   });
 
   it('keeps usable drive spelling separate from canonical target authority', async () => {

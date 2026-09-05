@@ -163,7 +163,7 @@ try {
     $env:BAZFRAME_WIN32_NATIVE_PACK_MODE = 'foundation-evidence'
     & $npmCommand run build
     Assert-NativeExit -Operation 'TypeScript build'
-    & $npxCommand vitest run --config vitest.config.ts test/unit/core/win32-native.test.ts test/unit/state/win32-private-directory.test.ts test/unit/state/win32-directory-closure.test.ts test/unit/state/win32-directory-publication.test.ts test/unit/state/win32-operation-lock.test.ts test/unit/state/win32-skill-membership.test.ts test/unit/skills/added-skill-platform-services.test.ts test/unit/skills/added-skill-product-lifecycle.test.ts test/unit/scripts/win32-added-skill-evidence.test.ts test/unit/profiles/win32-profile-provisioning.test.ts test/unit/cli/platform-support.test.ts
+    & $npxCommand vitest run --config vitest.config.ts test/unit/core/win32-native.test.ts test/unit/state/win32-private-directory.test.ts test/unit/state/win32-directory-closure.test.ts test/unit/state/win32-directory-publication.test.ts test/unit/state/win32-operation-lock.test.ts test/unit/state/win32-skill-membership.test.ts test/unit/skills/added-skill-platform-services.test.ts test/unit/skills/added-skill-product-lifecycle.test.ts test/unit/scripts/win32-added-skill-evidence.test.ts test/unit/profiles/win32-profile-provisioning.test.ts test/unit/profiles/win32-profile-selection.test.ts test/unit/state/win32-atomic-file.test.ts test/unit/profile-publishing/win32-profile-activation.test.ts test/unit/cli/platform-support.test.ts
     Assert-NativeExit -Operation 'Native contract tests'
 
     $env:BAZFRAME_WIN32_NATIVE_TEST_PARENT = $temporaryRoot
@@ -223,8 +223,8 @@ try {
     }
     $productSourceEvidence = Get-Content -LiteralPath $productSourceEvidencePath -Raw | ConvertFrom-Json
     $productInstalledEvidence = Get-Content -LiteralPath $productInstalledEvidencePath -Raw | ConvertFrom-Json
-    if ($productSourceEvidence.schemaVersion -ne 2 -or
-        $productInstalledEvidence.schemaVersion -ne 2 -or
+    if ($productSourceEvidence.schemaVersion -ne 3 -or
+        $productInstalledEvidence.schemaVersion -ne 3 -or
         $productSourceEvidence.completion -ne 'passed' -or
         $productInstalledEvidence.completion -ne 'passed' -or
         $productSourceEvidence.releaseAdmission -ne 'not-authorized' -or

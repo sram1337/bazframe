@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { win32 } from 'node:path';
 import type { BazframeWin32LockBackend, BazframeWin32NativeBackend } from '../core/win32-native.js';
 import { BazframeError, errorCode } from '../core/errors.js';
@@ -17,13 +16,13 @@ import {
 import { withWindowsOperationLock, type WindowsOperationLockIo } from '../state/win32-operation-lock.js';
 import {
   admitWindowsPrivateDirectory,
-  admitWindowsPrivateFile,
   ensureWindowsPrivateDirectoryPath,
   isValidWindowsPathComponent
 } from '../state/win32-private-directory.js';
 import { assertSafeProfileId, isSafeProfileId } from './profile-id.js';
 import type { ProfileListResult, ProfileProvisioningServices } from './profile-management.js';
-import { decodeActiveProfileState, loadProfile, MAX_ACTIVE_PROFILE_STATE_BYTES } from './profile-store.js';
+import { loadProfile } from './profile-store.js';
+import { readWindowsSelectionSnapshot } from './win32-profile-selection.js';
 
 export interface WindowsProfileProvisioningTestOptions {
   publicationIo?: WindowsDirectoryPublicationIo;
@@ -40,26 +39,7 @@ export function createWindowsProfileProvisioningServicesForInternalTesting(
   const enumerate = (path: string) => services.enumeratePrivateDirectory(path, ADDED_SKILL_NAMESPACE_ENTRY_LIMIT);
   const ensure = (path: string) => ensureWindowsPrivateDirectoryPath(backend, path);
 
-  async function activeSnapshot(home: string): Promise<{ profileId?: string; digest: string }> {
-    const namespace = await enumerate(home);
-    const names = namespace.names.filter((name) => key(name) === key('active-profile'));
-    if (names.length === 0) return { digest: digest('absent') };
-    if (names[0] !== 'active-profile') throw invalid('Active selection uses an alias spelling.');
-    const path = win32.join(home, 'active-profile');
-    const before = admitWindowsPrivateFile(backend, path);
-    const receipt = await backend.readStableFile(path, MAX_ACTIVE_PROFILE_STATE_BYTES);
-    const after = admitWindowsPrivateFile(backend, path);
-    if (JSON.stringify(before) !== JSON.stringify(after)
-      || JSON.stringify(before.object) !== JSON.stringify(receipt.before)
-      || JSON.stringify(receipt.before) !== JSON.stringify(receipt.after)
-      || BigInt(receipt.bytes.byteLength) !== BigInt(`0x${receipt.after.size}`)) {
-      throw invalid('Active selection changed during its bounded read.');
-    }
-    return {
-      profileId: decodeActiveProfileState(receipt.bytes, path),
-      digest: digest(JSON.stringify(after), receipt.bytes)
-    };
-  }
+  const activeSnapshot = (home: string) => readWindowsSelectionSnapshot(backend, home);
 
   async function absentAliasCache(home: string, profileId: string): Promise<void> {
     let parent = home;
@@ -194,11 +174,6 @@ export function createWindowsProfileProvisioningServicesForInternalTesting(
 }
 
 function key(value: string): string { return value.normalize('NFC').toLowerCase().toUpperCase().toLowerCase(); }
-function digest(value: string, bytes?: Uint8Array): string {
-  const hash = createHash('sha256').update('bazframe-win32-profile-add-selection-v1\0').update(value);
-  if (bytes !== undefined) hash.update(bytes);
-  return hash.digest('hex');
-}
 function invalid(message: string): BazframeError {
   return new BazframeError('WINDOWS_PROFILE_PROVISIONING_REFUSED', message);
 }

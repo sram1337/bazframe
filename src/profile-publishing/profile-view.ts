@@ -85,16 +85,30 @@ export interface ProfileSystemView {
   skills: ProfileSkillNamespaceEntry[];
 }
 
-export async function readProfileSystemView(home: string): Promise<ProfileSystemView> {
-  const profileNames = await scanProfileNames(home);
+export interface ProfileSystemViewReadServices {
+  scanProfileNames: typeof scanProfileNames;
+  captureExpectation: typeof capturePhysicalProfileExpectation;
+  assertExpectation: typeof assertPhysicalProfileExpectation;
+  readManagedState: typeof readOptionalManagedProfileState;
+  inspectCatalog: typeof inspectDefaultSkillCatalog;
+  scanCollections: typeof scanGlobalSkillCollections;
+}
+const defaultViewReads: ProfileSystemViewReadServices = {
+  scanProfileNames, captureExpectation: capturePhysicalProfileExpectation,
+  assertExpectation: assertPhysicalProfileExpectation, readManagedState: readOptionalManagedProfileState,
+  inspectCatalog: inspectDefaultSkillCatalog, scanCollections: scanGlobalSkillCollections
+};
+
+export async function readProfileSystemView(home: string, reads: ProfileSystemViewReadServices = defaultViewReads): Promise<ProfileSystemView> {
+  const profileNames = await reads.scanProfileNames(home);
   const profiles: ProfileDomainView[] = [];
   const instances = new Map<string, MutableInstance>();
   const profileInstanceIds = new Set<string>();
   let membershipCount = 0;
 
   const [ordinarySkills, ordinaryCollections] = await Promise.all([
-    inspectDefaultSkillCatalog(home),
-    scanGlobalSkillCollections(home)
+    reads.inspectCatalog(home),
+    reads.scanCollections(home)
   ]);
   for (const registration of ordinarySkills.registrations) {
     addOwnership(instances, `catalog:skill:${registration.id}`, { kind: 'skill', name: registration.id }, undefined, { kind: 'ordinary' });
@@ -104,8 +118,8 @@ export async function readProfileSystemView(home: string): Promise<ProfileSystem
   }
 
   for (const profileName of profileNames) {
-    const expectation = await capturePhysicalProfileExpectation(home, profileName);
-    const stateSnapshot = await readOptionalManagedProfileState(home, profileName);
+    const expectation = await reads.captureExpectation(home, profileName);
+    const stateSnapshot = await reads.readManagedState(home, profileName);
     if (stateSnapshot !== undefined) {
       if (profileInstanceIds.has(stateSnapshot.state.profileInstanceId)) throw invalid('profile instance identity is referenced by more than one profile');
       profileInstanceIds.add(stateSnapshot.state.profileInstanceId);
@@ -186,7 +200,7 @@ export async function readProfileSystemView(home: string): Promise<ProfileSystem
       missingResources,
       resourceIdentities
     });
-    await assertPhysicalProfileExpectation(home, profileName, expectation);
+    await reads.assertExpectation(home, profileName, expectation);
   }
 
   const resources = [...instances.values()].map(finishInstance).sort(compareInstances);

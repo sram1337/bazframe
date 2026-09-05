@@ -4,14 +4,15 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { runWindowsProfileActivationEvidence } from './test-win32-profile-activation.mjs';
 import { trackProvisioningChild, sanitizeProductFailure } from './test-win32-profile-provisioning-child.mjs';
 
 const args = process.argv.slice(2);
 const packageRoot = resolve(argument('--package-root') ?? fileURLToPath(new URL('..', import.meta.url)));
 const outputPath = resolve(argument('--output') ?? join(packageRoot, 'win32-added-skill-evidence.json'));
 const report = {
-  schemaVersion: 2,
-  purpose: 'Internal inactive-profile onboarding and healthy local added-Skill Windows product-slice evidence only.',
+  schemaVersion: 3,
+  purpose: 'Internal managed profile activation, current selection, onboarding and healthy local added-Skill Windows product-slice evidence only.',
   packageRootKind: packageRoot.includes('node_modules') ? 'packed-install' : 'source-tree',
   completion: 'failed',
   releaseAdmission: 'not-authorized',
@@ -93,7 +94,7 @@ try {
   const home = join(testRoot, 'missing-intermediate', 'home');
   const locks = join(home, 'locks');
   const profile = join(home, 'profiles', 'focused');
-  const profileBytes = '';
+  const profileBytes = '# Focused\n';
   const provisioningServices = provisioningModule.createWindowsProfileProvisioningServicesForInternalTesting(backend, {
     hooks: {
       afterStateLock() { diagnosticPhase = 'STATE_LOCK'; },
@@ -127,6 +128,10 @@ try {
   const bootstrapPrivate = privateDirectoryModule.admitWindowsPrivateDirectory(backend, home);
   markStep('intermediatePrivate');
   const intermediatePrivate = privateDirectoryModule.admitWindowsPrivateDirectory(backend, join(testRoot, 'missing-intermediate'));
+  const selectionAndFavoritesAbsent = await expectCode(() => backend.inspectPath(join(home, 'active-profile')), 'WINDOWS_NATIVE_PATH_NOT_FOUND')
+    && await expectCode(() => backend.inspectPath(join(home, 'profile-favorites.json')), 'WINDOWS_NATIVE_PATH_NOT_FOUND');
+  await writeFile(join(profile, 'AGENTS.md'), profileBytes);
+  await writeFile(join(home, 'profiles', 'alpha', 'AGENTS.md'), '# Alpha\n');
   diagnosticScenario = 'external-skill';
   markStep('start');
   markStep('external');
@@ -192,16 +197,20 @@ try {
     && catalogLink.targetFileId === profileLink.targetFileId
     && catalogLink.targetFileId === targetInspection.object.fileId;
 
+  diagnosticScenario = 'activation';
+  const activationObservations = await runWindowsProfileActivationEvidence({ backend, load, home, testRoot, packageRoot,
+    services, membershipOptions, target, children, mark: markStep });
+  diagnosticScenario = 'skill-lifecycle';
+  const { createWindowsProfileSelectionReadServicesForInternalTesting } = await load('dist/profiles/win32-profile-selection.js');
+  const activeMembershipOptions = { ...membershipOptions, selectionReadServices: createWindowsProfileSelectionReadServicesForInternalTesting(backend) };
   markStep('firstDetach');
-  const firstDetach = await membershipModule.removeProfileSkill(
-    membershipOptions,
-    'focused',
+  const firstDetach = await membershipModule.removeActiveProfileSkill(
+    activeMembershipOptions,
     'demo-skill'
   );
   markStep('repeatedDetach');
-  const repeatedDetach = await membershipModule.removeProfileSkill(
-    membershipOptions,
-    'focused',
+  const repeatedDetach = await membershipModule.removeActiveProfileSkill(
+    activeMembershipOptions,
     'demo-skill'
   );
   markStep('firstRemove');
@@ -227,17 +236,24 @@ try {
   diagnosticScenario = 'public-gate';
   markStep('start');
   const poisonHome = join(testRoot, 'public-gate-poison');
-  let publicGateClosed = false;
+  let publicGateClosed = true;
   markStep('invoke-cli');
-  try {
-    execFileSync(process.execPath, [join(packageRoot, 'dist/cli.js'), 'skill', 'list'], {
-      env: { ...process.env, BAZFRAME_HOME: poisonHome },
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
-  } catch (error) {
-    publicGateClosed = error?.status === 1
-      && String(error.stderr).includes('WINDOWS_PLATFORM_UNSUPPORTED');
+  const packageManifest = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8'));
+  for (const executable of ['bazframe', 'bzf']) {
+    requireCondition(packageManifest.bin[executable] === 'dist/cli.js', 'public entrypoint mapping changed');
+    try {
+      if (report.packageRootKind === 'packed-install') {
+        execFileSync('cmd.exe', ['/d', '/s', '/c', `""${join(packageRoot, '..', '.bin', `${executable}.cmd`)}" profile use focused"`], {
+          windowsVerbatimArguments: true,
+          env: { ...process.env, BAZFRAME_HOME: poisonHome }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']
+        });
+      } else execFileSync(process.execPath, [join(packageRoot, packageManifest.bin[executable]), 'profile', 'use', 'focused'], {
+        env: { ...process.env, BAZFRAME_HOME: poisonHome }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']
+      });
+      publicGateClosed = false;
+    } catch (error) {
+      publicGateClosed &&= error?.status === 1 && String(error.stderr).includes('WINDOWS_PLATFORM_UNSUPPORTED');
+    }
   }
   markStep('poison-home-check');
   let poisonHomeAbsent = false;
@@ -299,9 +315,10 @@ try {
     const beforeRead = await closureModule.captureWindowsDirectoryClosure(backend, crashHome);
     markStep('readOnly');
     const readOnly = await managementModule.listProfiles(crashHome, provisioningOptions);
+    const noSelection = await expectCode(() => managementModule.currentProfile(crashHome, createWindowsProfileSelectionReadServicesForInternalTesting(backend)), 'NO_ACTIVE_PROFILE');
     markStep('afterRead');
     const afterRead = await closureModule.captureWindowsDirectoryClosure(backend, crashHome);
-    readOnlyListingNoRecovery &&= beforeRead.closureSha256 === afterRead.closureSha256
+    readOnlyListingNoRecovery &&= noSelection && beforeRead.closureSha256 === afterRead.closureSha256
       && readOnly.profileIds.length === (beforeRename ? 0 : 1);
     markStep('retried');
     const retried = await runChild(crashHome);
@@ -497,9 +514,8 @@ try {
     profileAddAfterMembershipCurrent: afterMembershipAdd.action === 'current' && directTargets,
     profilesListedLexically: JSON.stringify(listedProfiles.profileIds) === JSON.stringify(['alpha', 'focused'])
       && listedProfiles.diagnostics.length === 0,
-    inactiveProfileIsolation: isolated.instructions === '' && isolated.skillDirectories.length === 0,
-    selectionAndFavoritesAbsent: await expectCode(() => backend.inspectPath(join(home, 'active-profile')), 'WINDOWS_NATIVE_PATH_NOT_FOUND')
-      && await expectCode(() => backend.inspectPath(join(home, 'profile-favorites.json')), 'WINDOWS_NATIVE_PATH_NOT_FOUND'),
+    inactiveProfileIsolation: isolated.instructions === '# Alpha\n' && isolated.skillDirectories.length === 0,
+    selectionAndFavoritesAbsent,
     bootstrapContentionSerialized: winnerResult.action === 'added',
     bootstrapContentionRetryCurrent: contentionRetry.action === 'current',
     ...crashObservations,
@@ -535,7 +551,8 @@ try {
     linkLeavesAbsent: catalogAbsent && profileAbsent,
     sourcePreserved,
     nativeLockNamespacesPersist: locksPersist,
-    publicWindowsGateClosed: publicGateClosed && poisonHomeAbsent
+    publicWindowsGateClosed: publicGateClosed && poisonHomeAbsent,
+    ...activationObservations
   };
   markStep('verify-observations');
   requireCondition(

@@ -365,15 +365,22 @@ export function decodeActiveProfileState(bytes: Uint8Array, statePath: string): 
   return profileId;
 }
 
-export async function readActiveProfile(bazframeHome: string): Promise<string> {
-  const snapshot = await readOptionalActiveProfileSnapshot(bazframeHome);
-  if (snapshot === undefined) {
+export interface ActiveProfileReadServices {
+  readSelectedProfileId(home: string): Promise<string | undefined>;
+}
+
+export async function readActiveProfile(bazframeHome: string, services?: ActiveProfileReadServices): Promise<string> {
+  const profileId = services === undefined
+    ? (await readOptionalActiveProfileSnapshot(bazframeHome))?.profileId
+    : await services.readSelectedProfileId(bazframeHome);
+  if (profileId === undefined) {
     throw new BazframeError(
       'NO_ACTIVE_PROFILE',
       'No active profile. Run `bazframe profile use <profile>` first.'
     );
   }
-  return snapshot.profileId;
+  assertSafeProfileId(profileId);
+  return profileId;
 }
 
 export async function selectProfile(

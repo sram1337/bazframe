@@ -4,6 +4,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 // Failure receipts admit only fixed codes/reasons/field names. They never copy
 // raw messages, stacks, paths, observed values, or arbitrary IPC properties.
 const FAILURE_CODES = new Set([
+  'NO_ACTIVE_PROFILE', 'INVALID_PROFILE_ID', 'INVALID_ACTIVE_PROFILE_STATE',
+  'WINDOWS_PROFILE_ACTIVATION_CHANGED', 'WINDOWS_PROFILE_ACTIVATION_UNSUPPORTED_STATE',
+  'WINDOWS_PROFILE_ACTIVATION_COMMITTED_CHECK_FAILED',
+  'WINDOWS_SELECTION_REFUSED', 'WINDOWS_SELECTION_BEFORE_EFFECT', 'WINDOWS_SELECTION_NO_EFFECT', 'WINDOWS_SELECTION_AMBIGUOUS',
   'ERR_MODULE_NOT_FOUND', 'WINDOWS_PROFILE_PROVISIONING_REFUSED',
   ...[
     'CHANGED', 'COMPARISON', 'INVALID', 'LIMIT_EXCEEDED',
@@ -113,12 +117,17 @@ export function sanitizeProductError(error, depth = 0) {
 }
 
 const SCENARIOS = new Set([
-  'startup', 'boundary', 'onboarding', 'external-skill', 'skill-lifecycle', 'public-gate',
+  'activation', 'startup', 'boundary', 'onboarding', 'external-skill', 'skill-lifecycle', 'public-gate',
   'contention', 'existing-state', 'observations', 'refusal-occupied', 'refusal-drift',
   ...['PLANNED', 'CANDIDATE_READY', 'CANDIDATE_RENAME_INTENT', 'AFTER_RENAME',
     'CANDIDATE_RENAME_PROVEN', 'DEPENDENT_STATE_PROVEN', 'COMMITTED'].map((phase) => `crash-${phase}`)
 ]);
 const SUBSTEPS = new Set([
+  'activation-outcome-onboarding', 'activation-deferred-refusal', 'selection-malformed',
+  'selection-profile-drift', 'selection-postcommit', 'current-selected-missing',
+  'activation-modules', 'current-missing', 'managed-activation', 'active-switch', 'activation-contention',
+  'selection-outcomes', 'selection-sharing', 'selection-ambiguity', 'activation-interruption',
+  'activation-BEFORE_REPLACEMENT', 'activation-AFTER_REPLACEMENT', 'activation-BEFORE_RETURN',
   'binary-digest', 'absent-home-check', 'invoke-cli', 'poison-home-check',
   'start', 'nativeModule', 'privateDirectoryModule', 'servicesModule',
   'catalogModule', 'membershipModule', 'indexModule', 'profileModule',
