@@ -137,10 +137,10 @@ describe('native qualification fixed schedules', () => {
 });
 
 describe('isolated workflow and local PowerShell contract', () => {
-  it('gates final promotion on all three jobs, retains local build/pack/install once, and never admits release', async () => {
-    const workflow = await readFile('.github/workflows/win32-native-foundation.yml', 'utf8');
+  it.each([['LF', '\n'], ['CRLF', '\r\n']])('gates final promotion on all three jobs, retains local build/pack/install once, and never admits release (%s)', async (_name, lineEnding) => {
+    const workflow = (await readFile('.github/workflows/win32-native-foundation.yml', 'utf8')).replace(/\r?\n/gu, lineEnding);
     const local = await readFile('scripts/run-win32-native-foundation.ps1', 'utf8');
-    const jobs = Object.fromEntries(workflow.split(/^ {2}(foundation|product-source|product-installed|promote):\n/mu).slice(1).reduce<Array<[string, string]>>((pairs, text, index, parts) => {
+    const jobs = Object.fromEntries(workflow.split(/^ {2}(foundation|product-source|product-installed|promote):\r?\n/mu).slice(1).reduce<Array<[string, string]>>((pairs, text, index, parts) => {
       if (index % 2 === 0) pairs.push([text, parts[index + 1]!]); return pairs;
     }, []));
     expect(Object.keys(jobs)).toEqual(['foundation', 'product-source', 'product-installed', 'promote']);
