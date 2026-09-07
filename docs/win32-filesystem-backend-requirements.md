@@ -414,6 +414,14 @@ Exact native run `34081175304`, attempt 1, at `70834d5a6dde1a5ac8781eda202ac7b06
 
 The run used Windows x64/local NTFS, image `win22` / `20260830.290.1`, Node `22.19.0`, npm `10.9.3`, Rust `1.88.0`, and MSVC tools `14.44.35207`. Each job stayed within its unchanged 30-minute limit. Native contract tests passed 552 cases; CI `34081175316` / job `101616593370` passed 1,814 unit tests plus one skip, 88 integration tests, and packed acceptance. Receipts retain `publicWindowsGate: closed`, `releaseAdmission: not-authorized`, and `windowsSupportClaim: false`. Broken targets, remaining resource/profile/policy/process integration, public callers, Pi/TUI, reclamation, and the complete installed-product gate remain separate unfinished work.
 
+#### Shared-authority refactor qualification (pending)
+
+The source-reviewed shared profile-operation-authority refactor was committed/pushed as `f7492bcf824aa649e4e611a7c071be8a89cba0fc`. Native run `34137308663` passed foundation job `101791152806` and source-product job `101794194520`, but packed-product job `101794194515` failed; promotion was skipped. Both foundation receipts pass 62/62 and source product passes 72/72. Both consumers passed authenticated input transfer and whole-tarball/npm equality. CI `34137308655` passed 1,837 unit tests plus one skip, 88 integration tests and packed acceptance; the native contract suite passed 555 tests.
+
+Independently authenticated packed diagnostic artifact `10025235786` (517 ZIP bytes; SHA-256 `eca669edf5199ea98fc95c29622030d8d603d7393a5f05aeeb8ace0c4363b88f`) records `activation` / `activation-BEFORE_REPLACEMENT`, code `WINDOWS_NATIVE_READ_CHANGED`, and an immediate sanitized `Error` without a cause code. Observations are empty and publication phase is absent. That substep spans multiple harness operations: the exact refusing operation and root cause are not established, and this is not evidence that the authority refactor caused the failure. The run did not time out.
+
+Foundation input `10024838259` and source-product input `10025272089` were also independently authenticated. The foundation-qualified binary is 635,904 bytes, SHA-256 `deda5c3541253f0fec0c8a08efce270fb64d9583b80abd3ed0bf8ce2ca87093a`. There is no qualified packed-product input or final success artifact. **Native acceptance of this refactor is withheld**; `70834d5` remains the latest accepted source/packed activation pair. Diagnosis and requalification are the first open roadmap tasks, not permission to relax comparisons or retry until green.
+
 ## 8. Acceptance requirements
 
 Acceptance runs on native Windows, not Git Bash emulation, and uses packed or registry-equivalent artifacts. No subgroup authorizes a partial support statement.
@@ -479,3 +487,161 @@ This proposal does not include:
 - mandatory write/delete share denial, 128-bit `FileIdInfo` specifically, native identity-bound file replacement, source-identity-bound rename, held membership-link identity, or native tri-state results solely to defend that excluded attacker;
 - membership copying, foreign reparse acceptance, or recursive traversal through a membership target; or
 - Git/`gh` workspace reclamation before process-tree settlement is proved, or a stronger sudden-power-loss guarantee than flushed files/records plus predicate-based recovery.
+
+## 10. Delivery roadmap and local Windows testing
+
+The owner reconfirmed **full current-product parity before Windows release (option A)**. This checklist sequences sections 2/6/8; it does not add stronger guarantees or authorize partial public support. `docs/design.md` remains product authority. Tasks default to the implementation agent; **Local** tasks belong to the maintainer on a Windows machine. A checked implementation prerequisite is not a newly supported command.
+
+Use the existing shared codecs, consent rules, resource identities, views and lifecycle decisions. Add a Windows mechanism only for a concrete gap; do not copy unsafe shortcuts merely because they exist on another platform. Preserve accepted foundations instead of rewriting them for line-count reduction. Each implementation slice needs focused regression proof, independent review and applicable native source/packed evidence. Keep one implementation writer; use the existing qualification infrastructure rather than creating a new pipeline per task. Dependency labels refer to the needed capabilities, not completion of every task in another block: ready-artifact work can precede remote acquisition, and editor completion does not block ZIP work.
+
+### W0 — Accepted baseline and current prerequisite
+
+- [x] Accept native private storage, stable reads/enumeration, directory publication/recovery, locks and junction membership (foundation v6).
+- [x] Accept internal healthy local Skills, absent-home onboarding and actual activation/current/switching (product v3 at `70834d5`; section 7.6).
+- [x] Map shared lifecycle reuse and concrete Windows-only differences; retain the full release gate.
+- [x] Consolidate profile-operation authority so existing Windows activation uses the opaque shared authority required by materialization and journals. Refactor `f7492bc` passed 69 focused tests, static checks and independent review.
+- [x] Inspect `f7492bc` qualification: CI passed; native `34137308663` passed foundations/source product but packed product refused with `WINDOWS_NATIVE_READ_CHANGED` at `activation-BEFORE_REPLACEMENT`; no final promotion (section 7.6).
+- [ ] Identify the precise refusing operation behind that multi-operation harness marker, then address only the demonstrated cause. Use privacy-safe diagnostics; do not attribute it to the refactor, weaken comparisons or rerun speculatively.
+- [ ] Requalify the reviewed correction through unchanged foundation-v6/product-v3 source/packed receipts, exact artifacts and CI before accepting the changed implementation.
+
+### W1 — Shared filesystem and identity integration
+
+**Depends on:** W0. **Starting seams:** `profile-filesystem.ts`, `physical-profile-closure.ts`, `transaction-journal.ts`, `src/state/`.
+
+- [ ] Choose and document the lossless Windows identity/journal bridge used by the existing profile transaction and recovery code. Preserve existing macOS/Linux records; never reinterpret POSIX identities as Windows authority or leak physical identities into portable captures.
+- [ ] Adapt existing bounded physical read/enumeration seams to native receipts, keeping usable syscall paths separate from canonical identity paths. Do not fabricate Node file handles, `dev`/`ino`, modes or successful directory sync.
+- [ ] Reuse shared state-file codecs and lifecycle decisions with Windows private creation, flush, immediate validation and honest publication-error classification. Scope I/O to actual callers, not a generic virtual filesystem.
+- [ ] Supply protected nested candidate/store materialization with the governing entry/byte limits, ownership, no-replace publication and drained writes; cover drift and interruption before using it in product transactions.
+- [ ] Preserve executable bits as logical artifact metadata across Windows import/export; do not infer portable executable meaning from NTFS mode bits.
+- [ ] Prove private-local bounded ZIP staging/random access without fitting the archive into one native read buffer or lowering existing product limits. The native read ceiling and archive limits are different contracts.
+- [ ] Apply the external-root table in section 3.1: independently admit sources, projects, Pi directories and ZIP destinations, including allowed different local volumes; reject unsupported roots before effects. Automatic ACL repair and private copies of external sources are not prerequisites.
+
+### W2 — Resources, immutable stores and shared projection
+
+**Depends on:** W0/W1; remote acquisition also needs W6. **Starting seams:** `blob-store.ts`, `artifact-tree.ts`, `profile-materialization.ts`, `profile-view.ts`, `src/skill-collections/`, `src/skills/`.
+
+- [ ] Adapt immutable blob/tree publication and validation to accepted Windows file identities, single-link/private storage and logical executable metadata; do not inherit a hard-link publication strategy that violates the accepted Windows closure contract.
+- [ ] Materialize ready local/imported/profile-local Skill and collection artifacts through the existing stable-identity and exact-cache-reuse policy; preserve source ownership and build-free reuse.
+- [ ] Complete shared system-view reads for sidecars, collection records and artifact trees; remove hard-coded POSIX path splitting and supply the currently hard-coded store reads through existing seams. Occupied state must never disappear as an empty result.
+- [ ] Complete local and remote `skill list|add|update|remove`, including broken-target/reference-index refusal and link-leaf-only removal without touching source targets. Editor completion is tracked in W8.
+- [ ] Complete local/remote `library list|add|update|remove`, preserving build-free snapshots and all-referencing-profile validation.
+- [ ] Complete `package list|add|build|update|remove`, including exact manifest/argv consent, process outcomes, packages-last effects and preservation of the active snapshot after failure (W6).
+- [ ] Complete active and explicit-profile `skill|library|package list|add|remove` using shared selectors/reference identity, collision withholding and imported collection-child projection. Preserve active-only list and CLI-only mutation boundaries.
+- [ ] Exercise changed, missing, foreign, busy and malformed resources as well as healthy resources; remove each temporary internal refusal only when its real shared path is covered.
+
+### W3 — One shared profile transaction and recovery policy
+
+**Depends on:** W1 and ready-resource parts of W2. **Starting seams:** `profile-transaction.ts`, `transaction-journal.ts`, `profile-recovery.ts`, `profile-materialization.ts`.
+
+- [ ] Compose Windows effects into the existing profile candidate-swap policy for fresh import, overwrite, update, repair and version selection. Do not nest two complete transaction engines or write a second Windows import lifecycle.
+- [ ] Preserve sorted operation locks, state-lock ordering, expected-old closure, candidate sidecar binding, active selection, explicit overwrite consent and the non-worsening missing-resource rule.
+- [ ] Carry exact package-effect records and immutable resource references through materialization, commit and failure; never call a side-effectful build a rollbackable file operation.
+- [ ] Adapt journal discovery, reacquisition/re-read, phase advancement and recovery predicates to the Windows identity bridge; unknown or ambiguous state remains private and retained.
+- [ ] Prove fresh/no-replace and candidate/backup replacement at each existing interruption boundary, including postcommit failures, concurrent contenders, sharing denial and clean-process retry.
+
+### W4 — ZIP export/import and cross-platform round trips
+
+**Depends on:** W1/W2/W3; referenced remote acquisition needs W6. **Starting seams:** `profile-capture.ts`, `profile-zip.ts`, `profile-lifecycle.ts`.
+
+- [ ] Run the actual shared capture over ready direct Skills, libraries and package artifacts: deterministic preview/exclusions, build-free capture, remote-reference retention and `--bundle-remote` behavior.
+- [ ] Publish deterministic ZIP output through private siblings at the admitted destination; refuse existing output without explicit overwrite and reconcile failed replacement honestly.
+- [ ] Inspect/import bounded local or copied network ZIP input through existing canonical/path/manifest checks, including reserved names, aliases, traversal, unexpected entries and malformed data.
+- [ ] Preserve dry-run's no-home-mutation/no-recovery/no-build/no-login contract, collision reporting, safe suffix, cancellation and `--yes` versus `--overwrite` semantics.
+- [ ] Execute fresh inactive, exact reuse, safe-suffix and overwrite import; preserve active selection on active-profile replacement and permit initial incompleteness only under the existing settled-network-unavailability rule.
+- [ ] Prove macOS/Linux → Windows → macOS/Linux capture/import round trips, resource identities, executable metadata, instructions and source-path/ownership-ID exclusion. Preserve user-authored bytes without promising every Skill or build script is OS-independent.
+
+### W5 — Remaining profile lifecycle and authorized cleanup
+
+**Depends on:** W1/W2/W3. **Starting seams:** `profile-managed-lifecycle.ts`, `src/profiles/`, `profile-recovery.ts`.
+
+- [ ] Complete duplicate and rename with existing identity/publication rules, active-selection behavior and favorite preservation; preserve imported identities without copying publication linkage.
+- [ ] Complete guarded local profile removal, including active-profile refusal, already-absent state, favorites and authorized cache cleanup; detach only owned state.
+- [ ] Complete favorite reads/writes, malformed-state diagnostics and full profile list/current/use behavior for imported, incomplete and collection-bearing profiles.
+- [ ] Implement the already-approved ordinary postcommit reclamation of authorized detached profiles, candidates/backups and failed staging using bounded no-follow Windows evidence. This is richer than current managed-profile retention on macOS/Linux, not an unavoidable Windows syscall substitution.
+- [ ] Prove unopposed cleanup succeeds and sharing/drift/uncertainty retains private quarantine without undoing logical success or deleting external Skill targets. Do not add automatic published-snapshot/blob GC without separate ownership/retention policy.
+
+### W6 — Git, GitHub and package process behavior
+
+**Depends on:** W1; resource/profile publication uses W2/W3. **Starting seams:** `src/core/child-process.ts`, `profile-github-process.ts`, `profile-remote-materializer.ts`, `src/providers/managed-git.ts`.
+
+- [ ] Preserve exact argv, no implicit shell, consent, current process/output limits and bounded failure classification on Windows. Prove interruption/child settlement or honest uncertainty; direct-child closure is not proof that descendants stopped.
+- [ ] Use private admitted local acquisition/publication workspaces with the existing Git environment, prompting/hooks and credential rules; retain workspaces whenever process-tree settlement is unproved. Git workspace deletion is not a release prerequisite.
+- [ ] Clarify the blanket Git-working-directory wording against the admitted external-project table before wiring project discovery: preserve shared worktree discovery rather than silently requiring a private clone or new publication-style behavior for it.
+- [ ] Complete exact-revision acquisition/update for Skills, libraries and packages, including provenance, reachable historical revisions, stable checkout paths and build authorization.
+- [ ] Complete Git profile import, update, version list/use and repair with exact revisions, linkage, offline cache reuse, discard consent and non-worsening existing-profile updates.
+- [ ] Complete publish using shared preview/visibility consent, private-first creation, expected-old leases, local/remote intent and predicate recovery; do not replace this with an unnecessary whole-profile swap.
+- [ ] Cover absent Git/`gh`, authentication refusal, failed transport/build, bounded-output failure and interruption. Real repository creation/push/publication tests require explicit authorization and disposable destinations.
+
+### W7 — Policy, adapters, status and installed Pi
+
+**Depends on:** W1/W2/W5; project/process integration uses W6. **Starting seams:** `src/policy/`, `src/project/`, `src/adapters/pi/`, `src/status/`, `artifacts/pi/bazframe.ts`.
+
+- [ ] Wire global/project list/show/enable/disable to shared codecs, locks and state-file behavior; preserve file-free defaults, Git-only project overrides, non-Git inheritance and malformed-state refusal. Do not invent new policy journals.
+- [ ] Complete adapter list/install/uninstall and explicit `--force` repair at the independently admitted Pi agent directory; preserve extension/manifest ownership and collision behavior rather than swapping the entire Pi directory.
+- [ ] Complete bounded read-only status and corrective diagnostics for profiles, resources, policy, adapters and caches without bootstrap or recovery side effects.
+- [ ] Prove installed `pi` and `pi -nc` instructions, provenance/order, native/profile resource layers, aliases/collision withholding, enable/disable behavior, `/bazframe info` and reload with ordinary and imported profiles.
+- [ ] Complete the deprecated launcher through both `bazframe pi` and `bzf pi`: dry-run, forwarded arguments, refusals, child exit/signal and cleanup behavior; no pre-acceptance launch.
+
+### W8 — Editors and the existing Windows Terminal TUI
+
+**Depends on:** W2/W5/W6/W7. **Starting seams:** editor services, `src/application/tui-service.ts`, existing TUI components/tests.
+
+- [ ] Complete profile/Added-Skill editor admission, documented contained final-file links, executable-only `VISUAL`/`EDITOR`, cwd/stdio, Ctrl+C and exact exit/signal outcomes; preserve managed-snapshot/remote-checkout refusal.
+- [ ] Connect the existing TUI to the same accepted application services for reads, profile mutations, membership, editors and consent-bound library acquisition; do not add new TUI features or move CLI-only operations into it.
+- [ ] Automate applicable native terminal enter/restore, resize/same-width growth, compact layout, navigation, refresh, Unicode/ANSI bounds, errors and editor-handoff regressions.
+- [ ] **Local:** verify the actual Windows Terminal interaction and restoration checklist below. Headless/fake renderer evidence alone does not establish this environment's behavior.
+
+### W9 — Complete installed-product acceptance and gate transition
+
+**Depends on:** W0–W8; this is the full gate, not a sum of unsupported-feature claims.
+
+- [ ] Map every command in section 2.1 and every existing TUI operation to success/refusal/consent/interrupt/recovery/privacy/JSON/prose coverage; use internal seams while the pre-acceptance public gate stays closed.
+- [ ] Define and review the full-surface unreleased-candidate procedure for testing actual public dispatch and both installed executable names before support admission. Do not introduce a public flag/environment bypass or treat one internal group as permission to open the gate.
+- [ ] Exercise local and global packed installation through `bazframe` and `bzf`, without compiler/WSL/Git Bash/runtime binary downloads, on each Node version the release will claim.
+- [ ] Verify missing/corrupt/wrong-target/version/ABI native-artifact diagnostics and storage refusal cases; preserve platform-neutral help/version/syntax and the pre-acceptance CLI/Pi gate tests.
+- [ ] Bind the complete candidate matrix to its exact source, package/native bytes and environment; retain the existing strict foundation/product evidence and add only the observations needed by newly implemented behavior. Keep qualification per-job ceilings and final-only artifact promotion intact.
+- [ ] **Local:** complete the fresh-machine/real-terminal matrix below against the designated unreleased candidate, not an arbitrary local rebuild or current npm beta.
+- [ ] Pass macOS/Linux regression and packed/real-Pi acceptance; reconcile automation, independent evidence review and local findings before accepting full Windows support.
+
+### W10 — Release preparation and publication
+
+**Depends on:** W9. **Authority:** `docs/releasing.md`; no release action is authorized merely by this checklist.
+
+- [ ] Update help, README, support/storage/Node prerequisites and generated Skill guidance for the actual accepted surface; retain TUI production-readiness caveats and do not claim arbitrary source Skills/builds are cross-platform.
+- [ ] **Maintainer:** configure/verify npm trusted publishing and the protected GitHub `npm` environment; choose an unused version and explicitly authorize tag/publication.
+- [ ] Run final release checks/audit and review the exact package contents; prove same-release-run native admission, checksum binding and repeated final-tarball validation without a repack between approval and publication.
+- [ ] Publish only the authorized exact artifact, verify registry byte identity/tags and repeat disposable Windows installation through both executable names.
+
+`profile exportable`, automatic historical snapshot GC, additional architectures/filesystems, new TUI features and stronger same-authority attack guarantees are separate product work, not hidden additions to this Windows roadmap.
+
+### Local maintainer checklist
+
+**Now: internal qualification only.** The public CLI/Pi Windows gate is still closed. There is no usable Windows export/import release to test yet. The current `f7492bc` revision has the unresolved packed-only refusal recorded in W0; a local run is additional diagnostic evidence, not an already-qualified release. If the pinned development tools are already available, the maintainer can independently run the existing source-build harness; otherwise defer this developer-only exercise and test the ordinary installed candidate when W9 is ready. Future end-user installation must not require these build tools.
+
+- [ ] **Local — environment:** record Windows version/build, x64, Node/npm versions, filesystem and whether the shell is elevated. Prefer a normal-user run; CI's elevated runner does not substitute for it. Use native PowerShell and local NTFS, outside OneDrive/UNC/mapped-drive/cloud-managed roots.
+- [ ] **Local — isolation:** use a fresh disposable checkout at the exact requested commit and separate evidence output; preserve real Bazframe/Pi state. Do not run another qualification concurrently on that machine (foundation SUBST use is machine-global).
+- [ ] **Local — optional current harness:** require Node `22.19.0` x64, Git, rustup and Visual Studio C++ tools `14.44.35207` with the Windows SDK. The script installs/selects Rust `1.88.0` and its MSVC target. Do not change pins just to obtain a green result.
+
+From that clean checkout at `f7492bcf824aa649e4e611a7c071be8a89cba0fc`, run in native PowerShell:
+
+```powershell
+.\scripts\run-win32-native-foundation.ps1 -EvidenceDirectory (
+    Join-Path $env:LOCALAPPDATA ("bazframe-evidence-" + [guid]::NewGuid().ToString("N"))
+)
+```
+
+The script builds/packs/installs once and runs all four workloads sequentially. It creates disposable fixtures and restores its environment; it is not an installer or gate-opening switch. Review any existing Bazframe-related environment overrides before use. Leave fixtures/ambiguous state alone after a refusal rather than attempting manual repair to make the test pass.
+
+- [ ] **Local — report:** return the exact commit, pass/fail and sanitized failure code/stage, plus `native-source-evidence.json`, `native-installed-evidence.json`, `win32-product-source-evidence.json`, `win32-product-installed-evidence.json`, and the successful `native-foundation-evidence.json` if produced. A missing receipt is missing evidence, not success. Local aggregate shape differs from the Actions aggregate; do not substitute it for workflow artifact attestation.
+- [ ] **Local — privacy:** keep raw logs, fixture trees, ZIP inputs, binaries and tarballs local unless specifically requested and reviewed. Logs can contain personal paths or source content; do not upload the whole evidence directory. A separately built local binary can have a different hash—bind local source/packed receipts to its actual bytes rather than requiring the CI build's hash.
+
+**Later: complete installed candidate, coordinated after W9's gate-transition procedure is ready.** Use a designated checksummed candidate and disposable `BAZFRAME_HOME`, `PI_CODING_AGENT_DIR` and installation prefix/global environment; do not replace a working personal installation or import unreviewed private instructions.
+
+- [ ] **Local — installation:** clean local and isolated global install, both executables, supported Node version(s), no native build tools needed; record candidate digest and environment.
+- [ ] **Local — migration:** import a reviewed macOS/Linux ZIP with direct Skills and collection/package artifacts; verify instructions/resources, inactive import, activation and Pi use; export back and compare on macOS/Linux. Include suffix/overwrite/cancel/dry-run and bundled versus referenced remote resources.
+- [ ] **Local — lifecycle:** create/list/current/use/duplicate/rename/favorite/remove, active-removal refusal, local/remote resource operations, package consent, explicit versus active membership and source-target preservation.
+- [ ] **Local — policy/runtime:** Git and non-Git directories, global/project precedence, adapter install/repair/uninstall, status, `pi`/`pi -nc`, info/reload, collisions and deprecated launcher outcomes.
+- [ ] **Local — terminal/editor:** Windows Terminal navigation, resize, compact/wide layouts, previews, library consent, editor handoff, Ctrl+C, handled failure and terminal restoration, including the user's normal shell/font/display settings.
+- [ ] **Local — failures:** safe disposable cases for denied sharing/open handles, occupied output, invalid selection/records and unsupported storage. Only run interruption fixtures against dedicated test state; report retention/diagnostics instead of deleting ambiguous state.
+- [ ] **Local — real Git effects:** use explicitly authorized disposable repositories/accounts for publish/private-import/visibility tests; never a working repository as a failure fixture.
+- [ ] **Local — sign-off:** link findings to the candidate/environment, distinguish passed/failed/not-run, and hand back sanitized results. Local sign-off complements, rather than replaces, the automated full matrix and release authorization.
