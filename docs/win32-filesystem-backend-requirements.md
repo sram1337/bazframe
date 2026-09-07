@@ -422,6 +422,8 @@ Independently authenticated packed diagnostic artifact `10025235786` (517 ZIP by
 
 Foundation input `10024838259` and source-product input `10025272089` were also independently authenticated. The foundation-qualified binary is 635,904 bytes, SHA-256 `deda5c3541253f0fec0c8a08efce270fb64d9583b80abd3ed0bf8ce2ca87093a`. There is no qualified packed-product input or final success artifact. **Native acceptance of this refactor is withheld**; `70834d5` remains the latest accepted source/packed activation pair. Diagnosis and requalification are the first open roadmap tasks, not permission to relax comparisons or retry until green.
 
+Diagnostic-only source preparation now distinguishes the interruption loop's parent operations, independent candidate reads and actual lifecycle calls. The existing native error channel reports fixed comparison-site/object-kind/prefix-role and differing-field or predicate names for the five native READ_CHANGED origins; the TypeScript receipt-only refusal is distinguished separately. No paths, observed values, identities, ACL bytes, timestamps, contents or stacks enter these diagnostics. Native comparisons and I/O, error codes/causes, success receipts, exports/DTOs, qualification topology and public gates remain unchanged. Independent review and focused/static/host-Rust checks pass; Windows-target tests compiled but did not execute. The diagnostic patch requires native source/packed qualification at its exact producing commit. It is not a behavioral correction or proof of the old failure's cause.
+
 ## 8. Acceptance requirements
 
 Acceptance runs on native Windows, not Git Bash emulation, and uses packed or registry-equivalent artifacts. No subgroup authorizes a partial support statement.
@@ -501,6 +503,7 @@ Use the existing shared codecs, consent rules, resource identities, views and li
 - [x] Map shared lifecycle reuse and concrete Windows-only differences; retain the full release gate.
 - [x] Consolidate profile-operation authority so existing Windows activation uses the opaque shared authority required by materialization and journals. Refactor `f7492bc` passed 69 focused tests, static checks and independent review.
 - [x] Inspect `f7492bc` qualification: CI passed; native `34137308663` passed foundations/source product but packed product refused with `WINDOWS_NATIVE_READ_CHANGED` at `activation-BEFORE_REPLACEMENT`; no final promotion (section 7.6).
+- [x] Prepare independently reviewed, locally validated fixed harness/native refusal diagnostics without changing comparisons or successful behavior; native execution is still pending.
 - [ ] Identify the precise refusing operation behind that multi-operation harness marker, then address only the demonstrated cause. Use privacy-safe diagnostics; do not attribute it to the refactor, weaken comparisons or rerun speculatively.
 - [ ] Requalify the reviewed correction through unchanged foundation-v6/product-v3 source/packed receipts, exact artifacts and CI before accepting the changed implementation.
 
@@ -616,13 +619,13 @@ Use the existing shared codecs, consent rules, resource identities, views and li
 
 ### Local maintainer checklist
 
-**Now: internal qualification only.** The public CLI/Pi Windows gate is still closed. There is no usable Windows export/import release to test yet. The current `f7492bc` revision has the unresolved packed-only refusal recorded in W0; a local run is additional diagnostic evidence, not an already-qualified release. If the pinned development tools are already available, the maintainer can independently run the existing source-build harness; otherwise defer this developer-only exercise and test the ordinary installed candidate when W9 is ready. Future end-user installation must not require these build tools.
+**Now: internal qualification only.** The public CLI/Pi Windows gate is still closed. There is no usable Windows export/import release to test yet. The refusal at `f7492bc` recorded in W0 remains unexplained. Use the designated diagnostic revision for a new local run; it supplies additional evidence, not an already-qualified release. If the pinned development tools are already available, the maintainer can independently run the existing source-build harness; otherwise defer this developer-only exercise and test the ordinary installed candidate when W9 is ready. Future end-user installation must not require these build tools.
 
 - [ ] **Local — environment:** record Windows version/build, x64, Node/npm versions, filesystem and whether the shell is elevated. Prefer a normal-user run; CI's elevated runner does not substitute for it. Use native PowerShell and local NTFS, outside OneDrive/UNC/mapped-drive/cloud-managed roots.
 - [ ] **Local — isolation:** use a fresh disposable checkout at the exact requested commit and separate evidence output; preserve real Bazframe/Pi state. Do not run another qualification concurrently on that machine (foundation SUBST use is machine-global).
 - [ ] **Local — optional current harness:** require Node `22.19.0` x64, Git, rustup and Visual Studio C++ tools `14.44.35207` with the Windows SDK. The script installs/selects Rust `1.88.0` and its MSVC target. Do not change pins just to obtain a green result.
 
-From that clean checkout at `f7492bcf824aa649e4e611a7c071be8a89cba0fc`, run in native PowerShell:
+From a clean checkout at the exact diagnostic commit supplied for the run, record `git rev-parse HEAD` and run in native PowerShell:
 
 ```powershell
 .\scripts\run-win32-native-foundation.ps1 -EvidenceDirectory (

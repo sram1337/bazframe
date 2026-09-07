@@ -10,6 +10,9 @@ use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use crate::read_change::{
+    directory_fields, prefix_role, read_changed, security_fields, stable_fields, stable_read_fields,
+};
 use napi::Error;
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS,
@@ -681,10 +684,9 @@ fn inspect_opened_path(opened: &OpenedPath) -> NativeResult<WindowsPathInspectio
     if !same_stable_observation(&before, &after)
         || !same_security_observation(&security_before, &security_after)
     {
-        return Err(native_error(
-            "ERR_WIN32_READ_CHANGED",
-            "path identity, metadata, or security changed while it was inspected",
-        ));
+        let mut fields = stable_fields(&before, &after);
+        fields.extend(security_fields(&security_before, &security_after));
+        return read_changed("inspect-opened-path", before.directory, "none", fields);
     }
     Ok(WindowsPathInspection {
         canonical_path: opened.canonical_path.clone(),
@@ -770,10 +772,12 @@ pub(crate) fn rename_windows_directory_no_replace(
     if !same_directory_identity(&parent_before, &parent_after)
         || !same_security_observation(&parent_before.security, &parent_after.security)
     {
-        return Err(native_error(
-            "ERR_WIN32_READ_CHANGED",
-            "no-replace directory rename parent changed before the operation",
-        ));
+        return read_changed(
+            "rename-parent",
+            parent_before.object.directory,
+            "none",
+            directory_fields(&parent_before, &parent_after),
+        );
     }
 
     let destination_path = join_direct_child(parent_path, destination_component);
@@ -865,10 +869,12 @@ pub(crate) fn read_windows_file_stable(path: &str, max_bytes: u32) -> NativeResu
             return Err(last_win_error("probe stable file growth"));
         }
         if read != 0 {
-            return Err(native_error(
-                "ERR_WIN32_READ_CHANGED",
-                "stable read detected growth beyond the observed file size",
-            ));
+            return read_changed(
+                "stable-read-growth",
+                before.directory,
+                "none",
+                vec!["growthProbeNonzero"],
+            );
         }
     }
 
@@ -877,10 +883,12 @@ pub(crate) fn read_windows_file_stable(path: &str, max_bytes: u32) -> NativeResu
         || parse_nonnegative_hex_u64(&after.size)? != bytes.len() as u64
         || !same_stable_observation(&before, &after)
     {
-        return Err(native_error(
-            "ERR_WIN32_READ_CHANGED",
-            "file identity, metadata, size, or byte count changed during stable read",
-        ));
+        return read_changed(
+            "stable-read-final",
+            before.directory,
+            "none",
+            stable_read_fields(&before, &after, expected, bytes.len() as u64),
+        );
     }
 
     Ok(StableReadData {
@@ -1661,17 +1669,23 @@ fn open_admitted_path_with_final_share(
         }
     }
     let handle = final_handle.expect("nonempty prefix list must retain final handle");
-    for expected in &observations {
+    for (index, expected) in observations.iter().enumerate() {
         let reopened = open_existing(&expected.path, FILE_READ_ATTRIBUTES)?;
         let canonical_path = final_path(reopened.0)?;
         let object = snapshot(reopened.0)?;
         if canonical_path != expected.canonical_path
             || !same_stable_observation(&expected.object, &object)
         {
-            return Err(native_error(
-                "ERR_WIN32_READ_CHANGED",
-                "Windows path ancestry changed while it was inspected",
-            ));
+            let mut fields = stable_fields(&expected.object, &object);
+            if canonical_path != expected.canonical_path {
+                fields.push("canonicalPath");
+            }
+            return read_changed(
+                "reopened-prefix",
+                expected.object.directory,
+                prefix_role(index, last),
+                fields,
+            );
         }
     }
     let canonical_path = observations
@@ -2452,6 +2466,89 @@ mod tests {
     fn exact_hex_preserves_values_above_javascript_safe_integer_range() {
         assert_eq!(hex_u64(9_007_199_254_740_993), "0020000000000001");
         assert_eq!(hex_bytes(&[0, 1, 0xfe, 0xff]), "0001feff");
+    }
+
+    #[test]
+    fn read_change_diagnostics_match_authoritative_comparisons() {
+        use crate::read_change::tests::{inspection, object, security};
+        let a = object();
+        macro_rules! object_change {
+            ($field:ident, $value:expr) => {{
+                let mut b = object();
+                b.$field = $value;
+                assert_eq!(
+                    same_stable_observation(&a, &b),
+                    stable_fields(&a, &b).is_empty()
+                );
+            }};
+        }
+        assert!(same_stable_observation(&a, &object()));
+        object_change!(volume_identity, "OTHER".into());
+        object_change!(file_id, "OTHER".into());
+        object_change!(size, "OTHER".into());
+        object_change!(allocation_size, "OTHER".into());
+        object_change!(number_of_links, "OTHER".into());
+        object_change!(creation_time, "OTHER".into());
+        object_change!(last_access_time, "OTHER".into());
+        object_change!(last_write_time, "OTHER".into());
+        object_change!(change_time, "OTHER".into());
+        object_change!(attributes, 1);
+        object_change!(reparse_tag, 1);
+        object_change!(delete_pending, true);
+        object_change!(directory, false);
+        for expected in [2, 3, 4] {
+            for byte_count in [2, 3, 4] {
+                let b = object();
+                let changed = byte_count != expected
+                    || parse_nonnegative_hex_u64(&b.size).unwrap() != byte_count
+                    || !same_stable_observation(&a, &b);
+                assert_eq!(
+                    changed,
+                    !stable_read_fields(&a, &b, expected, byte_count).is_empty()
+                );
+            }
+        }
+        let a = security();
+        macro_rules! security_change {
+            ($field:ident, $value:expr) => {{
+                let mut b = security();
+                b.$field = $value;
+                assert_eq!(
+                    same_security_observation(&a, &b),
+                    security_fields(&a, &b).is_empty()
+                );
+            }};
+        }
+        assert!(same_security_observation(&a, &security()));
+        security_change!(descriptor_control, 1);
+        security_change!(dacl_present, false);
+        security_change!(dacl_null, true);
+        security_change!(dacl_defaulted, true);
+        security_change!(dacl_bytes, vec![3].into());
+        security_change!(owner_sid, "OTHER".into());
+        security_change!(owner_defaulted, true);
+        security_change!(group_sid, "OTHER".into());
+        security_change!(group_defaulted, true);
+        security_change!(current_user_sid, "OTHER".into());
+        let a = inspection();
+        macro_rules! directory_change {
+            ($($field:ident).+, $value:expr) => {{
+                let mut b = inspection(); b.$($field).+ = $value;
+                for (left, right) in [(&a, &b), (&b, &a), (&b, &b)] {
+                    assert_eq!(same_directory_identity(left, right) && same_security_observation(&left.security, &right.security), directory_fields(left, right).is_empty());
+                }
+            }};
+        }
+        directory_change!(canonical_path, "OTHER".into());
+        directory_change!(kind, "regular-file".into());
+        directory_change!(volume.identity, "OTHER".into());
+        directory_change!(object.volume_identity, "OTHER".into());
+        directory_change!(object.file_id, "OTHER".into());
+        directory_change!(object.reparse_tag, 1);
+        directory_change!(object.delete_pending, true);
+        directory_change!(object.directory, false);
+        directory_change!(object.size, "OTHER".into());
+        directory_change!(security.owner_sid, "OTHER".into());
     }
 
     #[test]

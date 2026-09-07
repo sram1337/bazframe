@@ -25,40 +25,14 @@ export async function runWindowsProfileActivationEvidence(context) {
   const current = (root = home) => management.currentProfile(root, selectionReadServices);
   const readCandidate = (path) => selectionModule.readWindowsPrivateFileSnapshot(backend, path, MAX_ACTIVE_PROFILE_STATE_BYTES);
   const candidateNames = async (root) => (await backend.enumerateStableDirectory(root, PROFILE_PORTABILITY_PRODUCTION_LIMITS.stagingEntries)).entries.map((entry) => entry.name);
-  const newCandidate = async (root, previousNames) => {
-    const name = newSelectionCandidateName(previousNames, await candidateNames(root));
-    const path = join(root, name);
-    return { path, snapshot: await readCandidate(path) };
-  };
   const optionalCandidate = async (path) => {
     try { return await readCandidate(path); }
     catch (error) { if (error?.code === 'WINDOWS_NATIVE_PATH_NOT_FOUND') return undefined; throw error; }
   };
-  // Independently prove every successful use, including a reconciled after-effect error.
-  // These observations stay in this process; only the existing booleans enter receipts.
-  const use = async (name, options = {}, root = home) => {
-    const { onCandidate, ...activationOptions } = options;
-    const previousNames = await candidateNames(root);
-    let created, candidate;
-    const result = await lifecycle.useManagedProfile(root, name, make({ ...activationOptions, hooks: {
-      ...activationOptions.hooks,
-      async afterPrivateCreation() {
-        created = await newCandidate(root, previousNames);
-        requireCondition(created.snapshot.bytes.length === 0 && (created.snapshot.inspection.security.descriptorControl & 0x1000) !== 0);
-        await activationOptions.hooks?.afterPrivateCreation?.(created.snapshot);
-      },
-      async beforeReplacement() {
-        candidate = { path: created.path, snapshot: await readCandidate(created.path) };
-        requireCondition(sameSelectionCandidateObject(created.snapshot, candidate.snapshot)
-          && candidate.snapshot.bytes.equals(Buffer.from(`${name}\n`)));
-        await onCandidate?.(candidate);
-        await activationOptions.hooks?.beforeReplacement?.();
-      }
-    } }));
-    requireCondition(candidate !== undefined);
-    requireCondition(selectionCandidateCommitted(candidate.snapshot, await read(root), await optionalCandidate(candidate.path)));
-    return result;
-  };
+  const use = (name, options = {}, root = home, mark = () => {}) => observeActivationUse({
+    candidateNames, readCandidate, read, optionalCandidate,
+    useManagedProfile: (name, options) => lifecycle.useManagedProfile(root, name, make(options))
+  }, name, options, root, mark);
   const observations = {};
   mark('current-missing');
   observations.currentMissingNoWrites = await code(() => current(join(testRoot, 'never-created-current')), 'NO_ACTIVE_PROFILE')
@@ -207,27 +181,15 @@ export async function runWindowsProfileActivationEvidence(context) {
   mark('activation-interruption');
   let currentNoRecovery = true;
   for (const stage of ['BEFORE_REPLACEMENT', 'AFTER_REPLACEMENT', 'BEFORE_RETURN']) {
-    mark(`activation-${stage}`);
-    await use('alpha', undefined, scenarioHome);
-    const before = await read(scenarioHome);
-    const previousTemps = await candidateNames(scenarioHome);
-    const child = launch(scenarioHome, 'focused', stage);
-    await child.next('ready'); child.process.send('start');
-    const candidate = await observeActivationChildStop(child, stage, () => newCandidate(scenarioHome, previousTemps));
-    requireCondition(candidate.snapshot.bytes.equals(Buffer.from('focused\n')));
-    child.process.kill(); await child.exited;
-    const pending = await closure.captureWindowsDirectoryClosure(backend, scenarioHome);
-    const selected = await current(scenarioHome);
-    const after = await closure.captureWindowsDirectoryClosure(backend, scenarioHome);
-    currentNoRecovery &&= pending.closureSha256 === after.closureSha256 && pending.rootIdentity === after.rootIdentity;
-    if (stage === 'BEFORE_REPLACEMENT') {
-      observations.interruptedBeforeReplacementRetained = selected === 'alpha' && same(before, await read(scenarioHome))
-        && selectionCandidateRetained(candidate.snapshot, await optionalCandidate(candidate.path));
-    } else observations[stage === 'AFTER_REPLACEMENT' ? 'interruptedAfterReplacementComplete' : 'interruptedBeforeReturnComplete'] = selected === 'focused'
-      && selectionCandidateCommitted(candidate.snapshot, await read(scenarioHome), await optionalCandidate(candidate.path));
-    requireCondition((await use('focused', undefined, scenarioHome)).active);
+    const result = await observeActivationInterruption({ use, read, candidateNames, readCandidate,
+      launch, captureClosure: (root) => closure.captureWindowsDirectoryClosure(backend, root),
+      current, optionalCandidate }, stage, scenarioHome, (operation) => mark(`activation-${stage}-${operation}`), currentNoRecovery);
+    currentNoRecovery &&= result.noRecovery;
+    observations[stage === 'BEFORE_REPLACEMENT' ? 'interruptedBeforeReplacementRetained'
+      : stage === 'AFTER_REPLACEMENT' ? 'interruptedAfterReplacementComplete' : 'interruptedBeforeReturnComplete'] = result.complete;
   }
   observations.currentPendingNoRecovery = currentNoRecovery;
+  mark('activation-interruption-final-current');
   observations.interruptedActivationExplicitRetry = await current(scenarioHome) === 'focused';
   return observations;
 
@@ -245,6 +207,98 @@ export async function runWindowsProfileActivationEvidence(context) {
     const child = trackProvisioningChild(process); children.add(child); void child.exited.then(() => children.delete(child)); return child;
   }
 }
+async function observeNewCandidate(deps, root, previousNames, mark) {
+  mark('candidate-enumerate');
+  const name = newSelectionCandidateName(previousNames, await deps.candidateNames(root));
+  const path = join(root, name);
+  mark('candidate-read');
+  return { path, snapshot: await deps.readCandidate(path) };
+}
+
+/** Independently prove every successful use, including a reconciled after-effect error.
+ * Observations stay in this process; only existing booleans enter receipts. */
+export async function observeActivationUse(deps, name, options, root, mark = () => {}) {
+  const { onCandidate, ...activationOptions } = options;
+  mark('temps-enumerate');
+  const previousNames = await deps.candidateNames(root);
+  let created, candidate;
+  mark('lifecycle');
+  const result = await deps.useManagedProfile(name, { ...activationOptions, hooks: {
+    ...activationOptions.hooks,
+    async afterPrivateCreation() {
+      created = await observeNewCandidate(deps, root, previousNames, (operation) => mark(`created-${operation}`));
+      mark('created-check');
+      requireCondition(created.snapshot.bytes.length === 0 && (created.snapshot.inspection.security.descriptorControl & 0x1000) !== 0);
+      mark('created-hook');
+      await activationOptions.hooks?.afterPrivateCreation?.(created.snapshot);
+      mark('lifecycle'); // Restore only after a successful hook, never in finally.
+    },
+    async beforeReplacement() {
+      mark('written-read');
+      candidate = { path: created.path, snapshot: await deps.readCandidate(created.path) };
+      mark('written-check');
+      requireCondition(sameSelectionCandidateObject(created.snapshot, candidate.snapshot)
+        && candidate.snapshot.bytes.equals(Buffer.from(`${name}\n`)));
+      mark('written-hook');
+      await onCandidate?.(candidate);
+      await activationOptions.hooks?.beforeReplacement?.();
+      mark('lifecycle');
+    }
+  } });
+  mark('returned-check');
+  requireCondition(candidate !== undefined);
+  const candidateSnapshot = candidate.snapshot; // Preserve argument capture before either awaited read.
+  mark('destination-read');
+  const destination = await deps.read(root);
+  mark('temporary-read');
+  const temporary = await deps.optionalCandidate(candidate.path);
+  mark('commit-check');
+  requireCondition(selectionCandidateCommitted(candidateSnapshot, destination, temporary));
+  return result;
+}
+
+/** One real interruption iteration; exported only for host harness seam tests. */
+export async function observeActivationInterruption(deps, stage, root, mark, currentNoRecovery = true) {
+  mark('reset-use');
+  await deps.use('alpha', undefined, root, (operation) => mark(`reset-use-${operation}`));
+  mark('before-read');
+  const before = await deps.read(root);
+  mark('temps-enumerate');
+  const previousTemps = await deps.candidateNames(root);
+  mark('child-launch');
+  const child = deps.launch(root, 'focused', stage);
+  mark('child-ready');
+  await child.next('ready');
+  mark('child-start');
+  child.process.send('start');
+  const candidate = await observeActivationChildStop(child, stage, () => observeNewCandidate(deps, root, previousTemps, mark), mark);
+  mark('candidate-check');
+  requireCondition(candidate.snapshot.bytes.equals(Buffer.from('focused\n')));
+  mark('child-kill');
+  child.process.kill();
+  mark('child-exit');
+  await child.exited;
+  mark('pending-closure');
+  const pending = await deps.captureClosure(root);
+  mark('current-read');
+  const selected = await deps.current(root);
+  mark('after-closure');
+  const after = await deps.captureClosure(root);
+  mark('closure-check');
+  const noRecovery = currentNoRecovery && pending.closureSha256 === after.closureSha256 && pending.rootIdentity === after.rootIdentity;
+  // Keep the original short circuits: do not observe or mark a suppressed read.
+  const readSelection = () => { mark('selection-read'); return deps.read(root); };
+  const readTemporary = () => { mark('candidate-retained-read'); return deps.optionalCandidate(candidate.path); };
+  mark('selection-verify');
+  const complete = stage === 'BEFORE_REPLACEMENT'
+    ? selected === 'alpha' && same(before, await readSelection())
+      && selectionCandidateRetained(candidate.snapshot, await readTemporary())
+    : selected === 'focused' && selectionCandidateCommitted(candidate.snapshot, await readSelection(), await readTemporary());
+  mark('explicit-use');
+  requireCondition((await deps.use('focused', undefined, root, (operation) => mark(`explicit-use-${operation}`))).active);
+  return { noRecovery, complete };
+}
+
 /** Harness-only predicates: native snapshots are never serialized into IPC or receipts. */
 export function sameSelectionCandidateObject(left, right) {
   if (left?.inspection === undefined || right?.inspection === undefined) return false;
@@ -272,12 +326,15 @@ export function newSelectionCandidateName(previousNames, currentNames) {
 }
 /** Parent observes the exact candidate before allowing a child to rename it.
  * IPC contains only fixed phase/continue tokens, never candidate observations. */
-export async function observeActivationChildStop(child, stage, observeCandidate) {
+export async function observeActivationChildStop(child, stage, observeCandidate, mark = () => {}) {
   requireCondition(['BEFORE_REPLACEMENT', 'AFTER_REPLACEMENT', 'BEFORE_RETURN'].includes(stage));
+  mark('child-before-pause');
   requireCondition((await child.next('paused')).phase === 'BEFORE_REPLACEMENT');
   const candidate = await observeCandidate();
   if (stage !== 'BEFORE_REPLACEMENT') {
+    mark('child-continue');
     child.process.send('continue');
+    mark('child-final-pause');
     requireCondition((await child.next('paused')).phase === stage);
   }
   return candidate;

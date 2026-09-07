@@ -657,3 +657,159 @@ function without(value: Record<string, unknown>, excluded: readonly string[]): R
 function coded(code: string, message = 'native failure'): Error & { code: string } {
   return Object.assign(new Error(message), { code });
 }
+
+describe('error-only native read-change diagnosis', async () => {
+  const { sanitizeProductError } = await import(new URL('../../../scripts/test-win32-profile-provisioning-child.mjs', import.meta.url).href);
+  const diagnostic = { site: 'reopened-prefix', objectKind: 'directory', prefixRole: 'ancestor', differingFields: ['object.changeTime', 'canonicalPath'] };
+  const reason = 'read-change|reopened-prefix|directory|ancestor|object.changeTime,canonicalPath';
+  it.each(['sync', 'async'])('decodes %s native transport without replacing its original cause', async (mode) => {
+    const original = coded(mode === 'sync' ? 'ERR_WIN32_READ_CHANGED' : 'GenericFailure', mode === 'sync' ? reason : `ERR_WIN32_READ_CHANGED: ${reason}`);
+    const originalCause = new Error('PRIVATE-SID-PATH');
+    original.cause = originalCause;
+    const backend = load(module({ inspectWindowsPath() { throw original; }, readWindowsFileStable() { return Promise.reject(original); } }));
+    const error = await (async () => { try { return mode === 'sync' ? backend.inspectPath('C:\\private') : await backend.readStableFile('C:\\private', 3); } catch (error) { return error; } })();
+    expect(error).toMatchObject({ code: 'WINDOWS_NATIVE_READ_CHANGED', nativeReadChange: diagnostic });
+    expect((error as Error).cause).toBe(original);
+    expect(original.cause).toBe(originalCause);
+    const sanitized = sanitizeProductError(error);
+    expect(sanitized.nativeReadChange).toEqual(diagnostic);
+    expect(sanitizeProductError(JSON.parse(JSON.stringify(sanitized)))).toEqual(sanitized);
+    expect(JSON.stringify(sanitized)).not.toContain('PRIVATE');
+  });
+  const maximalFields = [
+    'object.volumeIdentity', 'object.fileId', 'object.size', 'object.allocationSize', 'object.numberOfLinks',
+    'object.creationTime', 'object.lastWriteTime', 'object.changeTime', 'object.attributes', 'object.reparseTag',
+    'object.deletePending', 'object.directory', 'security.descriptorControl', 'security.daclPresent', 'security.daclNull',
+    'security.daclDefaulted', 'security.daclBytes', 'security.ownerSid', 'security.ownerDefaulted', 'security.groupSid',
+    'security.groupDefaulted', 'security.currentUserSid'
+  ];
+  const maximalReason = ['read-change', 'inspect-opened-path', 'regular-file', 'none', maximalFields.join(',')].join('|');
+  it.each(['sync', 'async'])('accepts the maximal supported %s diagnostic with its original cause', async (mode) => {
+    expect(maximalReason.length).toBe(489); // Fixture length, not a production limit.
+    const original = coded(mode === 'sync' ? 'ERR_WIN32_READ_CHANGED' : 'GenericFailure',
+      mode === 'sync' ? maximalReason : `ERR_WIN32_READ_CHANGED: ${maximalReason}`);
+    const backend = load(module({ inspectWindowsPath() { throw original; }, readWindowsFileStable: () => Promise.reject(original) }));
+    const error = await (async () => { try { return mode === 'sync' ? backend.inspectPath('C:\\private') : await backend.readStableFile('C:\\private', 3); } catch (error) { return error; } })();
+    expect(error).toMatchObject({ code: 'WINDOWS_NATIVE_READ_CHANGED', nativeReadChange: {
+      site: 'inspect-opened-path', objectKind: 'regular-file', prefixRole: 'none', differingFields: maximalFields
+    } });
+    expect((error as Error).cause).toBe(original);
+    expect(sanitizeProductError(error).nativeReadChange.differingFields).toEqual(maximalFields);
+  });
+  it.each(['sync', 'async'])('rejects oversized %s text before splitting, retaining code/cause', (mode) => {
+    const oversized = `${maximalReason}X`;
+    const original = coded(mode === 'sync' ? 'ERR_WIN32_READ_CHANGED' : 'GenericFailure',
+      mode === 'sync' ? oversized : `ERR_WIN32_READ_CHANGED: ${oversized}`);
+    const backend = load(module({ inspectWindowsPath() { throw original; } }));
+    const split = vi.spyOn(String.prototype, 'split');
+    let error: unknown, splitCalls: number;
+    try { backend.inspectPath('C:\\private'); } catch (caught) { error = caught; }
+    finally { splitCalls = split.mock.calls.length; split.mockRestore(); }
+    expect(splitCalls).toBe(0);
+    expect(error).toMatchObject({ code: 'WINDOWS_NATIVE_READ_CHANGED' });
+    expect((error as Error).cause).toBe(original);
+    expect(error).not.toHaveProperty('nativeReadChange');
+  });
+  it.each(['iterator-private', 'iterator-throws', 'methods-invalid', 'changing-index', 'sparse', 'duplicate', 'over-count'])(
+    'captures only validated indexed fields at the native decoder seam: %s', (mode) => {
+      const fields = mode === 'sparse' ? new Array<string>(1) : mode === 'over-count' ? new Array<string>(14)
+        : mode === 'duplicate' ? ['object.changeTime', 'object.changeTime'] : [mode === 'methods-invalid' ? 'PRIVATE' : 'object.changeTime'];
+      let iteratorCalls = 0, indexReads = 0;
+      Object.defineProperty(fields, Symbol.iterator, { value: function* () {
+        iteratorCalls++;
+        if (mode === 'iterator-throws') throw new Error('PRIVATE iterator');
+        yield 'PRIVATE';
+      } });
+      Object.defineProperty(fields, 'some', { value: () => false });
+      if (mode === 'changing-index' || mode === 'over-count') Object.defineProperty(fields, '0', { get() {
+        indexReads++;
+        return indexReads === 1 ? 'object.changeTime' : 'PRIVATE';
+      } });
+      const original = coded('ERR_WIN32_READ_CHANGED', 'read-change|reopened-prefix|directory|ancestor|object.changeTime');
+      const backend = load(module({ inspectWindowsPath() { throw original; } }));
+      // Inject at the parser's field-array seam without exporting the internal validator.
+      const split = vi.spyOn(String.prototype, 'split')
+        .mockReturnValueOnce(['read-change', 'reopened-prefix', 'directory', 'ancestor', 'object.changeTime'])
+        .mockReturnValueOnce(fields);
+      let error: unknown;
+      try { backend.inspectPath('C:\\private'); } catch (caught) { error = caught; }
+      finally { split.mockRestore(); }
+      expect(error).toMatchObject({ code: 'WINDOWS_NATIVE_READ_CHANGED' });
+      expect((error as Error).cause).toBe(original);
+      expect(iteratorCalls).toBe(0);
+      expect(indexReads).toBe(mode === 'changing-index' ? 1 : 0);
+      const sanitized = sanitizeProductError(error);
+      if (['iterator-private', 'iterator-throws', 'changing-index'].includes(mode)) {
+        expect(sanitized.nativeReadChange.differingFields).toEqual(['object.changeTime']);
+      } else expect(error).not.toHaveProperty('nativeReadChange');
+      expect(JSON.stringify(sanitized)).not.toContain('PRIVATE');
+      expect(sanitizeProductError(JSON.parse(JSON.stringify(sanitized)))).toEqual(sanitized);
+    }
+  );
+  it.each([
+    ['inspect-opened-path', 'regular-file', 'none', 'security.daclBytes'],
+    ['rename-parent', 'directory', 'none', 'kindDirectory,reparseTagZero,notDeletePending,objectDirectory'],
+    ['stable-read-growth', 'regular-file', 'none', 'growthProbeNonzero'],
+    ['stable-read-final', 'regular-file', 'none', 'byteCountExpected,afterSizeByteCount,object.size'],
+    ['reopened-prefix', 'directory', 'drive-root', 'object.lastWriteTime'],
+    ['reopened-prefix', 'regular-file', 'final', 'object.fileId']
+  ])('decodes fixed site/kind/role/predicates %s %s %s', async (site, objectKind, prefixRole, fields) => {
+    const original = coded('GenericFailure', `ERR_WIN32_READ_CHANGED: read-change|${site}|${objectKind}|${prefixRole}|${fields}`);
+    const backend = load(module({ readWindowsFileStable: () => Promise.reject(original) }));
+    await expect(backend.readStableFile('C:\\private', 3)).rejects.toMatchObject({ nativeReadChange: { site, objectKind, prefixRole, differingFields: fields.split(',') }, cause: original });
+  });
+  it.each([
+    'legacy private native message', `${reason}|PRIVATE`, `${reason},PRIVATE`,
+    'read-change|PRIVATE|directory|ancestor|object.size',
+    'read-change|reopened-prefix|PRIVATE|ancestor|object.size',
+    'read-change|reopened-prefix|directory|PRIVATE|object.size',
+    'read-change|reopened-prefix|directory|none|object.size',
+    'read-change|reopened-prefix|directory|ancestor|object.size,object.size',
+    'read-change|reopened-prefix|directory|ancestor|',
+    'read-change|stable-read-growth|regular-file|none|object.size',
+    'read-change|stable-read-receipt|regular-file|none|beforeDirectory',
+    `PRIVATE ${reason}`, `${reason}\nPRIVATE`
+  ])('retains legacy/malformed rejection without admitting diagnostic text: %s', async (message) => {
+    const original = coded('ERR_WIN32_READ_CHANGED', message);
+    const error = await load(module({ readWindowsFileStable: () => Promise.reject(original) })).readStableFile('C:\\private', 3).catch((error: unknown) => error);
+    expect(error).toMatchObject({ code: 'WINDOWS_NATIVE_READ_CHANGED', cause: original });
+    expect(error).not.toHaveProperty('nativeReadChange');
+  });
+  it.each(['ERR_WIN32_READ_CHANGED', 'GenericFailure', 'ERR_WIN32_FUTURE'])('never coerces hostile non-string messages for %s', async (code) => {
+    const original = coded(code);
+    Object.defineProperty(original, 'message', { value: { toString() { throw new Error('coerced private message'); } } });
+    const error = await load(module({ readWindowsFileStable: () => Promise.reject(original) })).readStableFile('C:\\private', 3).catch((error: unknown) => error);
+    expect(error).toMatchObject({ code: code === 'ERR_WIN32_READ_CHANGED' ? 'WINDOWS_NATIVE_READ_CHANGED' : 'WINDOWS_NATIVE_OPERATION_FAILED', cause: original });
+    expect(error).not.toHaveProperty('nativeReadChange');
+  });
+  it.each(['ERR_WIN32_READ_CHANGED', 'GenericFailure'])('does not let a hostile message getter replace the original %s cause', async (code) => {
+    const original = coded(code);
+    Object.defineProperty(original, 'message', { get() { throw new Error('PRIVATE accessor'); } });
+    const error = await load(module({ readWindowsFileStable: () => Promise.reject(original) })).readStableFile('C:\\private', 3).catch((error: unknown) => error);
+    expect(error).toMatchObject({ code: code === 'ERR_WIN32_READ_CHANGED' ? 'WINDOWS_NATIVE_READ_CHANGED' : 'WINDOWS_NATIVE_OPERATION_FAILED' });
+    expect((error as Error).cause).toBe(original);
+    expect(error).not.toHaveProperty('nativeReadChange');
+  });
+  it('does not add native diagnostics to unknown codes even with a valid-looking reason', async () => {
+    const original = coded('ERR_WIN32_FUTURE', reason);
+    const error = await load(module({ readWindowsFileStable: () => Promise.reject(original) })).readStableFile('C:\\private', 3).catch((error: unknown) => error);
+    expect(error).toMatchObject({ code: 'WINDOWS_NATIVE_OPERATION_FAILED', cause: original });
+    expect(error).not.toHaveProperty('nativeReadChange');
+  });
+  it('distinguishes the receipt-only refusal and leaves its cause absent', async () => {
+    const value = stableRead({ before: { directory: true }, after: { directory: true } });
+    const error = await load(module({ stableRead: value })).readStableFile('C:\\private', 3).catch((error: unknown) => error);
+    expect(error).toMatchObject({ code: 'WINDOWS_NATIVE_READ_CHANGED', nativeReadChange: {
+      site: 'stable-read-receipt', objectKind: 'directory', prefixRole: 'none', differingFields: ['beforeDirectory', 'afterDirectory']
+    } });
+    expect((error as Error).cause).toBeUndefined();
+  });
+  it('reports exact receipt fields without normalizing them or including last-access time', async () => {
+    const unchanged = stableRead({ after: { lastAccessTime: '0000000000000002' } });
+    await expect(load(module({ stableRead: unchanged })).readStableFile('C:\\private', 3)).resolves.toMatchObject({ byteCount: '0000000000000003' });
+    const changed = stableRead({ after: { changeTime: '0000000000000002', size: '0000000000000004' } });
+    await expect(load(module({ stableRead: changed })).readStableFile('C:\\private', 3)).rejects.toMatchObject({ code: 'WINDOWS_NATIVE_READ_CHANGED', nativeReadChange: {
+      differingFields: ['object.size', 'object.changeTime', 'afterSizeByteCount']
+    } });
+  });
+});

@@ -14,6 +14,8 @@ use napi_derive::napi;
 mod component;
 #[cfg(not(windows))]
 mod non_windows;
+#[cfg(any(windows, test))]
+mod read_change;
 #[cfg(windows)]
 mod windows;
 

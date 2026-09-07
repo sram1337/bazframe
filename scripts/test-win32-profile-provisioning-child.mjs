@@ -91,10 +91,55 @@ const DIFFERING_FIELDS = [
   ...['name', ...ENTRY_FIELDS, 'length', 'serialization'].map((field) => `entries.${field}`)
 ];
 
+// Fixed error-only vocabulary; no native receipt or capability fields are added.
+const READ_CHANGE_OBJECT_FIELDS = ['object.volumeIdentity', 'object.fileId', 'object.size', 'object.allocationSize', 'object.numberOfLinks', 'object.creationTime', 'object.lastWriteTime', 'object.changeTime', 'object.attributes', 'object.reparseTag', 'object.deletePending', 'object.directory'];
+const READ_CHANGE_SECURITY_FIELDS = ['security.descriptorControl', 'security.daclPresent', 'security.daclNull', 'security.daclDefaulted', 'security.daclBytes', 'security.ownerSid', 'security.ownerDefaulted', 'security.groupSid', 'security.groupDefaulted', 'security.currentUserSid'];
+const READ_CHANGE_FIELDS = {
+  'inspect-opened-path': [...READ_CHANGE_OBJECT_FIELDS, ...READ_CHANGE_SECURITY_FIELDS],
+  'rename-parent': ['canonicalPath', 'kindDirectory', 'volume.identity', 'object.volumeIdentity', 'object.fileId',
+    'reparseTagZero', 'notDeletePending', 'objectDirectory', ...READ_CHANGE_SECURITY_FIELDS],
+  'stable-read-growth': ['growthProbeNonzero'],
+  'stable-read-final': [...READ_CHANGE_OBJECT_FIELDS, 'byteCountExpected', 'afterSizeByteCount'],
+  'reopened-prefix': [...READ_CHANGE_OBJECT_FIELDS, 'canonicalPath'],
+  'stable-read-receipt': [...READ_CHANGE_OBJECT_FIELDS, 'beforeDirectory', 'afterDirectory', 'beforeReparseTag',
+    'afterReparseTag', 'beforeDeletePending', 'afterDeletePending', 'beforeSizeByteCount', 'afterSizeByteCount']
+};
+
+const READ_CHANGE_OBJECT_KINDS = ['directory', 'regular-file'];
+const READ_CHANGE_PREFIX_ROLES = ['drive-root', 'ancestor', 'final'];
+
+function readChangeDiagnostic(value) {
+  try {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const record = value;
+    if (Object.keys(record).sort().join(',') !== 'differingFields,objectKind,prefixRole,site') return undefined;
+    const { site, objectKind, prefixRole, differingFields } = record;
+    if (typeof site !== 'string' || !Object.hasOwn(READ_CHANGE_FIELDS, site)
+      || !READ_CHANGE_OBJECT_KINDS.includes(objectKind)
+      || !(site === 'reopened-prefix' ? READ_CHANGE_PREFIX_ROLES : ['none']).includes(prefixRole)
+      || !Array.isArray(differingFields)) return undefined;
+    const allowed = READ_CHANGE_FIELDS[site];
+    const count = differingFields.length;
+    if (!Number.isInteger(count) || count < 1 || count > allowed.length) return undefined;
+    const fields = [];
+    // Capture each indexed value once; never invoke caller array methods or iterators.
+    for (let index = 0; index < count; index++) {
+      const field = differingFields[index];
+      if (typeof field !== 'string' || !allowed.includes(field) || fields.includes(field)) return undefined;
+      fields.push(field);
+    }
+    return { site, objectKind, prefixRole, differingFields: fields };
+  } catch { return undefined; }
+}
+
 export function sanitizeProductError(error, depth = 0) {
   const result = { name: 'Error', message: 'sanitized product-slice failure' };
   if (error === null || typeof error !== 'object' || depth > 3) return result;
   if (FAILURE_CODES.has(error.code)) result.code = error.code;
+  if (result.code === 'WINDOWS_NATIVE_READ_CHANGED') {
+    const diagnostic = readChangeDiagnostic(Object.getOwnPropertyDescriptor(error, 'nativeReadChange')?.value);
+    if (diagnostic !== undefined) result.nativeReadChange = diagnostic;
+  }
   const reason = typeof error.message === 'string'
     ? CLOSURE_REASONS.get(`${result.code}|${error.message}`)
     : undefined;
@@ -122,11 +167,26 @@ const SCENARIOS = new Set([
   ...['PLANNED', 'CANDIDATE_READY', 'CANDIDATE_RENAME_INTENT', 'AFTER_RENAME',
     'CANDIDATE_RENAME_PROVEN', 'DEPENDENT_STATE_PROVEN', 'COMMITTED'].map((phase) => `crash-${phase}`)
 ]);
+const ACTIVATION_USE_OPERATIONS = [
+  'temps-enumerate', 'lifecycle', 'created-candidate-enumerate', 'created-candidate-read',
+  'created-check', 'created-hook', 'written-read', 'written-check', 'written-hook',
+  'returned-check', 'destination-read', 'temporary-read', 'commit-check'
+];
+const ACTIVATION_INTERRUPTION_OPERATIONS = [
+  'reset-use', 'before-read', 'temps-enumerate', 'child-launch', 'child-ready', 'child-start',
+  'child-before-pause', 'candidate-enumerate', 'candidate-read', 'candidate-check',
+  'child-continue', 'child-final-pause', 'child-kill', 'child-exit', 'pending-closure',
+  'current-read', 'after-closure', 'closure-check', 'selection-verify', 'selection-read',
+  'candidate-retained-read', 'explicit-use',
+  ...['reset-use', 'explicit-use'].flatMap((scope) => ACTIVATION_USE_OPERATIONS.map((operation) => `${scope}-${operation}`))
+];
 const SUBSTEPS = new Set([
+  ...['BEFORE_REPLACEMENT', 'AFTER_REPLACEMENT', 'BEFORE_RETURN'].flatMap((stage) =>
+    ACTIVATION_INTERRUPTION_OPERATIONS.map((operation) => `activation-${stage}-${operation}`)),
   'activation-outcome-onboarding', 'activation-deferred-refusal', 'selection-malformed',
   'selection-profile-drift', 'selection-postcommit', 'current-selected-missing', 'selection-reset-after-missing',
   'activation-modules', 'current-missing', 'managed-activation', 'active-switch', 'activation-contention',
-  'selection-outcomes', 'selection-sharing', 'selection-ambiguity', 'activation-interruption',
+  'selection-outcomes', 'selection-sharing', 'selection-ambiguity', 'activation-interruption', 'activation-interruption-final-current',
   'activation-BEFORE_REPLACEMENT', 'activation-AFTER_REPLACEMENT', 'activation-BEFORE_RETURN',
   'binary-digest', 'absent-home-check', 'invoke-cli', 'poison-home-check',
   'start', 'nativeModule', 'privateDirectoryModule', 'servicesModule',

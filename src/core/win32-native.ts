@@ -729,10 +729,23 @@ function stableReadReceipt(value: unknown, maxBytes: number): WindowsStableReadR
     if (before.directory || after.directory || before.reparseTag !== null || after.reparseTag !== null
       || before.deletePending || after.deletePending || before.size !== byteCount
       || after.size !== byteCount || !sameStableObservation(before, after)) {
-      throw failure(
+      const differingFields = READ_CHANGE_OBJECT_FIELDS.filter((field) => {
+        const key = field.slice('object.'.length) as keyof WindowsObjectObservation;
+        return before[key] !== after[key];
+      });
+      if (before.directory) differingFields.push('beforeDirectory');
+      if (after.directory) differingFields.push('afterDirectory');
+      if (before.reparseTag !== null) differingFields.push('beforeReparseTag');
+      if (after.reparseTag !== null) differingFields.push('afterReparseTag');
+      if (before.deletePending) differingFields.push('beforeDeletePending');
+      if (after.deletePending) differingFields.push('afterDeletePending');
+      if (before.size !== byteCount) differingFields.push('beforeSizeByteCount');
+      if (after.size !== byteCount) differingFields.push('afterSizeByteCount');
+      throw Object.assign(failure(
         'WINDOWS_NATIVE_READ_CHANGED',
         'The native stable-read receipt reports changed or inconsistent file state.'
-      );
+      ), { nativeReadChange: { site: 'stable-read-receipt', objectKind: before.directory ? 'directory' : 'regular-file',
+        prefixRole: 'none', differingFields } });
     }
     return { bytes, byteCount, before, after };
   } catch (error) {
@@ -1037,6 +1050,69 @@ function nativeCreationFailure(error: unknown): BazframeError {
   );
 }
 
+// Fixed error-only vocabulary; no native receipt or capability fields are added.
+const READ_CHANGE_OBJECT_FIELDS = ['object.volumeIdentity', 'object.fileId', 'object.size', 'object.allocationSize', 'object.numberOfLinks', 'object.creationTime', 'object.lastWriteTime', 'object.changeTime', 'object.attributes', 'object.reparseTag', 'object.deletePending', 'object.directory'];
+const READ_CHANGE_SECURITY_FIELDS = ['security.descriptorControl', 'security.daclPresent', 'security.daclNull', 'security.daclDefaulted', 'security.daclBytes', 'security.ownerSid', 'security.ownerDefaulted', 'security.groupSid', 'security.groupDefaulted', 'security.currentUserSid'];
+const READ_CHANGE_FIELDS = {
+  'inspect-opened-path': [...READ_CHANGE_OBJECT_FIELDS, ...READ_CHANGE_SECURITY_FIELDS],
+  'rename-parent': ['canonicalPath', 'kindDirectory', 'volume.identity', 'object.volumeIdentity', 'object.fileId',
+    'reparseTagZero', 'notDeletePending', 'objectDirectory', ...READ_CHANGE_SECURITY_FIELDS],
+  'stable-read-growth': ['growthProbeNonzero'],
+  'stable-read-final': [...READ_CHANGE_OBJECT_FIELDS, 'byteCountExpected', 'afterSizeByteCount'],
+  'reopened-prefix': [...READ_CHANGE_OBJECT_FIELDS, 'canonicalPath'],
+  'stable-read-receipt': [...READ_CHANGE_OBJECT_FIELDS, 'beforeDirectory', 'afterDirectory', 'beforeReparseTag',
+    'afterReparseTag', 'beforeDeletePending', 'afterDeletePending', 'beforeSizeByteCount', 'afterSizeByteCount']
+};
+
+const READ_CHANGE_OBJECT_KINDS = ['directory', 'regular-file'];
+const READ_CHANGE_PREFIX_ROLES = ['drive-root', 'ancestor', 'final'];
+// Every supported native message uses one site, kind and role plus unique fields.
+// Derive the largest complete encoding; the receipt-only site has no native transport.
+const READ_CHANGE_MAX_MESSAGE_LENGTH = Math.max(...Object.entries(READ_CHANGE_FIELDS)
+  .filter(([site]) => site !== 'stable-read-receipt')
+  .flatMap(([site, fields]) => READ_CHANGE_OBJECT_KINDS.flatMap((kind) =>
+    (site === 'reopened-prefix' ? READ_CHANGE_PREFIX_ROLES : ['none']).map((role) =>
+      ['read-change', site, kind, role, fields.join(',')].join('|').length))));
+
+function readChangeDiagnostic(value: unknown): Record<string, unknown> | undefined {
+  try {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const record = value as Record<string, unknown>;
+    if (Object.keys(record).sort().join(',') !== 'differingFields,objectKind,prefixRole,site') return undefined;
+    const { site, objectKind, prefixRole, differingFields } = record;
+    if (typeof site !== 'string' || !Object.hasOwn(READ_CHANGE_FIELDS, site)
+      || !READ_CHANGE_OBJECT_KINDS.includes(objectKind as string)
+      || !(site === 'reopened-prefix' ? READ_CHANGE_PREFIX_ROLES : ['none']).includes(prefixRole as string)
+      || !Array.isArray(differingFields)) return undefined;
+    const allowed = READ_CHANGE_FIELDS[site as keyof typeof READ_CHANGE_FIELDS];
+    const count = differingFields.length;
+    if (!Number.isInteger(count) || count < 1 || count > allowed.length) return undefined;
+    const fields: string[] = [];
+    // Capture each indexed value once; never invoke caller array methods or iterators.
+    for (let index = 0; index < count; index++) {
+      const field = differingFields[index];
+      if (typeof field !== 'string' || !allowed.includes(field) || fields.includes(field)) return undefined;
+      fields.push(field);
+    }
+    return { site, objectKind, prefixRole, differingFields: fields };
+  } catch { return undefined; }
+}
+
+function nativeReadChange(error: unknown): Record<string, unknown> | undefined {
+  try {
+    if (!(error instanceof Error)) return undefined;
+    const reason = error.message;
+    if (typeof reason !== 'string') return undefined;
+    // Sync N-API errors carry the direct code; async N-API prepends it to the reason.
+    const message = reason.startsWith('ERR_WIN32_READ_CHANGED: ')
+      ? reason.slice('ERR_WIN32_READ_CHANGED: '.length) : reason;
+    if (message.length > READ_CHANGE_MAX_MESSAGE_LENGTH) return undefined;
+    const parts = message.split('|');
+    if (parts.length !== 5 || parts[0] !== 'read-change' || parts[1] === 'stable-read-receipt') return undefined;
+    return readChangeDiagnostic({ site: parts[1], objectKind: parts[2], prefixRole: parts[3], differingFields: parts[4].split(',') });
+  } catch { return undefined; }
+}
+
 function nativeOperationFailure(error: unknown): BazframeError {
   const mapped: Record<string, { code: string; message?: string }> = {
     ERR_WIN32_ACCESS_DENIED: { code: 'WINDOWS_NATIVE_ACCESS_DENIED' },
@@ -1080,18 +1156,24 @@ function nativeOperationFailure(error: unknown): BazframeError {
   };
   const nativeCode = nativeOperationCode(error);
   const result = nativeCode === undefined ? undefined : mapped[nativeCode];
-  return failure(
+  const mappedError = failure(
     result?.code ?? 'WINDOWS_NATIVE_OPERATION_FAILED',
     result?.message ?? 'The Bazframe native Windows operation failed without producing admissible evidence.',
     error
   );
+  const diagnostic = nativeCode === 'ERR_WIN32_READ_CHANGED' ? nativeReadChange(error) : undefined;
+  if (diagnostic !== undefined) Object.assign(mappedError, { nativeReadChange: diagnostic });
+  return mappedError;
 }
 
 function nativeOperationCode(error: unknown): string | undefined {
   const direct = errorCode(error);
   if (direct?.startsWith('ERR_WIN32_')) return direct;
   if (error instanceof Error) {
-    return /(?:^|\b)(ERR_WIN32_[A-Z0-9_]+):/u.exec(error.message)?.[1];
+    try {
+      const message = error.message;
+      if (typeof message === 'string') return /(?:^|\b)(ERR_WIN32_[A-Z0-9_]+):/u.exec(message)?.[1];
+    } catch { /* A hostile message is not a native operation code. */ }
   }
   return undefined;
 }
