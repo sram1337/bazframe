@@ -4,7 +4,7 @@ import { ZipFile } from 'yazl';
 import { describe, expect, it } from 'vitest';
 import { createTempDirectory } from '../../helpers/temp-directory.js';
 // @ts-expect-error Repository scripts intentionally have no TypeScript declaration surface.
-import { admitWin32NativeRelease } from '../../../scripts/win32-native-release-admission.mjs';
+import { admitWin32NativeRelease, verifyWin32FoundationArchive } from '../../../scripts/win32-native-release-admission.mjs';
 
 const commit = 'a'.repeat(40);
 const version = '0.1.0-test.1';
@@ -144,6 +144,7 @@ describe('Win32 native release admission', () => {
     try {
       await directory.write('repository/package.json', JSON.stringify({ name: 'bazframe', version }));
       const archive = await createEvidenceArchive(directory.path('evidence.zip'), { mutate });
+      await expect(verifyWin32FoundationArchive({ repositoryRoot: directory.path('repository'), archivePath: archive.path, archiveDigest: archive.digest, releaseCommit: commit, packageVersion: version })).rejects.toThrow(/release admission failed/u);
       await expect(admit(directory.path('repository'), archive.path, archive.digest)).rejects.toThrow(/release admission failed/u);
     } finally {
       await directory.cleanup();
@@ -160,6 +161,7 @@ describe('Win32 native release admission', () => {
     try {
       await directory.write('repository/package.json', JSON.stringify({ name: 'bazframe', version }));
       const archive = await createEvidenceArchive(directory.path('evidence.zip'), options);
+      await expect(verifyWin32FoundationArchive({ repositoryRoot: directory.path('repository'), archivePath: archive.path, archiveDigest: archive.digest, releaseCommit: commit, packageVersion: version })).rejects.toThrow(/release admission failed/u);
       await expect(admit(directory.path('repository'), archive.path, archive.digest)).rejects.toThrow(/release admission failed/u);
     } finally {
       await directory.cleanup();

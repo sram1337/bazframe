@@ -21,7 +21,20 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
+const { verifyProductReceipt, verifyProductPair } = await import(pathToFileURL(
+  join(process.cwd(), 'scripts', 'verify-win32-added-skill-evidence.mjs')
+).href);
+
 describe('Windows added-Skill product evidence verifier', () => {
+  it('exports main-safe exact single and pair validators with fixed root kinds', () => {
+    const source = receipt('source-tree'), installed = receipt('packed-install');
+    expect(verifyProductReceipt(source, 'source-tree', 'a'.repeat(64))).toBe(source);
+    expect(verifyProductPair(source, installed, 'a'.repeat(64))).toEqual({ source, installed });
+    expect(() => verifyProductReceipt(source, 'packed-install', 'a'.repeat(64))).toThrow();
+    expect(() => verifyProductReceipt(source, 'custom', 'a'.repeat(64))).toThrow();
+    expect(() => verifyProductPair(installed, source, 'a'.repeat(64))).toThrow();
+    expect(() => verifyProductPair(source, installed, '')).toThrow();
+  });
   it.each(['version', 'support', 'admission', 'gate', 'missing', 'false', 'path', 'SID', 'identity', 'content', 'digest', 'failure'])(
     'rejects incomplete or identifying receipts: %s', async (mode) => {
       const root = await mkdtemp(join(tmpdir(), 'bazframe-win-product-evidence-'));
@@ -99,11 +112,13 @@ describe('Windows added-Skill product evidence verifier', () => {
     await writeFile(source, JSON.stringify(receipt('source-tree')));
     await writeFile(installed, JSON.stringify(receipt('packed-install')));
     expect(run(source, installed).status).toBe(0);
+    expect(spawnSync(process.execPath, ['scripts/verify-win32-added-skill-evidence.mjs',
+      '--binary-sha256', 'a'.repeat(64), '--installed', installed, '--source', source]).status).toBe(0);
 
     await writeFile(installed, JSON.stringify({ ...receipt('packed-install'), extra: true }));
     const rejected = run(source, installed);
     expect(rejected.status).toBe(1);
-    expect(rejected.stderr).toContain('unexpected schema');
+    expect(rejected.stderr.trim()).toBe('Windows added-Skill evidence refused.');
   });
 });
 

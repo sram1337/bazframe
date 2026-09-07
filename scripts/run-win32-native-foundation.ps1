@@ -193,6 +193,7 @@ try {
     $installedEvidencePath = Join-Path $evidenceRoot 'native-installed-evidence.json'
     $productSourceEvidencePath = Join-Path $evidenceRoot 'win32-product-source-evidence.json'
     $productInstalledEvidencePath = Join-Path $evidenceRoot 'win32-product-installed-evidence.json'
+    # Fixed local schedule: foundation source -> packed -> product source -> packed; no local deadline.
     & $nodeCommand .\scripts\run-win32-qualification.mjs `
         --source-root $repository --installed-root $installed `
         --foundation-source-output $sourceEvidencePath --foundation-installed-output $installedEvidencePath `

@@ -5,10 +5,10 @@ on:
     outputs:
       artifact_id:
         description: Numeric ID of the successful foundation artifact.
-        value: ${{ jobs.native-foundation.outputs.artifact_id }}
+        value: ${{ jobs.promote.outputs.artifact_id }}
       artifact_digest:
         description: Raw lowercase 64-hex SHA-256 output from actions/upload-artifact.
-        value: ${{ jobs.native-foundation.outputs.artifact_digest }}
+        value: ${{ jobs.promote.outputs.artifact_digest }}
   workflow_dispatch:
   pull_request:
     paths:
@@ -55,6 +55,10 @@ on:
       - 'scripts/test-win32-operation-lock-child.mjs'
       - 'scripts/run-win32-native-foundation.ps1'
       - 'scripts/run-win32-qualification.mjs'
+      - 'scripts/win32-qualification-input.mjs'
+      - 'scripts/win32-native-release-admission.mjs'
+      - 'test/unit/scripts/win32-qualification-input.test.ts'
+      - 'test/unit/scripts/win32-native-release-admission.test.ts'
       - 'test/unit/scripts/win32-qualification.test.ts'
       - 'scripts/test-pack.mjs'
       - 'scripts/build.mjs'
@@ -106,6 +110,10 @@ on:
       - 'scripts/test-win32-operation-lock-child.mjs'
       - 'scripts/run-win32-native-foundation.ps1'
       - 'scripts/run-win32-qualification.mjs'
+      - 'scripts/win32-qualification-input.mjs'
+      - 'scripts/win32-native-release-admission.mjs'
+      - 'test/unit/scripts/win32-qualification-input.test.ts'
+      - 'test/unit/scripts/win32-native-release-admission.test.ts'
       - 'test/unit/scripts/win32-qualification.test.ts'
       - 'scripts/test-pack.mjs'
       - 'scripts/build.mjs'
@@ -114,35 +122,52 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   BAZFRAME_RUST_TOOLCHAIN: 1.88.0
   BAZFRAME_MSVC_TOOLS_VERSION: 14.44.35207
   BAZFRAME_WIN32_NATIVE_PACK_MODE: foundation-evidence
+  QUALIFICATION_REPOSITORY_ID: ${{ github.repository_id }}
+  # Transport head identity is distinct from github.sha (the PR merge/source checkout).
+  QUALIFICATION_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  QUALIFICATION_HEAD_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
 
 jobs:
-  native-foundation:
-    name: Evidence only (public Windows gate remains closed)
+  foundation:
     runs-on: windows-2022
-    outputs:
-      artifact_id: ${{ steps.upload-success.outputs.artifact-id }}
-      artifact_digest: ${{ steps.upload-success.outputs.artifact-digest }}
     timeout-minutes: 30
     defaults:
       run:
         shell: pwsh
+    outputs:
+      artifact_id: ${{ steps.upload-input.outputs.artifact-id }}
+      artifact_digest: ${{ steps.upload-input.outputs.artifact-digest }}
+      source_commit: ${{ steps.binding.outputs.source_commit }}
+      binary_sha256: ${{ steps.binding.outputs.binary_sha256 }}
+      tarball_sha256: ${{ steps.binding.outputs.tarball_sha256 }}
+      npm_version: ${{ steps.binding.outputs.npm_version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Check exact clean source before setup
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $commit = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Git revision inspection failed.' }
+          $state = & git status --porcelain=v1 --untracked-files=all
+          if ($LASTEXITCODE -ne 0) { throw 'Git cleanliness inspection failed.' }
+          if ($commit -cne $env:GITHUB_SHA -or -not [string]::IsNullOrWhiteSpace(($state -join "`n"))) {
+            throw 'Qualification source changed or is not clean.'
+          }
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22.19.0
           cache: npm
-
-      - name: Install JavaScript dependencies
+      - name: Install locked JavaScript dependencies
         run: npm ci
-
       - name: Pin Rust toolchain and Windows target
         run: |
           $ErrorActionPreference = 'Stop'
@@ -211,86 +236,36 @@ jobs:
           }
           $env:BAZFRAME_WIN32_NATIVE_TEST_PARENT = $testParent
           "BAZFRAME_WIN32_NATIVE_TEST_PARENT=$testParent" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          $productEvidenceRoot = Join-Path $env:RUNNER_TEMP 'win32-native-evidence-product'
-          if (Test-Path -LiteralPath $productEvidenceRoot) {
-            Remove-Item -LiteralPath $productEvidenceRoot -Recurse -Force
-          }
-          New-Item -ItemType Directory -Path $productEvidenceRoot | Out-Null
-
-      - name: Pack once, install, then qualify independent lanes offline
+      - name: Pack and install once, then qualify foundations sequentially offline
+        id: binding
         run: |
           $ErrorActionPreference = 'Stop'
+          $npmVersion = (npm --version).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'npm version inspection failed.' }
           $pack = npm pack --ignore-scripts --json --silent | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0) { throw "npm pack failed with exit $LASTEXITCODE" }
-          if ($pack.Count -ne 1) { throw 'Expected exactly one Bazframe tarball.' }
+          if ($LASTEXITCODE -ne 0 -or $pack.Count -ne 1) { throw 'Expected exactly one successful Bazframe pack.' }
           $tarball = Join-Path $PWD $pack[0].filename
+          $tarballHash = (Get-FileHash $tarball -Algorithm SHA256).Hash.ToLowerInvariant()
+          $expectedHash = (Get-Content native-binary.sha256 -Raw).Trim()
           $installRoot = Join-Path $env:RUNNER_TEMP 'bazframe-native-packed-install'
-          New-Item -ItemType Directory -Force $installRoot | Out-Null
+          New-Item -ItemType Directory $installRoot | Out-Null
           npm install --prefix $installRoot --ignore-scripts --no-package-lock $tarball
-          if ($LASTEXITCODE -ne 0) { throw "packed npm install failed with exit $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw 'Packed npm install failed.' }
           $installed = Join-Path $installRoot 'node_modules\bazframe'
           $installedNative = Join-Path $installed 'artifacts\native\win32-x64-msvc\bazframe-win32.node'
-          $expectedHash = (Get-Content native-binary.sha256 -Raw).Trim()
           $installedHash = (Get-FileHash $installedNative -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($installedHash -ne $expectedHash) { throw 'Packed native binary does not match the reviewed build output.' }
+          if ($installedHash -cne $expectedHash) { throw 'Packed native binary changed.' }
+          "source_commit=$env:GITHUB_SHA" >> $env:GITHUB_OUTPUT
+          "binary_sha256=$expectedHash" >> $env:GITHUB_OUTPUT
+          "tarball_sha256=$tarballHash" >> $env:GITHUB_OUTPUT
+          "npm_version=$npmVersion" >> $env:GITHUB_OUTPUT
           $env:npm_config_offline = 'true'
-          $productEvidenceRoot = Join-Path $env:RUNNER_TEMP 'win32-native-evidence-product'
-          $productSourcePath = Join-Path $productEvidenceRoot 'source.json'
-          $productInstalledPath = Join-Path $productEvidenceRoot 'installed.json'
-          $sourceEvidencePath = Join-Path $PWD 'native-source-evidence.json'
-          $installedEvidencePath = Join-Path $PWD 'native-installed-evidence.json'
-          node ./scripts/run-win32-qualification.mjs `
+          node ./scripts/run-win32-qualification.mjs --selection foundation `
             --source-root $PWD.Path --installed-root $installed `
-            --foundation-source-output $sourceEvidencePath --foundation-installed-output $installedEvidencePath `
-            --product-source-output $productSourcePath --product-installed-output $productInstalledPath
-          if ($LASTEXITCODE -ne 0) { throw "source/installed qualification lanes failed with exit $LASTEXITCODE" }
-          $sourceReceipt = Get-Content native-source-evidence.json -Raw | ConvertFrom-Json
-          $installedReceipt = Get-Content native-installed-evidence.json -Raw | ConvertFrom-Json
-          if ($sourceReceipt.completion -ne 'passed' -or $installedReceipt.completion -ne 'passed') {
-            throw 'Native conformance receipts did not both pass.'
-          }
-          if ($sourceReceipt.releaseAdmission -ne 'not-authorized' -or
-              $installedReceipt.releaseAdmission -ne 'not-authorized' -or
-              $sourceReceipt.windowsSupportClaim -ne $false -or
-              $installedReceipt.windowsSupportClaim -ne $false) {
-            throw 'Native conformance receipts changed the closed release/support boundary.'
-          }
-          if ($sourceReceipt.observations.binarySha256 -ne $expectedHash -or
-              $installedReceipt.observations.binarySha256 -ne $expectedHash) {
-            throw 'Native conformance receipt digests do not match the reviewed binary.'
-          }
-          $productSource = Get-Content -LiteralPath $productSourcePath -Raw | ConvertFrom-Json
-          $productInstalled = Get-Content -LiteralPath $productInstalledPath -Raw | ConvertFrom-Json
-          if ($productSource.schemaVersion -ne 3 -or $productInstalled.schemaVersion -ne 3 -or
-              $productSource.completion -ne 'passed' -or $productInstalled.completion -ne 'passed' -or
-              $productSource.releaseAdmission -ne 'not-authorized' -or
-              $productInstalled.releaseAdmission -ne 'not-authorized' -or
-              $productSource.windowsSupportClaim -ne $false -or
-              $productInstalled.windowsSupportClaim -ne $false -or
-              $productSource.publicWindowsGate -ne 'closed' -or
-              $productInstalled.publicWindowsGate -ne 'closed' -or
-              $productSource.observations.binarySha256 -ne $expectedHash -or
-              $productInstalled.observations.binarySha256 -ne $expectedHash) {
-            throw 'Windows product-slice receipts changed their closed support boundary.'
-          }
-          $sourceObservations = $productSource.observations | ConvertTo-Json -Compress
-          $installedObservations = $productInstalled.observations | ConvertTo-Json -Compress
-          if ($sourceObservations -ne $installedObservations) {
-            throw 'Windows product-slice source and packed observations differ.'
-          }
-          node ./scripts/verify-win32-added-skill-evidence.mjs --source $productSourcePath --installed $productInstalledPath --binary-sha256 $expectedHash
-          if ($LASTEXITCODE -ne 0) { throw "Windows product-slice evidence verification failed with exit $LASTEXITCODE" }
-          $finalCommit = (& git rev-parse HEAD).Trim()
-          if ($LASTEXITCODE -ne 0) { throw "final Git revision inspection failed with exit $LASTEXITCODE" }
-          $finalWorktreeState = & git status --porcelain=v1 --untracked-files=all
-          if ($LASTEXITCODE -ne 0) { throw "final Git worktree inspection failed with exit $LASTEXITCODE" }
-          if ($finalCommit -ne '${{ github.sha }}' -or
-              -not [string]::IsNullOrWhiteSpace(($finalWorktreeState -join "`n"))) {
-            throw 'The Bazframe source changed during native evidence collection.'
-          }
-
+            --foundation-source-output (Join-Path $PWD 'native-source-evidence.json') `
+            --foundation-installed-output (Join-Path $PWD 'native-installed-evidence.json')
+          if ($LASTEXITCODE -ne 0) { throw 'Foundation qualification failed.' }
       - name: Assemble source-bound evidence
-        if: always()
         run: |
           $ErrorActionPreference = 'Stop'
           $nodeVersion = node --version
@@ -327,9 +302,332 @@ jobs:
             windowsSupportClaim = $false
           }
           $evidence | ConvertTo-Json -Depth 20 | Set-Content native-foundation-evidence.json
-          Get-Content native-foundation-evidence.json
           if ($completion -ne 'passed') { throw 'Native foundation evidence is incomplete or failed.' }
 
+      - name: Verify complete foundation-qualified input before transport
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'win32-qualification/foundation'
+          New-Item -ItemType Directory (Join-Path $root 'artifacts/native/win32-x64-msvc') -Force | Out-Null
+          Copy-Item artifacts/native/win32-x64-msvc/bazframe-win32.node (Join-Path $root 'artifacts/native/win32-x64-msvc/bazframe-win32.node')
+          Copy-Item native-binary.sha256,native-foundation-evidence.json,native-source-evidence.json,native-installed-evidence.json,native-rust-version.txt,native-msvc-version.txt $root
+          node ./scripts/win32-qualification-input.mjs foundation
+          if ($LASTEXITCODE -ne 0) { throw 'Foundation input verification failed.' }
+          $commit = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Git revision inspection failed.' }
+          $state = & git status --porcelain=v1 --untracked-files=all
+          if ($LASTEXITCODE -ne 0) { throw 'Git cleanliness inspection failed.' }
+          if ($commit -cne $env:GITHUB_SHA -or -not [string]::IsNullOrWhiteSpace(($state -join "`n"))) {
+            throw 'Qualification source changed or is not clean.'
+          }
+      - name: Transfer foundation-qualified input only (not final success)
+        id: upload-input
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bazframe-win32-qualification-input-foundation-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          path: ${{ runner.temp }}/win32-qualification/foundation/
+      - name: Upload sanitized failed or cancelled diagnostics
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bazframe-win32-diagnostics-foundation-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          path: |
+            native-source-evidence.json
+            native-installed-evidence.json
+            native-rust-version.txt
+            native-msvc-version.txt
+
+  product-source:
+    needs: foundation
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    outputs:
+      artifact_id: ${{ steps.upload-input.outputs.artifact-id }}
+      artifact_digest: ${{ steps.upload-input.outputs.artifact-digest }}
+      source_commit: ${{ steps.binding.outputs.source_commit }}
+      binary_sha256: ${{ steps.binding.outputs.binary_sha256 }}
+      tarball_sha256: ${{ steps.binding.outputs.tarball_sha256 }}
+      npm_version: ${{ steps.binding.outputs.npm_version }}
+    env:
+      FOUNDATION_BINDING: ${{ toJSON(needs.foundation.outputs) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Check exact clean source before setup
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $commit = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Git revision inspection failed.' }
+          $state = & git status --porcelain=v1 --untracked-files=all
+          if ($LASTEXITCODE -ne 0) { throw 'Git cleanliness inspection failed.' }
+          if ($commit -cne $env:GITHUB_SHA -or -not [string]::IsNullOrWhiteSpace(($state -join "`n"))) {
+            throw 'Qualification source changed or is not clean.'
+          }
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - name: Install locked JavaScript dependencies
+        run: npm ci
+      - name: Authenticate and verify exact qualified input; stage only verified native bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node ./scripts/win32-qualification-input.mjs consume
+          if ($LASTEXITCODE -ne 0) { throw 'Qualified input refused.' }
+      - name: Rebuild and require identical whole tarball before product execution
+        id: binding
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $binding = $env:FOUNDATION_BINDING | ConvertFrom-Json
+          $npmVersion = (npm --version).Trim()
+          if ($LASTEXITCODE -ne 0 -or $npmVersion -cne $binding.npm_version) { throw 'npm version differs from producer.' }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { throw 'TypeScript build failed.' }
+          $npmVersion = (npm --version).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'npm version inspection failed.' }
+          $pack = npm pack --ignore-scripts --json --silent | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $pack.Count -ne 1) { throw 'Expected exactly one successful Bazframe pack.' }
+          $tarball = Join-Path $PWD $pack[0].filename
+          $tarballHash = (Get-FileHash $tarball -Algorithm SHA256).Hash.ToLowerInvariant()
+          $env:QUALIFICATION_TARBALL = $tarball
+          $env:QUALIFICATION_NPM_VERSION = $npmVersion
+          node ./scripts/win32-qualification-input.mjs repack
+          if ($LASTEXITCODE -ne 0) { throw 'Whole tarball does not match qualified producer.' }
+          $expectedHash = $binding.binary_sha256
+          "source_commit=$env:GITHUB_SHA" >> $env:GITHUB_OUTPUT
+          "binary_sha256=$expectedHash" >> $env:GITHUB_OUTPUT
+          "tarball_sha256=$tarballHash" >> $env:GITHUB_OUTPUT
+          "npm_version=$npmVersion" >> $env:GITHUB_OUTPUT
+      - name: Admit independent private conformance roots
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $testParent = $env:LOCALAPPDATA
+          $drive = (Get-Item $testParent).PSDrive.Name
+          $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$($drive):'"
+          if ($null -eq $disk -or $disk.DriveType -ne 3 -or $disk.FileSystem -ne 'NTFS') {
+            throw 'The private conformance parent is not on a fixed local NTFS volume.'
+          }
+          $env:BAZFRAME_WIN32_NATIVE_TEST_PARENT = $testParent
+          "BAZFRAME_WIN32_NATIVE_TEST_PARENT=$testParent" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Qualify only product-source offline and verify exact single receipt
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'win32-qualification/product'
+          New-Item -ItemType Directory $root -Force | Out-Null
+          $env:npm_config_offline = 'true'
+          node ./scripts/run-win32-qualification.mjs --selection product-source `
+            --source-root $PWD.Path `
+            --product-source-output (Join-Path $root 'source.json')
+          if ($LASTEXITCODE -ne 0) { throw 'Product qualification failed.' }
+          node ./scripts/win32-qualification-input.mjs product-source
+          if ($LASTEXITCODE -ne 0) { throw 'Product receipt refused.' }
+          $commit = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Git revision inspection failed.' }
+          $state = & git status --porcelain=v1 --untracked-files=all
+          if ($LASTEXITCODE -ne 0) { throw 'Git cleanliness inspection failed.' }
+          if ($commit -cne $env:GITHUB_SHA -or -not [string]::IsNullOrWhiteSpace(($state -join "`n"))) {
+            throw 'Qualification source changed or is not clean.'
+          }
+      - name: Transfer verified product input only
+        id: upload-input
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bazframe-win32-qualification-input-product-source-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          path: ${{ runner.temp }}/win32-qualification/product/source.json
+      - name: Upload sanitized failed or cancelled diagnostics
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bazframe-win32-diagnostics-product-source-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/win32-qualification/product/source.json
+
+  product-installed:
+    needs: foundation
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    outputs:
+      artifact_id: ${{ steps.upload-input.outputs.artifact-id }}
+      artifact_digest: ${{ steps.upload-input.outputs.artifact-digest }}
+      source_commit: ${{ steps.binding.outputs.source_commit }}
+      binary_sha256: ${{ steps.binding.outputs.binary_sha256 }}
+      tarball_sha256: ${{ steps.binding.outputs.tarball_sha256 }}
+      npm_version: ${{ steps.binding.outputs.npm_version }}
+    env:
+      FOUNDATION_BINDING: ${{ toJSON(needs.foundation.outputs) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Check exact clean source before setup
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $commit = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Git revision inspection failed.' }
+          $state = & git status --porcelain=v1 --untracked-files=all
+          if ($LASTEXITCODE -ne 0) { throw 'Git cleanliness inspection failed.' }
+          if ($commit -cne $env:GITHUB_SHA -or -not [string]::IsNullOrWhiteSpace(($state -join "`n"))) {
+            throw 'Qualification source changed or is not clean.'
+          }
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - name: Install locked JavaScript dependencies
+        run: npm ci
+      - name: Authenticate and verify exact qualified input; stage only verified native bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node ./scripts/win32-qualification-input.mjs consume
+          if ($LASTEXITCODE -ne 0) { throw 'Qualified input refused.' }
+      - name: Rebuild and require identical whole tarball before product execution
+        id: binding
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $binding = $env:FOUNDATION_BINDING | ConvertFrom-Json
+          $npmVersion = (npm --version).Trim()
+          if ($LASTEXITCODE -ne 0 -or $npmVersion -cne $binding.npm_version) { throw 'npm version differs from producer.' }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { throw 'TypeScript build failed.' }
+          $npmVersion = (npm --version).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'npm version inspection failed.' }
+          $pack = npm pack --ignore-scripts --json --silent | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $pack.Count -ne 1) { throw 'Expected exactly one successful Bazframe pack.' }
+          $tarball = Join-Path $PWD $pack[0].filename
+          $tarballHash = (Get-FileHash $tarball -Algorithm SHA256).Hash.ToLowerInvariant()
+          $env:QUALIFICATION_TARBALL = $tarball
+          $env:QUALIFICATION_NPM_VERSION = $npmVersion
+          node ./scripts/win32-qualification-input.mjs repack
+          if ($LASTEXITCODE -ne 0) { throw 'Whole tarball does not match qualified producer.' }
+          $expectedHash = $binding.binary_sha256
+          $installRoot = Join-Path $env:RUNNER_TEMP 'bazframe-native-packed-install'
+          New-Item -ItemType Directory $installRoot | Out-Null
+          npm install --prefix $installRoot --ignore-scripts --no-package-lock $tarball
+          if ($LASTEXITCODE -ne 0) { throw 'Packed npm install failed.' }
+          $installed = Join-Path $installRoot 'node_modules\bazframe'
+          $installedNative = Join-Path $installed 'artifacts\native\win32-x64-msvc\bazframe-win32.node'
+          $installedHash = (Get-FileHash $installedNative -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($installedHash -cne $expectedHash) { throw 'Packed native binary changed.' }
+          "source_commit=$env:GITHUB_SHA" >> $env:GITHUB_OUTPUT
+          "binary_sha256=$expectedHash" >> $env:GITHUB_OUTPUT
+          "tarball_sha256=$tarballHash" >> $env:GITHUB_OUTPUT
+          "npm_version=$npmVersion" >> $env:GITHUB_OUTPUT
+          "QUALIFICATION_INSTALLED=$installed" >> $env:GITHUB_ENV
+      - name: Admit independent private conformance roots
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $testParent = $env:LOCALAPPDATA
+          $drive = (Get-Item $testParent).PSDrive.Name
+          $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$($drive):'"
+          if ($null -eq $disk -or $disk.DriveType -ne 3 -or $disk.FileSystem -ne 'NTFS') {
+            throw 'The private conformance parent is not on a fixed local NTFS volume.'
+          }
+          $env:BAZFRAME_WIN32_NATIVE_TEST_PARENT = $testParent
+          "BAZFRAME_WIN32_NATIVE_TEST_PARENT=$testParent" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Qualify only product-installed offline and verify exact single receipt
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'win32-qualification/product'
+          New-Item -ItemType Directory $root -Force | Out-Null
+          $env:npm_config_offline = 'true'
+          node ./scripts/run-win32-qualification.mjs --selection product-installed `
+            --source-root $PWD.Path `
+            --installed-root $env:QUALIFICATION_INSTALLED `
+            --product-installed-output (Join-Path $root 'installed.json')
+          if ($LASTEXITCODE -ne 0) { throw 'Product qualification failed.' }
+          node ./scripts/win32-qualification-input.mjs product-installed
+          if ($LASTEXITCODE -ne 0) { throw 'Product receipt refused.' }
+          $commit = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Git revision inspection failed.' }
+          $state = & git status --porcelain=v1 --untracked-files=all
+          if ($LASTEXITCODE -ne 0) { throw 'Git cleanliness inspection failed.' }
+          if ($commit -cne $env:GITHUB_SHA -or -not [string]::IsNullOrWhiteSpace(($state -join "`n"))) {
+            throw 'Qualification source changed or is not clean.'
+          }
+      - name: Transfer verified product input only
+        id: upload-input
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bazframe-win32-qualification-input-product-installed-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          path: ${{ runner.temp }}/win32-qualification/product/installed.json
+      - name: Upload sanitized failed or cancelled diagnostics
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bazframe-win32-diagnostics-product-installed-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/win32-qualification/product/installed.json
+
+  promote:
+    needs: [foundation, product-source, product-installed]
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    # No always()/failure fallback: every qualification job must have succeeded.
+    outputs:
+      artifact_id: ${{ steps.upload-success.outputs.artifact-id }}
+      artifact_digest: ${{ steps.upload-success.outputs.artifact-digest }}
+    env:
+      FOUNDATION_BINDING: ${{ toJSON(needs.foundation.outputs) }}
+      SOURCE_BINDING: ${{ toJSON(needs.product-source.outputs) }}
+      INSTALLED_BINDING: ${{ toJSON(needs.product-installed.outputs) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Check exact clean source before setup
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $commit = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Git revision inspection failed.' }
+          $state = & git status --porcelain=v1 --untracked-files=all
+          if ($LASTEXITCODE -ne 0) { throw 'Git cleanliness inspection failed.' }
+          if ($commit -cne $env:GITHUB_SHA -or -not [string]::IsNullOrWhiteSpace(($state -join "`n"))) {
+            throw 'Qualification source changed or is not clean.'
+          }
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - name: Install locked JavaScript dependencies
+        run: npm ci
+      - name: Reauthenticate all inputs and promote only original verified bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node ./scripts/win32-qualification-input.mjs promote
+          if ($LASTEXITCODE -ne 0) { throw 'Final qualification promotion refused.' }
+          $commit = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Git revision inspection failed.' }
+          $state = & git status --porcelain=v1 --untracked-files=all
+          if ($LASTEXITCODE -ne 0) { throw 'Git cleanliness inspection failed.' }
+          if ($commit -cne $env:GITHUB_SHA -or -not [string]::IsNullOrWhiteSpace(($state -join "`n"))) {
+            throw 'Qualification source changed or is not clean.'
+          }
       - name: Upload successful internal product-slice evidence
         if: success()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -337,9 +635,8 @@ jobs:
           name: bazframe-win32-added-skill-product-${{ github.sha }}
           if-no-files-found: error
           path: |
-            ${{ runner.temp }}/win32-native-evidence-product/source.json
-            ${{ runner.temp }}/win32-native-evidence-product/installed.json
-
+            ${{ runner.temp }}/win32-qualification/product/source.json
+            ${{ runner.temp }}/win32-qualification/product/installed.json
       - name: Upload successful binary and evidence
         id: upload-success
         if: success()
@@ -347,26 +644,13 @@ jobs:
         with:
           name: bazframe-win32-native-foundation-${{ github.sha }}
           if-no-files-found: error
-          path: |
-            artifacts/native/win32-x64-msvc/bazframe-win32.node
-            native-binary.sha256
-            native-foundation-evidence.json
-            native-source-evidence.json
-            native-installed-evidence.json
-            native-rust-version.txt
-            native-msvc-version.txt
-
-      - name: Upload failed or cancelled-run diagnostics
+          path: ${{ runner.temp }}/win32-qualification/foundation/
+      - name: Upload sanitized failed or cancelled diagnostics
         if: failure() || cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: bazframe-win32-native-foundation-failed-${{ github.sha }}
+          name: bazframe-win32-diagnostics-promotion-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: warn
           path: |
-            native-foundation-evidence.json
-            native-source-evidence.json
-            native-installed-evidence.json
-            ${{ runner.temp }}/win32-native-evidence-product/source.json
-            ${{ runner.temp }}/win32-native-evidence-product/installed.json
-            native-rust-version.txt
-            native-msvc-version.txt
+            ${{ runner.temp }}/win32-qualification/product/source.json
+            ${{ runner.temp }}/win32-qualification/product/installed.json

@@ -1,21 +1,21 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
-const args = process.argv.slice(2);
-const sourcePath = required('--source');
-const installedPath = required('--installed');
-const expectedBinarySha256 = required('--binary-sha256');
-if (!/^[a-f0-9]{64}$/u.test(expectedBinarySha256)) throw new Error('Invalid expected binary digest.');
-const source = await receipt(sourcePath, 'source-tree', expectedBinarySha256);
-const installed = await receipt(installedPath, 'packed-install', expectedBinarySha256);
-if (JSON.stringify(source.observations) !== JSON.stringify(installed.observations)) {
-  throw new Error('Windows added-Skill source and packed observations differ.');
+import { fileURLToPath } from 'node:url';
+
+export function verifyProductPair(source, installed, binarySha256) {
+  verifyProductReceipt(source, 'source-tree', binarySha256);
+  verifyProductReceipt(installed, 'packed-install', binarySha256);
+  if (JSON.stringify(source.observations) !== JSON.stringify(installed.observations)) {
+    throw new Error('Windows added-Skill source and packed observations differ.');
+  }
+  return { source, installed };
 }
 
-async function receipt(path, packageRootKind, binarySha256) {
-  let value;
-  try { value = JSON.parse(await readFile(resolve(path), 'utf8')); }
-  catch { throw new Error('Windows added-Skill evidence is not valid JSON.'); }
+export function verifyProductReceipt(value, packageRootKind, binarySha256) {
+  if (!/^[a-f0-9]{64}$/u.test(binarySha256) || !['source-tree', 'packed-install'].includes(packageRootKind)) {
+    throw new Error('Invalid expected product binding.');
+  }
   exact(value, [
     'schemaVersion',
     'purpose',
@@ -127,9 +127,20 @@ function exact(value, keys) {
     throw new Error('Windows added-Skill evidence has an unexpected schema.');
   }
 }
-function required(name) {
-  const index = args.indexOf(name);
-  const value = index === -1 ? undefined : args[index + 1];
-  if (value === undefined || value.length === 0) throw new Error(`Missing ${name}.`);
-  return value;
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    const args = process.argv.slice(2);
+    const required = (name) => {
+      const index = args.indexOf(name), value = index === -1 ? undefined : args[index + 1];
+      if (value === undefined || value.length === 0) throw new Error();
+      return value;
+    };
+    const sourcePath = required('--source'), installedPath = required('--installed');
+    const binarySha256 = required('--binary-sha256');
+    verifyProductPair(JSON.parse(await readFile(resolve(sourcePath), 'utf8')),
+      JSON.parse(await readFile(resolve(installedPath), 'utf8')), binarySha256);
+  } catch {
+    console.error('Windows added-Skill evidence refused.');
+    process.exitCode = 1;
+  }
 }

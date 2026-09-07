@@ -19,7 +19,7 @@ const SHA256 = /^[a-f0-9]{64}$/u;
 const COMMIT = /^[a-f0-9]{40}$/u;
 const POSITIVE_ID = /^[1-9][0-9]*$/u;
 const STABLE_BYTE_COUNT = /^[a-f0-9]{16}$/u;
-const REQUIRED_FILES = Object.freeze([
+export const REQUIRED_FILES = Object.freeze([
   WIN32_NATIVE_BINARY_PATH,
   'native-binary.sha256',
   'native-foundation-evidence.json',
@@ -95,7 +95,6 @@ const OBSERVATION_BOOLEANS = Object.freeze([
 
 export async function admitWin32NativeRelease(options) {
   const repositoryRoot = resolve(requiredString(options.repositoryRoot, 'repositoryRoot'));
-  const archivePath = resolve(requiredString(options.archivePath, 'archivePath'));
   const releaseCommit = requiredMatch(options.releaseCommit, COMMIT, 'releaseCommit');
   const packageVersion = requiredString(options.packageVersion, 'packageVersion');
   const producerRepository = requiredString(options.producerRepository, 'producerRepository');
@@ -103,41 +102,7 @@ export async function admitWin32NativeRelease(options) {
   const producerRunId = requiredMatch(String(options.producerRunId), POSITIVE_ID, 'producerRunId');
   const artifactId = requiredMatch(String(options.artifactId), POSITIVE_ID, 'artifactId');
   const archiveDigest = normalizeArchiveDigest(options.archiveDigest);
-  const expectedArchiveDigest = archiveDigest.slice('sha256:'.length);
-  const archiveBytes = await readPhysicalFile(archivePath, 'native evidence archive');
-  const actualArchiveDigest = sha256Bytes(archiveBytes);
-  if (actualArchiveDigest !== expectedArchiveDigest) fail('artifact archive digest does not match the trusted metadata');
-
-  const entries = await readExactArtifactArchive(archiveBytes);
-  const binary = entries.get(WIN32_NATIVE_BINARY_PATH);
-  const checksumText = decodeUtf8(entries.get('native-binary.sha256'), 'native-binary.sha256');
-  if (!/^[a-f0-9]{64}\r?\n$/u.test(checksumText)) fail('native-binary.sha256 has an invalid shape');
-  const checksum = checksumText.trim();
-  const binarySha256 = sha256Bytes(binary);
-  if (checksum !== binarySha256) fail('native binary does not match native-binary.sha256');
-
-  const sourceReceipt = parseJson(entries.get('native-source-evidence.json'), 'native-source-evidence.json');
-  const installedReceipt = parseJson(entries.get('native-installed-evidence.json'), 'native-installed-evidence.json');
-  validateConformanceReceipt(sourceReceipt, 'source-tree', packageVersion, binarySha256);
-  validateConformanceReceipt(installedReceipt, 'packed-install', packageVersion, binarySha256);
-
-  const rustText = decodeUtf8(entries.get('native-rust-version.txt'), 'native-rust-version.txt');
-  const msvcText = decodeUtf8(entries.get('native-msvc-version.txt'), 'native-msvc-version.txt');
-  const aggregate = parseJson(entries.get('native-foundation-evidence.json'), 'native-foundation-evidence.json');
-  validateAggregateEvidence({
-    aggregate,
-    releaseCommit,
-    binarySha256,
-    sourceReceipt,
-    installedReceipt,
-    rustText,
-    msvcText
-  });
-
-  const manifest = parseJson(await readFile(join(repositoryRoot, 'package.json')), 'package.json');
-  if (!isObject(manifest) || manifest.name !== 'bazframe' || manifest.version !== packageVersion) {
-    fail('release package version does not match the repository manifest');
-  }
+  const { binary, binarySha256 } = await verifyWin32FoundationArchive(options);
 
   const artifactName = `bazframe-win32-native-foundation-${releaseCommit}`;
   const record = {
@@ -183,6 +148,54 @@ export async function admitWin32NativeRelease(options) {
     throw error;
   }
   return record;
+}
+
+/** Read-only: verification conveys no package-assembly authority and writes nothing. */
+export async function verifyWin32FoundationArchive(options) {
+  const archivePath = resolve(requiredString(options.archivePath, 'archivePath'));
+  const archiveDigest = normalizeArchiveDigest(options.archiveDigest);
+  const archiveBytes = await readPhysicalFile(archivePath, 'native evidence archive');
+  if (sha256Bytes(archiveBytes) !== archiveDigest.slice('sha256:'.length)) fail('artifact archive digest does not match the trusted metadata');
+  return verifyWin32FoundationEntries(await readExactArtifactArchive(archiveBytes), options);
+}
+
+/** Shared exact seven-file content checks, also used before qualification-input upload. */
+export async function verifyWin32FoundationEntries(entries, options) {
+  const repositoryRoot = resolve(requiredString(options.repositoryRoot, 'repositoryRoot'));
+  const releaseCommit = requiredMatch(options.releaseCommit, COMMIT, 'releaseCommit');
+  const packageVersion = requiredString(options.packageVersion, 'packageVersion');
+  if (!isDeepStrictEqual([...entries.keys()].sort(), [...REQUIRED_FILES].sort())) fail('native evidence inventory is incomplete');
+  const binary = entries.get(WIN32_NATIVE_BINARY_PATH);
+  const checksumText = decodeUtf8(entries.get('native-binary.sha256'), 'native-binary.sha256');
+  if (!/^[a-f0-9]{64}\r?\n$/u.test(checksumText)) fail('native-binary.sha256 has an invalid shape');
+  const checksum = checksumText.trim();
+  const binarySha256 = sha256Bytes(binary);
+  if (checksum !== binarySha256) fail('native binary does not match native-binary.sha256');
+
+  const sourceReceipt = parseJson(entries.get('native-source-evidence.json'), 'native-source-evidence.json');
+  const installedReceipt = parseJson(entries.get('native-installed-evidence.json'), 'native-installed-evidence.json');
+  validateConformanceReceipt(sourceReceipt, 'source-tree', packageVersion, binarySha256);
+  validateConformanceReceipt(installedReceipt, 'packed-install', packageVersion, binarySha256);
+
+  const rustText = decodeUtf8(entries.get('native-rust-version.txt'), 'native-rust-version.txt');
+  const msvcText = decodeUtf8(entries.get('native-msvc-version.txt'), 'native-msvc-version.txt');
+  const aggregate = parseJson(entries.get('native-foundation-evidence.json'), 'native-foundation-evidence.json');
+  validateAggregateEvidence({
+    aggregate,
+    releaseCommit,
+    binarySha256,
+    sourceReceipt,
+    installedReceipt,
+    rustText,
+    msvcText
+  });
+
+  const manifest = parseJson(await readFile(join(repositoryRoot, 'package.json')), 'package.json');
+  if (!isObject(manifest) || manifest.name !== 'bazframe' || manifest.version !== packageVersion) {
+    fail('release package version does not match the repository manifest');
+  }
+
+  return { entries, binary, binarySha256, sourceReceipt, installedReceipt, aggregate };
 }
 
 export function validateAdmissionRecord(record, expected = {}) {
@@ -264,7 +277,7 @@ export async function validateReleasePackInput({ repositoryRoot, releaseCommit }
   return record;
 }
 
-async function readExactArtifactArchive(archiveBytes) {
+export async function readExactArtifactArchive(archiveBytes, requiredFiles = REQUIRED_FILES) {
   const { fromBufferPromise } = await import('yauzl');
   const zip = await fromBufferPromise(archiveBytes, {
     lazyEntries: true,
@@ -281,7 +294,7 @@ async function readExactArtifactArchive(archiveBytes) {
     zip.on('error', rejectOnce);
     zip.on('entry', (entry) => {
       void (async () => {
-        if (!REQUIRED_FILES.includes(entry.fileName)) fail(`unexpected native evidence entry: ${entry.fileName}`);
+        if (!requiredFiles.includes(entry.fileName)) fail(`unexpected native evidence entry: ${entry.fileName}`);
         if (values.has(entry.fileName)) fail(`duplicate native evidence entry: ${entry.fileName}`);
         const creatorSystem = entry.versionMadeBy >>> 8;
         const unixMode = (entry.externalFileAttributes >>> 16) & 0xffff;
@@ -305,7 +318,7 @@ async function readExactArtifactArchive(archiveBytes) {
       if (settled) return;
       settled = true;
       const names = [...values.keys()].sort();
-      const expected = [...REQUIRED_FILES].sort();
+      const expected = [...requiredFiles].sort();
       if (!isDeepStrictEqual(names, expected)) {
         reject(new Error('Win32 native release admission failed: native evidence archive inventory is incomplete.'));
         return;
