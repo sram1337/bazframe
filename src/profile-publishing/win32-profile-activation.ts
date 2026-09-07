@@ -8,13 +8,12 @@ import { readWindowsPrivateFileSnapshot, readWindowsSelectionSnapshot } from '..
 import { createWindowsAddedSkillPlatformServicesForInternalTesting, enumerateWindowsPrivateDirectory } from '../skills/added-skill-platform-services.js';
 import { inspectDefaultSkillCatalog, readDefaultSkillRegistration } from '../skills/default-skill-catalog.js';
 import { requireDirectChild, requireEntryMatchesObject } from '../state/win32-directory-closure.js';
-import { profilePublishingOperationLockRoot } from '../state/paths.js';
 import { publishWindowsSelection, type WindowsSelectionPublicationIo, type WindowsSelectionPublicationHooks } from '../state/win32-atomic-file.js';
 import { withWindowsOperationLock, type WindowsOperationLockIo } from '../state/win32-operation-lock.js';
 import { admitWindowsPrivateDirectory, ensureWindowsPrivateDirectoryPath, isValidWindowsPathComponent } from '../state/win32-private-directory.js';
 import { capturePhysicalProfileExpectation, samePhysicalProfileExpectation, type PhysicalProfileReadServices } from './physical-profile-closure.js';
 import type { ManagedProfileActivationServices, ManagedProfileActivationAuthority } from './profile-managed-lifecycle.js';
-import { orderedProfileOperationKeys } from './profile-operation-lock.js';
+import { assertOperationMutationAuthority, withWindowsProfileOperationLocksForInternalTesting } from './profile-operation-lock.js';
 import { readProfileSystemView, type ProfileSystemViewReadServices } from './profile-view.js';
 import { isReservedProfileSiblingName, publicationSidecarName } from './publication-state.js';
 
@@ -166,34 +165,19 @@ export function createWindowsProfileActivationServicesForInternalTesting(
       return view;
     },
     async withOperationLocks<T>(home: string, keys: readonly string[], transactionId: string, operation: (authority: ManagedProfileActivationAuthority) => Promise<T>): Promise<T> {
-      const ordered = orderedProfileOperationKeys(keys, transactionId);
-      const admitted = admitWindowsPrivateDirectory(backend, home);
-      const root = win32.normalize(profilePublishingOperationLockRoot(home));
-      ensureWindowsPrivateDirectoryPath(backend, root);
-      const held: Array<{ assertHeld(): void }> = [];
-      let active = true;
-      const authority = { assertHeld(requestedHome?: string, profileName?: string) {
-        if ((requestedHome !== undefined && win32.normalize(requestedHome) !== win32.normalize(home))
-          || (profileName !== undefined && (!ordered.includes('@store') || !ordered.includes(profileName)))) throw changed();
-        if (!active || held.length !== ordered.length) throw changed();
-        const current = admitWindowsPrivateDirectory(backend, home);
-        if (current.canonicalPath !== admitted.canonicalPath || current.object.fileId !== admitted.object.fileId || current.object.volumeIdentity !== admitted.object.volumeIdentity) throw changed();
-        for (const lock of held) lock.assertHeld();
-      } };
-      const acquire = async (index: number): Promise<T> => {
-        if (index === ordered.length) return operation(authority);
-        const key = ordered[index]!;
-        const component = createHash('sha256').update('bazframe-profile-operation-key-v1\0').update(key).digest('hex');
-        return withWindowsOperationLock({ backend, lockRootPath: root, lockComponent: component,
-          details: { command: 'profile-managed-use', target: `${transactionId}:${key}` },
-          ...(options.lockIo === undefined ? {} : { io: options.lockIo }) }, async (lock) => {
-          held.push(lock);
-          try { await options.hooks?.afterOperationLock?.(key); return await acquire(index + 1); }
-          finally { held.pop(); }
-        });
-      };
-      try { return await acquire(0); }
-      finally { active = false; }
+      return withWindowsProfileOperationLocksForInternalTesting(backend, home, keys, transactionId, async (authority) => operation({
+        assertHeld(requestedHome = home, profileName) {
+          try {
+            assertOperationMutationAuthority(authority, requestedHome, profileName === undefined ? [] : ['@store', profileName], transactionId);
+          } catch (error) {
+            if (error instanceof BazframeError && error.code === 'PROFILE_OPERATION_AUTHORITY_INVALID') throw changed();
+            throw error;
+          }
+        }
+      }), {
+        ...(options.lockIo === undefined ? {} : { lockIo: options.lockIo }),
+        afterOperationLock: (key) => options.hooks?.afterOperationLock?.(key)
+      });
     },
     async withStateLock(home, profileName, operation) {
       const root = win32.join(home, 'locks');

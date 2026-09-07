@@ -2,18 +2,25 @@ import { createHash, randomBytes } from 'node:crypto';
 import { lstatSync } from 'node:fs';
 import { link, lstat, open, opendir, rename, unlink } from 'node:fs/promises';
 import { createConnection, createServer, type Server } from 'node:net';
-import { basename, join, resolve } from 'node:path';
+import { basename, join, resolve, win32 } from 'node:path';
+import type { BazframeWin32NativeBackend, BazframeWin32LockBackend, WindowsPathInspection } from '../core/win32-native.js';
 import { BazframeError, errorCode } from '../core/errors.js';
 import { PROFILE_PORTABILITY_PRODUCTION_LIMITS } from '../profile-portability/profile-portability-policy.js';
 import { isSafeProfileId } from '../profiles/profile-id.js';
 import { ensureManagedDirectory } from '../state/atomic-file.js';
 import { profilePublishingOperationLockRoot } from '../state/paths.js';
+import { withWindowsOperationLock, type WindowsOperationLockAuthority, type WindowsOperationLockIo } from '../state/win32-operation-lock.js';
+import { admitWindowsPrivateDirectory, ensureWindowsPrivateDirectoryPath } from '../state/win32-private-directory.js';
 
 const TRANSACTION = /^[a-f0-9]{32}$/u;
 const KEY = /^(?:@store|[A-Za-z0-9][A-Za-z0-9-]{0,63})$/u;
 const LOCK_ENTRY = /^(?:[A-Za-z0-9_-]{22}|\.[ors]-[A-Za-z0-9_-]{19}|\.c[A-Za-z0-9_-]{9}\.[A-Za-z0-9_-]{10})$/u;
 interface HeldOperationLock { path: string; ownerPath: string; server: Server; device: bigint; inode: bigint }
-const records = new WeakMap<object, { home: string; keys: Set<string>; transactionId: string; active: boolean; held: HeldOperationLock[] }>();
+type OperationLockProof =
+  | { kind: 'supported'; held: readonly HeldOperationLock[] }
+  | { kind: 'windows'; backend: BazframeWin32NativeBackend; homePath: string; admitted: WindowsPathInspection; held: readonly WindowsOperationLockAuthority[] };
+interface OperationAuthorityRecord { home: string; keys: Set<string>; transactionId: string; active: boolean; proof: OperationLockProof }
+const records = new WeakMap<object, OperationAuthorityRecord>();
 
 export interface OperationMutationAuthority { readonly __operationMutationAuthority: unique symbol }
 
@@ -27,12 +34,12 @@ export async function withProfileOperationLocks<T>(home: string, keys: readonly 
   const canonicalHome = resolve(home);
   const ordered = orderedProfileOperationKeys(keys, transactionId);
   const held: HeldOperationLock[] = [];
-  const authority = {} as OperationMutationAuthority;
+  let authority: OperationMutationAuthority | undefined;
   let value: T | undefined;
   let operationError: unknown;
   try {
     for (const key of ordered) held.push(await acquire(canonicalHome, key));
-    records.set(authority as object, { home: canonicalHome, keys: new Set(ordered), transactionId, active: true, held });
+    authority = issueAuthority(canonicalHome, ordered, transactionId, { kind: 'supported', held });
     value = await operation(authority);
   } catch (error) { operationError = error; }
   const record = records.get(authority as object); if (record !== undefined) record.active = false;
@@ -45,14 +52,75 @@ export async function withProfileOperationLocks<T>(home: string, keys: readonly 
   return value as T;
 }
 
+/** Internal Windows profile-lock composition; public acquisition retains its platform refusal. */
+export async function withWindowsProfileOperationLocksForInternalTesting<T>(
+  backend: BazframeWin32NativeBackend & BazframeWin32LockBackend,
+  home: string, keys: readonly string[], transactionId: string,
+  operation: (authority: OperationMutationAuthority) => Promise<T>,
+  options: { lockIo?: WindowsOperationLockIo; afterOperationLock?(key: string): void | Promise<void> } = {}
+): Promise<T> {
+  const ordered = orderedProfileOperationKeys(keys, transactionId);
+  const admitted = admitWindowsPrivateDirectory(backend, home);
+  const root = win32.normalize(profilePublishingOperationLockRoot(home));
+  ensureWindowsPrivateDirectoryPath(backend, root);
+  const held: WindowsOperationLockAuthority[] = [];
+  const acquire = async (index: number): Promise<T> => {
+    if (index === ordered.length) {
+      const authority = issueAuthority(win32.normalize(home), ordered, transactionId, { kind: 'windows', backend, homePath: home, admitted, held });
+      try { return await operation(authority); }
+      finally { records.get(authority as object)!.active = false; }
+    }
+    const key = ordered[index]!;
+    const component = createHash('sha256').update('bazframe-profile-operation-key-v1\0').update(key).digest('hex');
+    return withWindowsOperationLock({ backend, lockRootPath: root, lockComponent: component,
+      details: { command: 'profile-managed-use', target: `${transactionId}:${key}` },
+      ...(options.lockIo === undefined ? {} : { io: options.lockIo }) }, async (lock) => {
+      held.push(lock);
+      try { await options.afterOperationLock?.(key); return await acquire(index + 1); }
+      finally { held.pop(); }
+    });
+  };
+  // Keep Windows' nested release/error precedence, including rejected undefined.
+  return acquire(0);
+}
+
+function issueAuthority(home: string, keys: readonly string[], transactionId: string, proof: OperationLockProof): OperationMutationAuthority {
+  const authority = {} as OperationMutationAuthority;
+  records.set(authority as object, { home, keys: new Set(keys), transactionId, active: true, proof });
+  return authority;
+}
+
 export function assertOperationMutationAuthority(authority: OperationMutationAuthority, home: string, requiredKeys: readonly string[], transactionId?: string): void {
-  const record = records.get(authority as object);
-  if (record === undefined || !record.active || record.home !== resolve(home) || requiredKeys.some((key) => !record.keys.has(key)) || (transactionId !== undefined && record.transactionId !== transactionId) || !heldLocksStillOwned(record.held)) throw new BazframeError('PROFILE_OPERATION_AUTHORITY_INVALID', 'Profile operation mutation authority is invalid or expired.');
+  const record = activeAuthorityRecord(authority);
+  const normalizedHome = record.proof.kind === 'windows' ? win32.normalize(home) : resolve(home);
+  if (record.home !== normalizedHome || requiredKeys.some((key) => !record.keys.has(key)) || (transactionId !== undefined && record.transactionId !== transactionId)) throw invalidAuthority();
+  assertLiveProof(record);
 }
 
 export function operationAuthorityTransactionId(authority: OperationMutationAuthority): string {
-  const record = records.get(authority as object); if (record === undefined || !record.active || !heldLocksStillOwned(record.held)) throw new BazframeError('PROFILE_OPERATION_AUTHORITY_INVALID', 'Profile operation mutation authority is invalid or expired.'); return record.transactionId;
+  const record = activeAuthorityRecord(authority);
+  assertLiveProof(record);
+  return record.transactionId;
 }
+
+function activeAuthorityRecord(authority: OperationMutationAuthority): OperationAuthorityRecord {
+  const record = records.get(authority as object);
+  if (record === undefined || !record.active) throw invalidAuthority();
+  return record;
+}
+function assertLiveProof(record: OperationAuthorityRecord): void {
+  const proof = record.proof;
+  if (proof.held.length !== record.keys.size) throw invalidAuthority();
+  if (proof.kind === 'supported') {
+    if (!heldLocksStillOwned(proof.held)) throw invalidAuthority();
+    return;
+  }
+  // Do not mask native admission/capability refusals as generic invalid authority.
+  const current = admitWindowsPrivateDirectory(proof.backend, proof.homePath);
+  if (current.canonicalPath !== proof.admitted.canonicalPath || current.object.fileId !== proof.admitted.object.fileId || current.object.volumeIdentity !== proof.admitted.object.volumeIdentity) throw invalidAuthority();
+  for (const lock of proof.held) lock.assertHeld();
+}
+function invalidAuthority(): BazframeError { return new BazframeError('PROFILE_OPERATION_AUTHORITY_INVALID', 'Profile operation mutation authority is invalid or expired.'); }
 
 export function profileOperationSocketPath(home: string, key: string): string {
   if (!isOperationKey(key)) throw invalid('lock key is invalid');

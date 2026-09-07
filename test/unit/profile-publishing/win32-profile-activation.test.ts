@@ -10,6 +10,8 @@ vi.mock('node:path', async (original) => {
   return { ...actual, basename: (path: string, suffix?: string) => path.includes('\\') ? actual.win32.basename(path, suffix) : actual.basename(path, suffix) };
 });
 afterEach(() => vi.restoreAllMocks());
+import { BazframeError } from '../../../src/core/errors.js';
+import * as operationLocks from '../../../src/profile-publishing/profile-operation-lock.js';
 import { addProfile, currentProfile } from '../../../src/profiles/profile-management.js';
 import { createWindowsProfileProvisioningServicesForInternalTesting } from '../../../src/profiles/win32-profile-provisioning.js';
 import { createWindowsProfileSelectionReadServicesForInternalTesting } from '../../../src/profiles/win32-profile-selection.js';
@@ -32,6 +34,11 @@ async function fixture() {
 describe('actual managed activation with native observations', () => {
   it('captures edited closures, uses shared view/projection, locks in order, activates and switches without profile writes', async () => {
     const f = await fixture();
+    const assertShared = operationLocks.assertOperationMutationAuthority;
+    const sharedChecks = vi.spyOn(operationLocks, 'assertOperationMutationAuthority').mockImplementation((authority, home, keys, transactionId) => {
+      assertShared(authority, home, keys, transactionId);
+      expect(operationLocks.operationAuthorityTransactionId(authority)).toBe(transactionId);
+    });
     const events: string[] = [];
     const services = f.services({ hooks: { afterOperationLock(key) { events.push(key); }, afterStateLock() { events.push('state'); }, beforeReplacement() { events.push('replace'); }, beforeReturn() { events.push('return'); } } });
     const before = [...f.nodes].filter(([path]) => path.startsWith(`${HOME}\\profiles\\`));
@@ -43,6 +50,8 @@ describe('actual managed activation with native observations', () => {
     expect((await services.readSystemView(HOME)).profiles.map((profile) => profile.name)).toEqual(['alpha', 'bravo']);
     expect(await useManagedProfile(HOME, 'alpha', services)).toMatchObject({ active: true, incomplete: false, warning: null });
     expect(events).toEqual(['@store', 'alpha', 'state', 'replace', 'return']);
+    expect(sharedChecks).toHaveBeenCalledWith(expect.anything(), HOME, ['@store', 'alpha'], expect.stringMatching(/^[a-f0-9]{32}$/u));
+    expect(() => operationLocks.operationAuthorityTransactionId(sharedChecks.mock.calls[0]![0])).toThrow();
     expect(await currentProfile(HOME, f.selection)).toBe('alpha');
     const prior = f.nodes.get(`${HOME}\\active-profile`)!.id;
     await useManagedProfile(HOME, 'bravo', services);
@@ -125,9 +134,41 @@ describe('actual managed activation with native observations', () => {
     const f = await fixture(); const services = f.services(); const transaction = 'a'.repeat(32);
     for (const keys of [[], ['alpha', 'alpha'], ['../bad']]) await expect(services.withOperationLocks(HOME, keys, transaction, async () => undefined)).rejects.toMatchObject({ code: 'PROFILE_OPERATION_LOCK_INVALID' });
     let escaped: { assertHeld(): void } | undefined;
-    await services.withOperationLocks(HOME, ['bravo', '@store'], transaction, async (authority) => { escaped = authority; authority.assertHeld(HOME, 'bravo'); expect(() => authority.assertHeld(`${HOME}-other`, 'bravo')).toThrow(); expect(() => authority.assertHeld(HOME, 'alpha')).toThrow(); });
-    expect(() => escaped!.assertHeld()).toThrow();
+    await services.withOperationLocks(HOME, ['bravo', '@store'], transaction, async (authority) => { escaped = authority; authority.assertHeld(HOME, 'bravo'); expect(() => authority.assertHeld(`${HOME}-other`, 'bravo')).toThrow(expect.objectContaining({ code: 'WINDOWS_PROFILE_ACTIVATION_CHANGED' })); expect(() => authority.assertHeld(HOME, 'alpha')).toThrow(expect.objectContaining({ code: 'WINDOWS_PROFILE_ACTIVATION_CHANGED' })); });
+    expect(() => escaped!.assertHeld()).toThrow(expect.objectContaining({ code: 'WINDOWS_PROFILE_ACTIVATION_CHANGED' }));
     await expect(f.services({ hooks: { afterOperationLock(key) { if (key === 'alpha') throw new Error('partial'); } } }).withOperationLocks(HOME, ['alpha', '@store'], transaction, async () => undefined)).rejects.toThrow('partial');
     await expect(services.withOperationLocks(HOME, ['alpha', '@store'], transaction, async () => 'retry')).resolves.toBe('retry');
   });
+  it.each(['home', 'admission', 'capability'] as const)('preserves activation %s refusal instead of masking the first native failure', async (kind) => {
+    const f = await fixture();
+    const nativeFailure = new BazframeError('WINDOWS_NATIVE_TEST_REFUSAL', 'first native refusal');
+    let refusing = false;
+    const inspect = f.backend.inspectPath;
+    f.backend.inspectPath = (path) => {
+      if (refusing && kind === 'admission' && path === HOME) throw nativeFailure;
+      return inspect(path);
+    };
+    const acquire = f.backend.acquireFileLock;
+    f.backend.acquireFileLock = (path) => {
+      const result = acquire(path);
+      if (result.state !== 'acquired') return result;
+      return { ...result, capability: { release: () => result.capability.release(), assertHeld() {
+        if (refusing && kind === 'capability') throw nativeFailure;
+        result.capability.assertHeld();
+      } } };
+    };
+    await f.services().withOperationLocks(HOME, ['alpha', '@store'], 'a'.repeat(32), async (authority) => {
+      const before = f.nodes.get(HOME)!;
+      if (kind === 'home') f.directory(HOME);
+      refusing = true;
+      try {
+        if (kind === 'home') expect(() => authority.assertHeld(HOME, 'alpha')).toThrow(expect.objectContaining({ code: 'WINDOWS_PROFILE_ACTIVATION_CHANGED' }));
+        else {
+          try { authority.assertHeld(HOME, 'alpha'); expect.fail('authority accepted invalid native proof'); }
+          catch (error) { expect(error).toBe(nativeFailure); }
+        }
+      } finally { refusing = false; f.nodes.set(HOME, before); }
+    });
+  });
+
 });
