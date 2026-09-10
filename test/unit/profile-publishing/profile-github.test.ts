@@ -12,6 +12,7 @@ import {
 import {
   createProfileGithubIsolation,
   defaultProfileGithubProcess,
+  runBoundedProfileGithubProcess,
   profileGithubGitArguments,
   type ProfileGithubProcess,
   type ProfileGithubProcessRequest,
@@ -220,6 +221,20 @@ describe('profile GitHub source and process foundation', () => {
     await isolated.dispose();
   });
 
+  it.each([
+    { failure: 'timeout' as const },
+    { uncertainTermination: true },
+    { error: new Error('process error') },
+    { failure: 'monitor-failure' as const, monitorError: new Error('monitor error') }
+  ])('does not turn failed authentication inspection or a 404 diagnostic into login/not-found: %j', async (fault) => {
+    const isolated = await isolation(), requests: ProfileGithubProcessRequest[] = [];
+    try {
+      await expect(requireProfileGithubAuthentication({ process: fake([ok('gh version'), { status: 1, stdout: '', stderr: 'not authenticated', ...fault }], requests), isolation: isolated, cwd: temporary!.root }, 'human')).rejects.toMatchObject({ code: 'PROFILE_GITHUB_AUTH_FAILED' });
+      expect(requests).toHaveLength(2);
+      await expect(lookupProfileGithubRepository({ process: fake([{ status: 1, stdout: '', stderr: 'gh: Not Found (HTTP 404)\n', ...fault }], []), isolation: isolated, cwd: temporary!.root }, parseProfileGithubSource('git:owner/repo'))).rejects.toMatchObject({ code: 'PROFILE_GITHUB_METADATA_FAILED' });
+    } finally { await isolated.dispose(); }
+  });
+
   it('does not settle an asynchronous spawn failure until an active monitor completes', async () => {
     temporary = await createTempDirectory('/tmp/bzf-profile-github-');
     let releaseMonitor!: () => void;
@@ -228,7 +243,7 @@ describe('profile GitHub source and process foundation', () => {
     const monitorRelease = new Promise<void>((resolve) => { releaseMonitor = resolve; });
     let samples = 0;
     let settled = false;
-    const resultPromise = defaultProfileGithubProcess({
+    const resultPromise = runBoundedProfileGithubProcess({
       executable: 'gh', args: ['version'], cwd: temporary.root,
       environment: { PATH: temporary.root, HOME: temporary.root, LANG: 'C', LC_ALL: 'C' }, stdin: 'ignore',
       timeoutMilliseconds: 5000, terminationGraceMilliseconds: 25, maxStdoutBytes: 1024, maxStderrBytes: 1024,

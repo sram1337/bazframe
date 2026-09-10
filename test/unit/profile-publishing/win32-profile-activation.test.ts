@@ -1,3 +1,8 @@
+import { createWindowsAddedSkillPlatformServicesForInternalTesting } from '../../../src/skills/added-skill-platform-services.js';
+import type { WindowsPathInspection } from '../../../src/core/win32-native.js';
+import { createHash } from 'node:crypto';
+import { serializeWindowsPhysicalProfileProof, samePhysicalProfileProof } from '../../../src/profile-publishing/physical-profile-closure.js';
+import { encodeTransactionJournal, decodeTransactionJournalBytes, type RenameProfileJournalV2 } from '../../../src/profile-publishing/transaction-journal.js';
 import * as fs from 'node:fs/promises';
 import { win32 } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -31,7 +36,97 @@ async function fixture() {
   return { ...f, services, selection: createWindowsProfileSelectionReadServicesForInternalTesting(f.backend) };
 }
 
+async function membershipFixture() {
+  const f = await fixture();
+  const target = 'C:\\boundary\\demo-skill';
+  f.directory(target); f.file(`${target}\\SKILL.md`, '---\nname: demo-skill\n---\n# Demo\n');
+  f.directory(`${HOME}\\skills`);
+  const catalog = `${HOME}\\skills\\demo-skill`;
+  const link = `${HOME}\\profiles\\alpha\\skills\\demo-skill`;
+  f.reparse(catalog); f.reparse(link);
+  vi.mocked(fs.readlink).mockImplementation(async () => target);
+  f.backend.inspectMembershipLink = (path) => {
+    const value = f.backend.inspectPath(path);
+    if (value.object.reparseTag !== 0xa0000003) throw new Error('not a junction');
+    const destination = f.backend.inspectPath(target);
+    return { ...value, normalizedTarget: destination.canonicalPath, targetVolumeIdentity: destination.object.volumeIdentity, targetFileId: destination.object.fileId };
+  };
+  return { ...f, target, catalog, link };
+}
+
 describe('actual managed activation with native observations', () => {
+  it.each(['volumeIdentity', 'fileId', 'size', 'allocationSize', 'numberOfLinks', 'creationTime', 'lastWriteTime', 'changeTime', 'attributes', 'reparseTag', 'deletePending', 'directory'] as const)('retains native membership object %s across actual closure passes', async (field) => {
+    const f = await membershipFixture(), membership = f.backend.inspectMembershipLink;
+    let drift = false;
+    f.backend.inspectMembershipLink = (path) => {
+      const value = membership(path);
+      if (!drift || path !== f.link) return value;
+      const prior = value.object[field];
+      return { ...value, object: { ...value.object, [field]: typeof prior === 'boolean' ? !prior : typeof prior === 'number' ? prior ^ 1 : 'f'.repeat(String(prior).length) } };
+    };
+    const before = f.snapshot();
+    await expect(f.services().captureExpectation(HOME, 'alpha', {}, { async beforeSecondPass() { drift = true; } })).rejects.toThrow();
+    expect(f.snapshot()).toBe(before);
+  });
+
+  it.each(['canonicalPath', 'normalizedTarget', 'targetVolumeIdentity', 'targetFileId', 'security'] as const)('retains native membership %s in the actual observation map', async (field) => {
+    const f = await membershipFixture(), membership = f.backend.inspectMembershipLink;
+    let drift = false;
+    f.backend.inspectMembershipLink = (path) => {
+      const value = membership(path);
+      if (!drift || path !== f.link) return value;
+      if (field === 'security') return { ...value, security: { ...value.security, daclBytes: Buffer.concat([value.security.daclBytes, Buffer.from([1])]) } };
+      return { ...value, [field]: `${value[field]}-changed` };
+    };
+    const before = f.snapshot();
+    await expect(f.services().captureExpectation(HOME, 'alpha', {}, { async beforeSecondPass() { drift = true; } })).rejects.toMatchObject({ code: 'WINDOWS_PROFILE_ACTIVATION_CHANGED' });
+    expect(f.snapshot()).toBe(before);
+  });
+
+  it.each(['root', 'skills', 'instructions', 'profiles-parent'] as const)('accepts independent %s access-only drift in actual capture/assert/use', async (kind) => {
+    const f = await fixture(), services = f.services();
+    const original = (await inspectManagedProfileActivation(HOME, 'alpha', services)).expectation;
+    const path = kind === 'profiles-parent' ? `${HOME}\\profiles` : `${HOME}\\profiles\\alpha${kind === 'skills' ? '\\skills' : kind === 'instructions' ? '\\AGENTS.md' : ''}`;
+    const inspect = f.backend.inspectPath, enumerate = f.backend.enumerateStableDirectory, read = f.backend.readStableFile;
+    let clock = 10, changed = 0;
+    const time = () => (++clock).toString(16).padStart(16, '0');
+    const access = (value: WindowsPathInspection) => { changed++; return { ...value, object: { ...value.object, lastAccessTime: time() } }; };
+    f.backend.inspectPath = (name) => { const value = inspect(name); return win32.normalize(name) === path ? access(value) : value; };
+    f.backend.enumerateStableDirectory = async (...args) => { const value = await enumerate(...args); return win32.normalize(args[0]) === path ? { ...value, directoryBefore: access(value.directoryBefore), directoryAfter: access(value.directoryAfter) } : value; };
+    f.backend.readStableFile = async (...args) => { const value = await read(...args); return win32.normalize(args[0]) === path ? { ...value, before: { ...value.before, lastAccessTime: time() }, after: { ...value.after, lastAccessTime: time() } } : value; };
+    const before = f.snapshot(), observed = (await inspectManagedProfileActivation(HOME, 'alpha', services)).expectation;
+    expect(observed).toEqual(original); expect(f.snapshot()).toBe(before); expect(changed).toBeGreaterThan(0);
+    await expect(services.assertExpectation(HOME, 'alpha', original)).resolves.toBeUndefined();
+    expect((await useManagedProfile(HOME, 'alpha', services)).active).toBe(true);
+    expect(await currentProfile(HOME, f.selection)).toBe('alpha');
+    expect((await inspectManagedProfileActivation(HOME, 'alpha', services)).expectation).toEqual(original);
+  });
+
+  it('asserts fresh admission and core proof after unrelated sibling changes between captures', async () => {
+    const f = await fixture(), services = f.services();
+    const expected = await services.captureExpectation(HOME, 'alpha');
+    f.directory(`${HOME}\\profiles\\unrelated`);
+    await expect(services.assertExpectation(HOME, 'alpha', expected)).resolves.toBeUndefined();
+    expect(await services.captureExpectation(HOME, 'alpha')).toEqual(expected);
+  });
+
+  it.each(['lastWriteTime', 'changeTime', 'security', 'entry'] as const)('retains final profiles-parent %s binding even with unchanged profile closure', async (field) => {
+    const f = await fixture(), services = f.services(), path = `${HOME}\\profiles`;
+    const inspect = f.backend.inspectPath, enumerate = f.backend.enumerateStableDirectory;
+    let drift = false;
+    const change = (value: WindowsPathInspection) => field === 'security'
+      ? { ...value, security: { ...value.security, descriptorControl: value.security.descriptorControl ^ 0x400 } }
+      : field === 'entry' ? value : { ...value, object: { ...value.object, [field]: '0000000000000099' } };
+    f.backend.inspectPath = (name) => { const value = inspect(name); return drift && name === path ? change(value) : value; };
+    f.backend.enumerateStableDirectory = async (...args) => {
+      const value = await enumerate(...args);
+      return drift && args[0] === path ? { ...value, directoryBefore: change(value.directoryBefore), directoryAfter: change(value.directoryAfter), entries: field === 'entry' ? value.entries.map((entry) => entry.name === 'bravo' ? { ...entry, fileId: 'f'.repeat(32) } : entry) : value.entries } : value;
+    };
+    const before = f.snapshot();
+    await expect(services.captureExpectation(HOME, 'alpha', {}, { async beforeSecondPass() { drift = true; } })).rejects.toMatchObject({ code: 'WINDOWS_PROFILE_ACTIVATION_CHANGED' });
+    expect(f.snapshot()).toBe(before);
+  });
+
   it('captures edited closures, uses shared view/projection, locks in order, activates and switches without profile writes', async () => {
     const f = await fixture();
     const assertShared = operationLocks.assertOperationMutationAuthority;
@@ -59,31 +154,63 @@ describe('actual managed activation with native observations', () => {
     expect(f.nodes.get(`${HOME}\\active-profile`)!.id).not.toBe(prior);
     expect([...f.nodes].filter(([path]) => path.startsWith(`${HOME}\\profiles\\`))).toEqual(before);
   });
-  it('consumes native junction observations in the real closure, ownership, selector and projection algorithms', async () => {
-    const f = await fixture();
-    const target = 'C:\\boundary\\demo-skill';
-    f.directory(target); f.file(`${target}\\SKILL.md`, '---\nname: demo-skill\n---\n# Demo\n');
-    f.directory(`${HOME}\\skills`);
-    const catalog = `${HOME}\\skills\\demo-skill`;
-    const link = `${HOME}\\profiles\\alpha\\skills\\demo-skill`;
-    f.reparse(catalog); f.reparse(link);
-    vi.mocked(fs.readlink).mockImplementation(async () => target);
-    f.backend.inspectMembershipLink = (path) => {
-      const value = f.backend.inspectPath(path);
-      if (value.object.reparseTag !== 0xa0000003) throw new Error('not a junction');
-      const destination = f.backend.inspectPath(target);
-      return { ...value, normalizedTarget: destination.canonicalPath, targetVolumeIdentity: destination.object.volumeIdentity, targetFileId: destination.object.fileId };
+  it('round trips core activation proof and moves the same logical profile to a freshly admitted home', async () => {
+    const f = await fixture(), services = f.services();
+    const expectation = await services.captureExpectation(HOME, 'alpha');
+    const proof = serializeWindowsPhysicalProfileProof(expectation);
+    expect(proof.identity).toMatch(/^win32-ntfs:[a-f0-9]{16}:[a-f0-9]{32}$/u);
+    expect(Object.keys(proof)).toEqual(['identity', 'sidecarSha256', 'profileClosureSha256']);
+    const canonical = `${JSON.stringify(expectation.closure, null, 2)}\n`;
+    expect(proof.profileClosureSha256).toBe(createHash('sha256').update('bazframe-physical-profile-closure-v1\0').update(canonical).digest('hex'));
+    const journal: RenameProfileJournalV2 = {
+      schemaVersion: 2, identityDomain: 'win32-ntfs', kind: 'rename-profile', transactionId: 'a'.repeat(32),
+      oldName: 'alpha', newName: 'charlie', expectedOld: proof, expectedNew: { kind: 'absent' },
+      activeBefore: null, activeAfter: null, favoritesBeforeSha256: null, favoritesAfterCanonicalBytesSha256: null, phase: 'INTENT'
     };
+    const decoded = decodeTransactionJournalBytes(Buffer.from(encodeTransactionJournal(journal)));
+    if (decoded.kind !== 'rename-profile' || decoded.schemaVersion !== 2) throw new Error('wrong codec domain');
+    expect(decoded.expectedOld).toEqual(proof);
+    const legacy = { ...journal, expectedOld: { ...proof, observationIdentity: 'f'.repeat(64) } };
+    expect(() => decodeTransactionJournalBytes(Buffer.from(`${JSON.stringify(legacy, null, 2)}\n`))).toThrow();
+    const destination = `${HOME}-moved`;
+    for (const [path, node] of [...f.nodes]) {
+      if (path === HOME || path.startsWith(`${HOME}\\`)) { f.nodes.delete(path); f.nodes.set(destination + path.slice(HOME.length), node); }
+    }
+    const moved = await services.captureExpectation(destination, 'alpha');
+    expect(samePhysicalProfileProof(moved, expectation)).toBe(true);
+    await expect(services.assertExpectation(destination, 'alpha', expectation)).resolves.toBeUndefined();
+    f.directory(`${destination}\\profiles\\alpha`);
+    await expect(services.assertExpectation(destination, 'alpha', expectation)).rejects.toMatchObject({ code: 'WINDOWS_PROFILE_ACTIVATION_CHANGED' });
+  });
+  it.each([false, true, 'native-link-only'] as const)('consumes native junction observations with access drift=%s in real capture/assert/use and catalog proofs', async (accessDrift) => {
+    const f = await membershipFixture();
+    const { target, link } = f;
     const services = f.services();
+    const baseline = await inspectManagedProfileActivation(HOME, 'alpha', services);
+    const platform = createWindowsAddedSkillPlatformServicesForInternalTesting(f.backend);
+    const linkProof = platform.inspectSkillLink(win32.dirname(link), 'demo-skill', target);
+    const inspect = f.backend.inspectPath, membership = f.backend.inspectMembershipLink;
+    let clock = 10;
+    if (accessDrift === true) {
+      f.backend.inspectPath = (path) => { const value = inspect(path); return { ...value, object: { ...value.object, lastAccessTime: (++clock).toString(16).padStart(16, '0') } }; };
+    }
+    if (accessDrift) {
+      f.backend.inspectMembershipLink = (path) => { const value = membership(path); return { ...value, object: { ...value.object, lastAccessTime: (++clock).toString(16).padStart(16, '0') } }; };
+    }
+    expect(platform.inspectSkillLink(win32.dirname(link), 'demo-skill', target)).toEqual(linkProof);
     const inspection = await inspectManagedProfileActivation(HOME, 'alpha', services);
+    expect(inspection.expectation).toEqual(baseline.expectation);
+    await expect(services.assertExpectation(HOME, 'alpha', baseline.expectation)).resolves.toBeUndefined();
     expect(inspection.expectation.closure.entries).toContainEqual({ path: 'skills/demo-skill', kind: 'membership-link', targetIdentity: 'catalog:skill:demo-skill' });
     const view = await services.readSystemView(HOME);
     expect(view.profiles.find((profile) => profile.name === 'alpha')?.resourceIdentities).toEqual(['catalog:skill:demo-skill']);
     expect(view.resources).toEqual([{ stableIdentity: 'catalog:skill:demo-skill', key: { kind: 'skill', name: 'demo-skill' }, ownerProfiles: ['alpha'], materialization: { kind: 'ordinary' }, projected: true }]);
     expect(view.skills[0]).toMatchObject({ ownerProfiles: ['alpha'], selectors: ['demo-skill', 'alpha/demo-skill'], directory: target, directlyAttachable: true });
     expect((await useManagedProfile(HOME, 'alpha', services)).active).toBe(true);
+    // Recreating an admitted junction to the same logical member is a fresh valid capture.
+    expect((await useManagedProfile(HOME, 'alpha', f.services({ hooks: { afterStateLock() { f.reparse(link); } } }))).active).toBe(true);
     const old = { ...f.nodes.get(`${HOME}\\active-profile`)! };
-    await expect(useManagedProfile(HOME, 'alpha', f.services({ hooks: { afterStateLock() { f.reparse(link); } } }))).rejects.toMatchObject({ code: 'WINDOWS_PROFILE_ACTIVATION_CHANGED' });
+    await expect(useManagedProfile(HOME, 'alpha', f.services({ hooks: { afterStateLock() { f.file(link, 'not a junction'); } } }))).rejects.toThrow();
     expect(f.nodes.get(`${HOME}\\active-profile`)).toEqual(old);
     expect(f.nodes.get(win32.join(target, 'SKILL.md'))?.bytes?.toString()).toContain('# Demo');
   });

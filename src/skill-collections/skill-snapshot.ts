@@ -1,3 +1,4 @@
+import { sameResourceIdentity, type ResourceRootIdentity } from './resource-identity.js';
 import { createHash, randomUUID, type Hash } from 'node:crypto';
 import { constants } from 'node:fs';
 import {
@@ -49,7 +50,15 @@ export type SkillSnapshotHandleTarget =
   | 'artifact-root-directory'
   | 'cleanup-directory';
 
+export interface SkillSnapshotReadEffects {
+  joinPath(...parts: string[]): string;
+  physical: import('../profile-publishing/physical-profile-closure.js').PhysicalProfileReadServices;
+  logicalExecutable: boolean;
+}
 export interface SkillSnapshotDependencies {
+  publication?: SkillSnapshotPublicationEffects;
+  expectedInputResourceIdentity?: ResourceRootIdentity;
+  reads?: SkillSnapshotReadEffects;
   beforePublish?: (stagingRoot: string) => Promise<void>;
   duringArtifactVerification?: (artifactPath: string) => Promise<void>;
   /** Internal exact source precondition for a caller that already inspected the physical root. */
@@ -178,6 +187,7 @@ export async function publishSkillSnapshot(
   dependencies: SkillSnapshotDependencies = {}
 ): Promise<PublishedSnapshot> {
   const policy = copyLimitPolicy(dependencies.limitPolicy);
+  if (dependencies.publication !== undefined) return publishSnapshotWithEffects(bazframeHome, inputArtifactRoot, dependencies, dependencies.publication, policy);
   const canonicalInput = await physicalDirectory(inputArtifactRoot, 'Artifact root');
   if (dependencies.expectedInputRootIdentity !== undefined
     && canonicalInput !== dependencies.expectedInputRootIdentity.canonicalPath) {
@@ -275,7 +285,56 @@ export async function verifySkillSnapshot(
 ): Promise<PublishedSnapshot> {
   const policy = copyLimitPolicy(dependencies.limitPolicy);
   if (!/^[a-f0-9]{64}$/u.test(digest)) throw corrupt('snapshot digest is invalid');
+  if (dependencies.reads !== undefined) return verifySnapshotWithReads(bazframeHome, digest, dependencies.reads, policy);
   return verifySnapshotAt(snapshotPath(bazframeHome, digest), digest, dependencies, policy);
+}
+
+/** Same canonical snapshot/digest and complete physical closure, with platform file effects. */
+async function verifySnapshotWithReads(home: string, digest: string, effects: SkillSnapshotReadEffects, policy: SkillSnapshotLimitPolicy): Promise<PublishedSnapshot> {
+  const path = effects.joinPath(home, 'skill-snapshots', 'sha256', digest);
+  const reads = effects.physical;
+  const root = await reads.openDirectory(path, home);
+  try {
+    if ((await root.enumerate(3)).join(',') !== 'artifact,manifest.json') throw corrupt('snapshot root contains unexpected entries');
+    const bytes = (await reads.readFile(root.childPath('manifest.json'), policy.maxManifestBytes)).bytes;
+    if (createHash('sha256').update(bytes).digest('hex') !== digest) throw corrupt('manifest digest does not match snapshot identity');
+    let value: unknown;
+    try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } catch { throw corrupt('manifest bytes are invalid'); }
+    const manifest = decodeSnapshotManifest(value, policy);
+    if (!encodeSnapshotManifest(manifest, policy).equals(bytes)) throw corrupt('manifest bytes are not canonical');
+    const expected = new Map(manifest.entries.map((entry) => [entry.path, entry]));
+    const artifactPath = root.childPath('artifact');
+    for (let pass = 0; pass < 2; pass++) {
+      const actual: SnapshotEntry[] = [{ path: '.', type: 'directory' }];
+      const budget = { entries: 1, bytes: 0 };
+      async function visit(path: string, prefix: string, depth: number) {
+        if (depth > policy.maxDepth) throw corrupt('snapshot exceeds depth limit');
+        const directory = await reads.openDirectory(path, home);
+        try {
+          for (const name of await directory.enumerate(policy.maxEntries)) {
+            const relative = prefix === '' ? name : `${prefix}/${name}`;
+            if (++budget.entries > policy.maxEntries || Buffer.byteLength(relative) > policy.maxPathBytes) throw corrupt('snapshot exceeds entry/path limit');
+            const child = directory.childPath(name); const kind = await reads.inspectKind(child);
+            if (kind === 'directory') { actual.push({ path: relative, type: 'directory' }); await visit(child, relative, depth + 1); }
+            else if (kind === 'file') {
+              const file = await reads.readFile(child, policy.maxFileBytes); budget.bytes += file.bytes.length;
+              if (budget.bytes > policy.maxAggregateFileBytes) throw corrupt('snapshot exceeds aggregate byte limit');
+              const entry = expected.get(relative);
+              if (entry?.type !== 'file') throw corrupt('snapshot contains an unexpected file');
+              actual.push({ path: relative, type: 'file', executable: effects.logicalExecutable ? entry.executable : file.executable, sha256: createHash('sha256').update(file.bytes).digest('hex') });
+            } else throw corrupt('snapshot contains a link or special entry');
+          }
+          await directory.assertStable();
+        } finally { await directory.close(); }
+      }
+      await visit(artifactPath, '', 0);
+      actual.sort((a, b) => compare(a.path, b.path));
+      if (!encodeSnapshotManifest({ schemaVersion: 1, entries: actual }, policy).equals(bytes)) throw corrupt('artifact tree does not match manifest');
+    }
+    if (!(await reads.readFile(root.childPath('manifest.json'), policy.maxManifestBytes)).bytes.equals(bytes)) throw corrupt('snapshot manifest changed');
+    await root.assertStable();
+    return { digest, snapshotRoot: path, artifactPath, manifest, manifestBytes: bytes };
+  } finally { await root.close(); }
 }
 
 async function verifySnapshotAt(
@@ -1280,3 +1339,87 @@ async function pathExists(path: string): Promise<boolean> {
   try { await lstat(path); return true; } catch (error) { if (errorCode(error) === 'ENOENT') return false; throw error; }
 }
 function formatCode(error: unknown): string { const code = errorCode(error); return code === undefined ? '' : ` (${code})`; }
+/** Physical effects for immutable snapshot publication; no lifecycle/consent policy. */
+export interface SkillSnapshotPublicationEffects {
+  reads: SkillSnapshotReadEffects;
+  sourceReads: SkillSnapshotReadEffects;
+  canonicalDirectory(path: string): Promise<string>;
+  rootIdentity(path: string): Promise<ResourceRootIdentity>;
+  within(parent: string, child: string): boolean;
+  assertAuthority(): void;
+  ensureDirectory(home: string, path: string): Promise<void>;
+  createDirectory(path: string): Promise<void>;
+  writeFile(path: string, bytes: Uint8Array): Promise<void>;
+  absent(path: string): Promise<boolean>;
+}
+
+async function publishSnapshotWithEffects(home: string, input: string, dependencies: SkillSnapshotDependencies, effects: SkillSnapshotPublicationEffects, policy: SkillSnapshotLimitPolicy): Promise<PublishedSnapshot> {
+  const pathJoin = effects.reads.joinPath;
+  const canonical = await effects.canonicalDirectory(input);
+  const store = pathJoin(home, 'skill-snapshots', 'sha256');
+  if (effects.within(canonical, store) || effects.within(store, canonical)) throw new BazframeError('SKILL_SNAPSHOT_PATH_OVERLAP', 'Artifact root and Bazframe snapshot storage must not overlap.');
+  await dependencies.beforeInputRootIdentityCapture?.();
+  const expected = dependencies.expectedInputResourceIdentity ?? (dependencies.expectedInputRootIdentity === undefined ? undefined : { root: dependencies.expectedInputRootIdentity.canonicalPath, device: dependencies.expectedInputRootIdentity.device, inode: dependencies.expectedInputRootIdentity.inode });
+  const current = await effects.rootIdentity(canonical);
+  if (expected !== undefined && (expected.root !== canonical || !sameResourceIdentity(expected, current))) throw new BazframeError('SKILL_COLLECTION_ROOT_CHANGED', 'Snapshot source does not match the expected physical root.');
+  const source = await effects.sourceReads.physical.openDirectory(canonical, canonical);
+  const files = new Map<string, Buffer>();
+  async function capture(copy: boolean): Promise<Buffer> {
+    const entries: SnapshotEntry[] = [{ path: '.', type: 'directory' }];
+    let aggregate = 0;
+    async function visit(path: string, prefix: string, depth: number): Promise<void> {
+      if (depth > policy.maxDepth) throw invalidEntry('snapshot exceeds depth limit');
+      const directory = await effects.sourceReads.physical.openDirectory(path, canonical);
+      try {
+        for (const name of await directory.enumerate(policy.maxEntries)) {
+          const relativePath = prefix === '' ? name : `${prefix}/${name}`;
+          assertPathLimits(relativePath, policy, invalidEntry);
+          if (entries.length >= policy.maxEntries) throw invalidEntry('snapshot exceeds entry limit');
+          const child = directory.childPath(name);
+          const kind = await effects.sourceReads.physical.inspectKind(child);
+          if (kind === 'directory') { entries.push({ path: relativePath, type: 'directory' }); await visit(child, relativePath, depth + 1); }
+          else if (kind === 'file') {
+            const file = await effects.sourceReads.physical.readFile(child, Math.min(policy.maxFileBytes, policy.maxAggregateFileBytes - aggregate));
+            aggregate += file.bytes.length;
+            if (aggregate > policy.maxAggregateFileBytes) throw invalidEntry('snapshot exceeds aggregate limit');
+            await dependencies.duringSourceFileCopy?.(child);
+            entries.push({ path: relativePath, type: 'file', executable: file.executable, sha256: createHash('sha256').update(file.bytes).digest('hex') });
+            if (copy) files.set(relativePath, file.bytes);
+          } else throw invalidEntry('snapshot input contains a link or special entry');
+        }
+        await directory.assertStable();
+      } finally { await directory.close(); }
+    }
+    await visit(canonical, '', 0); await source.assertStable();
+    entries.sort((a, b) => compare(a.path, b.path));
+    return encodeSnapshotManifest({ schemaVersion: 1, entries }, policy);
+  }
+  try {
+    effects.assertAuthority();
+    const manifestBytes = await capture(true);
+    if (!manifestBytes.equals(await capture(false))) throw invalidEntry('snapshot source changed during copying');
+    const manifest = decodeSnapshotManifest(JSON.parse(manifestBytes.toString('utf8')), policy);
+    const digest = createHash('sha256').update(manifestBytes).digest('hex');
+    const final = pathJoin(store, digest);
+    effects.assertAuthority(); await effects.ensureDirectory(home, store); effects.assertAuthority();
+    if (await effects.absent(final)) {
+      // A protected final directory is initially exclusive. Partial state is retained,
+      // never repaired; the manifest is the last dependency and verification follows.
+      effects.assertAuthority(); await effects.createDirectory(final); effects.assertAuthority();
+      const artifact = pathJoin(final, 'artifact'); await effects.createDirectory(artifact);
+      for (const entry of manifest.entries.slice(1)) {
+        effects.assertAuthority();
+        const destination = pathJoin(artifact, ...entry.path.split('/'));
+        if (entry.type === 'directory') await effects.createDirectory(destination);
+        else await effects.writeFile(destination, files.get(entry.path)!);
+        effects.assertAuthority();
+      }
+      if (!manifestBytes.equals(await capture(false))) throw invalidEntry('snapshot source changed before commit marker');
+      effects.assertAuthority(); await effects.writeFile(pathJoin(final, 'manifest.json'), manifestBytes); effects.assertAuthority();
+    }
+    await dependencies.beforePublish?.(final);
+    const result = await verifySnapshotWithReads(home, digest, effects.reads, policy);
+    if (!manifestBytes.equals(await capture(false))) throw invalidEntry('snapshot source changed before publication result');
+    effects.assertAuthority(); return result;
+  } finally { await source.close(); }
+}

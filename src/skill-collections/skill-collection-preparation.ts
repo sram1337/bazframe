@@ -1,3 +1,5 @@
+import { ExecutableHelperUncertainError, resolvePackageExecutable, type ResolvedExecutable } from '../core/executable-resolution.js';
+import { sameResourceIdentity, type ResourceRootIdentity } from './resource-identity.js';
 import { lstat, realpath } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import {
@@ -21,10 +23,16 @@ export interface PreparedPackage {
 }
 export type PreparedSkillCollection = PreparedLibrary | PreparedPackage;
 
-export interface CanonicalPackageRootIdentity {
-  readonly root: string;
-  readonly device: bigint;
-  readonly inode: bigint;
+export type CanonicalPackageRootIdentity = ResourceRootIdentity;
+export interface SkillCollectionPreparationEffects {
+  basename: typeof basename;
+  resolveBuild?(argv: readonly string[], cwd: string, environment: NodeJS.ProcessEnv): Promise<ResolvedExecutable>;
+  rootIdentity(root: string): Promise<ResourceRootIdentity>;
+  manifestAbsent(root: string): Promise<boolean>;
+  readManifest: typeof readPackageManifest;
+  resolveDirectory: typeof resolvePhysicalRelativeDirectory;
+  snapshotDependencies(): SkillSnapshotDependencies;
+  assertAuthority(): void;
 }
 
 export interface BeforePackageBuildContext {
@@ -70,6 +78,7 @@ export function isUncertainPackageBuildError(error: unknown): boolean {
 }
 
 export interface PackagePreparationDependencies {
+  effects?: SkillCollectionPreparationEffects;
   beforePackageBuild?: (context: BeforePackageBuildContext) => void | Promise<void>;
   expectedRootIdentity?: CanonicalPackageRootIdentity;
   limitPolicy?: Partial<PackageLimitPolicy>;
@@ -83,19 +92,14 @@ export interface PackagePreparationDependencies {
 export async function prepareLibrary(
   bazframeHome: string,
   libraryRoot: string,
-  snapshotDependencies: SkillSnapshotDependencies = {}
+  snapshotDependencies: SkillSnapshotDependencies = {},
+  effects?: SkillCollectionPreparationEffects
 ): Promise<PreparedLibrary> {
-  const manifestPath = join(libraryRoot, PACKAGE_MANIFEST);
-  try {
-    await lstat(manifestPath);
-    throw new BazframeError('LIBRARY_IS_PACKAGE', `Library root contains ${PACKAGE_MANIFEST}. Use \`bazframe package add <absolute-root>\`.`);
-  } catch (error) {
-    if (error instanceof BazframeError) throw error;
-    if (errorCode(error) !== 'ENOENT') throw new BazframeError('LIBRARY_ROOT_INVALID', `Could not inspect library root: ${libraryRoot}`, { cause: error });
-  }
-  const snapshot = await publishSkillSnapshot(bazframeHome, libraryRoot, snapshotDependencies);
-  await assertLibraryManifestAbsent(libraryRoot);
-  await resolvePhysicalRelativeDirectory(snapshot.artifactPath, '.');
+  await assertLibraryManifestAbsent(libraryRoot, effects);
+  const snapshot = await publishSkillSnapshot(bazframeHome, libraryRoot, { ...effects?.snapshotDependencies(), ...snapshotDependencies });
+  await assertLibraryManifestAbsent(libraryRoot, effects);
+  await (effects?.resolveDirectory ?? resolvePhysicalRelativeDirectory)(snapshot.artifactPath, '.');
+  effects?.assertAuthority();
   return { kind: 'library', snapshot, skillsRoot: '.' };
 }
 
@@ -108,43 +112,58 @@ export async function preparePackage(
   childOutputPolicy: ChildOutputPolicy = 'inherit',
   dependencies: PackagePreparationDependencies = {}
 ): Promise<PreparedPackage> {
+  const effects = dependencies.effects;
   const policy = packageLimitPolicy(dependencies.limitPolicy);
-  const rootIdentity = await physicalRootIdentity(packageRoot);
+  const rootIdentity = await (effects?.rootIdentity ?? physicalRootIdentity)(packageRoot);
   assertExpectedPackageRootIdentity(rootIdentity, dependencies.expectedRootIdentity);
-  const initial = await readPackageManifest(packageRoot, policy);
+  const initial = await (effects?.readManifest ?? readPackageManifest)(packageRoot, policy);
   if (expectedManifest !== undefined && !samePackageManifestSnapshot(expectedManifest, initial)) {
     throw new BazframeError('PACKAGE_MANIFEST_CHANGED', 'Package manifest changed after build authorization.');
   }
-  await assertPhysicalRootIdentity(packageRoot, rootIdentity);
-  const adjacentManifest = await readPackageManifest(packageRoot, policy);
+  await assertPhysicalRootIdentity(packageRoot, rootIdentity, effects);
+  const adjacentManifest = await (effects?.readManifest ?? readPackageManifest)(packageRoot, policy);
   if (!samePackageManifestSnapshot(initial, adjacentManifest)) {
     throw new BazframeError('PACKAGE_MANIFEST_CHANGED', 'Package manifest changed before build.');
   }
   freezePackageManifestSnapshot(initial);
+  let launch = effects?.resolveBuild !== undefined
+    ? await effects.resolveBuild(initial.manifest.build, packageRoot, environment)
+    : process.platform === 'win32'
+      ? await resolvePackageExecutable(initial.manifest.build, { cwd: packageRoot, environment })
+      : { executable: initial.manifest.build[0]!, args: initial.manifest.build.slice(1) };
   await dependencies.beforePackageBuild?.(Object.freeze({
-    packageId: basename(rootIdentity.root),
-    rootIdentity: Object.freeze({ root: rootIdentity.root, device: rootIdentity.device, inode: rootIdentity.inode }),
+    packageId: (effects?.basename ?? basename)(rootIdentity.root),
+    rootIdentity: Object.freeze({ ...rootIdentity }),
     manifestSnapshot: initial
   }));
+  await assertPhysicalRootIdentity(packageRoot, rootIdentity, effects);
+  if (!samePackageManifestSnapshot(initial, await (effects?.readManifest ?? readPackageManifest)(packageRoot, policy))) throw new BazframeError('PACKAGE_MANIFEST_CHANGED', 'Package manifest changed before authorized helper execution.');
+  effects?.assertAuthority();
+  try { if ('afterAuthorization' in launch && launch.afterAuthorization !== undefined) launch = await launch.afterAuthorization(); }
+  catch (error) { if (error instanceof ExecutableHelperUncertainError) throw new PackageBuildTerminationUncertainError(undefined, { cause: error }); throw error; }
+  await assertPhysicalRootIdentity(packageRoot, rootIdentity, effects);
+  if (!samePackageManifestSnapshot(initial, await (effects?.readManifest ?? readPackageManifest)(packageRoot, policy))) throw new BazframeError('PACKAGE_MANIFEST_CHANGED', 'Package manifest changed during adjacent build authorization.');
+  effects?.assertAuthority();
   await executeBuild(
-    initial.manifest.build,
+    [launch.executable, ...launch.args],
     packageRoot,
     environment,
     childOutputPolicy,
     policy,
     dependencies.packageProcessRunner ?? spawnBoundedPackageProcess
   );
-  await assertPhysicalRootIdentity(packageRoot, rootIdentity);
-  const revalidated = await readPackageManifest(packageRoot, policy);
+  await assertPhysicalRootIdentity(packageRoot, rootIdentity, effects);
+  const revalidated = await (effects?.readManifest ?? readPackageManifest)(packageRoot, policy);
   if (!samePackageManifestSnapshot(initial, revalidated)) throw new BazframeError('PACKAGE_MANIFEST_CHANGED', 'Package manifest changed during build.');
-  const artifactPath = await resolvePhysicalRelativeDirectory(packageRoot, initial.manifest.artifactRoot);
-  await resolvePhysicalRelativeDirectory(artifactPath, initial.manifest.skillsRoot);
-  const snapshot = await publishSkillSnapshot(bazframeHome, artifactPath);
-  await resolvePhysicalRelativeDirectory(snapshot.artifactPath, initial.manifest.skillsRoot);
+  const artifactPath = await (effects?.resolveDirectory ?? resolvePhysicalRelativeDirectory)(packageRoot, initial.manifest.artifactRoot);
+  await (effects?.resolveDirectory ?? resolvePhysicalRelativeDirectory)(artifactPath, initial.manifest.skillsRoot);
+  const snapshot = await publishSkillSnapshot(bazframeHome, artifactPath, effects?.snapshotDependencies());
+  await (effects?.resolveDirectory ?? resolvePhysicalRelativeDirectory)(snapshot.artifactPath, initial.manifest.skillsRoot);
   await afterSnapshot?.();
-  await assertPhysicalRootIdentity(packageRoot, rootIdentity);
-  const finalManifest = await readPackageManifest(packageRoot, policy);
+  await assertPhysicalRootIdentity(packageRoot, rootIdentity, effects);
+  const finalManifest = await (effects?.readManifest ?? readPackageManifest)(packageRoot, policy);
   if (!samePackageManifestSnapshot(initial, finalManifest)) throw new BazframeError('PACKAGE_MANIFEST_CHANGED', 'Package manifest changed before activation.');
+  effects?.assertAuthority();
   return {
     kind: 'package', snapshot, artifactRoot: initial.manifest.artifactRoot,
     skillsRoot: initial.manifest.skillsRoot, manifestSnapshot: initial
@@ -153,19 +172,24 @@ export async function preparePackage(
 
 export async function revalidatePreparedCollectionDeclaration(
   root: string,
-  prepared: PreparedSkillCollection
+  prepared: PreparedSkillCollection,
+  effects?: SkillCollectionPreparationEffects
 ): Promise<void> {
   if (prepared.kind === 'library') {
-    await assertLibraryManifestAbsent(root);
+    await assertLibraryManifestAbsent(root, effects);
     return;
   }
-  const current = await readPackageManifest(root);
+  const current = await (effects?.readManifest ?? readPackageManifest)(root);
   if (!samePackageManifestSnapshot(prepared.manifestSnapshot, current)) {
     throw new BazframeError('PACKAGE_MANIFEST_CHANGED', 'Package manifest changed before activation.');
   }
 }
 
-async function assertLibraryManifestAbsent(libraryRoot: string): Promise<void> {
+async function assertLibraryManifestAbsent(libraryRoot: string, effects?: SkillCollectionPreparationEffects): Promise<void> {
+  if (effects !== undefined) {
+    if (!await effects.manifestAbsent(libraryRoot)) throw new BazframeError('LIBRARY_IS_PACKAGE', `Library root contains ${PACKAGE_MANIFEST}. Use package add.`);
+    return;
+  }
   const manifestPath = join(libraryRoot, PACKAGE_MANIFEST);
   try {
     await lstat(manifestPath);
@@ -178,7 +202,7 @@ async function assertLibraryManifestAbsent(libraryRoot: string): Promise<void> {
   }
 }
 
-interface RootIdentity { device: bigint; inode: bigint; root: string }
+type RootIdentity = ResourceRootIdentity;
 
 async function physicalRootIdentity(root: string): Promise<RootIdentity> {
   const metadata = await lstat(root, { bigint: true });
@@ -194,14 +218,15 @@ function freezePackageManifestSnapshot(snapshot: PackageManifestSnapshot): void 
 
 function assertExpectedPackageRootIdentity(current: RootIdentity, expected: CanonicalPackageRootIdentity | undefined): void {
   if (expected !== undefined
-    && (current.root !== expected.root || current.device !== expected.device || current.inode !== expected.inode)) {
+    && (current.root !== expected.root || !sameResourceIdentity(current, expected))) {
     throw new BazframeError('SKILL_COLLECTION_ROOT_CHANGED', `Package root does not match the caller's expected physical identity: ${current.root}`);
   }
 }
 
-async function assertPhysicalRootIdentity(root: string, expected: RootIdentity): Promise<void> {
-  const current = await physicalRootIdentity(root);
-  if (current.device !== expected.device || current.inode !== expected.inode || current.root !== expected.root) {
+async function assertPhysicalRootIdentity(root: string, expected: RootIdentity, effects?: SkillCollectionPreparationEffects): Promise<void> {
+  effects?.assertAuthority();
+  const current = await (effects?.rootIdentity ?? physicalRootIdentity)(root);
+  if (!sameResourceIdentity(current, expected) || current.root !== expected.root) {
     throw new BazframeError('PACKAGE_ROOT_CHANGED', `Package root changed during build: ${root}`);
   }
 }
@@ -226,7 +251,7 @@ async function executeBuild(
   } catch (error) {
     throw new BazframeError('PACKAGE_BUILD_FAILED', `Could not start package build: ${argv[0]}`, { cause: error });
   }
-  if (result.failure !== undefined) {
+  if (result.failure !== undefined || result.error !== undefined || result.uncertainTermination === true) {
     if (result.uncertainTermination === true || result.failure === 'termination-uncertain') {
       throw new PackageBuildTerminationUncertainError(
         'Package build termination could not be proven.',

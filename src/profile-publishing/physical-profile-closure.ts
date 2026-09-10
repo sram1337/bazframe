@@ -16,6 +16,9 @@ import {
   compare,
   enumerateStableDirectory,
   identityText,
+  isPosixPhysicalIdentityText,
+  isWindowsPhysicalIdentityText,
+  type WindowsPhysicalIdentityText,
   openStablePhysicalDirectory,
   readStablePhysicalFile,
   readStablePhysicalLink,
@@ -25,10 +28,44 @@ import {
 
 export type PhysicalProfileClosureEntryV1 =
   | { path: string; kind: 'file'; sha256: string; bytes: number; executable: boolean }
-  | { path: string; kind: 'membership-link'; targetIdentity: string }
+  | { path: string; kind: 'membership-link'; targetIdentity: string; sha256?: string; bytes?: number }
   | { path: string; kind: 'managed-sidecar'; sha256: string; bytes: number };
 export interface PhysicalProfileClosureV1 { schemaVersion: 1; profileName: string; entries: PhysicalProfileClosureEntryV1[] }
-export interface PhysicalProfileExpectation { identity: string; sidecarSha256: string | null; profileClosureSha256: string; closure: PhysicalProfileClosureV1; observationIdentity?: string }
+export interface PhysicalProfileExpectation { identity: string; sidecarSha256: string | null; profileClosureSha256: string; closure: PhysicalProfileClosureV1 }
+
+export interface PhysicalProfileProof { identity: string; sidecarSha256: string | null; profileClosureSha256: string }
+export interface WindowsPhysicalProfileProof extends PhysicalProfileProof { identity: WindowsPhysicalIdentityText }
+export interface WindowsPhysicalProfileExpectation extends WindowsPhysicalProfileProof { closure: PhysicalProfileClosureV1 }
+export type PosixPhysicalProfileProof = PhysicalProfileProof;
+
+function validProofHashes(value: PhysicalProfileProof): boolean {
+  const sha = (text: unknown) => typeof text === 'string' && /^[a-f0-9]{64}$/u.test(text);
+  return (value.sidecarSha256 === null || sha(value.sidecarSha256)) && sha(value.profileClosureSha256);
+}
+/** Explicit POSIX V1 projection. */
+export function serializePosixPhysicalProfileProof(value: PhysicalProfileProof): PosixPhysicalProfileProof {
+  if (!isPosixPhysicalIdentityText(value.identity) || !validProofHashes(value)) throw invalid('POSIX physical proof is invalid');
+  return { identity: value.identity, sidecarSha256: value.sidecarSha256, profileClosureSha256: value.profileClosureSha256 };
+}
+/** The reduced backup shape belongs exclusively to historical POSIX V1 storage. */
+export function validatePosixBackupProof(value: Pick<PhysicalProfileProof, 'identity' | 'profileClosureSha256'>): void {
+  if (!isPosixPhysicalIdentityText(value.identity) || typeof value.profileClosureSha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(value.profileClosureSha256)) throw invalid('POSIX backup proof is invalid');
+}
+export function serializePosixBackupProof(value: PhysicalProfileProof): Pick<PosixPhysicalProfileProof, 'identity' | 'profileClosureSha256'> {
+  const proof = serializePosixPhysicalProfileProof(value);
+  return { identity: proof.identity, profileClosureSha256: proof.profileClosureSha256 };
+}
+export function serializeWindowsPhysicalProfileProof(value: PhysicalProfileProof): WindowsPhysicalProfileProof {
+  if (!isWindowsPhysicalIdentityText(value.identity) || !validProofHashes(value)) throw invalid('Windows physical proof is invalid');
+  return { identity: value.identity, sidecarSha256: value.sidecarSha256, profileClosureSha256: value.profileClosureSha256 };
+}
+/** Compare physical root identity and logical content, independently of its admitted path. */
+export function samePhysicalProfileProof(left: PhysicalProfileProof, right: PhysicalProfileProof): boolean {
+  try {
+    const serialize = isWindowsPhysicalIdentityText(left.identity) ? serializeWindowsPhysicalProfileProof : serializePosixPhysicalProfileProof;
+    return JSON.stringify(serialize(left)) === JSON.stringify(serialize(right));
+  } catch { return false; }
+}
 
 export interface PhysicalProfileDirectory {
   identity: string;
@@ -39,13 +76,16 @@ export interface PhysicalProfileDirectory {
   close(): Promise<void>;
 }
 export interface PhysicalProfileReadServices {
+  collectionReferenceBytes?: boolean;
+  retainedRootFile?(path: string, name: string): Promise<boolean>;
+  retainedCollectionFile?(path: string, name: string): Promise<boolean>;
+  rootMetadata?: { name: string; validate(bytes: Buffer, policy: CapturedProfileLimitPolicy): number; validateClosure?(): void };
   openDirectory(path: string, trustedRoot: string): Promise<PhysicalProfileDirectory>;
   readFile(path: string, maxBytes: number): Promise<{ bytes: Buffer; executable: boolean }>;
   inspectKind(path: string): Promise<'link' | 'directory' | 'file' | 'other'>;
   membershipIdentity(home: string, path: string, name: string): Promise<string>;
-  observationIdentity?(): string;
 }
-const defaultPhysicalReads: PhysicalProfileReadServices = {
+export const defaultPhysicalReads: PhysicalProfileReadServices = {
   async openDirectory(path, trustedRoot) {
     const directory: StableDirectory = await openStablePhysicalDirectory(path, trustedRoot);
     return { identity: identityText(directory.identity), trustedRoot,
@@ -95,7 +135,7 @@ export async function capturePhysicalCandidateExpectation(
   return capturePhysicalProfileAtPath(home, candidatePath, logicalProfileId, lowerLimits, hooks, defaultPhysicalReads);
 }
 
-async function capturePhysicalProfileAtPath(
+export async function capturePhysicalProfileAtPath(
   home: string,
   path: string,
   profileId: string,
@@ -114,7 +154,7 @@ async function capturePhysicalProfileAtPath(
     }
     await profile.assertStable();
     const profileClosureSha256 = createHash('sha256').update('bazframe-physical-profile-closure-v1\0').update(second.canonical).digest('hex');
-    return { identity: profile.identity, sidecarSha256: second.sidecarSha256, profileClosureSha256, closure: second.closure, ...(reads.observationIdentity === undefined ? {} : { observationIdentity: reads.observationIdentity() }) };
+    return { identity: profile.identity, sidecarSha256: second.sidecarSha256, profileClosureSha256, closure: second.closure };
   } finally { await profile.close().catch(() => undefined); }
 }
 
@@ -129,7 +169,7 @@ export function physicalProfileLocalSkillNames(closure: PhysicalProfileClosureV1
 }
 
 export function samePhysicalProfileExpectation(left: PhysicalProfileExpectation, right: PhysicalProfileExpectation): boolean {
-  return left.identity === right.identity && left.sidecarSha256 === right.sidecarSha256 && left.profileClosureSha256 === right.profileClosureSha256 && left.observationIdentity === right.observationIdentity;
+  return samePhysicalProfileProof(left, right);
 }
 
 export async function assertPhysicalProfileExpectation(home: string, profileId: string, expected: PhysicalProfileExpectation): Promise<void> {
@@ -137,12 +177,27 @@ export async function assertPhysicalProfileExpectation(home: string, profileId: 
   if (!samePhysicalProfileExpectation(current, expected)) throw new BazframeError('PROFILE_PHYSICAL_CLOSURE_CHANGED', `Profile ${JSON.stringify(profileId)} changed while in use.`);
 }
 
-async function captureClosurePass(home: string, profileId: string, profile: PhysicalProfileDirectory, policy: CapturedProfileLimitPolicy, reads: PhysicalProfileReadServices): Promise<{ closure: PhysicalProfileClosureV1; canonical: string; sidecarSha256: string | null }> {
+async function captureClosurePass(home: string, profileId: string, profile: PhysicalProfileDirectory, policy: CapturedProfileLimitPolicy, sourceReads: PhysicalProfileReadServices): Promise<{ closure: PhysicalProfileClosureV1; canonical: string; sidecarSha256: string | null }> {
+  const countedFiles = new Set<string>(); let aggregateBytes = 0;
+  const reads: PhysicalProfileReadServices = { ...sourceReads, async readFile(path, maximum) {
+    const file = await sourceReads.readFile(path, maximum);
+    if (!countedFiles.has(path)) { countedFiles.add(path); aggregateBytes += file.bytes.length; }
+    if (file.bytes.length > maximum || aggregateBytes > policy.maxAggregateBytes) throw invalid('profile closure exceeds its byte limit');
+    return file;
+  } };
   const rootNames = await profile.enumerate(policy.maxEntries);
-  if (rootNames.some((name) => !ROOT_ENTRIES.has(name))) throw invalid('profile contains an unknown managed entry');
+  for (const name of rootNames) {
+    if (!ROOT_ENTRIES.has(name) && name !== reads.rootMetadata?.name && !await reads.retainedRootFile?.(profile.childPath(name), name)) throw invalid('profile contains an unknown managed entry');
+  }
   if (!rootNames.includes('AGENTS.md')) throw invalid('profile instructions are missing');
   const entries: PhysicalProfileClosureEntryV1[] = [await fileEntry(profile.childPath('AGENTS.md'), 'AGENTS.md', policy, reads, true)];
   const traversed = { count: rootNames.length };
+  if (reads.rootMetadata !== undefined && rootNames.includes(reads.rootMetadata.name)) {
+    const file = await reads.readFile(profile.childPath(reads.rootMetadata.name), policy.maxManifestBytes);
+    traversed.count += reads.rootMetadata.validate(file.bytes, policy);
+    entries.push({ path: reads.rootMetadata.name, kind: 'file', sha256: hash(file.bytes), bytes: file.bytes.length, executable: false });
+  }
+  if (traversed.count > policy.maxEntries) throw invalid('profile closure exceeds its traversal limit');
   for (const kind of ['skills', 'libraries', 'packages'] as const) {
     if (rootNames.includes(kind)) entries.push(...await membershipEntries(home, profileId, profile.childPath(kind), kind, policy, traversed, reads));
   }
@@ -153,6 +208,8 @@ async function captureClosurePass(home: string, profileId: string, profile: Phys
     sidecarSha256 = hash(file.bytes);
     entries.push({ path: publicationSidecarName(), kind: 'managed-sidecar', sha256: sidecarSha256, bytes: file.bytes.byteLength });
   }
+  reads.rootMetadata?.validateClosure?.();
+  if (entries.reduce((total, entry) => total + ('bytes' in entry ? entry.bytes ?? 0 : 0), 0) > policy.maxAggregateBytes) throw invalid('profile closure exceeds its aggregate byte limit');
   entries.sort((left, right) => compare(left.path, right.path));
   assertUniquePortablePaths(entries.map((entry) => entry.path));
   if (entries.length > policy.maxEntries) throw invalid('profile closure exceeds its entry limit');
@@ -188,6 +245,7 @@ async function membershipEntries(home: string, profileId: string, rootPath: stri
           throw invalid('profile Skill entry is neither a catalog membership nor a physical Skill directory');
         }
       } else {
+        if (await reads.retainedCollectionFile?.(root.childPath(name), name)) continue;
         if (!name.endsWith('.json') || !isSafeSkillId(name.slice(0, -5))) throw invalid(`profile contains an unsafe ${namespace} reference name`);
         const id = name.slice(0, -5);
         const kind = namespace === 'libraries' ? 'library' : 'package';
@@ -196,7 +254,7 @@ async function membershipEntries(home: string, profileId: string, rootPath: stri
         try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(file.bytes)); }
         catch (error) { throw new BazframeError('PROFILE_PHYSICAL_CLOSURE_INVALID', `Invalid profile ${kind} reference.`, { cause: error }); }
         decodeProfileCollectionReference(value, kind, id);
-        result.push({ path: `${namespace}/${name}`, kind: 'membership-link', targetIdentity: `catalog:${kind}:${id}` });
+        result.push({ path: `${namespace}/${name}`, kind: 'membership-link', targetIdentity: `catalog:${kind}:${id}`, ...(reads.collectionReferenceBytes ? { sha256: hash(file.bytes), bytes: file.bytes.length } : {}) });
       }
     }
     await root.assertStable();

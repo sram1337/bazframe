@@ -19,6 +19,7 @@ export type TestNode = {
 export function windowsProvisioningFixture() {
   const nodes = new Map<string, TestNode>([['C:\\', dir(1)], ['C:\\boundary', dir(2)]]);
   let nextId = 3;
+  const junctions = new Map<string, string>();
   const held = new Set<string>();
   const writes: string[] = [];
   const normalize = (path: string) => win32.normalize(path);
@@ -39,13 +40,51 @@ export function windowsProvisioningFixture() {
     return { parentBefore, created: inspect(path), parentAfter: inspect(parent) };
   }
   const backend: BazframeWin32NativeBackend & BazframeWin32LockBackend = {
+    inspectZipSource(path) {
+      if (lookup(path) !== path) throw new Error('ZIP source is aliased');
+      let current = path;
+      while (true) {
+        const object = inspect(current).object;
+        if (object.reparseTag !== null && ((object.reparseTag & ~0xf000) >>> 0) !== 0x9000001a) throw new Error('unexpected reparse');
+        if (current === path && (object.directory || object.numberOfLinks !== '00000001')) throw new Error('unsafe ZIP file');
+        const parent = win32.dirname(current); if (parent === current) break; current = parent;
+      }
+      return inspect(path).object;
+    },
     inspectPath: inspect,
-    inspectMembershipLink() { throw new Error('membership not configured in provisioning fixture'); },
-    createPrivateJunction() { throw new Error('membership not configured in provisioning fixture'); },
+    inspectMembershipLink(path) {
+      const value = inspect(path); const target = junctions.get(lookup(path));
+      if (target === undefined || value.object.reparseTag !== 0xa0000003) throw new Error('membership not configured in provisioning fixture');
+      const destination = inspect(target);
+      return { ...value, normalizedTarget: destination.canonicalPath, targetVolumeIdentity: destination.object.volumeIdentity, targetFileId: destination.object.fileId };
+    },
+    createPrivateJunction(parent, component, target) {
+      const parentBefore = inspect(parent); const path = win32.join(parent, component);
+      if (nodes.has(lookup(path))) throw new BazframeError('WINDOWS_NATIVE_DIRECTORY_OCCUPIED', 'occupied');
+      nodes.set(path, reparse(nextId++)); junctions.set(path, target); writes.push(path);
+      return { parentBefore, created: backend.inspectMembershipLink(path), parentAfter: inspect(parent) };
+    },
     createPrivateDirectory(parent, component) { return create(parent, component, 'directory'); },
     createPrivateFile(parent, component) { return create(parent, component, 'file'); },
+    async moveDirectoryNoReplace(sourceParent, source, destinationParent, destination) {
+      if (inspect(sourceParent).volume.identity !== inspect(destinationParent).volume.identity) throw new Error('cross-volume move');
+      const sourcePath = win32.join(sourceParent, source), targetPath = win32.join(destinationParent, destination);
+      moveTree(nodes, sourcePath, targetPath); writes.push(targetPath);
+    },
     async renameDirectoryNoReplace(parent, source, target) {
+      const from = win32.join(parent, source), to = win32.join(parent, target);
+      moveTree(nodes, from, to);
+      for (const [path, destination] of [...junctions]) if (path.startsWith(`${from}\\`)) { junctions.delete(path); junctions.set(`${to}${path.slice(from.length)}`, destination); }
+    },
+    async renameFileNoReplace(parent, source, target) {
+      if (nodes.get(win32.join(parent, source))?.kind !== 'file') throw new Error('not regular file');
       moveTree(nodes, win32.join(parent, source), win32.join(parent, target));
+    },
+    async readStableFileRange(path, offset, length, maxFileBytes) {
+      const value = inspect(path), all = required(nodes, lookup(path)).bytes ?? Buffer.alloc(0);
+      if (![offset, length, maxFileBytes].every(Number.isSafeInteger) || offset < 0 || length < 0 || length > 64 * 1024 * 1024 || maxFileBytes > 1536 * 1024 * 1024 || offset + length > all.length || all.length > maxFileBytes) throw new BazframeError('WINDOWS_NATIVE_READ_LIMIT_EXCEEDED', 'range limit');
+      const bytes = Buffer.from(all.subarray(offset, offset + length));
+      return { bytes, byteCount: hex(bytes.length), before: value.object, after: inspect(path).object };
     },
     async readStableFile(path, maxBytes) {
       const value = inspect(path);
@@ -80,11 +119,16 @@ export function windowsProvisioningFixture() {
       required(nodes, lookup(path)).bytes = Buffer.from(bytes);
       writes.push(path);
     },
-    async rename(source: string, target: string) { moveTree(nodes, source, target); writes.push(target); }
+    async rename(source: string, target: string) {
+      // Ordinary file replacement differs from the native no-replace directory move.
+      if (nodes.get(source)?.kind === 'file' && nodes.get(target)?.kind === 'file') nodes.delete(target);
+      moveTree(nodes, source, target); writes.push(target);
+    }
   };
   return { nodes, backend, io, writes,
     directory(path: string) { nodes.set(path, dir(nextId++)); },
     file(path: string, contents: string) { nodes.set(path, file(nextId++, contents)); },
+    junction(path: string, target: string) { nodes.set(path, reparse(nextId++)); junctions.set(path, target); },
     reparse(path: string) { nodes.set(path, reparse(nextId++)); },
     snapshot() { return JSON.stringify([...nodes]); }
   };
@@ -92,7 +136,7 @@ export function windowsProvisioningFixture() {
 
 function moveTree(nodes: Map<string, TestNode>, source: string, target: string): void {
   if (!nodes.has(source)) throw Object.assign(new Error('missing'), { code: 'WINDOWS_NATIVE_PATH_NOT_FOUND' });
-  if (nodes.has(target)) throw Object.assign(new Error('occupied'), { code: 'EEXIST' });
+  if ([...nodes.keys()].some((path) => path.toLowerCase() === target.toLowerCase())) throw Object.assign(new Error('occupied'), { code: 'EEXIST' });
   const moving = [...nodes.entries()].filter(([path]) => path === source || path.startsWith(`${source}\\`));
   for (const [path] of moving) nodes.delete(path);
   for (const [path, node] of moving) nodes.set(`${target}${path.slice(source.length)}`, node);

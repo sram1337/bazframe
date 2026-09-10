@@ -1,78 +1,110 @@
+import type { SkillCollectionLifecycleDependencies } from '../skill-collections/skill-collection-lifecycle.js';
+import type { AddedSkillPlatformServices } from '../skills/added-skill-platform-services.js';
+import { decodeManagedGitTreeEvidence, assertManagedGitIndexMatchesTree, type ManagedGitTreeEvidence } from './managed-git-tree.js';
+import { sameResourceIdentity, resourceIdentityText, type ResourceIdentity } from '../skill-collections/resource-identity.js';
+
+import { resolveControlledExecutable, executableEnvironmentValue } from '../core/executable-resolution.js';
+
 import { createHash, randomUUID } from 'node:crypto';
+
 import { constants } from 'node:fs';
-import { lstat, mkdtemp, open, realpath, rename, rm, unlink, type FileHandle } from 'node:fs/promises';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+
+import { lstat, mkdtemp as posixMkdtemp, open, realpath as posixRealpath, rename, rm, unlink, type FileHandle } from 'node:fs/promises';
+
+import { basename as posixBasename, dirname as posixDirname, join as posixJoin, relative as posixRelative, resolve as posixResolve, sep as posixSep } from 'node:path';
+
 import { BazframeError, errorCode } from '../core/errors.js';
+
 import type {
   BoundedPackageProcessOptions,
   BoundedPackageProcessResult,
   ChildOutputPolicy
 } from '../core/child-process.js';
+
 import { boundedPathForDisplay, boundedTextForDisplay, replaceUnsafeDisplayCharacters } from '../core/safe-text.js';
+
 import {
   PROFILE_PORTABILITY_PRODUCTION_LIMITS,
   managedGitAcquisitionLimitPolicy,
   type ManagedGitAcquisitionLimitPolicy
 } from '../profile-portability/profile-portability-policy.js';
-import { readPackageManifest, samePackageManifestSnapshot, type PackageManifestSnapshot } from '../packages/package-manifest.js';
+
+import { readPackageManifest as posixReadPackageManifest, samePackageManifestSnapshot, type PackageManifestSnapshot } from '../packages/package-manifest.js';
+
 import {
-  addDefaultSkill, defaultSkillCatalogRoot, readDefaultSkillRegistration,
-  readDefaultSkillRegistrationSnapshot, removeDefaultSkill
+  addDefaultSkill as sharedAddDefaultSkill, defaultSkillCatalogRoot, readDefaultSkillRegistration as posixReadDefaultSkillRegistration,
+  readDefaultSkillRegistrationSnapshot as posixReadDefaultSkillRegistrationSnapshot, removeDefaultSkill as sharedRemoveDefaultSkill
 } from '../skills/default-skill-catalog.js';
+
 import { assertSafeSkillId } from '../skills/skill-id.js';
+
 import { parseSkillDeclaredName } from '../skills/skill-metadata.js';
+
 import {
-  addLibrary, addPackage, buildPackage, removeLibrary, removePackage, updateLibrary,
+  addLibrary as sharedAddLibrary, addPackage as sharedAddPackage, buildPackage as sharedBuildPackage, removeLibrary as sharedRemoveLibrary, removePackage as sharedRemovePackage, updateLibrary as sharedUpdateLibrary,
   type SkillCollectionLifecycleResult
 } from '../skill-collections/skill-collection-lifecycle.js';
+
 import {
-  globalCollectionPath, readCollectionSnapshot, readLibrary, readLibrarySnapshot, readPackage, readPackageSnapshot,
+  globalCollectionPath as posixGlobalCollectionPath, readCollectionSnapshot as posixReadCollectionSnapshot, readLibrary as posixReadLibrary, readLibrarySnapshot as posixReadLibrarySnapshot, readPackage as posixReadPackage, readPackageSnapshot as posixReadPackageSnapshot,
   sameCollectionSnapshot, type SkillCollectionRecordSnapshot
 } from '../skill-collections/skill-collection-store.js';
+
 import {
   isUncertainPackageBuildError,
   type BeforePackageBuildContext
 } from '../skill-collections/skill-collection-preparation.js';
-import { verifySkillSnapshot } from '../skill-collections/skill-snapshot.js';
-import { ensureManagedDirectory, writeFileAtomic } from '../state/atomic-file.js';
-import { withStateLock } from '../state/lock.js';
+
+import { verifySkillSnapshot as posixVerifySkillSnapshot } from '../skill-collections/skill-snapshot.js';
+
+import { ensureManagedDirectory as posixEnsureManagedDirectory, writeFileAtomic as posixWriteFileAtomic } from '../state/atomic-file.js';
+
+import { withStateLock as posixWithStateLock } from '../state/lock.js';
+
 import {
-  assertReadOnlyPathAnchor,
-  closeReadOnlyPathAnchor,
-  holdReadOnlyPathAnchor
+  assertReadOnlyPathAnchor as posixAssertReadOnlyPathAnchor,
+  closeReadOnlyPathAnchor as posixCloseReadOnlyPathAnchor,
+  holdReadOnlyPathAnchor as posixHoldReadOnlyPathAnchor
 } from '../state/read-only-path-anchor.js';
+
 import {
-  assertValidManagedGitBranch, assertValidManagedGitRevision, canonicalManagedGitRoot,
-  decodeManagedGitRecord, decodePathFreeManagedGitIdentity, encodeManagedGitJournal, encodeManagedGitRecord, managedGitCheckoutRoot,
-  managedGitJournalPath, managedGitRecordPath, managedGitRecoveryRoot, managedGitStagingRoot,
-  optionalManagedGitRecord, optionalManagedGitRecordInExistingNamespace, readManagedGitJournal, readManagedGitRecord, type ManagedGitJournal, type ManagedGitJournalSnapshot,
+  assertValidManagedGitBranch, assertValidManagedGitRevision, canonicalManagedGitRoot as posixCanonicalManagedGitRoot,
+  decodeManagedGitRecord as posixDecodeManagedGitRecord, decodePathFreeManagedGitIdentity, encodeManagedGitJournal, encodeManagedGitRecord, managedGitCheckoutRoot as posixManagedGitCheckoutRoot,
+  managedGitJournalPath as posixManagedGitJournalPath, managedGitRecordPath as posixManagedGitRecordPath, managedGitRecoveryRoot as posixManagedGitRecoveryRoot, managedGitStagingRoot as posixManagedGitStagingRoot,
+  optionalManagedGitRecord as posixOptionalManagedGitRecord, optionalManagedGitRecordInExistingNamespace as posixOptionalManagedGitRecordInExistingNamespace, readManagedGitJournal as posixReadManagedGitJournal, readManagedGitRecord as posixReadManagedGitRecord, type ManagedGitJournal, type ManagedGitJournalSnapshot,
   type ManagedGitRecord, type ManagedGitRecordSnapshot, type ManagedGitResourceKind,
   type PathFreeManagedGitIdentity
 } from './managed-git-record.js';
-import { runManagedGitProcess, type ManagedGitProcessResult } from './managed-git-process.js';
+
+import { managedGithubCloneEnvironment, runManagedGitProcess, type ManagedGitProcessResult } from './managed-git-process.js';
+
 import {
-  inspectManagedGitAcquisition,
-  inspectManagedGitPublishedCheckout,
-  sampleManagedGitAcquisitionInProgress
+  inspectManagedGitAcquisition as posixInspectManagedGitAcquisition,
+  inspectManagedGitPublishedCheckout as posixInspectManagedGitPublishedCheckout,
+  sampleManagedGitAcquisitionInProgress as posixSampleManagedGitAcquisitionInProgress
 } from './managed-git-acquisition-inspection.js';
+
 import {
   canonicalManagedGitSourceForIdentity,
   normalizeManagedGitOrigin,
   parseManagedGitSource,
   type ManagedGitSource
 } from './managed-git-source.js';
+
 export {
   isManagedGitSource,
   normalizeManagedGitOrigin,
   parseManagedGitSource,
   type ManagedGitSource
 } from './managed-git-source.js';
+
 export interface ManagedGitBuildAuthorization {
   remote: string;
   revision: string;
   root: string;
   build: readonly string[];
 }
+
 export interface ManagedGitOptions {
   bazframeHome: string;
   environment?: NodeJS.ProcessEnv;
@@ -101,10 +133,12 @@ export interface ManagedGitOptions {
     injectUncertainPackageBuildFailure?: boolean;
   };
 }
+
 export interface ManagedGitExactRevisionReuseRequirement {
   mode: 'must-reuse';
   expectedHealth: ManagedGitExportHealthSnapshot;
 }
+
 
 export interface ManagedGitLifecycleResult {
   action: 'added' | 'current' | 'updated' | 'removed' | 'built';
@@ -116,21 +150,25 @@ export interface ManagedGitLifecycleResult {
   revision: string;
   resourceAction?: string;
 }
+
 export interface ManagedGitExportHealthSnapshot {
   recordSnapshot: ManagedGitRecordSnapshot;
-  root: { path: string; device: bigint; inode: bigint };
+  root: ResourceIdentity & { path: string };
   resourceIdentity: string;
   /** Exact reusable collection evidence retained only by internal planning/execution handoffs. */
   collectionSnapshot?: SkillCollectionRecordSnapshot;
 }
+
 export interface ManagedGitExportHealthTestHooks {
   beforeFinalRecoveryCheck?: () => void | Promise<void>;
 }
+
 interface PreparedAcquisitionContainer {
   container: string;
   containerIdentity: DirectoryIdentity;
   root: string;
 }
+
 interface AcquiredRepository {
   container: string;
   containerIdentity: DirectoryIdentity;
@@ -143,14 +181,289 @@ interface AcquiredRepository {
   revisionMode: ManagedGitRevisionSelection['mode'];
   acquisitionPolicy: Readonly<ManagedGitAcquisitionLimitPolicy>;
 }
-interface DirectoryIdentity { device: bigint; inode: bigint }
-interface HeldDirectoryIdentity { handle: FileHandle; identity: DirectoryIdentity }
-interface FileIdentity { device: bigint; inode: bigint; sha256: string }
+
+type DirectoryIdentity = ResourceIdentity;
+
+interface HeldDirectoryIdentity { handle: { close(): Promise<void> }; identity: DirectoryIdentity }
+
+type FileIdentity = ResourceIdentity & { sha256: string };
+
 interface TransactionState { resourceCommitted: boolean; journalState?: FileIdentity }
+
 type ManagedGitRevisionSelection =
   | { mode: 'branchHead'; branch?: string }
   | { mode: 'exact'; branch: string; revision: string };
+
 export interface ManagedGitCloneInvocation { transport: 'gh' | 'git'; args: readonly string[] }
+
+
+export type ManagedGitImportResourceAction = 'create' | 'reuse' | 'blocked';
+
+
+export interface ManagedGitImportResourceClassification {
+  action: ManagedGitImportResourceAction;
+  reason?: string;
+  health?: ManagedGitExportHealthSnapshot;
+}
+
+
+export interface ManagedGitImportResourceTestHooks {
+  afterInitialOccupancy?: () => void | Promise<void>;
+}
+
+
+export type ManagedGitImportOutcomeClassification =
+  | { state: 'exact'; health: ManagedGitExportHealthSnapshot }
+  | { state: 'absent' }
+  | { state: 'recovery-required' }
+  | { state: 'ambiguous'; reason: string };
+
+
+export type ImportOccupancy = 'absent' | ResourceIdentity & {
+  type: string;
+  mtimeNs: bigint | string;
+  ctimeNs: bigint | string;
+};
+
+interface HeldImportDirectory {
+  path: string;
+  handle: FileHandle;
+  device: bigint;
+  inode: bigint;
+  mtimeNs: bigint;
+  ctimeNs: bigint;
+}
+
+class ManagedGitProcessError extends BazframeError {
+  readonly operation: string;
+  readonly status: number | null;
+  readonly processFailure: ManagedGitProcessResult['failure'];
+  readonly definiteNetworkUnavailable: boolean;
+  readonly uncertainTermination: boolean;
+  readonly monitorError?: Error;
+  constructor(label: string, target: string, result: ManagedGitProcessResult) {
+    const termination = result.failure === undefined ? '' : result.uncertainTermination === true
+      ? `process ${result.failure}; termination could not be confirmed`
+      : `process ${result.failure}`;
+    const diagnostic = safeDiagnostic(result.monitorError?.message || termination || result.stderr || result.error?.message || `status ${result.status ?? 1}`);
+    const code = result.failure === 'monitor-failure' && result.monitorError instanceof BazframeError
+      ? result.monitorError.code
+      : 'MANAGED_GIT_PROCESS_FAILED';
+    super(code, `Git ${label} failed for ${target}: ${diagnostic}`, {
+      cause: result.monitorError ?? result.error
+    });
+    this.name = 'ManagedGitProcessError';
+    this.operation = label;
+    this.status = result.status;
+    this.processFailure = result.failure;
+    this.definiteNetworkUnavailable = !failedManagedGitProcess(result) && /(?:could not resolve host|failed to connect|network is unreachable|connection (?:timed out|refused)|couldn't connect)/iu.test(result.stderr || result.error?.message || '');
+    this.uncertainTermination = result.uncertainTermination === true;
+    this.monitorError = result.monitorError;
+  }
+}
+
+class ManagedGitAcquisitionCleanupError extends BazframeError {
+  readonly stagingPath: string;
+  constructor(stagingPath: string, primary: unknown, cleanup: unknown) {
+    super(
+      'MANAGED_GIT_ACQUISITION_CLEANUP_UNPROVEN',
+      `Remote Git acquisition failed and staging cleanup could not be proven at ${boundedPathForDisplay(stagingPath)}.`,
+      { cause: cleanup }
+    );
+    this.name = 'ManagedGitAcquisitionCleanupError';
+    this.stagingPath = stagingPath;
+    this.errors = [primary, cleanup];
+  }
+  readonly errors: unknown[];
+}
+
+class ManagedGitAcquisitionQuarantineError extends BazframeError {
+  readonly stagingPath: string;
+  readonly uncertainTermination = true;
+  constructor(stagingPath: string, cause: unknown) {
+    super(
+      'MANAGED_GIT_ACQUISITION_QUARANTINED',
+      `Remote Git acquisition process termination was uncertain; retained quarantine at ${boundedPathForDisplay(stagingPath)}.`,
+      { cause }
+    );
+    this.name = 'ManagedGitAcquisitionQuarantineError';
+    this.stagingPath = stagingPath;
+  }
+}
+
+function failedManagedGitProcess(result: ManagedGitProcessResult): boolean {
+  return result.failure !== undefined || result.error !== undefined || result.monitorError !== undefined || result.uncertainTermination === true || result.signal !== undefined;
+}
+
+function requiresAcquisitionRecovery(error: unknown): boolean {
+  return error instanceof ManagedGitAcquisitionCleanupError || isUncertainManagedGitProcessError(error);
+}
+
+function isUncertainManagedGitProcessError(error: unknown): boolean {
+  if (error instanceof ManagedGitAcquisitionQuarantineError) return true;
+  if (error instanceof ManagedGitProcessError) return error.uncertainTermination;
+  if (error instanceof AggregateError) return error.errors.some(isUncertainManagedGitProcessError);
+  return error instanceof Error && isUncertainManagedGitProcessError(error.cause);
+}
+
+
+/** True only when a clone/fetch process settled unsuccessfully with confirmed termination. */
+export function isDefiniteManagedGitAcquisitionUnavailable(error: unknown): boolean {
+  return error instanceof ManagedGitProcessError
+    && error.operation === 'clone'
+    && error.status !== null
+    && error.status !== 0
+    && error.processFailure === undefined
+    && error.monitorError === undefined
+    && error.definiteNetworkUnavailable
+    && !error.uncertainTermination;
+}
+
+
+/** Retain an isolated home whenever managed-Git/package cleanup or process settlement is uncertain. */
+export function isUncertainManagedGitOperation(error: unknown): boolean {
+  if (isUncertainManagedGitProcessError(error) || isUncertainPackageBuildError(error)) return true;
+  if (error instanceof BazframeError && [
+    'MANAGED_GIT_ACQUISITION_CLEANUP_UNPROVEN',
+    'MANAGED_GIT_ACQUISITION_QUARANTINED',
+    'MANAGED_GIT_RECOVERY_REQUIRED',
+    'PACKAGE_BUILD_TERMINATION_UNCERTAIN'
+  ].includes(error.code)) return true;
+  if (error instanceof AggregateError && error.errors.some(isUncertainManagedGitOperation)) return true;
+  return error instanceof Error && error.cause !== undefined && isUncertainManagedGitOperation(error.cause);
+}
+
+
+export function safeDiagnostic(value: string): string {
+  let redacted = value.replace(/(https?:\/\/)[^/@\s]+@/giu, '$1[redacted]@').replace(/\b(authorization|token|access[_-]?token|oauth[_-]?token|password)\s*[:=]\s*[^\s]+/giu, '$1=[redacted]');
+  redacted = replaceUnsafeDisplayCharacters(redacted, ' ').replace(/\s+/gu, ' ').trim();
+  return redacted.slice(0, 1000);
+}
+
+class ManagedGitRecoveryError extends AggregateError {
+  constructor(errors: readonly unknown[], message: string, cause: unknown) {
+    super(errors, message, { cause });
+    this.name = 'ManagedGitRecoveryError';
+  }
+}
+export interface ManagedGitReadAnchor { path: string; assertStable(): Promise<void>; close(): Promise<void> }
+export interface ManagedGitServices {
+platform: NodeJS.Platform;
+recordTreeEvidence(root: string, evidence: ManagedGitTreeEvidence): void;
+assertAuthority(): void;
+collectionDependencies: SkillCollectionLifecycleDependencies;
+catalogServices: AddedSkillPlatformServices;
+runProcess: typeof runManagedGitProcess;
+writeProviderFile(path: string, text: string, expected: (ResourceIdentity & { sha256: string }) | null): Promise<void>;
+physicalDirectory(path: string): Promise<void>;
+moveDirectory(source: string, destination: string, expected: ResourceIdentity): Promise<void>;
+
+readPackageManifest: typeof posixReadPackageManifest;
+readDefaultSkillRegistration: typeof posixReadDefaultSkillRegistration;
+captureSkillRegistrationIdentity(home: string, id: string): Promise<string>;
+readCollectionSnapshot: typeof posixReadCollectionSnapshot;
+readLibrary: typeof posixReadLibrary;
+readLibrarySnapshot: typeof posixReadLibrarySnapshot;
+readPackage: typeof posixReadPackage;
+readPackageSnapshot: typeof posixReadPackageSnapshot;
+verifySkillSnapshot: typeof posixVerifySkillSnapshot;
+ensureManagedDirectory: typeof posixEnsureManagedDirectory;
+writeFileAtomic: typeof posixWriteFileAtomic;
+withStateLock: typeof posixWithStateLock;
+holdReadOnlyPathAnchor(path: string): Promise<ManagedGitReadAnchor>;
+canonicalManagedGitRoot: typeof posixCanonicalManagedGitRoot;
+decodeManagedGitRecord: typeof posixDecodeManagedGitRecord;
+managedGitCheckoutRoot: typeof posixManagedGitCheckoutRoot;
+managedGitJournalPath: typeof posixManagedGitJournalPath;
+managedGitRecordPath: typeof posixManagedGitRecordPath;
+managedGitRecoveryRoot: typeof posixManagedGitRecoveryRoot;
+managedGitStagingRoot: typeof posixManagedGitStagingRoot;
+optionalManagedGitRecord: typeof posixOptionalManagedGitRecord;
+optionalManagedGitRecordInExistingNamespace: typeof posixOptionalManagedGitRecordInExistingNamespace;
+readManagedGitJournal: typeof posixReadManagedGitJournal;
+readManagedGitRecord: typeof posixReadManagedGitRecord;
+inspectManagedGitAcquisition: typeof posixInspectManagedGitAcquisition;
+inspectManagedGitPublishedCheckout: typeof posixInspectManagedGitPublishedCheckout;
+sampleManagedGitAcquisitionInProgress: typeof posixSampleManagedGitAcquisitionInProgress;
+basename: typeof posixBasename;
+dirname: typeof posixDirname;
+join: typeof posixJoin;
+relative: typeof posixRelative;
+resolve: typeof posixResolve;
+sep: string;
+realpath(path: string): Promise<string>;
+mkdtemp(prefix: string): Promise<string>;
+captureImportOccupancy: (home: string, paths: Readonly<Record<string, string>>) => Promise<ReadonlyMap<string, ImportOccupancy>>;
+repositoryArgs: (_root: string, args: readonly string[]) => string[];
+assertManagedGitResourceRecoveryAbsent: (home: string, kind: ManagedGitResourceKind, id: string) => Promise<void>;
+resolveManagedGitCommand: (environment: NodeJS.ProcessEnv, excludedRoot: string) => Promise<string>;
+resolveManagedGithubCommand: (environment: NodeJS.ProcessEnv, excludedRoot: string) => Promise<string | undefined>;
+gitEnvironment: (environment: NodeJS.ProcessEnv, isolated: boolean) => NodeJS.ProcessEnv;
+directoryIdentity: (path: string) => Promise<DirectoryIdentity>;
+holdDirectoryIdentity: (path: string) => Promise<HeldDirectoryIdentity>;
+removeOwnedTree: (path: string, expected: DirectoryIdentity) => Promise<void>;
+removeOwnedContainer: (path: string, expected: DirectoryIdentity) => Promise<void>;
+clearPartialClone: (container: string, expected: DirectoryIdentity, root: string) => Promise<void>;
+pathExists: (path: string) => Promise<boolean>;
+createExclusiveFile: (home: string, path: string, text: string) => Promise<FileIdentity>;
+physicalFileIdentity: (path: string) => Promise<FileIdentity>;
+removeOwnedFile: (path: string, expected: FileIdentity) => Promise<void>;
+removeOwnedRecord: (home: string, expected: ManagedGitRecordSnapshot) => Promise<void>;
+restoreOwnedRecord: (home: string, expected: ManagedGitRecordSnapshot, replacement: ManagedGitRecord) => Promise<void>;
+restoreOwnedDirectory: (source: string, expected: DirectoryIdentity, destination: string) => Promise<void>;
+readStableSkillName: (path: string) => Promise<string>;
+}
+
+/** One shared provider engine; platform services supply physical effects, never lifecycle outcomes. */
+export function createManagedGitProvider(services?: ManagedGitServices) {
+const globalCollectionPath: typeof posixGlobalCollectionPath = services === undefined ? posixGlobalCollectionPath : (home, kind, id) => services.join(home, kind === 'library' ? 'libraries' : 'packages', `${id}.json`);
+const collectionDeps = (deps: SkillCollectionLifecycleDependencies): SkillCollectionLifecycleDependencies => services === undefined ? deps : { ...deps, ...services.collectionDependencies };
+const addLibrary: typeof sharedAddLibrary = (options, root, deps = {}) => sharedAddLibrary(options, root, collectionDeps(deps));
+const addPackage: typeof sharedAddPackage = (options, root, deps = {}) => sharedAddPackage(options, root, collectionDeps(deps));
+const buildPackage: typeof sharedBuildPackage = (options, id, deps = {}) => sharedBuildPackage(options, id, collectionDeps(deps));
+const updateLibrary: typeof sharedUpdateLibrary = (options, id, deps = {}) => sharedUpdateLibrary(options, id, collectionDeps(deps));
+const removeLibrary: typeof sharedRemoveLibrary = (options, id, deps = {}) => sharedRemoveLibrary(options, id, collectionDeps(deps));
+const removePackage: typeof sharedRemovePackage = (options, id, deps = {}) => sharedRemovePackage(options, id, collectionDeps(deps));
+const addDefaultSkill: typeof sharedAddDefaultSkill = (home, root, deps = {}) => sharedAddDefaultSkill(home, root, services === undefined ? deps : { ...deps, stateLockHeld: false, platformServices: services.catalogServices });
+const removeDefaultSkill: typeof sharedRemoveDefaultSkill = (home, id, deps = {}) => sharedRemoveDefaultSkill(home, id, services === undefined ? deps : { ...deps, stateLockHeld: false, platformServices: services.catalogServices });
+const readPackageManifest = services?.readPackageManifest ?? posixReadPackageManifest;
+const readDefaultSkillRegistration = services?.readDefaultSkillRegistration ?? posixReadDefaultSkillRegistration;
+const readDefaultSkillRegistrationSnapshot = posixReadDefaultSkillRegistrationSnapshot;
+const readCollectionSnapshot = services?.readCollectionSnapshot ?? posixReadCollectionSnapshot;
+const readLibrary = services?.readLibrary ?? posixReadLibrary;
+const readLibrarySnapshot = services?.readLibrarySnapshot ?? posixReadLibrarySnapshot;
+const readPackage = services?.readPackage ?? posixReadPackage;
+const readPackageSnapshot = services?.readPackageSnapshot ?? posixReadPackageSnapshot;
+const verifySkillSnapshot = services?.verifySkillSnapshot ?? posixVerifySkillSnapshot;
+const ensureManagedDirectory = services?.ensureManagedDirectory ?? posixEnsureManagedDirectory;
+const writeFileAtomic = services?.writeFileAtomic ?? posixWriteFileAtomic;
+const withStateLock = services?.withStateLock ?? posixWithStateLock;
+const assertReadOnlyPathAnchor = (anchor: ManagedGitReadAnchor) => anchor.assertStable();
+const closeReadOnlyPathAnchor = (anchor: ManagedGitReadAnchor) => anchor.close();
+const holdReadOnlyPathAnchor = services?.holdReadOnlyPathAnchor ?? (async (path: string): Promise<ManagedGitReadAnchor> => { const anchor = await posixHoldReadOnlyPathAnchor(path); return { path: anchor.path, assertStable: () => posixAssertReadOnlyPathAnchor(anchor), close: () => posixCloseReadOnlyPathAnchor(anchor) }; });
+const canonicalManagedGitRoot = services?.canonicalManagedGitRoot ?? posixCanonicalManagedGitRoot;
+const decodeManagedGitRecord = services?.decodeManagedGitRecord ?? posixDecodeManagedGitRecord;
+const managedGitCheckoutRoot = services?.managedGitCheckoutRoot ?? posixManagedGitCheckoutRoot;
+const managedGitJournalPath = services?.managedGitJournalPath ?? posixManagedGitJournalPath;
+const managedGitRecordPath = services?.managedGitRecordPath ?? posixManagedGitRecordPath;
+const managedGitRecoveryRoot = services?.managedGitRecoveryRoot ?? posixManagedGitRecoveryRoot;
+const managedGitStagingRoot = services?.managedGitStagingRoot ?? posixManagedGitStagingRoot;
+const optionalManagedGitRecord = services?.optionalManagedGitRecord ?? posixOptionalManagedGitRecord;
+const optionalManagedGitRecordInExistingNamespace = services?.optionalManagedGitRecordInExistingNamespace ?? posixOptionalManagedGitRecordInExistingNamespace;
+const readManagedGitJournal = services?.readManagedGitJournal ?? posixReadManagedGitJournal;
+const readManagedGitRecord = services?.readManagedGitRecord ?? posixReadManagedGitRecord;
+const inspectManagedGitAcquisition = services?.inspectManagedGitAcquisition ?? posixInspectManagedGitAcquisition;
+const inspectManagedGitPublishedCheckout = services?.inspectManagedGitPublishedCheckout ?? posixInspectManagedGitPublishedCheckout;
+const sampleManagedGitAcquisitionInProgress = services?.sampleManagedGitAcquisitionInProgress ?? posixSampleManagedGitAcquisitionInProgress;
+const basename = services?.basename ?? posixBasename;
+const dirname = services?.dirname ?? posixDirname;
+const join = services?.join ?? posixJoin;
+const relative = services?.relative ?? posixRelative;
+const resolve = services?.resolve ?? posixResolve;
+const sep = services?.sep ?? posixSep;
+const realpath = services?.realpath ?? posixRealpath;
+const mkdtemp = services?.mkdtemp ?? posixMkdtemp;
+
 
 const LOCAL_CONFIG_KEYS = new Set([
   'core.repositoryformatversion', 'core.filemode', 'core.bare', 'core.logallrefupdates',
@@ -158,7 +471,8 @@ const LOCAL_CONFIG_KEYS = new Set([
   'remote.origin.fetch', 'extensions.objectformat', 'extensions.refstorage'
 ]);
 
-export function managedGitCloneInvocation(source: ManagedGitSource, root: string, githubAuthenticated: boolean): ManagedGitCloneInvocation {
+
+function managedGitCloneInvocation(source: ManagedGitSource, root: string, githubAuthenticated: boolean): ManagedGitCloneInvocation {
   return source.githubRepository !== undefined && githubAuthenticated
     ? { transport: 'gh', args: ['repo', 'clone', source.githubRepository, root, '--', '--no-checkout', '--no-local', '--no-hardlinks', '--template='] }
     : {
@@ -170,10 +484,14 @@ export function managedGitCloneInvocation(source: ManagedGitSource, root: string
       };
 }
 
-export async function addManagedGitSkill(options: ManagedGitOptions, entered: string): Promise<ManagedGitLifecycleResult> { return addManaged(options, 'skill', parseManagedGitSource(entered)); }
-export async function addManagedGitLibrary(options: ManagedGitOptions, entered: string): Promise<ManagedGitLifecycleResult> { return addManaged(options, 'library', parseManagedGitSource(entered)); }
-export async function addManagedGitPackage(options: ManagedGitOptions, entered: string): Promise<ManagedGitLifecycleResult> { return addManaged(options, 'package', parseManagedGitSource(entered)); }
-export async function addManagedGitSkillAtRevision(
+
+async function addManagedGitSkill(options: ManagedGitOptions, entered: string): Promise<ManagedGitLifecycleResult> { return addManaged(options, 'skill', parseManagedGitSource(entered)); }
+
+async function addManagedGitLibrary(options: ManagedGitOptions, entered: string): Promise<ManagedGitLifecycleResult> { return addManaged(options, 'library', parseManagedGitSource(entered)); }
+
+async function addManagedGitPackage(options: ManagedGitOptions, entered: string): Promise<ManagedGitLifecycleResult> { return addManaged(options, 'package', parseManagedGitSource(entered)); }
+
+async function addManagedGitSkillAtRevision(
   options: ManagedGitOptions,
   id: string,
   enteredIdentity: PathFreeManagedGitIdentity,
@@ -181,7 +499,8 @@ export async function addManagedGitSkillAtRevision(
 ): Promise<ManagedGitLifecycleResult> {
   return addManagedAtRevision(options, 'skill', id, enteredIdentity, requirement);
 }
-export async function addManagedGitLibraryAtRevision(
+
+async function addManagedGitLibraryAtRevision(
   options: ManagedGitOptions,
   id: string,
   enteredIdentity: PathFreeManagedGitIdentity,
@@ -189,7 +508,8 @@ export async function addManagedGitLibraryAtRevision(
 ): Promise<ManagedGitLifecycleResult> {
   return addManagedAtRevision(options, 'library', id, enteredIdentity, requirement);
 }
-export async function addManagedGitPackageAtRevision(
+
+async function addManagedGitPackageAtRevision(
   options: ManagedGitOptions,
   id: string,
   enteredIdentity: PathFreeManagedGitIdentity,
@@ -197,26 +517,35 @@ export async function addManagedGitPackageAtRevision(
 ): Promise<ManagedGitLifecycleResult> {
   return addManagedAtRevision(options, 'package', id, enteredIdentity, requirement);
 }
-export async function updateManagedGitSkill(options: ManagedGitOptions, id: string): Promise<ManagedGitLifecycleResult> { return updateManaged(options, 'skill', id); }
-export async function updateManagedGitLibrary(options: ManagedGitOptions, id: string): Promise<ManagedGitLifecycleResult> { return updateManaged(options, 'library', id); }
-export async function updateManagedGitPackage(options: ManagedGitOptions, id: string): Promise<ManagedGitLifecycleResult> { return updateManaged(options, 'package', id); }
-export async function removeManagedGitSkill(options: ManagedGitOptions, id: string): Promise<ManagedGitLifecycleResult> { return removeManaged(options, 'skill', id); }
-export async function removeManagedGitLibrary(options: ManagedGitOptions, id: string): Promise<ManagedGitLifecycleResult> { return removeManaged(options, 'library', id); }
-export async function removeManagedGitPackage(options: ManagedGitOptions, id: string): Promise<ManagedGitLifecycleResult> { return removeManaged(options, 'package', id); }
 
-export async function isManagedGitResource(options: { bazframeHome: string }, kind: ManagedGitResourceKind, id: string): Promise<boolean> {
+async function updateManagedGitSkill(options: ManagedGitOptions, id: string): Promise<ManagedGitLifecycleResult> { return updateManaged(options, 'skill', id); }
+
+async function updateManagedGitLibrary(options: ManagedGitOptions, id: string): Promise<ManagedGitLifecycleResult> { return updateManaged(options, 'library', id); }
+
+async function updateManagedGitPackage(options: ManagedGitOptions, id: string): Promise<ManagedGitLifecycleResult> { return updateManaged(options, 'package', id); }
+
+async function removeManagedGitSkill(options: ManagedGitOptions, id: string): Promise<ManagedGitLifecycleResult> { return removeManaged(options, 'skill', id); }
+
+async function removeManagedGitLibrary(options: ManagedGitOptions, id: string): Promise<ManagedGitLifecycleResult> { return removeManaged(options, 'library', id); }
+
+async function removeManagedGitPackage(options: ManagedGitOptions, id: string): Promise<ManagedGitLifecycleResult> { return removeManaged(options, 'package', id); }
+
+
+async function isManagedGitResource(options: { bazframeHome: string }, kind: ManagedGitResourceKind, id: string): Promise<boolean> {
   if (await optionalManagedGitRecord(options.bazframeHome, kind, id) !== undefined) return true;
   const journalPath = managedGitJournalPath(options.bazframeHome, kind, id);
   return await pathExists(journalPath) && (await readManagedGitJournal(options.bazframeHome, kind, id)).journal.operation === 'remove';
 }
-export async function verifyManagedGitResource(home: string, kind: ManagedGitResourceKind, id: string, environment: NodeJS.ProcessEnv = process.env): Promise<ManagedGitRecord> {
+
+async function verifyManagedGitResource(home: string, kind: ManagedGitResourceKind, id: string, environment: NodeJS.ProcessEnv = process.env): Promise<ManagedGitRecord> {
   const record = (await readManagedGitRecord(home, kind, id)).record;
   await verifyProvider(record, environment);
   await verifyResourceRegistration(record);
   return record;
 }
 
-export async function captureManagedGitExportHealth(
+
+async function captureManagedGitExportHealth(
   home: string,
   kind: ManagedGitResourceKind,
   id: string,
@@ -258,7 +587,8 @@ export async function captureManagedGitExportHealth(
   return snapshot;
 }
 
-export function sameManagedGitExportHealth(
+
+function sameManagedGitExportHealth(
   left: ManagedGitExportHealthSnapshot,
   right: ManagedGitExportHealthSnapshot
 ): boolean {
@@ -271,11 +601,11 @@ export function sameManagedGitExportHealth(
   return left.recordSnapshot.path === right.recordSnapshot.path
     && sameRecordSnapshot(left.recordSnapshot, right.recordSnapshot)
     && left.root.path === right.root.path
-    && left.root.device === right.root.device
-    && left.root.inode === right.root.inode
+    && sameResourceIdentity(left.root, right.root)
     && left.resourceIdentity === right.resourceIdentity
     && collectionMatches;
 }
+
 
 function copyExactReuseRequirement(requirement: ManagedGitExactRevisionReuseRequirement): ManagedGitExportHealthSnapshot {
   if (requirement === null || typeof requirement !== 'object' || requirement.mode !== 'must-reuse'
@@ -285,25 +615,22 @@ function copyExactReuseRequirement(requirement: ManagedGitExactRevisionReuseRequ
   const health = requirement.expectedHealth;
   return {
     recordSnapshot: {
+      ...health.recordSnapshot,
       record: { ...health.recordSnapshot.record },
       path: health.recordSnapshot.path,
-      device: health.recordSnapshot.device,
-      inode: health.recordSnapshot.inode,
       contentSha256: health.recordSnapshot.contentSha256
     },
     root: { ...health.root },
     resourceIdentity: health.resourceIdentity,
     ...(health.collectionSnapshot === undefined ? {} : {
       collectionSnapshot: {
-        record: { ...health.collectionSnapshot.record },
-        path: health.collectionSnapshot.path,
-        device: health.collectionSnapshot.device,
-        inode: health.collectionSnapshot.inode,
-        contentSha256: health.collectionSnapshot.contentSha256
+        ...health.collectionSnapshot,
+        record: { ...health.collectionSnapshot.record }
       }
     })
   };
 }
+
 
 function assertExpectedExactReuseHealth(
   home: string,
@@ -321,26 +648,9 @@ function assertExpectedExactReuseHealth(
   }
 }
 
-export type ManagedGitImportResourceAction = 'create' | 'reuse' | 'blocked';
-
-export interface ManagedGitImportResourceClassification {
-  action: ManagedGitImportResourceAction;
-  reason?: string;
-  health?: ManagedGitExportHealthSnapshot;
-}
-
-export interface ManagedGitImportResourceTestHooks {
-  afterInitialOccupancy?: () => void | Promise<void>;
-}
-
-export type ManagedGitImportOutcomeClassification =
-  | { state: 'exact'; health: ManagedGitExportHealthSnapshot }
-  | { state: 'absent' }
-  | { state: 'recovery-required' }
-  | { state: 'ambiguous'; reason: string };
 
 /** Read-only exact-state classification for post-error import accounting. */
-export async function classifyManagedGitImportOutcome(
+async function classifyManagedGitImportOutcome(
   home: string,
   kind: ManagedGitResourceKind,
   id: string,
@@ -373,8 +683,9 @@ export async function classifyManagedGitImportOutcome(
   }
 }
 
+
 /** Read-only provider-only occupancy probe for local profile-import classification. */
-export async function classifyManagedGitProviderOccupancy(
+async function classifyManagedGitProviderOccupancy(
   home: string,
   kind: 'library' | 'package',
   id: string,
@@ -401,8 +712,9 @@ export async function classifyManagedGitProviderOccupancy(
   }
 }
 
+
 /** Read-only exact-state classification for profile-import planning. */
-export async function classifyManagedGitImportResource(
+async function classifyManagedGitImportResource(
   home: string,
   kind: ManagedGitResourceKind,
   id: string,
@@ -418,6 +730,7 @@ export async function classifyManagedGitImportResource(
   }
   return blockedImportResource(outcome.reason);
 }
+
 
 async function classifyManagedGitImportOutcomeAtHome(
   canonicalHome: string,
@@ -465,21 +778,6 @@ async function classifyManagedGitImportOutcomeAtHome(
   return { state: 'exact', health };
 }
 
-type ImportOccupancy = 'absent' | {
-  device: bigint;
-  inode: bigint;
-  type: string;
-  mtimeNs: bigint;
-  ctimeNs: bigint;
-};
-interface HeldImportDirectory {
-  path: string;
-  handle: FileHandle;
-  device: bigint;
-  inode: bigint;
-  mtimeNs: bigint;
-  ctimeNs: bigint;
-}
 
 function importResourcePaths(home: string, kind: ManagedGitResourceKind, id: string): {
   record: string;
@@ -497,10 +795,11 @@ function importResourcePaths(home: string, kind: ManagedGitResourceKind, id: str
   };
 }
 
+
 async function captureImportOccupancy(
   home: string,
   paths: Readonly<Record<string, string>>
-): Promise<ReadonlyMap<string, ImportOccupancy>> {
+): Promise<ReadonlyMap<string, ImportOccupancy>> { if (services !== undefined) return services.captureImportOccupancy(home, paths);
   const result = new Map<string, ImportOccupancy>();
   const held = new Map<string, HeldImportDirectory>();
   let operationError: unknown;
@@ -523,6 +822,7 @@ async function captureImportOccupancy(
   if (operationError !== undefined) throw operationError;
   return result;
 }
+
 
 async function inspectPhysicalImportPath(
   home: string,
@@ -566,6 +866,7 @@ async function inspectPhysicalImportPath(
   }
 }
 
+
 function importOccupancy(metadata: {
   dev: bigint;
   ino: bigint;
@@ -590,10 +891,12 @@ function importOccupancy(metadata: {
   };
 }
 
+
 async function holdImportDirectory(
   path: string,
   expected: Exclude<ImportOccupancy, 'absent'>
 ): Promise<HeldImportDirectory> {
+  if (expected.domain === 'windows') throw new BazframeError('MANAGED_GIT_DOMAIN_INVALID', 'POSIX import observation cannot consume Windows identity.');
   let handle: FileHandle | undefined;
   try {
     handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
@@ -610,14 +913,15 @@ async function holdImportDirectory(
       handle,
       device: expected.device,
       inode: expected.inode,
-      mtimeNs: expected.mtimeNs,
-      ctimeNs: expected.ctimeNs
+      mtimeNs: opened.mtimeNs,
+      ctimeNs: opened.ctimeNs
     };
   } catch (error) {
     await handle?.close().catch(() => undefined);
     throw error;
   }
 }
+
 
 async function assertHeldImportDirectory(directory: HeldImportDirectory): Promise<void> {
   const [opened, current] = await Promise.all([
@@ -633,14 +937,15 @@ async function assertHeldImportDirectory(directory: HeldImportDirectory): Promis
   }
 }
 
+
 function sameImportOccupancyValue(left: ImportOccupancy, right: ImportOccupancy): boolean {
   if (left === 'absent' || right === 'absent') return left === right;
-  return left.device === right.device
-    && left.inode === right.inode
+  return sameResourceIdentity(left, right)
     && left.type === right.type
     && left.mtimeNs === right.mtimeNs
     && left.ctimeNs === right.ctimeNs;
 }
+
 
 function sameImportOccupancy(
   left: ReadonlyMap<string, ImportOccupancy>,
@@ -658,13 +963,16 @@ function sameImportOccupancy(
   return true;
 }
 
+
 function blockedImportResource(reason: string): ManagedGitImportResourceClassification {
   return { action: 'blocked', reason: boundedTextForDisplay(reason) };
 }
 
+
 function importErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
 
 async function captureManagedResourceIdentity(record: ManagedGitRecord): Promise<{
   identity: string;
@@ -672,6 +980,7 @@ async function captureManagedResourceIdentity(record: ManagedGitRecord): Promise
 }> {
   const home = resolveHome(record.root);
   if (record.kind === 'skill') {
+    if (services !== undefined) return { identity: await services.captureSkillRegistrationIdentity(home, record.id) };
     const snapshot = await readDefaultSkillRegistrationSnapshot(home, record.id);
     return {
       identity: [
@@ -684,12 +993,14 @@ async function captureManagedResourceIdentity(record: ManagedGitRecord): Promise
   }
   const collectionSnapshot = await readCollectionSnapshot(home, { kind: record.kind, id: record.id });
   return {
-    identity: `${collectionSnapshot.path}:${collectionSnapshot.device}:${collectionSnapshot.inode}:${collectionSnapshot.contentSha256}`,
+    identity: `${collectionSnapshot.path}:${resourceIdentityText(collectionSnapshot)}:${collectionSnapshot.contentSha256}`,
     collectionSnapshot
   };
 }
 
-export async function buildManagedGitPackage(options: ManagedGitOptions, id: string): Promise<SkillCollectionLifecycleResult> {
+
+async function buildManagedGitPackage(options: ManagedGitOptions, id: string): Promise<SkillCollectionLifecycleResult> {
+  options = await resolveManagedGitOptions(options);
   assertSafeSkillId(id);
   const home = await canonicalManagedHome(options.bazframeHome);
   await assertNoRecovery(home, 'package', id);
@@ -748,7 +1059,8 @@ export async function buildManagedGitPackage(options: ManagedGitOptions, id: str
   return result;
 }
 
-export async function inspectManagedGitRecordHealth(record: ManagedGitRecord, environment: NodeJS.ProcessEnv = process.env): Promise<string | undefined> {
+
+async function inspectManagedGitRecordHealth(record: ManagedGitRecord, environment: NodeJS.ProcessEnv = process.env): Promise<string | undefined> {
   try {
     await verifyProvider(record, environment);
     await verifyResourceRegistration(record);
@@ -758,6 +1070,7 @@ export async function inspectManagedGitRecordHealth(record: ManagedGitRecord, en
   } catch (error) { return safeDiagnostic(error instanceof Error ? error.message : String(error)); }
 }
 
+
 async function addManagedAtRevision(
   options: ManagedGitOptions,
   kind: ManagedGitResourceKind,
@@ -765,6 +1078,7 @@ async function addManagedAtRevision(
   enteredIdentity: PathFreeManagedGitIdentity,
   requirement?: ManagedGitExactRevisionReuseRequirement
 ): Promise<ManagedGitLifecycleResult> {
+  options = await resolveManagedGitOptions(options);
   const identity = decodePathFreeManagedGitIdentity(enteredIdentity, id);
   const source = canonicalManagedGitSourceForIdentity(id, identity);
   const expectedHealth = requirement === undefined ? undefined : copyExactReuseRequirement(requirement);
@@ -787,12 +1101,14 @@ async function addManagedAtRevision(
   return addManaged(options, kind, source, { mode: 'exact', branch: identity.branch, revision: identity.revision });
 }
 
+
 async function addManaged(
   options: ManagedGitOptions,
   kind: ManagedGitResourceKind,
   source: ManagedGitSource,
   selection: ManagedGitRevisionSelection = { mode: 'branchHead' }
 ): Promise<ManagedGitLifecycleResult> {
+  options = await resolveManagedGitOptions(options);
   const acquisitionPolicy = managedGitAcquisitionLimitPolicy(options.acquisitionLimits);
   const home = await canonicalManagedHome(options.bazframeHome);
   const expectedRoot = managedGitCheckoutRoot(home, kind, source.id);
@@ -918,6 +1234,7 @@ async function addManaged(
   return result;
 }
 
+
 async function commitAdd(
   options: ManagedGitOptions,
   home: string,
@@ -931,8 +1248,7 @@ async function commitAdd(
   if (transaction.journalState === undefined) await assertNoRecovery(home, kind, source.id);
   else {
     const currentJournal = await readManagedGitJournal(home, kind, source.id);
-    if (currentJournal.device !== transaction.journalState.device
-      || currentJournal.inode !== transaction.journalState.inode
+    if (!sameResourceIdentity(currentJournal, transaction.journalState)
       || currentJournal.contentSha256 !== transaction.journalState.sha256
       || currentJournal.journal.operation !== 'add-exact'
       || currentJournal.journal.phase !== 'acquiring'
@@ -956,13 +1272,14 @@ async function commitAdd(
   try {
     await ensureManagedDirectory(home, dirname(expectedRoot));
     await assertIdentity(acquired.root, acquired.identity, 'acquired repository changed before publication');
-    await rename(acquired.root, expectedRoot);
+    await moveDirectory(acquired.root, expectedRoot, acquired.identity);
     published = true;
     transaction.journalState = await updateJournal(home, journalFor(record, addOperation, 'provider-published', null, record.revision, acquired.container), transaction.journalState);
     await options.testHooks?.afterPublishedCheckout?.();
     await inspectManagedGitPublishedCheckout(expectedRoot, acquired.acquisitionPolicy);
     await verifyProvider(record, options.environment ?? process.env);
-    await writeFileAtomic(managedGitRecordPath(home, kind, source.id), encodeManagedGitRecord(record), { managedRoot: home, mode: 0o600, commitOnRename: true });
+    if (services !== undefined) await services.writeProviderFile(managedGitRecordPath(home, kind, source.id), encodeManagedGitRecord(record), null);
+    else await writeFileAtomic(managedGitRecordPath(home, kind, source.id), encodeManagedGitRecord(record), { managedRoot: home, mode: 0o600, commitOnRename: true });
     recordSnapshot = await readManagedGitRecord(home, kind, source.id);
     transaction.journalState = await updateJournal(home, journalFor(record, addOperation, 'provenance-published', null, record.revision, acquired.container), transaction.journalState);
     let collection: SkillCollectionLifecycleResult | undefined;
@@ -1006,7 +1323,9 @@ async function commitAdd(
   }
 }
 
+
 async function updateManaged(options: ManagedGitOptions, kind: ManagedGitResourceKind, id: string): Promise<ManagedGitLifecycleResult> {
+  options = await resolveManagedGitOptions(options);
   assertSafeSkillId(id);
   const home = await canonicalManagedHome(options.bazframeHome);
   await assertNoRecovery(home, kind, id);
@@ -1018,6 +1337,7 @@ async function updateManaged(options: ManagedGitOptions, kind: ManagedGitResourc
     entered: initial.record.fetchUrl, remote: initial.record.remote, fetchUrl: initial.record.fetchUrl, id,
     ...(initial.record.transport === 'gh' ? { githubRepository: initial.record.remote.slice('github.com/'.length) } : {})
   };
+  options = await resolveManagedGitOptions(options);
   const acquisitionPolicy = managedGitAcquisitionLimitPolicy(options.acquisitionLimits);
   const acquired = await acquireRepository(
     home,
@@ -1058,6 +1378,7 @@ async function updateManaged(options: ManagedGitOptions, kind: ManagedGitResourc
   return result;
 }
 
+
 async function verifyCurrentUpdate(
   options: ManagedGitOptions,
   home: string,
@@ -1080,6 +1401,7 @@ async function verifyCurrentUpdate(
     { managedRoot: home }
   );
 }
+
 
 async function commitUpdate(
   options: ManagedGitOptions,
@@ -1107,14 +1429,15 @@ async function commitUpdate(
   let updatedRecordSnapshot: ManagedGitRecordSnapshot | undefined;
   try {
     transaction.journalState = await createJournal(home, journalFor(next, 'update', 'staged', initial.revision, next.revision, acquired.container, backup));
-    await rename(initial.root, backup); oldMoved = true;
+    await moveDirectory(initial.root, backup, previousIdentity); oldMoved = true;
     await assertIdentity(acquired.root, acquired.identity, 'candidate changed before update publication');
-    await rename(acquired.root, initial.root); newPublished = true;
+    await moveDirectory(acquired.root, initial.root, acquired.identity); newPublished = true;
     transaction.journalState = await updateJournal(home, journalFor(next, 'update', 'provider-published', initial.revision, next.revision, acquired.container, backup), transaction.journalState);
     await options.testHooks?.afterPublishedCheckout?.();
     await inspectManagedGitPublishedCheckout(initial.root, acquired.acquisitionPolicy);
     await verifyProvider(next, environment);
-    await writeFileAtomic(managedGitRecordPath(home, initial.kind, initial.id), encodeManagedGitRecord(next), { managedRoot: home, mode: 0o600, commitOnRename: true });
+    if (services !== undefined) await services.writeProviderFile(managedGitRecordPath(home, initial.kind, initial.id), encodeManagedGitRecord(next), { ...initialSnapshot, sha256: initialSnapshot.contentSha256 });
+    else await writeFileAtomic(managedGitRecordPath(home, initial.kind, initial.id), encodeManagedGitRecord(next), { managedRoot: home, mode: 0o600, commitOnRename: true });
     provenanceWritten = true;
     updatedRecordSnapshot = await readManagedGitRecord(home, initial.kind, initial.id);
     transaction.journalState = await updateJournal(home, journalFor(next, 'update', 'provenance-published', initial.revision, next.revision, acquired.container, backup), transaction.journalState);
@@ -1166,7 +1489,9 @@ async function commitUpdate(
   }
 }
 
+
 async function removeManaged(options: ManagedGitOptions, kind: ManagedGitResourceKind, id: string): Promise<ManagedGitLifecycleResult> {
+  options = await resolveManagedGitOptions(options);
   assertSafeSkillId(id);
   const home = await canonicalManagedHome(options.bazframeHome);
   const journalPath = managedGitJournalPath(home, kind, id);
@@ -1223,6 +1548,7 @@ async function removeManaged(options: ManagedGitOptions, kind: ManagedGitResourc
   return result;
 }
 
+
 async function resumeManagedRemoval(options: ManagedGitOptions, home: string, initialJournal: ManagedGitJournalSnapshot): Promise<ManagedGitLifecycleResult> {
   const record = recordFromRemoveJournal(initialJournal.journal);
   let result: ManagedGitLifecycleResult;
@@ -1269,6 +1595,7 @@ async function resumeManagedRemoval(options: ManagedGitOptions, home: string, in
   return result;
 }
 
+
 async function managedResourceStateSha256(home: string, record: ManagedGitRecord): Promise<string> {
   if (record.kind === 'skill') {
     const registration = await readDefaultSkillRegistration(home, record.id);
@@ -1279,13 +1606,18 @@ async function managedResourceStateSha256(home: string, record: ManagedGitRecord
     : (await readPackageSnapshot(home, record.id)).contentSha256;
 }
 
+
 function recordFromRemoveJournal(journal: ManagedGitJournal): ManagedGitRecord {
   if (journal.operation !== 'remove' || journal.resourceStateSha256 === null) throw new BazframeError('MANAGED_GIT_JOURNAL_INVALID', 'Remote Git removal recovery record is incomplete.');
   return decodeManagedGitRecord({ schemaVersion: 1, kind: journal.kind, id: journal.id, root: journal.root, remote: journal.remote, fetchUrl: journal.fetchUrl, transport: journal.transport, branch: journal.branch, revision: journal.nextRevision });
 }
+
 function sameManagedGitRecord(left: ManagedGitRecord, right: ManagedGitRecord): boolean { return encodeManagedGitRecord(left) === encodeManagedGitRecord(right); }
-function sameJournalSnapshot(left: ManagedGitJournalSnapshot, right: ManagedGitJournalSnapshot): boolean { return left.device === right.device && left.inode === right.inode && left.contentSha256 === right.contentSha256; }
-function journalFileIdentity(snapshot: ManagedGitJournalSnapshot): FileIdentity { return { device: snapshot.device, inode: snapshot.inode, sha256: snapshot.contentSha256 }; }
+
+function sameJournalSnapshot(left: ManagedGitJournalSnapshot, right: ManagedGitJournalSnapshot): boolean { return sameResourceIdentity(left, right) && left.contentSha256 === right.contentSha256; }
+
+function journalFileIdentity(snapshot: ManagedGitJournalSnapshot): FileIdentity { return { ...snapshot, sha256: snapshot.contentSha256 }; }
+
 
 async function prepareAcquisitionContainer(home: string, id: string): Promise<PreparedAcquisitionContainer> {
   await ensureManagedDirectory(home, managedGitStagingRoot(home));
@@ -1293,6 +1625,7 @@ async function prepareAcquisitionContainer(home: string, id: string): Promise<Pr
   const containerIdentity = await directoryIdentity(container);
   return { container, containerIdentity, root: join(container, id) };
 }
+
 
 async function acquireRepository(
   home: string,
@@ -1315,24 +1648,27 @@ async function acquireRepository(
     ))
   );
   try {
-    const git = environment.BAZFRAME_GIT_COMMAND || 'git';
-    const gh = environment.BAZFRAME_GH_COMMAND || 'gh';
+    const git = await resolveManagedGitCommand(environment, root);
+    const gh = source.githubRepository === undefined ? undefined : await resolveManagedGithubCommand(environment, root);
     const authEnvironment = gitEnvironment(environment, false);
-    const authStatus = source.githubRepository === undefined
+    const authStatus = source.githubRepository === undefined || gh === undefined
       ? undefined
       : await runAcquisition(gh, ['auth', 'status', '--hostname', 'github.com'], home, authEnvironment);
-    if (authStatus?.failure !== undefined) throw processFailure('inspect GitHub authentication', gh, authStatus);
+    if (authStatus !== undefined && failedManagedGitProcess(authStatus)) throw processFailure('inspect GitHub authentication', gh ?? 'gh', authStatus);
     const githubAuthenticated = authStatus?.status === 0;
     let invocation = managedGitCloneInvocation(source, root, githubAuthenticated);
-    let clone = await runAcquisition(invocation.transport === 'gh' ? gh : git, invocation.args, home, authEnvironment);
-    if (clone.failure !== undefined) throw processFailure('clone', source.remote, clone);
+    const cloneEnvironment = invocation.transport === 'gh' && (services?.platform ?? process.platform) === 'win32'
+      ? managedGithubCloneEnvironment(git, authEnvironment, [container])
+      : authEnvironment;
+    let clone = await runAcquisition(invocation.transport === 'gh' ? gh! : git, invocation.args, home, cloneEnvironment);
+    if (failedManagedGitProcess(clone)) throw processFailure('clone', source.remote, clone);
     if (clone.status !== 0 && invocation.transport === 'gh') {
       if (environment.BAZFRAME_STRICT_GIT_ENVIRONMENT === '1') throw processFailure('clone', source.remote, clone);
       await clearPartialClone(container, containerIdentity, root);
       invocation = managedGitCloneInvocation(source, root, false);
       clone = await runAcquisition(git, invocation.args, home, authEnvironment);
     }
-    if (clone.status !== 0 || clone.failure !== undefined) throw processFailure('clone', source.remote, clone);
+    if (clone.status !== 0 || failedManagedGitProcess(clone)) throw processFailure('clone', source.remote, clone);
     if (testHooks.injectUncertainAcquisitionFailure === true) {
       throw processFailure('clone', source.remote, {
         status: null,
@@ -1389,6 +1725,7 @@ async function acquireRepository(
       }
       revision = selection.revision;
     }
+    if (services?.platform === 'win32') await readTreeEvidence(root, revision, git, isolated);
     await requiredWithMonitor(
       git,
       repositoryArgs(root, ['checkout', '--detach', revision]),
@@ -1415,6 +1752,17 @@ async function acquireRepository(
   }
 }
 
+
+async function moveDirectory(source: string, destination: string, expected: ResourceIdentity): Promise<void> {
+  if (services !== undefined) return services.moveDirectory(source, destination, expected);
+  await assertIdentity(source, expected, 'Managed checkout changed before movement');
+  await rename(source, destination);
+}
+async function physicalDirectory(path: string): Promise<void> {
+  if (services !== undefined) return services.physicalDirectory(path);
+  const metadata = await lstat(path);
+  if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new BazframeError('MANAGED_GIT_ROOT_INVALID', `Expected physical Git directory: ${path}`);
+}
 async function validateCandidate(kind: ManagedGitResourceKind, root: string, id: string): Promise<void> {
   if (basename(root) !== id) throw new BazframeError('MANAGED_GIT_RESOURCE_INVALID', `Remote Git source ${kind} root basename must be ${id}.`);
   if (kind === 'skill') {
@@ -1423,11 +1771,12 @@ async function validateCandidate(kind: ManagedGitResourceKind, root: string, id:
     return;
   }
   if (kind === 'package') { await readPackageManifest(root); return; }
-  try { await lstat(join(root, 'bazframe-package.json')); throw new BazframeError('LIBRARY_IS_PACKAGE', 'Remote Git library source contains bazframe-package.json; use `bazframe package add` for this repository.'); }
+  try { if (!await pathExists(join(root, 'bazframe-package.json'))) return; throw new BazframeError('LIBRARY_IS_PACKAGE', 'Remote Git library source contains bazframe-package.json; use `bazframe package add` for this repository.'); }
   catch (error) { if (error instanceof BazframeError) throw error; if (errorCode(error) !== 'ENOENT') throw error; }
 }
 
-export async function authorizeManagedGitPackageBuild(options: ManagedGitOptions, root: string, remote: string, revision: string, managedRoot?: string): Promise<PackageManifestSnapshot> {
+
+async function authorizeManagedGitPackageBuild(options: ManagedGitOptions, root: string, remote: string, revision: string, managedRoot?: string): Promise<PackageManifestSnapshot> {
   const manifest = await readPackageManifest(root);
   const details = { remote, revision, root: managedRoot ?? managedGitCheckoutRoot(resolve(options.bazframeHome), 'package', basename(root)), build: manifest.manifest.build };
   await options.reportPackageBuild?.(details);
@@ -1440,18 +1789,20 @@ export async function authorizeManagedGitPackageBuild(options: ManagedGitOptions
   return manifest;
 }
 
+
 async function verifyProvider(record: ManagedGitRecord, environment: NodeJS.ProcessEnv): Promise<void> {
+  environment = resolvedGitEnvironment(environment, await resolveManagedGitCommand(environment, record.root));
   await canonicalManagedGitRoot(record);
   await verifyCheckoutState(record, environment);
 }
+
 
 async function verifyCheckoutState(
   record: Pick<ManagedGitRecord, 'root' | 'remote' | 'fetchUrl' | 'branch' | 'revision'>,
   environment: NodeJS.ProcessEnv
 ): Promise<void> {
-  const gitMetadata = await lstat(join(record.root, '.git'));
-  if (gitMetadata.isSymbolicLink() || !gitMetadata.isDirectory()) throw new BazframeError('MANAGED_GIT_ROOT_INVALID', `Bazframe-managed checkout .git must be a physical directory: ${record.root}`);
-  const git = environment.BAZFRAME_GIT_COMMAND || 'git';
+  await physicalDirectory(join(record.root, '.git'));
+  const git = await resolveManagedGitCommand(environment, record.root);
   const isolated = gitEnvironment(environment, true);
   await assertEffectiveGitStorage(record.root, git, isolated);
   await assertSafeLocalGitConfiguration(record.root, git, isolated);
@@ -1474,12 +1825,43 @@ async function verifyCheckoutState(
     await requiredOutput(git, repositoryArgs(record.root, ['rev-parse', '--verify', `${branchRef}^{commit}`]), record.root, isolated, 'read recorded branch'),
     'recorded branch revision'
   );
+  if (services?.platform === 'win32') await captureTreeEvidence(record.root, record.revision, git, isolated);
   if (head !== record.revision || branchRevision !== record.revision) throw new BazframeError('MANAGED_GIT_REVISION_MISMATCH', `Bazframe-managed checkout revision changed: ${record.root}`);
+}
+
+
+async function readTreeEvidence(root: string, revision: string, git: string, environment: NodeJS.ProcessEnv): Promise<ManagedGitTreeEvidence> {
+  return decodeManagedGitTreeEvidence(await exactOutput(git, repositoryArgs(root, ['ls-tree', '-rz', '--full-tree', revision]), root, environment), 'tree');
+}
+async function exactOutput(git: string, args: string[], root: string, environment: NodeJS.ProcessEnv): Promise<Uint8Array> {
+  const result = await run(git, args, root, environment);
+  if (result.status !== 0 || failedManagedGitProcess(result)) throw processFailure('read exact tree/index', git, result);
+  if (result.stdoutBytes === undefined) throw new BazframeError('MANAGED_GIT_OUTPUT_INVALID', 'Exact Git byte evidence is required.');
+  return result.stdoutBytes;
+}
+async function captureTreeEvidence(root: string, revision: string, git: string, environment: NodeJS.ProcessEnv): Promise<ManagedGitTreeEvidence> {
+  const tree = await readTreeEvidence(root, revision, git, environment);
+  const index = decodeManagedGitTreeEvidence(await exactOutput(git, repositoryArgs(root, ['ls-files', '--stage', '-z']), root, environment), 'index');
+  assertManagedGitIndexMatchesTree(tree, index);
+  services?.recordTreeEvidence(root, tree);
+  return tree;
+}
+async function captureManagedGitTreeEvidence(root: string, revision: string, environment: NodeJS.ProcessEnv = process.env): Promise<ManagedGitTreeEvidence> {
+  const before = await directoryIdentity(root);
+  const evidence = await captureTreeEvidence(root, revision, await resolveManagedGitCommand(environment, root), gitEnvironment(environment, true));
+  await assertIdentity(root, before, 'Git mode source changed'); return evidence;
+}
+async function captureManagedGitTree(record: ManagedGitRecord, environment: NodeJS.ProcessEnv = process.env): Promise<ManagedGitTreeEvidence> {
+  const before = await directoryIdentity(record.root);
+  await verifyProvider(record, environment);
+  const tree = await captureTreeEvidence(record.root, record.revision, await resolveManagedGitCommand(environment, record.root), gitEnvironment(environment, true));
+  await assertIdentity(record.root, before, 'Managed source changed during exact tree capture');
+  return tree;
 }
 
 async function assertDetachedHead(root: string, git: string, environment: NodeJS.ProcessEnv): Promise<void> {
   const result = await run(git, repositoryArgs(root, ['symbolic-ref', '-q', 'HEAD']), root, environment);
-  if (result.failure !== undefined || result.error !== undefined || (result.status !== 0 && result.status !== 1)) {
+  if (failedManagedGitProcess(result) || (result.status !== 0 && result.status !== 1)) {
     throw processFailure('inspect detached HEAD', git, result);
   }
   if (result.status === 0 || result.stdout !== '' || result.stderr !== '') {
@@ -1487,9 +1869,10 @@ async function assertDetachedHead(root: string, git: string, environment: NodeJS
   }
 }
 
+
 async function assertDirectGitReference(root: string, reference: string, git: string, environment: NodeJS.ProcessEnv): Promise<void> {
   const result = await run(git, repositoryArgs(root, ['symbolic-ref', '-q', reference]), root, environment);
-  if (result.failure !== undefined || result.error !== undefined || (result.status !== 0 && result.status !== 1)) {
+  if (failedManagedGitProcess(result) || (result.status !== 0 && result.status !== 1)) {
     throw processFailure('inspect branch reference', git, result);
   }
   if (result.status === 0) {
@@ -1497,6 +1880,7 @@ async function assertDirectGitReference(root: string, reference: string, git: st
   }
   if (result.stdout !== '' || result.stderr !== '') throw processFailure('inspect branch reference', git, result);
 }
+
 
 async function verifyResourceRegistration(record: ManagedGitRecord): Promise<void> {
   const home = resolveHome(record.root);
@@ -1510,15 +1894,17 @@ async function verifyResourceRegistration(record: ManagedGitRecord): Promise<voi
   await verifySkillSnapshot(home, resource.digest);
 }
 
+
 async function assertResourceAvailableForAdd(home: string, kind: ManagedGitResourceKind, id: string, expectedRoot: string): Promise<void> {
   if (await pathExists(expectedRoot)) throw new BazframeError('MANAGED_GIT_DESTINATION_OCCUPIED', `Bazframe-managed checkout destination is occupied without matching provenance: ${expectedRoot}`);
   const path = kind === 'skill' ? join(defaultSkillCatalogRoot(home), id) : globalCollectionPath(home, kind, id);
   if (await pathExists(path)) throw new BazframeError('MANAGED_GIT_DESTINATION_OCCUPIED', `${title(kind)} ${id} is already registered at ${path}.`);
 }
 
+
 async function cleanManagedCheckout(record: ManagedGitRecord, environment: NodeJS.ProcessEnv, expectedIdentity: DirectoryIdentity): Promise<void> {
   await assertIdentity(record.root, expectedIdentity, 'Bazframe-managed package checkout changed before cleanup');
-  const git = environment.BAZFRAME_GIT_COMMAND || 'git';
+  const git = await resolveManagedGitCommand(environment, record.root);
   const isolated = gitEnvironment(environment, true);
   await assertSafeLocalGitConfiguration(record.root, git, isolated);
   await required(git, repositoryArgs(record.root, ['reset', '--hard', record.revision]), record.root, isolated, 'restore Bazframe-managed package checkout');
@@ -1526,8 +1912,9 @@ async function cleanManagedCheckout(record: ManagedGitRecord, environment: NodeJ
   await verifyProvider(record, environment);
 }
 
+
 async function assertClean(root: string, environment: NodeJS.ProcessEnv): Promise<void> {
-  const git = environment.BAZFRAME_GIT_COMMAND || 'git';
+  const git = await resolveManagedGitCommand(environment, root);
   const isolated = gitEnvironment(environment, true);
   await assertSafeLocalGitConfiguration(root, git, isolated);
   const output = await requiredOutput(git, repositoryArgs(root, ['status', '--porcelain=v1', '--untracked-files=all', '--ignored']), root, isolated, 'inspect source checkout state');
@@ -1540,6 +1927,7 @@ async function assertClean(root: string, environment: NodeJS.ProcessEnv): Promis
     }
   }
 }
+
 
 async function assertEffectiveGitStorage(root: string, git: string, environment: NodeJS.ProcessEnv): Promise<void> {
   const expectedGitDirectory = join(root, '.git');
@@ -1556,21 +1944,23 @@ async function assertEffectiveGitStorage(root: string, git: string, environment:
   await assertEffectiveGitDirectory(root, objectDirectory, expectedObjectDirectory, 'Git object directory');
 }
 
+
 async function assertEffectiveGitDirectory(root: string, reported: string, expected: string, label: string): Promise<void> {
   const resolved = resolve(root, reported);
   if (resolved !== expected) {
     throw new BazframeError('MANAGED_GIT_ROOT_INVALID', `Bazframe-managed checkout ${label} must remain inside its physical .git directory: ${root}`);
   }
   try {
-    const metadata = await lstat(expected);
+    await physicalDirectory(expected);
     const canonical = await realpath(expected);
-    if (metadata.isSymbolicLink() || !metadata.isDirectory() || canonical !== expected) {
+    if (canonical !== expected) {
       throw new Error(`${label} is not a physical in-tree directory`);
     }
   } catch (cause) {
     throw new BazframeError('MANAGED_GIT_ROOT_INVALID', `Bazframe-managed checkout ${label} must be a physical in-tree directory: ${root}`, { cause });
   }
 }
+
 
 async function assertSafeLocalGitConfiguration(root: string, git: string, environment: NodeJS.ProcessEnv): Promise<void> {
   const output = await requiredOutput(git, repositoryArgs(root, ['config', '--local', '--no-includes', '--null', '--list']), root, environment, 'inspect local configuration');
@@ -1589,12 +1979,15 @@ async function assertSafeLocalGitConfiguration(root: string, git: string, enviro
   }
 }
 
-function repositoryArgs(_root: string, args: readonly string[]): string[] {
+
+function repositoryArgs(_root: string, args: readonly string[]): string[] { if (services !== undefined) return services.repositoryArgs(_root, args);
   return ['--no-replace-objects', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', ...args];
 }
+
 function requiredSingleLine(output: string, label: string): string {
   return requiredOutputLines(output, 1, label)[0]!;
 }
+
 function requiredOutputLines(output: string, count: number, label: string): string[] {
   const normalized = output.replace(/\r\n/gu, '\n');
   const value = normalized.endsWith('\n') ? normalized.slice(0, -1) : normalized;
@@ -1605,17 +1998,19 @@ function requiredOutputLines(output: string, count: number, label: string): stri
   return lines;
 }
 
+
 function requiredRevisionOutput(output: string, label: string): string {
   const revision = requiredSingleLine(output, label);
   assertValidManagedGitRevision(revision);
   return revision;
 }
 
+
 async function isAncestor(root: string, previous: string, next: string, environment: NodeJS.ProcessEnv): Promise<boolean> {
-  const git = environment.BAZFRAME_GIT_COMMAND || 'git';
+  const git = await resolveManagedGitCommand(environment, root);
   const isolated = gitEnvironment(environment, true);
   const available = await run(git, repositoryArgs(root, ['rev-parse', '--verify', '--quiet', `${previous}^{commit}`]), root, isolated);
-  if (available.failure !== undefined || available.error !== undefined
+  if (failedManagedGitProcess(available)
     || (available.status !== 0 && !(available.status === 1 && available.stdout === '' && available.stderr === ''))) {
     throw processFailure('resolve prior branch revision', git, available);
   }
@@ -1624,21 +2019,27 @@ async function isAncestor(root: string, previous: string, next: string, environm
     throw new BazframeError('MANAGED_GIT_REVISION_MISMATCH', `Recorded prior revision did not resolve exactly: ${previous}`);
   }
   const result = await run(git, repositoryArgs(root, ['merge-base', '--is-ancestor', previous, next]), root, isolated);
-  if (result.failure !== undefined || result.error !== undefined || (result.status !== 0 && result.status !== 1)) {
+  if (failedManagedGitProcess(result) || (result.status !== 0 && result.status !== 1)) {
     throw processFailure('verify branch ancestry', git, result);
   }
   return result.status === 0;
 }
 
+
 function makeRecord(kind: ManagedGitResourceKind, source: ManagedGitSource, root: string, branch: string, revision: string, transport: 'git' | 'gh'): ManagedGitRecord {
   return decodeManagedGitRecord({ schemaVersion: 1, kind, id: source.id, root, remote: source.remote, fetchUrl: source.fetchUrl, transport, branch, revision });
 }
+
 function lifecycleResult(action: ManagedGitLifecycleResult['action'], record: ManagedGitRecord): ManagedGitLifecycleResult { return { action, kind: record.kind, id: record.id, root: record.root, remote: record.remote, branch: record.branch, revision: record.revision }; }
+
 function resolveHome(root: string): string { const marker = join('providers', 'git', 'checkouts'); const index = root.lastIndexOf(marker); if (index <= 0) throw new BazframeError('MANAGED_GIT_ROOT_INVALID', `Bazframe-managed checkout root is outside its Bazframe-managed namespace: ${root}`); return root.slice(0, index - 1); }
+
 async function canonicalManagedHome(entered: string): Promise<string> { const absolute = resolve(entered); await ensureManagedDirectory(absolute, absolute); return realpath(absolute); }
+
 async function assertNoRecovery(home: string, kind: ManagedGitResourceKind, id: string): Promise<void> { const path = managedGitJournalPath(home, kind, id); if (await pathExists(path)) throw new BazframeError('MANAGED_GIT_RECOVERY_REQUIRED', `Inspect remote Git source recovery state before continuing: ${path}`); }
 
-async function assertManagedGitResourceRecoveryAbsent(home: string, kind: ManagedGitResourceKind, id: string): Promise<void> {
+
+async function assertManagedGitResourceRecoveryAbsent(home: string, kind: ManagedGitResourceKind, id: string): Promise<void> { if (services !== undefined) return services.assertManagedGitResourceRecoveryAbsent(home, kind, id);
   const recoveryRoot = managedGitRecoveryRoot(home);
   const journalPath = managedGitJournalPath(home, kind, id);
   const ancestorPaths = [home, join(home, 'providers'), join(home, 'providers', 'git')];
@@ -1679,6 +2080,7 @@ async function assertManagedGitResourceRecoveryAbsent(home: string, kind: Manage
   if (operationError !== undefined) throw operationError;
 }
 
+
 async function assertRecoveryPathAbsent(path: string, journalPath: string): Promise<void> {
   try { await lstat(path); }
   catch (error) {
@@ -1687,6 +2089,7 @@ async function assertRecoveryPathAbsent(path: string, journalPath: string): Prom
   }
   throw recoveryAbsenceError(journalPath);
 }
+
 async function recoveryDirectoryIdentity(path: string, journalPath: string): Promise<DirectoryIdentity> {
   try {
     const metadata = await lstat(path, { bigint: true });
@@ -1694,17 +2097,44 @@ async function recoveryDirectoryIdentity(path: string, journalPath: string): Pro
     return { device: metadata.dev, inode: metadata.ino };
   } catch (error) { throw error instanceof BazframeError ? error : recoveryAbsenceError(journalPath, error); }
 }
-function sameDirectoryIdentity(left: DirectoryIdentity, right: DirectoryIdentity): boolean { return left.device === right.device && left.inode === right.inode; }
+
+function sameDirectoryIdentity(left: DirectoryIdentity, right: DirectoryIdentity): boolean { return sameResourceIdentity(left, right); }
+
 function recoveryAbsenceError(path: string, cause?: unknown): BazframeError {
   return new BazframeError('MANAGED_GIT_RECOVERY_REQUIRED', `Remote Git recovery for this resource must be absent in a stable physical namespace: ${path}`, cause === undefined ? {} : { cause });
 }
 
-function gitEnvironment(environment: NodeJS.ProcessEnv, isolated: boolean): NodeJS.ProcessEnv {
+
+const resolvedManagedEnvironments = new WeakSet<object>();
+
+function resolvedGitEnvironment(environment: NodeJS.ProcessEnv, executable: string): NodeJS.ProcessEnv { const result = { ...environment }; if ((services?.platform ?? process.platform) === 'win32') for (const key of Object.keys(result)) if (key.toUpperCase() === 'BAZFRAME_GIT_COMMAND') delete result[key]; result.BAZFRAME_GIT_COMMAND = executable; return result; }
+async function resolveManagedGitOptions(options: ManagedGitOptions): Promise<ManagedGitOptions> {
+  if (options.environment !== undefined && resolvedManagedEnvironments.has(options.environment)) return options;
+  const environment = { ...(options.environment ?? process.env) };
+  const selected = await resolveManagedGitCommand(environment, resolve(options.bazframeHome, 'providers'));
+  if ((services?.platform ?? process.platform) === 'win32') for (const key of Object.keys(environment)) if (key.toUpperCase() === 'BAZFRAME_GIT_COMMAND') delete environment[key];
+  environment.BAZFRAME_GIT_COMMAND = selected;
+  resolvedManagedEnvironments.add(environment);
+  return { ...options, environment };
+}
+
+async function resolveManagedGitCommand(environment: NodeJS.ProcessEnv, excludedRoot: string): Promise<string> { if (services !== undefined) return services.resolveManagedGitCommand(environment, excludedRoot);
+  return resolveControlledExecutable(executableEnvironmentValue(environment, 'BAZFRAME_GIT_COMMAND') || 'git', { cwd: process.cwd(), environment, excludedRoots: [excludedRoot] });
+}
+
+async function resolveManagedGithubCommand(environment: NodeJS.ProcessEnv, excludedRoot: string): Promise<string | undefined> { if (services !== undefined) return services.resolveManagedGithubCommand(environment, excludedRoot);
+  try { return await resolveControlledExecutable(executableEnvironmentValue(environment, 'BAZFRAME_GH_COMMAND') || 'gh', { cwd: process.cwd(), environment, excludedRoots: [excludedRoot] }); }
+  catch (error) { if (error instanceof BazframeError && error.code === 'EXECUTABLE_NOT_FOUND') return undefined; throw error; }
+}
+
+
+function gitEnvironment(environment: NodeJS.ProcessEnv, isolated: boolean): NodeJS.ProcessEnv { if (services !== undefined) return services.gitEnvironment(environment, isolated);
   const strict = environment.BAZFRAME_STRICT_GIT_ENVIRONMENT === '1';
   const result: NodeJS.ProcessEnv = strict ? {} : { ...environment };
   if (strict) {
-    for (const key of ['PATH', 'TMPDIR', 'TMP', 'TEMP', 'GH_CONFIG_DIR', 'BAZFRAME_GIT_COMMAND', 'BAZFRAME_GH_COMMAND'] as const) {
-      if (environment[key] !== undefined) result[key] = environment[key];
+    for (const key of ['PATH', 'PATHEXT', 'SystemRoot', 'WINDIR', 'TMPDIR', 'TMP', 'TEMP', 'GH_CONFIG_DIR', 'BAZFRAME_GIT_COMMAND', 'BAZFRAME_GH_COMMAND'] as const) {
+      const value = executableEnvironmentValue(environment, key);
+      if (value !== undefined) result[key] = value;
     }
     result.HOME = requiredStrictEnvironmentValue(environment, 'BAZFRAME_STRICT_GIT_HOME');
     result.XDG_CONFIG_HOME = requiredStrictEnvironmentValue(environment, 'BAZFRAME_STRICT_GIT_XDG_HOME');
@@ -1733,12 +2163,14 @@ function gitEnvironment(environment: NodeJS.ProcessEnv, isolated: boolean): Node
   if (isolated) { result.GIT_CONFIG_NOSYSTEM = '1'; result.GIT_CONFIG_GLOBAL = strict ? result.GIT_CONFIG_GLOBAL : process.platform === 'win32' ? 'NUL' : '/dev/null'; }
   return result;
 }
+
 function requiredStrictEnvironmentValue(environment: NodeJS.ProcessEnv, key: string): string {
   const value = environment[key];
   if (value === undefined || value.length === 0) throw new BazframeError('MANAGED_GIT_ENVIRONMENT_INVALID', `Strict Git environment is missing ${key}.`);
   return value;
 }
-function run(
+
+async function run(
   executable: string,
   args: readonly string[],
   cwd: string,
@@ -1746,120 +2178,40 @@ function run(
   monitor?: () => void | Promise<void>
 ): Promise<ManagedGitProcessResult> {
   const longRunning = args.includes('clone') || args.includes('fetch');
-  return runManagedGitProcess(executable, args, cwd, environment, {
+  const result = await (services?.runProcess ?? runManagedGitProcess)(executable, args, cwd, environment, {
     timeoutMilliseconds: longRunning
       ? PROFILE_PORTABILITY_PRODUCTION_LIMITS.gitCloneFetchMilliseconds
       : PROFILE_PORTABILITY_PRODUCTION_LIMITS.gitMetadataMilliseconds,
     terminationGraceMilliseconds: PROFILE_PORTABILITY_PRODUCTION_LIMITS.processTerminationGraceMilliseconds,
     maxStreamBytes: PROFILE_PORTABILITY_PRODUCTION_LIMITS.gitStreamBytes
   }, monitor === undefined ? {} : { monitor });
+  if ((result.stdoutBytes?.byteLength ?? Buffer.byteLength(result.stdout)) > PROFILE_PORTABILITY_PRODUCTION_LIMITS.gitStreamBytes || Buffer.byteLength(result.stderr) > PROFILE_PORTABILITY_PRODUCTION_LIMITS.gitStreamBytes) throw new BazframeError('MANAGED_GIT_OUTPUT_INVALID', 'Managed Git exceeded its bounded output receipt.');
+  if (result.stdoutBytes !== undefined && Buffer.from(result.stdoutBytes).toString('utf8') !== result.stdout) throw new BazframeError('MANAGED_GIT_OUTPUT_INVALID', 'Managed Git returned contradictory stdout representations.');
+  return result;
 }
-async function required(executable: string, args: readonly string[], cwd: string, environment: NodeJS.ProcessEnv, label: string): Promise<void> { const result = await run(executable, args, cwd, environment); if (result.status !== 0 || result.failure !== undefined) throw processFailure(label, executable, result); }
-async function requiredWithMonitor(executable: string, args: readonly string[], cwd: string, environment: NodeJS.ProcessEnv, label: string, monitor: () => void | Promise<void>): Promise<void> { const result = await run(executable, args, cwd, environment, monitor); if (result.status !== 0 || result.failure !== undefined) throw processFailure(label, executable, result); }
-async function requiredOutput(executable: string, args: readonly string[], cwd: string, environment: NodeJS.ProcessEnv, label: string): Promise<string> { const result = await run(executable, args, cwd, environment); if (result.status !== 0 || result.failure !== undefined) throw processFailure(label, executable, result); return result.stdout; }
-class ManagedGitProcessError extends BazframeError {
-  readonly operation: string;
-  readonly status: number | null;
-  readonly processFailure: ManagedGitProcessResult['failure'];
-  readonly definiteNetworkUnavailable: boolean;
-  readonly uncertainTermination: boolean;
-  readonly monitorError?: Error;
-  constructor(label: string, target: string, result: ManagedGitProcessResult) {
-    const termination = result.failure === undefined ? '' : result.uncertainTermination === true
-      ? `process ${result.failure}; termination could not be confirmed`
-      : `process ${result.failure}`;
-    const diagnostic = safeDiagnostic(result.monitorError?.message || termination || result.stderr || result.error?.message || `status ${result.status ?? 1}`);
-    const code = result.failure === 'monitor-failure' && result.monitorError instanceof BazframeError
-      ? result.monitorError.code
-      : 'MANAGED_GIT_PROCESS_FAILED';
-    super(code, `Git ${label} failed for ${target}: ${diagnostic}`, {
-      cause: result.monitorError ?? result.error
-    });
-    this.name = 'ManagedGitProcessError';
-    this.operation = label;
-    this.status = result.status;
-    this.processFailure = result.failure;
-    this.definiteNetworkUnavailable = /(?:could not resolve host|failed to connect|network is unreachable|connection (?:timed out|refused)|couldn't connect)/iu.test(result.stderr || result.error?.message || '');
-    this.uncertainTermination = result.uncertainTermination === true;
-    this.monitorError = result.monitorError;
-  }
-}
-class ManagedGitAcquisitionCleanupError extends BazframeError {
-  readonly stagingPath: string;
-  constructor(stagingPath: string, primary: unknown, cleanup: unknown) {
-    super(
-      'MANAGED_GIT_ACQUISITION_CLEANUP_UNPROVEN',
-      `Remote Git acquisition failed and staging cleanup could not be proven at ${boundedPathForDisplay(stagingPath)}.`,
-      { cause: cleanup }
-    );
-    this.name = 'ManagedGitAcquisitionCleanupError';
-    this.stagingPath = stagingPath;
-    this.errors = [primary, cleanup];
-  }
-  readonly errors: unknown[];
-}
-class ManagedGitAcquisitionQuarantineError extends BazframeError {
-  readonly stagingPath: string;
-  readonly uncertainTermination = true;
-  constructor(stagingPath: string, cause: unknown) {
-    super(
-      'MANAGED_GIT_ACQUISITION_QUARANTINED',
-      `Remote Git acquisition process termination was uncertain; retained quarantine at ${boundedPathForDisplay(stagingPath)}.`,
-      { cause }
-    );
-    this.name = 'ManagedGitAcquisitionQuarantineError';
-    this.stagingPath = stagingPath;
-  }
-}
+
+async function required(executable: string, args: readonly string[], cwd: string, environment: NodeJS.ProcessEnv, label: string): Promise<void> { const result = await run(executable, args, cwd, environment); if (result.status !== 0 || failedManagedGitProcess(result)) throw processFailure(label, executable, result); }
+
+async function requiredWithMonitor(executable: string, args: readonly string[], cwd: string, environment: NodeJS.ProcessEnv, label: string, monitor: () => void | Promise<void>): Promise<void> { const result = await run(executable, args, cwd, environment, monitor); if (result.status !== 0 || failedManagedGitProcess(result)) throw processFailure(label, executable, result); }
+
+async function requiredOutput(executable: string, args: readonly string[], cwd: string, environment: NodeJS.ProcessEnv, label: string): Promise<string> { const result = await run(executable, args, cwd, environment); if (result.status !== 0 || failedManagedGitProcess(result)) throw processFailure(label, executable, result); return result.stdout; }
+
 function processFailure(label: string, target: string, result: ManagedGitProcessResult): ManagedGitProcessError {
   return new ManagedGitProcessError(label, target, result);
 }
-function requiresAcquisitionRecovery(error: unknown): boolean {
-  return error instanceof ManagedGitAcquisitionCleanupError || isUncertainManagedGitProcessError(error);
-}
-function isUncertainManagedGitProcessError(error: unknown): boolean {
-  if (error instanceof ManagedGitAcquisitionQuarantineError) return true;
-  if (error instanceof ManagedGitProcessError) return error.uncertainTermination;
-  if (error instanceof AggregateError) return error.errors.some(isUncertainManagedGitProcessError);
-  return error instanceof Error && isUncertainManagedGitProcessError(error.cause);
-}
 
-/** True only when a clone/fetch process settled unsuccessfully with confirmed termination. */
-export function isDefiniteManagedGitAcquisitionUnavailable(error: unknown): boolean {
-  return error instanceof ManagedGitProcessError
-    && error.operation === 'clone'
-    && error.status !== null
-    && error.status !== 0
-    && error.processFailure === undefined
-    && error.monitorError === undefined
-    && error.definiteNetworkUnavailable
-    && !error.uncertainTermination;
-}
+async function directoryIdentity(path: string): Promise<DirectoryIdentity> { if (services !== undefined) return services.directoryIdentity(path); const metadata = await lstat(path, { bigint: true }); if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new BazframeError('MANAGED_GIT_ROOT_INVALID', `Expected a physical Bazframe-managed directory: ${path}`); return { device: metadata.dev, inode: metadata.ino }; }
 
-/** Retain an isolated home whenever managed-Git/package cleanup or process settlement is uncertain. */
-export function isUncertainManagedGitOperation(error: unknown): boolean {
-  if (isUncertainManagedGitProcessError(error) || isUncertainPackageBuildError(error)) return true;
-  if (error instanceof BazframeError && [
-    'MANAGED_GIT_ACQUISITION_CLEANUP_UNPROVEN',
-    'MANAGED_GIT_ACQUISITION_QUARANTINED',
-    'MANAGED_GIT_RECOVERY_REQUIRED',
-    'PACKAGE_BUILD_TERMINATION_UNCERTAIN'
-  ].includes(error.code)) return true;
-  if (error instanceof AggregateError && error.errors.some(isUncertainManagedGitOperation)) return true;
-  return error instanceof Error && error.cause !== undefined && isUncertainManagedGitOperation(error.cause);
-}
+async function holdDirectoryIdentity(path: string): Promise<HeldDirectoryIdentity> { if (services !== undefined) return services.holdDirectoryIdentity(path); let handle: FileHandle | undefined; try { handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW); const opened = await handle.stat({ bigint: true }); const current = await lstat(path, { bigint: true }); if (!opened.isDirectory() || current.isSymbolicLink() || !current.isDirectory() || opened.dev !== current.dev || opened.ino !== current.ino) throw new BazframeError('MANAGED_GIT_ROOT_INVALID', `Expected a stable physical Bazframe-managed directory: ${path}`); return { handle, identity: { device: opened.dev, inode: opened.ino } }; } catch (error) { await handle?.close().catch(() => undefined); throw error; } }
 
-export function safeDiagnostic(value: string): string {
-  let redacted = value.replace(/(https?:\/\/)[^/@\s]+@/giu, '$1[redacted]@').replace(/\b(authorization|token|access[_-]?token|oauth[_-]?token|password)\s*[:=]\s*[^\s]+/giu, '$1=[redacted]');
-  redacted = replaceUnsafeDisplayCharacters(redacted, ' ').replace(/\s+/gu, ' ').trim();
-  return redacted.slice(0, 1000);
-}
-async function directoryIdentity(path: string): Promise<DirectoryIdentity> { const metadata = await lstat(path, { bigint: true }); if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new BazframeError('MANAGED_GIT_ROOT_INVALID', `Expected a physical Bazframe-managed directory: ${path}`); return { device: metadata.dev, inode: metadata.ino }; }
-async function holdDirectoryIdentity(path: string): Promise<HeldDirectoryIdentity> { let handle: FileHandle | undefined; try { handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW); const opened = await handle.stat({ bigint: true }); const current = await lstat(path, { bigint: true }); if (!opened.isDirectory() || current.isSymbolicLink() || !current.isDirectory() || opened.dev !== current.dev || opened.ino !== current.ino) throw new BazframeError('MANAGED_GIT_ROOT_INVALID', `Expected a stable physical Bazframe-managed directory: ${path}`); return { handle, identity: { device: opened.dev, inode: opened.ino } }; } catch (error) { await handle?.close().catch(() => undefined); throw error; } }
-async function assertIdentity(path: string, expected: DirectoryIdentity, message: string): Promise<void> { const current = await directoryIdentity(path); if (current.device !== expected.device || current.inode !== expected.inode) throw new BazframeError('MANAGED_GIT_OWNERSHIP_CHANGED', `${message}: ${path}`); }
-async function removeOwnedTree(path: string, expected: DirectoryIdentity): Promise<void> { await assertIdentity(path, expected, 'Bazframe-managed directory ownership changed before cleanup'); await rm(path, { recursive: true }); }
-async function removeOwnedContainer(path: string, expected: DirectoryIdentity): Promise<void> { const metadata = await lstat(path, { bigint: true }).catch((error) => errorCode(error) === 'ENOENT' ? undefined : Promise.reject(error)); if (metadata === undefined) return; if (metadata.isSymbolicLink() || !metadata.isDirectory() || metadata.dev !== expected.device || metadata.ino !== expected.inode) throw new BazframeError('MANAGED_GIT_OWNERSHIP_CHANGED', `Bazframe-managed staging container ownership changed: ${path}`); await rm(path, { recursive: true }); }
-async function clearPartialClone(container: string, expected: DirectoryIdentity, root: string): Promise<void> { await assertIdentity(container, expected, 'staging container changed before GitHub fallback'); await rm(root, { recursive: true, force: true }); }
+async function assertIdentity(path: string, expected: DirectoryIdentity, message: string): Promise<void> { const current = await directoryIdentity(path); if (!sameResourceIdentity(current, expected)) throw new BazframeError('MANAGED_GIT_OWNERSHIP_CHANGED', `${message}: ${path}`); }
+
+async function removeOwnedTree(path: string, expected: DirectoryIdentity): Promise<void> { if (services !== undefined) return services.removeOwnedTree(path, expected); await assertIdentity(path, expected, 'Bazframe-managed directory ownership changed before cleanup'); await rm(path, { recursive: true }); }
+
+async function removeOwnedContainer(path: string, expected: DirectoryIdentity): Promise<void> { if (services !== undefined) return services.removeOwnedContainer(path, expected); const metadata = await lstat(path, { bigint: true }).catch((error) => errorCode(error) === 'ENOENT' ? undefined : Promise.reject(error)); if (metadata === undefined) return; if (metadata.isSymbolicLink() || !metadata.isDirectory() || metadata.dev !== expected.device || metadata.ino !== expected.inode) throw new BazframeError('MANAGED_GIT_OWNERSHIP_CHANGED', `Bazframe-managed staging container ownership changed: ${path}`); await rm(path, { recursive: true }); }
+
+async function clearPartialClone(container: string, expected: DirectoryIdentity, root: string): Promise<void> { if (services !== undefined) return services.clearPartialClone(container, expected, root); await assertIdentity(container, expected, 'staging container changed before GitHub fallback'); await rm(root, { recursive: true, force: true }); }
+
 
 function requiredAuthorizedManifest(manifest: PackageManifestSnapshot | undefined): PackageManifestSnapshot {
   if (manifest === undefined) {
@@ -1868,21 +2220,21 @@ function requiredAuthorizedManifest(manifest: PackageManifestSnapshot | undefine
   return manifest;
 }
 
+
 function managedPackageActivationDependencies(
   options: ManagedGitOptions,
   record: ManagedGitRecord,
   expectedIdentity: DirectoryIdentity,
   expectedManifest: PackageManifestSnapshot
 ): {
-  expectedRootIdentity: { root: string; device: bigint; inode: bigint };
+  expectedRootIdentity: ResourceIdentity & { root: string };
   expectedPackageManifest: PackageManifestSnapshot;
   beforePackageBuild: (context: BeforePackageBuildContext) => Promise<void>;
 } {
   const revalidateBuildInputs = async (context: BeforePackageBuildContext): Promise<void> => {
     if (context.packageId !== record.id
       || context.rootIdentity.root !== record.root
-      || context.rootIdentity.device !== expectedIdentity.device
-      || context.rootIdentity.inode !== expectedIdentity.inode
+      || !sameResourceIdentity(context.rootIdentity, expectedIdentity)
       || !samePackageManifestSnapshot(context.manifestSnapshot, expectedManifest)) {
       throw new BazframeError('MANAGED_GIT_CHANGED', `Remote Git package ${record.id} no longer matches its authorized build inputs.`);
     }
@@ -1908,6 +2260,7 @@ function managedPackageActivationDependencies(
   };
 }
 
+
 function packageProcessTestDependency(options: ManagedGitOptions): {
   packageProcessRunner?: (
     executable: string,
@@ -1925,6 +2278,7 @@ function packageProcessTestDependency(options: ManagedGitOptions): {
     })
   };
 }
+
 
 async function throwAfterAcquiredTransactionFailure(
   error: unknown,
@@ -1950,26 +2304,38 @@ async function throwAfterAcquiredTransactionFailure(
   catch (cleanupError) { throw new AggregateError([error, cleanupError], `${cleanupDetail} at ${acquired.container}.`, { cause: cleanupError }); }
   throw error;
 }
-async function pathExists(path: string): Promise<boolean> { try { await lstat(path); return true; } catch (error) { if (errorCode(error) === 'ENOENT') return false; throw error; } }
-async function createExclusiveFile(home: string, path: string, text: string): Promise<FileIdentity> { await ensureManagedDirectory(home, dirname(path)); let handle: FileHandle | undefined; try { handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600); await handle.writeFile(text, 'utf8'); await handle.sync(); } finally { await handle?.close(); } return physicalFileIdentity(path); }
+
+async function pathExists(path: string): Promise<boolean> { if (services !== undefined) return services.pathExists(path); try { await lstat(path); return true; } catch (error) { if (errorCode(error) === 'ENOENT') return false; throw error; } }
+
+async function createExclusiveFile(home: string, path: string, text: string): Promise<FileIdentity> { if (services !== undefined) return services.createExclusiveFile(home, path, text); await ensureManagedDirectory(home, dirname(path)); let handle: FileHandle | undefined; try { handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600); await handle.writeFile(text, 'utf8'); await handle.sync(); } finally { await handle?.close(); } return physicalFileIdentity(path); }
+
 async function createJournal(home: string, journal: ManagedGitJournal): Promise<FileIdentity> { return createExclusiveFile(home, managedGitJournalPath(home, journal.kind, journal.id), encodeManagedGitJournal(journal)); }
-async function updateJournal(home: string, journal: ManagedGitJournal, expected: FileIdentity | undefined): Promise<FileIdentity> { const path = managedGitJournalPath(home, journal.kind, journal.id); if (expected === undefined) throw new BazframeError('MANAGED_GIT_OWNERSHIP_CHANGED', `Bazframe-managed recovery record ownership is unavailable: ${path}`); const current = await physicalFileIdentity(path); if (!sameFileIdentity(expected, current)) throw new BazframeError('MANAGED_GIT_OWNERSHIP_CHANGED', `Bazframe-managed recovery record changed before update: ${path}`); await writeFileAtomic(path, encodeManagedGitJournal(journal), { managedRoot: home, mode: 0o600, commitOnRename: true }); return physicalFileIdentity(path); }
+
+async function updateJournal(home: string, journal: ManagedGitJournal, expected: FileIdentity | undefined): Promise<FileIdentity> { const path = managedGitJournalPath(home, journal.kind, journal.id); if (expected === undefined) throw new BazframeError('MANAGED_GIT_OWNERSHIP_CHANGED', `Bazframe-managed recovery record ownership is unavailable: ${path}`); const current = await physicalFileIdentity(path); if (!sameFileIdentity(expected, current)) throw new BazframeError('MANAGED_GIT_OWNERSHIP_CHANGED', `Bazframe-managed recovery record changed before update: ${path}`); if (services !== undefined) await services.writeProviderFile(path, encodeManagedGitJournal(journal), expected); else await writeFileAtomic(path, encodeManagedGitJournal(journal), { managedRoot: home, mode: 0o600, commitOnRename: true }); return physicalFileIdentity(path); }
+
 function journalFor(record: ManagedGitRecord, operation: ManagedGitJournal['operation'], phase: string, previousRevision: string | null, nextRevision: string, staging: string | null = null, backup: string | null = null, resourceStateSha256: string | null = null): ManagedGitJournal { return { schemaVersion: 1, operation, phase, kind: record.kind, id: record.id, remote: record.remote, fetchUrl: record.fetchUrl, transport: record.transport, branch: record.branch, previousRevision, nextRevision, root: record.root, staging, backup, resourceStateSha256 }; }
-async function physicalFileIdentity(path: string): Promise<FileIdentity> { let handle: FileHandle | undefined; try { handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); const before = await handle.stat({ bigint: true }); if (!before.isFile()) throw new BazframeError('MANAGED_GIT_OWNERSHIP_CHANGED', `Expected a physical Bazframe-managed file: ${path}`); const bytes = await handle.readFile(); const after = await handle.stat({ bigint: true }); const current = await lstat(path, { bigint: true }); if (!after.isFile() || current.isSymbolicLink() || !current.isFile() || before.dev !== after.dev || before.ino !== after.ino || after.dev !== current.dev || after.ino !== current.ino || before.size !== after.size || before.mtimeNs !== after.mtimeNs) throw new BazframeError('MANAGED_GIT_OWNERSHIP_CHANGED', `Bazframe-managed file changed while inspected: ${path}`); return { device: before.dev, inode: before.ino, sha256: createHash('sha256').update(bytes).digest('hex') }; } finally { await handle?.close(); } }
-async function removeOwnedFile(path: string, expected: FileIdentity): Promise<void> { const current = await physicalFileIdentity(path); if (current.device !== expected.device || current.inode !== expected.inode || current.sha256 !== expected.sha256) throw new BazframeError('MANAGED_GIT_OWNERSHIP_CHANGED', `Bazframe-managed file ownership changed before removal: ${path}`); await unlink(path); }
-async function removeOwnedRecord(home: string, expected: ManagedGitRecordSnapshot): Promise<void> { const current = await readManagedGitRecord(home, expected.record.kind, expected.record.id); if (!sameRecordSnapshot(expected, current)) throw new BazframeError('MANAGED_GIT_OWNERSHIP_CHANGED', `Remote Git provenance changed before removal: ${expected.path}`); await unlink(expected.path); }
-async function restoreOwnedRecord(home: string, expected: ManagedGitRecordSnapshot, replacement: ManagedGitRecord): Promise<void> { const current = await readManagedGitRecord(home, expected.record.kind, expected.record.id); if (!sameRecordSnapshot(expected, current)) throw new BazframeError('MANAGED_GIT_OWNERSHIP_CHANGED', `Remote Git provenance changed before rollback: ${expected.path}`); await writeFileAtomic(expected.path, encodeManagedGitRecord(replacement), { managedRoot: home, mode: 0o600, commitOnRename: true }); }
-async function restoreOwnedDirectory(source: string, expected: DirectoryIdentity, destination: string): Promise<void> { await assertIdentity(source, expected, 'Bazframe-managed backup ownership changed before rollback'); if (await pathExists(destination)) throw new BazframeError('MANAGED_GIT_OWNERSHIP_CHANGED', `Bazframe-managed rollback destination became occupied: ${destination}`); await rename(source, destination); }
-function sameRecordSnapshot(left: ManagedGitRecordSnapshot, right: ManagedGitRecordSnapshot): boolean { return left.device === right.device && left.inode === right.inode && left.contentSha256 === right.contentSha256; }
-function sameFileIdentity(left: FileIdentity, right: FileIdentity): boolean { return left.device === right.device && left.inode === right.inode && left.sha256 === right.sha256; }
-async function readStableSkillName(path: string): Promise<string> { let handle: FileHandle | undefined; try { try { handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (error) { throw new BazframeError('MANAGED_GIT_RESOURCE_INVALID', `Remote Git Skill definition must be a physical regular file: ${path}`, { cause: error }); } const before = await handle.stat({ bigint: true }); if (!before.isFile()) throw new BazframeError('MANAGED_GIT_RESOURCE_INVALID', `Remote Git Skill definition must be a physical regular file: ${path}`); const bytes = await handle.readFile(); const after = await handle.stat({ bigint: true }); const current = await lstat(path, { bigint: true }); if (!after.isFile() || current.isSymbolicLink() || !current.isFile() || before.dev !== after.dev || before.ino !== after.ino || after.dev !== current.dev || after.ino !== current.ino || before.size !== after.size || before.mtimeNs !== after.mtimeNs) throw new BazframeError('MANAGED_GIT_RESOURCE_INVALID', `Remote Git Skill definition changed while inspected: ${path}`); let text: string; try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch (error) { throw new BazframeError('INVALID_SKILL_DEFINITION', `Skill definition is not valid UTF-8: ${path}`, { cause: error }); } return parseSkillDeclaredName(text, path); } finally { await handle?.close(); } }
-class ManagedGitRecoveryError extends AggregateError {
-  constructor(errors: readonly unknown[], message: string, cause: unknown) {
-    super(errors, message, { cause });
-    this.name = 'ManagedGitRecoveryError';
-  }
-}
+
+async function physicalFileIdentity(path: string): Promise<FileIdentity> { if (services !== undefined) return services.physicalFileIdentity(path); let handle: FileHandle | undefined; try { handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); const before = await handle.stat({ bigint: true }); if (!before.isFile()) throw new BazframeError('MANAGED_GIT_OWNERSHIP_CHANGED', `Expected a physical Bazframe-managed file: ${path}`); const bytes = await handle.readFile(); const after = await handle.stat({ bigint: true }); const current = await lstat(path, { bigint: true }); if (!after.isFile() || current.isSymbolicLink() || !current.isFile() || before.dev !== after.dev || before.ino !== after.ino || after.dev !== current.dev || after.ino !== current.ino || before.size !== after.size || before.mtimeNs !== after.mtimeNs) throw new BazframeError('MANAGED_GIT_OWNERSHIP_CHANGED', `Bazframe-managed file changed while inspected: ${path}`); return { device: before.dev, inode: before.ino, sha256: createHash('sha256').update(bytes).digest('hex') }; } finally { await handle?.close(); } }
+
+async function removeOwnedFile(path: string, expected: FileIdentity): Promise<void> { if (services !== undefined) return services.removeOwnedFile(path, expected); const current = await physicalFileIdentity(path); if (!sameResourceIdentity(current, expected) || current.sha256 !== expected.sha256) throw new BazframeError('MANAGED_GIT_OWNERSHIP_CHANGED', `Bazframe-managed file ownership changed before removal: ${path}`); await unlink(path); }
+
+async function removeOwnedRecord(home: string, expected: ManagedGitRecordSnapshot): Promise<void> { if (services !== undefined) return services.removeOwnedRecord(home, expected); const current = await readManagedGitRecord(home, expected.record.kind, expected.record.id); if (!sameRecordSnapshot(expected, current)) throw new BazframeError('MANAGED_GIT_OWNERSHIP_CHANGED', `Remote Git provenance changed before removal: ${expected.path}`); await unlink(expected.path); }
+
+async function restoreOwnedRecord(home: string, expected: ManagedGitRecordSnapshot, replacement: ManagedGitRecord): Promise<void> { if (services !== undefined) return services.restoreOwnedRecord(home, expected, replacement); const current = await readManagedGitRecord(home, expected.record.kind, expected.record.id); if (!sameRecordSnapshot(expected, current)) throw new BazframeError('MANAGED_GIT_OWNERSHIP_CHANGED', `Remote Git provenance changed before rollback: ${expected.path}`); await writeFileAtomic(expected.path, encodeManagedGitRecord(replacement), { managedRoot: home, mode: 0o600, commitOnRename: true }); }
+
+async function restoreOwnedDirectory(source: string, expected: DirectoryIdentity, destination: string): Promise<void> { if (services !== undefined) return services.restoreOwnedDirectory(source, expected, destination); await assertIdentity(source, expected, 'Bazframe-managed backup ownership changed before rollback'); if (await pathExists(destination)) throw new BazframeError('MANAGED_GIT_OWNERSHIP_CHANGED', `Bazframe-managed rollback destination became occupied: ${destination}`); await rename(source, destination); }
+
+function sameRecordSnapshot(left: ManagedGitRecordSnapshot, right: ManagedGitRecordSnapshot): boolean { return sameResourceIdentity(left, right) && left.contentSha256 === right.contentSha256; }
+
+function sameFileIdentity(left: FileIdentity, right: FileIdentity): boolean { return sameResourceIdentity(left, right) && left.sha256 === right.sha256; }
+
+async function readStableSkillName(path: string): Promise<string> { if (services !== undefined) return services.readStableSkillName(path); let handle: FileHandle | undefined; try { try { handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (error) { throw new BazframeError('MANAGED_GIT_RESOURCE_INVALID', `Remote Git Skill definition must be a physical regular file: ${path}`, { cause: error }); } const before = await handle.stat({ bigint: true }); if (!before.isFile()) throw new BazframeError('MANAGED_GIT_RESOURCE_INVALID', `Remote Git Skill definition must be a physical regular file: ${path}`); const bytes = await handle.readFile(); const after = await handle.stat({ bigint: true }); const current = await lstat(path, { bigint: true }); if (!after.isFile() || current.isSymbolicLink() || !current.isFile() || before.dev !== after.dev || before.ino !== after.ino || after.dev !== current.dev || after.ino !== current.ino || before.size !== after.size || before.mtimeNs !== after.mtimeNs) throw new BazframeError('MANAGED_GIT_RESOURCE_INVALID', `Remote Git Skill definition changed while inspected: ${path}`); let text: string; try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch (error) { throw new BazframeError('INVALID_SKILL_DEFINITION', `Skill definition is not valid UTF-8: ${path}`, { cause: error }); } return parseSkillDeclaredName(text, path); } finally { await handle?.close(); } }
+
 function recoveryError(error: unknown, home: string, kind: ManagedGitResourceKind, id: string, detail: string): ManagedGitRecoveryError {
   return new ManagedGitRecoveryError([error], `Remote Git source ${detail}; inspect ${managedGitJournalPath(home, kind, id)} before continuing.`, error);
 }
+
 function title(kind: ManagedGitResourceKind): string { return kind === 'skill' ? 'Skill' : kind === 'library' ? 'Library' : 'Package'; }
+return { captureManagedGitTreeEvidence, captureManagedGitTree, managedGitCloneInvocation, addManagedGitSkill, addManagedGitLibrary, addManagedGitPackage, addManagedGitSkillAtRevision, addManagedGitLibraryAtRevision, addManagedGitPackageAtRevision, updateManagedGitSkill, updateManagedGitLibrary, updateManagedGitPackage, removeManagedGitSkill, removeManagedGitLibrary, removeManagedGitPackage, isManagedGitResource, verifyManagedGitResource, captureManagedGitExportHealth, sameManagedGitExportHealth, classifyManagedGitImportOutcome, classifyManagedGitProviderOccupancy, classifyManagedGitImportResource, buildManagedGitPackage, inspectManagedGitRecordHealth, authorizeManagedGitPackageBuild };
+}
+export const { managedGitCloneInvocation, addManagedGitSkill, addManagedGitLibrary, addManagedGitPackage, addManagedGitSkillAtRevision, addManagedGitLibraryAtRevision, addManagedGitPackageAtRevision, updateManagedGitSkill, updateManagedGitLibrary, updateManagedGitPackage, removeManagedGitSkill, removeManagedGitLibrary, removeManagedGitPackage, isManagedGitResource, verifyManagedGitResource, captureManagedGitExportHealth, sameManagedGitExportHealth, classifyManagedGitImportOutcome, classifyManagedGitProviderOccupancy, classifyManagedGitImportResource, buildManagedGitPackage, inspectManagedGitRecordHealth, authorizeManagedGitPackageBuild } = createManagedGitProvider();

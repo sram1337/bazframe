@@ -1,5 +1,9 @@
+import { sameResourceIdentity, type ResourceIdentity } from '../skill-collections/resource-identity.js';
+import { createManagedGitProvider } from '../providers/managed-git.js';
+import type { ProfileCaptureDependencies } from './profile-capture.js';
 import { lstat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join as posixJoin } from 'node:path';
+const join = posixJoin;
 import { BazframeError } from '../core/errors.js';
 import type { ChildOutputPolicy } from '../core/child-process.js';
 import {
@@ -14,7 +18,7 @@ import {
   isUncertainManagedGitOperation,
   type ManagedGitOptions
 } from '../providers/managed-git.js';
-import { ensureManagedDirectory, writeFileAtomic } from '../state/atomic-file.js';
+import { ensureManagedDirectory as posixEnsureManagedDirectory, writeFileAtomic } from '../state/atomic-file.js';
 import { publishArtifactTree, type ArtifactTreeManifestV1 } from './artifact-tree.js';
 import { publishStoredBlob } from './blob-store.js';
 import { type CapturedResource, type ExactRemoteGitIdentity } from './captured-profile.js';
@@ -31,9 +35,21 @@ export interface ProductionProfileRemoteAdapterOptions {
   childOutputPolicy?: ChildOutputPolicy;
   /** Deterministic internal seams forwarded only for managed-Git lifecycle tests. */
   testHooks?: ManagedGitOptions['testHooks'];
+  services?: ProfileRemoteMaterializationServices;
 }
 
-interface OwnedDirectoryIdentity { device: bigint; inode: bigint }
+type OwnedDirectoryIdentity = ResourceIdentity;
+export interface ProfileRemoteMaterializationServices {
+  joinPath(...parts: string[]): string;
+  ensureDirectory(home: string, path: string): Promise<void>;
+  writeFile(path: string, text: string): Promise<void>;
+  createOwnedDirectory: typeof createOwnedProfileGithubDirectory;
+  directoryIdentity(path: string): Promise<ResourceIdentity>;
+  captureDependencies: ProfileCaptureDependencies;
+  publishBlob: typeof publishStoredBlob;
+  publishTree: typeof publishArtifactTree;
+  withProvider<T>(home: string, operation: (provider: ReturnType<typeof createManagedGitProvider>) => Promise<T>): Promise<T>;
+}
 
 /**
  * Production exact-revision materialization. Stage 3 runs in an isolated home,
@@ -44,7 +60,7 @@ export function createProductionProfileLifecycleRemoteAdapter(
 ): ProfileLifecycleRemoteAdapter {
   const environment = { ...(options.environment ?? process.env) };
   return {
-    materialize: (resource, context) => materializeRemote(resource, context, environment, options.childOutputPolicy, options.testHooks)
+    materialize: (resource, context) => materializeRemote(resource, context, environment, options.childOutputPolicy, options.testHooks, options.services)
   };
 }
 
@@ -53,22 +69,24 @@ async function materializeRemote(
   context: RemoteResourceMaterializationContext,
   environment: NodeJS.ProcessEnv,
   childOutputPolicy?: ChildOutputPolicy,
-  testHooks?: ManagedGitOptions['testHooks']
+  testHooks?: ManagedGitOptions['testHooks'],
+  services?: ProfileRemoteMaterializationServices
 ) {
   if (resource.payload.kind !== 'remoteGit') throw invalid('remote adapter received a non-remote resource');
   assertOperationMutationAuthority(context.authority, context.home, ['@store'], context.transactionId);
-  const temporaryRoot = join(context.home, 'profile-publishing', 'remote-materialization');
-  await ensureManagedDirectory(context.home, temporaryRoot);
+  const pathJoin = services?.joinPath ?? join;
+  const temporaryRoot = pathJoin(context.home, 'profile-publishing', 'remote-materialization');
+  await (services?.ensureDirectory ?? posixEnsureManagedDirectory)(context.home, temporaryRoot);
   assertOperationMutationAuthority(context.authority, context.home, ['@store'], context.transactionId);
-  const owned = await createOwnedProfileGithubDirectory(temporaryRoot, 'bazframe-profile-remote-');
+  const owned = await (services?.createOwnedDirectory ?? createOwnedProfileGithubDirectory)(temporaryRoot, 'bazframe-profile-remote-');
   const temporaryHome = owned.path;
-  const temporaryIdentity = await directoryIdentity(temporaryHome);
+  const temporaryIdentity = await (services?.directoryIdentity ?? directoryIdentity)(temporaryHome);
   let result: Awaited<ReturnType<typeof publishCapturedArtifact>> | undefined;
   let primaryError: unknown;
   try {
-    const acquisitionEnvironment = await strictGitAcquisitionEnvironment(temporaryHome, environment);
-    await acquireIntoIsolatedHome(temporaryHome, resource, context, acquisitionEnvironment, childOutputPolicy, testHooks);
-    await assertOwnedDirectory(temporaryHome, temporaryIdentity);
+    const acquisitionEnvironment = await strictGitAcquisitionEnvironment(temporaryHome, environment, services);
+    await acquireIntoIsolatedHome(temporaryHome, resource, context, acquisitionEnvironment, childOutputPolicy, testHooks, services);
+    await assertOwnedDirectory(temporaryHome, temporaryIdentity, services);
     const captured = await captureCatalogResource({
       bazframeHome: temporaryHome,
       kind: resource.key.kind,
@@ -76,20 +94,19 @@ async function materializeRemote(
       capturedResourceId: resource.id,
       bundleRemote: true,
       environment: acquisitionEnvironment
-    });
-    await assertOwnedDirectory(temporaryHome, temporaryIdentity);
-    result = await publishCapturedArtifact(resource, captured, context);
-    await assertOwnedDirectory(temporaryHome, temporaryIdentity);
+    }, services?.captureDependencies);
+    await assertOwnedDirectory(temporaryHome, temporaryIdentity, services);
+    result = await publishCapturedArtifact(resource, captured, context, services);
+    await assertOwnedDirectory(temporaryHome, temporaryIdentity, services);
   } catch (error) {
     primaryError = error;
   }
 
   try {
     await owned.dispose();
-  } catch {
-    throw cleanupInvalid(primaryError === undefined
-      ? 'retained isolated-home identity was not proved'
-      : 'retained isolated-home identity was not proved after a failed operation');
+  } catch (cleanup) {
+    if (primaryError !== undefined) throw new AggregateError([primaryError, cleanup], 'Remote materialization and retained ownership proof both failed.', { cause: cleanup });
+    throw cleanup;
   }
 
   if (primaryError !== undefined) {
@@ -114,7 +131,8 @@ async function acquireIntoIsolatedHome(
   context: RemoteResourceMaterializationContext,
   environment: NodeJS.ProcessEnv,
   childOutputPolicy?: ChildOutputPolicy,
-  testHooks?: ManagedGitOptions['testHooks']
+  testHooks?: ManagedGitOptions['testHooks'],
+  services?: ProfileRemoteMaterializationServices
 ): Promise<void> {
   if (resource.payload.kind !== 'remoteGit') throw invalid('remote acquisition identity is absent');
   const identity = resource.payload.identity;
@@ -142,7 +160,13 @@ async function acquireIntoIsolatedHome(
       }
     } : {})
   };
-  if (resource.key.kind === 'skill') {
+  if (services !== undefined) {
+    await services.withProvider(temporaryHome, async (provider) => {
+      if (resource.key.kind === 'skill') await provider.addManagedGitSkillAtRevision(managedOptions, resource.key.name, identity);
+      else if (resource.key.kind === 'library') await provider.addManagedGitLibraryAtRevision(managedOptions, resource.key.name, identity);
+      else await provider.addManagedGitPackageAtRevision(managedOptions, resource.key.name, identity);
+    });
+  } else if (resource.key.kind === 'skill') {
     await addManagedGitSkillAtRevision(managedOptions, resource.key.name, identity);
   } else if (resource.key.kind === 'library') {
     await addManagedGitLibraryAtRevision(managedOptions, resource.key.name, identity);
@@ -154,7 +178,8 @@ async function acquireIntoIsolatedHome(
 async function publishCapturedArtifact(
   requested: CapturedResource,
   captured: Awaited<ReturnType<typeof captureCatalogResource>>,
-  context: RemoteResourceMaterializationContext
+  context: RemoteResourceMaterializationContext,
+  services?: ProfileRemoteMaterializationServices
 ): Promise<{ kind: 'ready'; treeId: string; identity: ExactRemoteGitIdentity; cacheWritten: boolean; buildExecuted: boolean }> {
   if (requested.payload.kind !== 'remoteGit' || captured.resource.id !== requested.id
     || captured.resource.key.kind !== requested.key.kind || captured.resource.key.name !== requested.key.name
@@ -175,7 +200,7 @@ async function publishCapturedArtifact(
   let cacheWritten = false;
   for (const blob of captured.blobs) {
     assertOperationMutationAuthority(context.authority, context.home, ['@store'], context.transactionId);
-    const published = await publishStoredBlob(context.home, context.authority, blob.bytesValue, blob.sha256);
+    const published = await (services?.publishBlob ?? publishStoredBlob)(context.home, context.authority, blob.bytesValue, blob.sha256);
     cacheWritten ||= !published.reused;
   }
   const manifest: ArtifactTreeManifestV1 = {
@@ -185,12 +210,14 @@ async function publishCapturedArtifact(
     files: captured.resource.payload.files.map((file) => ({ ...file }))
   };
   assertOperationMutationAuthority(context.authority, context.home, ['@store'], context.transactionId);
-  const tree = await publishArtifactTree(context.home, context.authority, manifest);
+  const tree = await (services?.publishTree ?? publishArtifactTree)(context.home, context.authority, manifest);
   cacheWritten ||= !tree.reused;
   return { kind: 'ready', treeId: tree.treeId, identity: structuredClone(requested.payload.identity), cacheWritten, buildExecuted: requested.key.kind === 'package' };
 }
 
-async function strictGitAcquisitionEnvironment(temporaryHome: string, inherited: NodeJS.ProcessEnv): Promise<NodeJS.ProcessEnv> {
+async function strictGitAcquisitionEnvironment(temporaryHome: string, inherited: NodeJS.ProcessEnv, services?: ProfileRemoteMaterializationServices): Promise<NodeJS.ProcessEnv> {
+  const join = services?.joinPath ?? posixJoin;
+  const ensureManagedDirectory = services?.ensureDirectory ?? posixEnsureManagedDirectory;
   const gitHome = join(temporaryHome, 'git-home');
   const xdgHome = join(temporaryHome, 'git-xdg');
   const hooks = join(temporaryHome, 'git-hooks');
@@ -198,7 +225,8 @@ async function strictGitAcquisitionEnvironment(temporaryHome: string, inherited:
   await ensureManagedDirectory(temporaryHome, xdgHome);
   await ensureManagedDirectory(temporaryHome, hooks);
   const globalConfig = join(temporaryHome, 'git-global-config');
-  await writeFileAtomic(globalConfig, '', { managedRoot: temporaryHome, mode: 0o600, commitOnRename: true });
+  if (services !== undefined) await services.writeFile(globalConfig, '');
+  else await writeFileAtomic(globalConfig, '', { managedRoot: temporaryHome, mode: 0o600, commitOnRename: true });
   const inheritedConfigHome = inherited.XDG_CONFIG_HOME ?? (inherited.HOME === undefined ? undefined : join(inherited.HOME, '.config'));
   const githubConfig = inherited.GH_CONFIG_DIR ?? (inheritedConfigHome === undefined ? undefined : join(inheritedConfigHome, 'gh'));
   return {
@@ -218,9 +246,9 @@ async function directoryIdentity(path: string): Promise<OwnedDirectoryIdentity> 
   return { device: metadata.dev, inode: metadata.ino };
 }
 
-async function assertOwnedDirectory(path: string, expected: OwnedDirectoryIdentity): Promise<void> {
-  const current = await directoryIdentity(path);
-  if (current.device !== expected.device || current.inode !== expected.inode) throw cleanupInvalid('isolated home ownership changed');
+async function assertOwnedDirectory(path: string, expected: OwnedDirectoryIdentity, services?: ProfileRemoteMaterializationServices): Promise<void> {
+  const current = await (services?.directoryIdentity ?? directoryIdentity)(path);
+  if (!sameResourceIdentity(current, expected)) throw cleanupInvalid('isolated home ownership changed');
 }
 
 function roleFor(kind: CapturedResource['key']['kind']): ArtifactTreeManifestV1['role'] {

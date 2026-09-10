@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { executeWindowsDirectoryPublication, decodeWindowsDirectoryPublicationJournal } from '../../../src/state/win32-directory-publication.js';
 import { describe, expect, it } from 'vitest';
 import { BazframeError } from '../../../src/core/errors.js';
 import { addProfile, listProfiles } from '../../../src/profiles/profile-management.js';
@@ -19,6 +21,45 @@ function fixture(options: WindowsProfileProvisioningTestOptions = {}) {
 }
 
 describe('internal Windows inactive profile provisioning', () => {
+  it('runs actual firstAdd/current/list with fresh access-only receipt drift, without prewarming home', async () => {
+    const f = fixture(), enumerate = f.backend.enumerateStableDirectory, read = f.backend.readStableFile, inspect = f.backend.inspectPath;
+    let clock = 10, enumerations = 0;
+    const time = () => (++clock).toString(16).padStart(16, '0');
+    f.backend.inspectPath = (path) => { const value = inspect(path); return { ...value, object: { ...value.object, lastAccessTime: time() } }; };
+    f.backend.enumerateStableDirectory = async (...args) => { const value = await enumerate(...args); enumerations++; return { ...value, directoryBefore: { ...value.directoryBefore, object: { ...value.directoryBefore.object, lastAccessTime: time() } }, directoryAfter: { ...value.directoryAfter, object: { ...value.directoryAfter.object, lastAccessTime: time() } } }; };
+    f.backend.readStableFile = async (...args) => { const value = await read(...args); return { ...value, before: { ...value.before, lastAccessTime: time() }, after: { ...value.after, lastAccessTime: time() } }; };
+    expect(f.nodes.has(HOME)).toBe(false);
+    expect(await addProfile(HOME, 'focused', f)).toMatchObject({ action: 'added' });
+    expect(await addProfile(HOME, 'focused', f)).toMatchObject({ action: 'current' });
+    const before = f.snapshot();
+    expect(await listProfiles(HOME, f)).toEqual({ profileIds: ['focused'], diagnostics: [] });
+    expect(f.snapshot()).toBe(before); expect(enumerations).toBeGreaterThan(0);
+  });
+
+  it('retains an old-domain pending dependency without publication, cleanup, dual matching or rewritten authority', async () => {
+    const f = fixture();
+    ensureWindowsPrivateDirectoryPath(f.backend, `${HOME}\\profiles`);
+    const journalRootPath = `${HOME}\\windows-transactions\\profile-add\\focused`;
+    ensureWindowsPrivateDirectoryPath(f.backend, journalRootPath);
+    const oldDigest = createHash('sha256').update('bazframe-win32-profile-add-selection-v1\0').update('absent').digest('hex');
+    const transactionId = 'a'.repeat(32);
+    // Construct NEW historical-domain pending state via the existing publication engine, not by rewriting a current journal.
+    await expect(executeWindowsDirectoryPublication({ backend: f.backend, parentPath: `${HOME}\\profiles`, journalRootPath,
+      destinationName: 'focused', operation: { mode: 'fresh' }, io: f.io,
+      authority: { transactionId, assertHeld() {} }, dependentState: { expectedSha256: oldDigest, async observeSha256() { return oldDigest; } },
+      async materialize(candidate) { await candidate.createPrivateFile('AGENTS.md', Buffer.alloc(0)); await candidate.createEmptyPrivateDirectory('skills'); },
+      hooks: { afterPhase(phase) { if (phase === 'CANDIDATE_READY') throw new Error('historical interruption'); } }
+    })).rejects.toThrow('historical interruption');
+    const retained = [...f.nodes].filter(([path]) => path.includes('.bazframe-candidate-') || path.startsWith(`${journalRootPath}\\${transactionId}`));
+    const raw = JSON.stringify(retained);
+    await expect(addProfile(HOME, 'focused', f)).rejects.toMatchObject({ code: 'WINDOWS_PROFILE_PROVISIONING_REFUSED' });
+    expect(f.nodes.has(`${HOME}\\profiles\\focused`)).toBe(false);
+    expect(JSON.stringify(retained.map(([path]) => [path, f.nodes.get(path)]))).toBe(raw);
+    const records = [...f.nodes].filter(([path]) => path.startsWith(`${journalRootPath}\\${transactionId}\\`) && path.endsWith('.json')).map(([, node]) => decodeWindowsDirectoryPublicationJournal(node.bytes!));
+    expect(records.at(-1)?.phase).toBe('AMBIGUOUS');
+    expect(records.every((record) => record.dependentStateSha256 === oldDigest)).toBe(true);
+  });
+
   it('lists absent state without bootstrapping, locking, or recovery', async () => {
     const f = fixture();
     const before = f.snapshot();
@@ -67,13 +108,16 @@ describe('internal Windows inactive profile provisioning', () => {
     expect(f.nodes.get(`${HOME}\\active-profile`)?.bytes?.toString()).toBe(bytes);
   });
 
-  it('refuses a dangling destination selection and occupied alias cache without replacing either', async () => {
+  it('refuses a dangling destination selection and unsafe occupied alias cache without replacing either', async () => {
     for (const cache of [false, true]) {
       const f = fixture();
       ensureWindowsPrivateDirectoryPath(f.backend, HOME);
-      if (cache) ensureWindowsPrivateDirectoryPath(f.backend, `${HOME}\\adapter-cache\\pi\\skill-aliases\\focused`);
+      if (cache) {
+        ensureWindowsPrivateDirectoryPath(f.backend, `${HOME}\\adapter-cache\\pi\\skill-aliases`);
+        f.reparse(`${HOME}\\adapter-cache\\pi\\skill-aliases\\focused`);
+      }
       else f.file(`${HOME}\\active-profile`, 'focused\n');
-      await expect(addProfile(HOME, 'focused', f)).rejects.toMatchObject({ code: 'WINDOWS_PROFILE_PROVISIONING_REFUSED' });
+      await expect(addProfile(HOME, 'focused', f)).rejects.toMatchObject({ code: cache ? 'WINDOWS_PRIVATE_DIRECTORY_PRIVACY_UNPROVED' : 'WINDOWS_PROFILE_PROVISIONING_REFUSED' });
       expect(f.nodes.has(`${HOME}\\profiles\\focused`)).toBe(false);
     }
   });

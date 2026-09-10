@@ -6,7 +6,7 @@ import { inspectDefaultSkillCatalog } from '../skills/default-skill-catalog.js';
 import { isSafeSkillId } from '../skills/skill-id.js';
 import { scanGlobalSkillCollections } from '../skill-collections/skill-collection-store.js';
 import type { PublicationState, ImportedResourceSource } from './publication-state.js';
-import { readOptionalManagedProfileState } from './managed-profile-state.js';
+import { readOptionalManagedProfileState, type ManagedProfileStateContentSnapshot } from './managed-profile-state.js';
 import { readArtifactTree } from './artifact-tree.js';
 import {
   assertPhysicalProfileExpectation,
@@ -86,10 +86,14 @@ export interface ProfileSystemView {
 }
 
 export interface ProfileSystemViewReadServices {
+  /** Recheck a scoped read authority after all asynchronous dependencies settle. */
+  assertReadAuthority?(home: string): void;
   scanProfileNames: typeof scanProfileNames;
   captureExpectation: typeof capturePhysicalProfileExpectation;
   assertExpectation: typeof assertPhysicalProfileExpectation;
-  readManagedState: typeof readOptionalManagedProfileState;
+  readManagedState(home: string, name: string): Promise<ManagedProfileStateContentSnapshot | undefined>;
+  readTree?: typeof readArtifactTree;
+  joinPath?: typeof join;
   inspectCatalog: typeof inspectDefaultSkillCatalog;
   scanCollections: typeof scanGlobalSkillCollections;
 }
@@ -145,7 +149,7 @@ export async function readProfileSystemView(home: string, reads: ProfileSystemVi
         if (binding?.identityKind !== 'profileLocal' || binding.instanceId !== instanceId) throw invalid(`physical profile-local Skill ${JSON.stringify(name)} has no exact state binding`);
         matchedProfileLocalBindings.add(binding.capturedResourceId);
       }
-      addOwnership(instances, stableIdentity, { kind: 'skill', name }, profileName, { kind: 'profileLocal', root: join(home, 'profiles', profileName, 'skills', name) });
+      addOwnership(instances, stableIdentity, { kind: 'skill', name }, profileName, { kind: 'profileLocal', root: (reads.joinPath ?? join)(home, 'profiles', profileName, 'skills', name) });
       resourceIdentities.push(stableIdentity);
       membershipCount += 1;
     }
@@ -169,10 +173,10 @@ export async function readProfileSystemView(home: string, reads: ProfileSystemVi
             diagnosticCode: imported.source.diagnosticCode
           });
         } else {
-          const tree = await readArtifactTree(home, imported.source.treeId);
+          const tree = await (reads.readTree ?? readArtifactTree)(home, imported.source.treeId);
           const expectedRole = roleFor(imported.key.kind);
           if (tree.manifest.role !== expectedRole) throw invalid(`artifact role does not match ${imported.key.kind} resource ${JSON.stringify(imported.key.name)}`);
-          const treeRoot = join(tree.path, 'root');
+          const treeRoot = (reads.joinPath ?? join)(tree.path, 'root');
           materialization = imported.source.kind === 'remoteGit'
             ? { kind: 'remoteGit', treeId: tree.treeId, treeRoot, role: tree.manifest.role, identity: structuredClone(imported.source.identity) }
             : imported.source.origin === undefined
@@ -205,10 +209,11 @@ export async function readProfileSystemView(home: string, reads: ProfileSystemVi
 
   const resources = [...instances.values()].map(finishInstance).sort(compareInstances);
   const namespace = buildNamespace(resources);
-  const skills = await buildSkillNamespace(home, resources, ordinarySkills.registrations);
+  const skills = await buildSkillNamespace(home, resources, ordinarySkills.registrations, reads);
   if (resources.length > PROFILE_PORTABILITY_PRODUCTION_LIMITS.profileNamespaceEntries
     || namespace.reduce((total, entry) => total + entry.selectors.length, 0) > PROFILE_PORTABILITY_PRODUCTION_LIMITS.profileNamespaceEntries
     || skills.reduce((total, entry) => total + entry.selectors.length, 0) > PROFILE_PORTABILITY_PRODUCTION_LIMITS.profileNamespaceEntries) throw limit();
+  reads.assertReadAuthority?.(home);
   return { profiles, resources, namespace, skills };
 }
 
@@ -293,7 +298,8 @@ function buildNamespace(resources: readonly ProfileResourceInstanceView[]): Prof
 async function buildSkillNamespace(
   home: string,
   resources: readonly ProfileResourceInstanceView[],
-  registrations: readonly { id: string; target: string }[]
+  registrations: readonly { id: string; target: string }[],
+  reads: ProfileSystemViewReadServices
 ): Promise<ProfileSkillNamespaceEntry[]> {
   const candidates: Array<Omit<ProfileSkillNamespaceEntry, 'displayName'|'selectors'>> = registrations.map((registration) => ({
     stableIdentity: `catalog:skill:${registration.id}`,
@@ -312,16 +318,16 @@ async function buildSkillNamespace(
     if (!resource.stableIdentity.startsWith('imported:') || !resource.projected) continue;
     const materialization = resource.materialization;
     if (materialization.kind === 'ordinary' || materialization.kind === 'missingRemoteGit') continue;
-    const tree = await readArtifactTree(home, materialization.treeId);
-    const directories = tree.manifest.files.flatMap((file) => file.path === 'SKILL.md'
-      ? [materialization.treeRoot]
-      : file.path.endsWith('/SKILL.md') ? [join(materialization.treeRoot, ...file.path.split('/').slice(0, -1))] : []);
+    const tree = await (reads.readTree ?? readArtifactTree)(home, materialization.treeId);
+    const definitions = tree.manifest.files.filter((file) => file.path === 'SKILL.md' || file.path.endsWith('/SKILL.md'));
     const seen = new Set<string>();
-    for (const [index, directory] of directories.entries()) {
-      const name = resource.key.kind==='skill'?resource.key.name:directory.split('/').at(-1)!;
+    for (const [index, definition] of definitions.entries()) {
+      const parts = definition.path.split('/').slice(0, -1);
+      const directory = (reads.joinPath ?? join)(materialization.treeRoot, ...parts);
+      const name = resource.key.kind === 'skill' ? resource.key.name : parts.at(-1)!;
       if (!isSafeSkillId(name) || seen.has(name)) throw invalid(`imported ${resource.key.kind} has an invalid or duplicate child Skill name`);
       seen.add(name);
-      if (resource.key.kind === 'skill' && (index !== 0 || directories.length !== 1 || directory !== materialization.treeRoot)) throw invalid('imported direct Skill artifact does not match its resource key');
+      if (resource.key.kind === 'skill' && (index !== 0 || definitions.length !== 1 || directory !== materialization.treeRoot)) throw invalid('imported direct Skill artifact does not match its resource key');
       candidates.push({
         stableIdentity: resource.key.kind === 'skill' ? resource.stableIdentity : `${resource.stableIdentity}#skill:${name}`,
         sourceResourceIdentity: resource.stableIdentity,

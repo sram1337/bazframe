@@ -8,7 +8,8 @@ import { capturedProfileLimitPolicy, type CapturedProfileLimitPolicy } from './p
 import { decodeManagedProfileStateBytes, encodeManagedProfileState, publicationSidecarName, type ManagedProfileStateV1 } from './publication-state.js';
 import { assertPhysicalDirectoryIdentity, assertStablePhysicalDirectory, openStablePhysicalDirectory, readStablePhysicalFile, stableReadChildPath, writeOwnedStagingFileAtomic } from './profile-filesystem.js';
 
-export interface ManagedProfileStateSnapshot { state: ManagedProfileStateV1; sha256: string; bytes: number; device: bigint; inode: bigint }
+export interface ManagedProfileStateContentSnapshot { state: ManagedProfileStateV1; sha256: string; bytes: number }
+export interface ManagedProfileStateSnapshot extends ManagedProfileStateContentSnapshot { device: bigint; inode: bigint }
 
 export function managedProfileStatePath(home: string, profileId: string): string { assertSafeProfileId(profileId); return join(profileDirectory(home, profileId), publicationSidecarName()); }
 

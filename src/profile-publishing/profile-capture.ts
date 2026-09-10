@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { decodeUtf8Instructions, MAX_EFFECTIVE_INSTRUCTION_BYTES } from '../core/content.js';
 import { BazframeError } from '../core/errors.js';
@@ -16,13 +15,13 @@ import {
 import { profileDirectory } from '../profiles/profile-store.js';
 import {
   readCollectionSnapshot,
-  sameCollectionSnapshot,
+  type SkillCollectionRecordSnapshot,
   type SkillCollectionKind
 } from '../skill-collections/skill-collection-store.js';
 import { verifySkillSnapshot } from '../skill-collections/skill-snapshot.js';
 import {
   readDefaultSkillRegistrationSnapshot,
-  sameDefaultSkillRegistrationSnapshot
+  type DefaultSkillRegistrationSnapshot
 } from '../skills/default-skill-catalog.js';
 import { isSafeSkillId } from '../skills/skill-id.js';
 import { readArtifactTree } from './artifact-tree.js';
@@ -49,16 +48,10 @@ import { readOptionalManagedProfileState } from './managed-profile-state.js';
 import {
   capturePhysicalProfileExpectation,
   physicalProfileLocalSkillNames,
+  defaultPhysicalReads, type PhysicalProfileReadServices, type PhysicalProfileDirectory,
   type PhysicalProfileExpectation
 } from './physical-profile-closure.js';
-import {
-  assertStablePhysicalDirectory,
-  compare,
-  enumerateStableDirectory,
-  openStablePhysicalDirectory,
-  readStablePhysicalFile,
-  stableReadChildPath
-} from './profile-filesystem.js';
+import { compare } from './profile-filesystem.js';
 import {
   capturedProfileLimitPolicy,
   type CapturedProfileLimitPolicy
@@ -107,7 +100,39 @@ export interface CatalogResourceCaptureSnapshot {
   blobs: CapturedBlobSnapshot[];
 }
 
+export interface ProfileCaptureReadServices {
+  validateHome?(home: string): Promise<void>;
+  joinPath: typeof join;
+  profilePath(home: string, profile: string): string;
+  physical: PhysicalProfileReadServices;
+  captureExpectation: typeof capturePhysicalProfileExpectation;
+  readManagedState(home: string, profile: string, limits: Partial<CapturedProfileLimitPolicy>): Promise<import('./managed-profile-state.js').ManagedProfileStateContentSnapshot | undefined>;
+  readTree: typeof readArtifactTree;
+  readBlob: typeof readStoredBlob;
+  readRegistration(home: string, name: string): Promise<{ target: string; identity: string }>;
+  readCollection(home: string, key: { kind: SkillCollectionKind; id: string }, max: number): Promise<{ record: SkillCollectionRecordSnapshot['record']; identity: string }>;
+  collectionIdentity(snapshot: SkillCollectionRecordSnapshot): string;
+  verifySnapshot: typeof verifySkillSnapshot;
+  optionalManagedRecord(home: string, kind: ManagedGitResourceKind, id: string, environment?: NodeJS.ProcessEnv): ReturnType<typeof optionalManagedGitRecord>;
+  managedRoot(home: string): string;
+  isWithin(parent: string, child: string): boolean;
+}
+function collectionIdentity(snapshot: SkillCollectionRecordSnapshot): string { return `${snapshot.device}:${snapshot.inode}:${snapshot.contentSha256}`; }
+function registrationIdentity(snapshot: DefaultSkillRegistrationSnapshot): string {
+  return JSON.stringify([snapshot.id, snapshot.registrationPath, snapshot.target, ...[snapshot.catalogDevice, snapshot.catalogInode, snapshot.registrationDevice, snapshot.registrationInode, snapshot.targetDevice, snapshot.targetInode].map(String)]);
+}
+const defaultCaptureReads: ProfileCaptureReadServices = {
+  joinPath: join, profilePath: profileDirectory, physical: defaultPhysicalReads,
+  captureExpectation: capturePhysicalProfileExpectation, readManagedState: readOptionalManagedProfileState,
+  readTree: readArtifactTree, readBlob: readStoredBlob,
+  async readRegistration(home, name) { const value = await readDefaultSkillRegistrationSnapshot(home, name); return { target: value.target, identity: registrationIdentity(value) }; },
+  async readCollection(home, key, max) { const value = await readCollectionSnapshot(home, key, { maxBytes: max }); return { record: value.record, identity: collectionIdentity(value) }; },
+  collectionIdentity, verifySnapshot: verifySkillSnapshot, optionalManagedRecord: optionalManagedGitRecord,
+  managedRoot: managedGitCheckoutsRoot, isWithin
+};
+
 export interface ProfileCaptureDependencies {
+  createReads?(home: string, profile: string, limits: CapturedProfileLimitPolicy): ProfileCaptureReadServices;
   limitPolicy?: Partial<CapturedProfileLimitPolicy>;
   captureManagedGitHealth?: typeof captureManagedGitExportHealth;
   testHooks?: {
@@ -117,6 +142,7 @@ export interface ProfileCaptureDependencies {
 }
 
 interface CaptureContext {
+  reads: ProfileCaptureReadServices;
   home: string;
   profileId: string;
   bundleRemote: boolean;
@@ -142,9 +168,9 @@ export async function captureProfile(options: ProfileCaptureOptions, dependencie
   const copied = copyOptions(options);
   const policy = capturedProfileLimitPolicy(dependencies.limitPolicy);
   const captureManagedGitHealth = dependencies.captureManagedGitHealth ?? captureManagedGitExportHealth;
-  const first = await captureOnce(copied, policy, captureManagedGitHealth, dependencies.testHooks?.duringFileCapture);
+  const first = await captureOnce(copied, policy, captureManagedGitHealth, dependencies.testHooks?.duringFileCapture, dependencies.createReads);
   await dependencies.testHooks?.afterPass?.(1);
-  const second = await captureOnce(copied, policy, captureManagedGitHealth, dependencies.testHooks?.duringFileCapture);
+  const second = await captureOnce(copied, policy, captureManagedGitHealth, dependencies.testHooks?.duringFileCapture, dependencies.createReads);
   requireSameCapture(first, second);
   await dependencies.testHooks?.afterPass?.(2);
   return copySnapshot(second);
@@ -169,9 +195,9 @@ export async function captureCatalogResource(
     bundleRemote: options.bundleRemote === true,
     environment: { ...(options.environment ?? process.env) }
   };
-  const first = await captureCatalogOnce(copied, policy, captureManagedGitHealth, dependencies.testHooks?.duringFileCapture);
+  const first = await captureCatalogOnce(copied, policy, captureManagedGitHealth, dependencies.testHooks?.duringFileCapture, dependencies.createReads);
   await dependencies.testHooks?.afterPass?.(1);
-  const second = await captureCatalogOnce(copied, policy, captureManagedGitHealth, dependencies.testHooks?.duringFileCapture);
+  const second = await captureCatalogOnce(copied, policy, captureManagedGitHealth, dependencies.testHooks?.duringFileCapture, dependencies.createReads);
   requireSameCatalogCapture(first, second);
   await dependencies.testHooks?.afterPass?.(2);
   return copyCatalogSnapshot(second);
@@ -181,11 +207,13 @@ async function captureCatalogOnce(
   options: Required<CatalogResourceCaptureOptions>,
   policy: Readonly<CapturedProfileLimitPolicy>,
   captureManagedGitHealth: typeof captureManagedGitExportHealth,
-  duringFileCapture?: (absolutePath: string) => void | Promise<void>
+  duringFileCapture?: (absolutePath: string) => void | Promise<void>,
+  createReads?: ProfileCaptureDependencies['createReads']
 ): Promise<CatalogResourceCaptureSnapshot> {
   const context: CaptureContext = {
     home: options.bazframeHome,
     profileId: 'catalog-capture',
+    reads: createReads?.(options.bazframeHome, 'catalog-capture', policy) ?? defaultCaptureReads,
     bundleRemote: options.bundleRemote,
     environment: options.environment,
     policy,
@@ -196,6 +224,7 @@ async function captureCatalogOnce(
     traversedEntries: 0,
     preview: []
   };
+  await context.reads.validateHome?.(context.home);
   const resource = await captureOrdinaryResource(context, options.kind, options.name, options.capturedResourceId);
   const blobs = [...context.blobs.values()].sort((left, right) => compare(left.sha256, right.sha256));
   validateStandaloneResource(resource, blobs, policy);
@@ -206,11 +235,13 @@ async function captureOnce(
   options: Required<ProfileCaptureOptions>,
   policy: Readonly<CapturedProfileLimitPolicy>,
   captureManagedGitHealth: typeof captureManagedGitExportHealth,
-  duringFileCapture?: (absolutePath: string) => void | Promise<void>
-): Promise<ProfileCaptureSnapshot> {
+  duringFileCapture?: (absolutePath: string) => void | Promise<void>,
+  createReads?: ProfileCaptureDependencies['createReads']
+): Promise<ProfileCaptureSnapshot & { physicalProof: PhysicalProfileExpectation }> {
   const context: CaptureContext = {
     home: options.bazframeHome,
     profileId: options.profileId,
+    reads: createReads?.(options.bazframeHome, options.profileId, policy) ?? defaultCaptureReads,
     bundleRemote: options.bundleRemote,
     environment: options.environment,
     policy,
@@ -221,13 +252,14 @@ async function captureOnce(
     traversedEntries: 0,
     preview: []
   };
-  const physical = await capturePhysicalProfileExpectation(context.home, context.profileId, policy);
-  const instructionsPath = join(profileDirectory(context.home, context.profileId), 'AGENTS.md');
-  const instructionFile = await readStablePhysicalFile(instructionsPath, Math.min(policy.maxBlobBytes, MAX_EFFECTIVE_INSTRUCTION_BYTES));
+  await context.reads.validateHome?.(context.home);
+  const physical = await context.reads.captureExpectation(context.home, context.profileId, policy);
+  const instructionsPath = context.reads.joinPath(context.reads.profilePath(context.home, context.profileId), 'AGENTS.md');
+  const instructionFile = await context.reads.physical.readFile(instructionsPath, Math.min(policy.maxBlobBytes, MAX_EFFECTIVE_INSTRUCTION_BYTES));
   decodeUtf8Instructions(instructionFile.bytes, `Profile ${JSON.stringify(context.profileId)} instructions`, instructionsPath);
   const instructions = addBlobFile(context, 'AGENTS.md', instructionFile.bytes, instructionFile.executable, 'profile/AGENTS.md');
 
-  const managedState = await readOptionalManagedProfileState(context.home, context.profileId, policy);
+  const managedState = await context.reads.readManagedState(context.home, context.profileId, policy);
   const profileInstanceId = managedState?.state.profileInstanceId ?? profileInstanceIdFromPhysicalIdentity(physical.identity);
   const retainedIds = new Map<string, Sha256>();
   if (managedState !== undefined) {
@@ -250,7 +282,7 @@ async function captureOnce(
     const canonicalId = capturedResourceId('skill', identity);
     const retainedId = retainedIds.get(resourceIdentityDigest(identity));
     const id = retainedId ?? canonicalId;
-    const payload = await captureBundledRoot(context, 'skill', name, id, join(profileDirectory(context.home, context.profileId), 'skills', name), undefined, 'profile-local');
+    const payload = await captureBundledRoot(context, 'skill', name, id, context.reads.joinPath(context.reads.profilePath(context.home, context.profileId), 'skills', name), undefined, 'profile-local');
     addResource(resources, seenResourceIds, { id, key: { kind: 'skill', name }, payload }, policy);
   }
 
@@ -277,43 +309,43 @@ async function captureOnce(
   await assertPhysicalExpectationUnchanged(context, physical);
   context.preview.sort((left, right) => compare(left.path, right.path));
   missingResourceIds.sort(compare);
-  return { profileInstanceId, profile, manifestBytes, blobs, preview: context.preview, complete: missingResourceIds.length === 0, missingResourceIds };
+  return { physicalProof: physical, profileInstanceId, profile, manifestBytes, blobs, preview: context.preview, complete: missingResourceIds.length === 0, missingResourceIds };
 }
 
 async function captureOrdinaryResource(context: CaptureContext, kind: ResourceKind, name: string, id: Sha256): Promise<CapturedResource> {
   if (kind === 'skill') {
-    const registration = await readDefaultSkillRegistrationSnapshot(context.home, name);
+    const registration = await context.reads.readRegistration(context.home, name);
     const managed = await optionalManaged(context, 'skill', name);
     if (managed !== undefined) {
       if (managed.recordSnapshot.record.root !== registration.target) throw invalid(`remote Git provenance does not match Skill ${JSON.stringify(name)}`);
       if (!context.bundleRemote) return remoteResource(kind, name, id, pathFreeManagedGitIdentityFromRecord(managed.recordSnapshot.record));
-    } else if (isWithin(managedGitCheckoutsRoot(context.home), registration.target)) {
+    } else if (context.reads.isWithin(context.reads.managedRoot(context.home), registration.target)) {
       throw invalid(`managed checkout Skill ${JSON.stringify(name)} has no exact provenance`);
     }
     const payload = await captureBundledRoot(context, kind, name, id, registration.target, managed === undefined ? undefined : pathFreeManagedGitIdentityFromRecord(managed.recordSnapshot.record));
-    const final = await readDefaultSkillRegistrationSnapshot(context.home, name);
-    if (!sameDefaultSkillRegistrationSnapshot(registration, final)) throw changed();
+    const final = await context.reads.readRegistration(context.home, name);
+    if (registration.identity !== final.identity) throw changed();
     return { id, key: { kind, name }, payload };
   }
 
   const collectionKind = kind as SkillCollectionKind;
-  const record = await readCollectionSnapshot(context.home, { kind: collectionKind, id: name }, { maxBytes: context.policy.maxManifestBytes });
+  const record = await context.reads.readCollection(context.home, { kind: collectionKind, id: name }, context.policy.maxManifestBytes);
   const managed = await optionalManaged(context, collectionKind, name);
   if (managed !== undefined) {
-    if (managed.recordSnapshot.record.root !== record.record.root || managed.collectionSnapshot === undefined || !sameCollectionSnapshot(record, managed.collectionSnapshot)) throw changed();
+    if (managed.recordSnapshot.record.root !== record.record.root || managed.collectionSnapshot === undefined || record.identity !== context.reads.collectionIdentity(managed.collectionSnapshot)) throw changed();
     if (!context.bundleRemote) return remoteResource(kind, name, id, pathFreeManagedGitIdentityFromRecord(managed.recordSnapshot.record));
-  } else if (isWithin(managedGitCheckoutsRoot(context.home), record.record.root)) {
+  } else if (context.reads.isWithin(context.reads.managedRoot(context.home), record.record.root)) {
     throw invalid(`${kind} ${JSON.stringify(name)} has managed checkout state without provenance`);
   }
   let snapshot;
-  try { snapshot = await verifySkillSnapshot(context.home, record.record.digest); }
+  try { snapshot = await context.reads.verifySnapshot(context.home, record.record.digest); }
   catch (error) {
     if (kind === 'package') throw new BazframeError('PROFILE_PACKAGE_ARTIFACT_UNAVAILABLE', `Package ${JSON.stringify(name)} has no healthy build artifacts. Run \`bazframe package build ${name}\`.`, { cause: error });
     throw error;
   }
   const payload = await captureBundledRoot(context, kind, name, id, snapshot.artifactPath, managed === undefined ? undefined : pathFreeManagedGitIdentityFromRecord(managed.recordSnapshot.record));
-  const final = await readCollectionSnapshot(context.home, { kind: collectionKind, id: name }, { maxBytes: context.policy.maxManifestBytes });
-  if (!sameCollectionSnapshot(record, final)) throw changed();
+  const final = await context.reads.readCollection(context.home, { kind: collectionKind, id: name }, context.policy.maxManifestBytes);
+  if (record.identity !== final.identity) throw changed();
   return { id, key: { kind, name }, payload };
 }
 
@@ -324,12 +356,13 @@ async function captureImportedResource(
   const { source, key, capturedResourceId: id } = imported;
   if (source.kind === 'missingRemoteGit') return remoteResource(key.kind, key.name, id, source.identity);
   if (source.kind === 'remoteGit' && !context.bundleRemote) return remoteResource(key.kind, key.name, id, source.identity);
-  const tree = await readArtifactTree(context.home, source.treeId, context.policy);
+  const tree = await context.reads.readTree(context.home, source.treeId, context.policy);
   const expectedRole = key.kind === 'package' ? 'packageArtifacts' : key.kind;
   if (tree.manifest.role !== expectedRole) throw invalid('imported artifact-tree role does not match its resource kind');
   const files: BlobFile[] = [];
   for (const file of tree.manifest.files) {
-    const bytes = await readStoredBlob(context.home, file.sha256, context.policy);
+    if (++context.traversedEntries > context.policy.maxEntries) throw invalid('captured closure exceeds its entry limit');
+    const bytes = await context.reads.readBlob(context.home, file.sha256, context.policy);
     files.push(addBlobFile(context, file.path, bytes, file.executable, previewPath(id, file.path)));
   }
   const origin = source.kind === 'artifact' ? source.origin : source.identity;
@@ -349,11 +382,11 @@ async function captureBundledRoot(
   sourceForm?: 'profile-local'
 ): Promise<BundledPayload> {
   const files: BlobFile[] = [];
-  const root = await openStablePhysicalDirectory(rootPath);
+  const root = await context.reads.physical.openDirectory(rootPath, rootPath);
   try {
     await captureDirectory(context, root, '', 0, files, resourceId);
-    await assertStablePhysicalDirectory(root);
-  } finally { await root.handle.close().catch(() => undefined); }
+    await root.assertStable();
+  } finally { await root.close().catch(() => undefined); }
   const role = kind === 'package' ? 'packageArtifacts' : kind;
   if (origin !== undefined && sourceForm !== undefined) throw invalid('bundled capture cannot combine origin and source form');
   return origin !== undefined
@@ -365,35 +398,36 @@ async function captureBundledRoot(
 
 async function captureDirectory(
   context: CaptureContext,
-  directory: Awaited<ReturnType<typeof openStablePhysicalDirectory>>,
+  directory: PhysicalProfileDirectory,
   prefix: string,
   depth: number,
   files: BlobFile[],
   resourceId: Sha256
 ): Promise<void> {
   if (depth > context.policy.maxDepth) throw invalid('resource tree exceeds its depth limit');
-  for (const name of await enumerateStableDirectory(directory, context.policy.maxEntries)) {
+  for (const name of await directory.enumerate(context.policy.maxEntries)) {
     context.traversedEntries += 1;
     if (context.traversedEntries > context.policy.maxEntries) throw invalid('captured closure exceeds its entry limit');
     if (isExcludedCapturedResourcePath(name)) continue;
     const logical = prefix === '' ? name : `${prefix}/${name}`;
-    const path = stableReadChildPath(directory, name);
-    const metadata = await lstat(path, { bigint: true });
-    if (metadata.isSymbolicLink()) throw invalid('ready-to-use content contains a symbolic link');
-    if (metadata.isDirectory()) {
-      const child = await openStablePhysicalDirectory(path, directory.trustedRoot);
+    const path = directory.childPath(name);
+    if (Buffer.byteLength(logical) > context.policy.maxPathBytes) throw invalid('resource path exceeds limit');
+    const kind = await context.reads.physical.inspectKind(path);
+    if (kind === 'link') throw invalid('ready-to-use content contains a symbolic link');
+    if (kind === 'directory') {
+      const child = await context.reads.physical.openDirectory(path, directory.trustedRoot);
       try { await captureDirectory(context, child, logical, depth + 1, files, resourceId); }
-      finally { await child.handle.close().catch(() => undefined); }
-    } else if (metadata.isFile()) {
+      finally { await child.close().catch(() => undefined); }
+    } else if (kind === 'file') {
       await context.duringFileCapture?.(path);
-      const file = await readStablePhysicalFile(path, context.policy.maxBlobBytes);
+      const file = await context.reads.physical.readFile(path, context.policy.maxBlobBytes);
       files.push(addBlobFile(context, logical, file.bytes, file.executable, previewPath(resourceId, logical)));
     } else {
       throw invalid('ready-to-use content contains a special file');
     }
   }
   files.sort((left, right) => compare(left.path, right.path));
-  await assertStablePhysicalDirectory(directory);
+  await directory.assertStable();
 }
 
 function addBlobFile(context: CaptureContext, path: string, bytes: Uint8Array, executable: boolean, preview: string): BlobFile {
@@ -413,7 +447,7 @@ function addBlobFile(context: CaptureContext, path: string, bytes: Uint8Array, e
 }
 
 async function optionalManaged(context: CaptureContext, kind: ManagedGitResourceKind, id: string): Promise<ManagedGitExportHealthSnapshot | undefined> {
-  const provenance = await optionalManagedGitRecord(context.home, kind, id);
+  const provenance = await context.reads.optionalManagedRecord(context.home, kind, id, context.environment);
   if (provenance === undefined) return undefined;
   return context.captureManagedGitHealth(context.home, kind, id, context.environment);
 }
@@ -482,8 +516,9 @@ function validateStandaloneResource(resource: CapturedResource, blobs: readonly 
   }, policy);
 }
 
-function requireSameCapture(left: ProfileCaptureSnapshot, right: ProfileCaptureSnapshot): void {
-  if (left.profileInstanceId !== right.profileInstanceId
+function requireSameCapture(left: ProfileCaptureSnapshot & { physicalProof: PhysicalProfileExpectation }, right: ProfileCaptureSnapshot & { physicalProof: PhysicalProfileExpectation }): void {
+  if (left.physicalProof.profileClosureSha256 !== right.physicalProof.profileClosureSha256
+    || left.profileInstanceId !== right.profileInstanceId
     || !left.manifestBytes.equals(right.manifestBytes)
     || left.blobs.length !== right.blobs.length
     || left.blobs.some((blob, index) => blob.sha256 !== right.blobs[index]!.sha256 || !blob.bytesValue.equals(right.blobs[index]!.bytesValue))) {
@@ -509,7 +544,7 @@ function copySnapshot(snapshot: ProfileCaptureSnapshot): ProfileCaptureSnapshot 
 }
 
 async function assertPhysicalExpectationUnchanged(context: CaptureContext, expected: PhysicalProfileExpectation): Promise<void> {
-  const current = await capturePhysicalProfileExpectation(context.home, context.profileId, context.policy);
+  const current = await context.reads.captureExpectation(context.home, context.profileId, context.policy);
   if (current.identity !== expected.identity || current.sidecarSha256 !== expected.sidecarSha256 || current.profileClosureSha256 !== expected.profileClosureSha256) throw changed();
 }
 

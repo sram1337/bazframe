@@ -1,3 +1,4 @@
+import { captureCatalogResource } from '../../src/profile-publishing/profile-capture.js';
 import { spawnSync } from 'node:child_process';
 import { chmod, lstat, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
@@ -21,6 +22,32 @@ afterEach(async () => Promise.all(directories.splice(0).map((directory) => direc
 const skill = (name: string) => `---\nname: ${name}\ndescription: ${name} Skill\n---\n# ${name}\n`;
 
 describe('unexposed exact-revision remote Git lifecycle', () => {
+  it.each(['skill', 'library'] as const)('preserves built-in EOL worktree bytes and executable modes in the POSIX %s journey', async (kind) => {
+    const directory = await createTempDirectory('bazframe-exact-eol-'); directories.push(directory);
+    const remote = await directory.mkdir('remote/toolkit'), path = kind === 'skill' ? 'SKILL.md' : 'alpha/SKILL.md';
+    const lf = skill(kind === 'skill' ? 'toolkit' : 'alpha'), crlf = Buffer.from(lf.replaceAll('\n', '\r\n'));
+    await directory.write('remote/toolkit/.gitattributes', '*.md text eol=crlf\n');
+    await directory.write(`remote/toolkit/${path}`, lf);
+    await chmod(join(remote, path), 0o755);
+    initialize(remote);
+    const revision = git(['rev-parse', 'HEAD'], remote).trim(), environment = await managedEnvironment(directory, remote), home = directory.path('home');
+    const added = kind === 'skill'
+      ? await addManagedGitSkillAtRevision({ bazframeHome: home, environment }, 'toolkit', identity('toolkit', revision))
+      : await addManagedGitLibraryAtRevision({ bazframeHome: home, environment }, 'toolkit', identity('toolkit', revision));
+    expect(git(['show', `HEAD:${path}`], added.root)).toBe(lf);
+    expect(await readFile(join(added.root, path))).toEqual(crlf);
+    expect(git(['status', '--porcelain'], added.root)).toBe('');
+    expect(git(['ls-files', '--stage', path], added.root)).toMatch(/^100755 /);
+    await captureManagedGitExportHealth(home, kind, 'toolkit', environment);
+    const captured = await captureCatalogResource({ bazframeHome: home, kind, name: 'toolkit', capturedResourceId: 'a'.repeat(64), bundleRemote: true, environment });
+    const payload = captured.resource.payload;
+    if (payload.kind !== 'bundled') throw new Error('not bundled');
+    const file = payload.files.find((file) => file.path === path)!;
+    expect(file.executable).toBe(true);
+    expect(captured.blobs.find((blob) => blob.sha256 === file.sha256)?.bytesValue).toEqual(crlf);
+    expect(git(['status', '--porcelain'], added.root)).toBe('');
+  }, 120_000);
+
   it('materializes and reuses an exact historical package without network, build, report, or consent', async () => {
     const directory = await createTempDirectory('bazframe-exact-package-history-'); directories.push(directory);
     const remote = await packageRemote(directory, 'toolkit');

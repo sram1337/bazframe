@@ -1,12 +1,50 @@
+import { createHash } from 'node:crypto';
+import { stableWindowsPathInspection } from '../../../src/core/win32-stable-observation.js';
 import { describe, expect, it } from 'vitest';
 import { currentProfile, addProfile } from '../../../src/profiles/profile-management.js';
 import { createWindowsProfileProvisioningServicesForInternalTesting } from '../../../src/profiles/win32-profile-provisioning.js';
-import { createWindowsProfileSelectionReadServicesForInternalTesting, readWindowsSelectionSnapshot } from '../../../src/profiles/win32-profile-selection.js';
+import { createWindowsProfileSelectionReadServicesForInternalTesting, readWindowsSelectionSnapshot, readWindowsPrivateFileSnapshot } from '../../../src/profiles/win32-profile-selection.js';
 import { ensureWindowsPrivateDirectoryPath } from '../../../src/state/win32-private-directory.js';
 import { windowsProvisioningFixture } from '../../helpers/windows-provisioning-fixture.js';
 const HOME = 'C:\\boundary\\home';
 
 describe('native selected-ID read-only composition', () => {
+  it('stabilizes access-only admission/read/reinspection and successive selection proofs without replacing raw evidence', async () => {
+    const f = windowsProvisioningFixture(); ensureWindowsPrivateDirectoryPath(f.backend, HOME);
+    const path = `${HOME}\\active-profile`; f.file(path, 'alpha\r\n');
+    const baseline = await readWindowsSelectionSnapshot(f.backend, HOME), state = f.snapshot();
+    const inspect = f.backend.inspectPath, read = f.backend.readStableFile;
+    let clock = 10;
+    const time = () => (++clock).toString(16).padStart(16, '0');
+    f.backend.inspectPath = (name) => { const value = inspect(name); return { ...value, object: { ...value.object, lastAccessTime: time() } }; };
+    let raw = '', receipt: Awaited<ReturnType<typeof read>> | undefined;
+    f.backend.readStableFile = async (...args) => { const value = await read(...args); receipt = { ...value, before: { ...value.before, lastAccessTime: time() }, after: { ...value.after, lastAccessTime: time() } }; raw = JSON.stringify(receipt); return receipt; };
+    const first = await readWindowsSelectionSnapshot(f.backend, HOME), second = await readWindowsSelectionSnapshot(f.backend, HOME);
+    expect(first.digest).toBe(baseline.digest); expect(second.digest).toBe(first.digest);
+    expect(first.inspection?.object.lastAccessTime).not.toBe(second.inspection?.object.lastAccessTime);
+    expect(first.bytes).toEqual(Buffer.from('alpha\r\n')); expect(first.inspection).toEqual(expect.objectContaining({ security: inspect(path).security }));
+    expect(JSON.stringify(receipt)).toBe(raw); expect(second.bytes).not.toBe(receipt!.bytes);
+    expect(f.snapshot()).toBe(state);
+    const payload = JSON.stringify(stableWindowsPathInspection(first.inspection!));
+    expect(first.digest).toBe(createHash('sha256').update('bazframe-win32-profile-add-selection-v2\0').update(payload).update(first.bytes!).digest('hex'));
+    expect(first.digest).not.toBe(createHash('sha256').update('bazframe-win32-profile-add-selection-v1\0').update(JSON.stringify(baseline.inspection)).update(first.bytes!).digest('hex'));
+  });
+  it.each(['ceiling', 'byte-count', 'size', 'write', 'change', 'creation', 'allocation', 'attributes', 'delete'] as const)('retains bounded file %s refusal', async (kind) => {
+    const f = windowsProvisioningFixture(); ensureWindowsPrivateDirectoryPath(f.backend, HOME);
+    const path = `${HOME}\\active-profile`; f.file(path, 'alpha\n');
+    const read = f.backend.readStableFile;
+    f.backend.readStableFile = async (...args) => {
+      const value = await read(...args);
+      if (kind === 'ceiling') return { ...value, bytes: Buffer.alloc(100) };
+      if (kind === 'byte-count') return { ...value, byteCount: '0000000000000001' };
+      const overrides = { size: { size: '0000000000000001' }, write: { lastWriteTime: '0000000000000099' }, change: { changeTime: '0000000000000099' }, creation: { creationTime: '0000000000000099' }, allocation: { allocationSize: '0000000000000099' }, attributes: { attributes: 0 }, delete: { deletePending: true } };
+      return { ...value, after: { ...value.after, ...overrides[kind] } };
+    };
+    const before = f.snapshot();
+    await expect(readWindowsPrivateFileSnapshot(f.backend, path, 10)).rejects.toMatchObject({ code: 'WINDOWS_PROFILE_PROVISIONING_REFUSED' });
+    expect(f.snapshot()).toBe(before);
+  });
+
   it('does not create missing home or selection, even with pending onboarding transactions', async () => {
     const f = windowsProvisioningFixture();
     const services = createWindowsProfileSelectionReadServicesForInternalTesting(f.backend);

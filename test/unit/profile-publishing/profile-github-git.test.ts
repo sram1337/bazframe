@@ -194,6 +194,21 @@ describe('captured-profile Git transport', () => {
     await isolated.dispose();
   });
 
+  it.each([
+    { failure: 'timeout' as const },
+    { uncertainTermination: true },
+    { error: new Error('fetch process error') }
+  ])('does not classify an unsafe failed fetch as main unavailability: %j', async (fault) => {
+    const { remote, quarantine, isolated, common } = await setup();
+    const process = async (request: Parameters<typeof defaultProfileGithubProcess>[0]) => request.args.includes('fetch')
+      ? { status: 1, stdout: '', stderr: 'no readable main', ...fault }
+      : defaultProfileGithubProcess(request);
+    try {
+      await expect(readCanonicalProfileGitVersion(remote, undefined, { ...common, process })).rejects.toMatchObject({ code: 'PROFILE_GITHUB_GIT_READ_FAILED' });
+      await expectRetainedGitWorkspaces(quarantine);
+    } finally { await isolated.dispose(); }
+  });
+
   it('bounds fetched object storage during active monitoring and retains the owned quarantine without traversal', async () => {
     const { remote, quarantine, isolated, common } = await setup();
     const capture = fixture(Buffer.alloc(4096, 0x61));

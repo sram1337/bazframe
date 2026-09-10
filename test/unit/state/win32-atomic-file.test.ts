@@ -18,6 +18,22 @@ function fixture() {
 }
 
 describe('private selection replacement predicate reconciliation', () => {
+  it.each(['committed', 'no-effect'] as const)('accepts candidate access-only final recheck and %s reconciliation, preserving bytes', async (outcome) => {
+    const f = fixture(); f.file(PATH, 'alpha\r\n');
+    const expected = await readWindowsSelectionSnapshot(f.backend, HOME), old = { ...f.nodes.get(PATH)! };
+    const inspect = f.backend.inspectPath, read = f.backend.readStableFile;
+    let drift = false, clock = 10, candidateReads = 0;
+    const time = () => (++clock).toString(16).padStart(16, '0');
+    f.backend.inspectPath = (path) => { const value = inspect(path); return drift && path.includes('selection-') ? { ...value, object: { ...value.object, lastAccessTime: time() } } : value; };
+    f.backend.readStableFile = async (...args) => { const value = await read(...args); if (!drift || !args[0].includes('selection-')) return value; candidateReads++; return { ...value, before: { ...value.before, lastAccessTime: time() }, after: { ...value.after, lastAccessTime: time() } }; };
+    const operation = publishWindowsSelection({ backend: f.backend, home: HOME, expected, bytes: Buffer.from('bravo\n'), authority: { assertHeld() {} }, io: {
+      ...f.io, async rename(source, destination) { if (outcome === 'no-effect') throw new Error('sharing'); await f.io.rename(source, destination); }
+    }, hooks: { afterCandidateRead() { drift = true; } } });
+    if (outcome === 'committed') { await expect(operation).resolves.toEqual({ effect: 'committed' }); expect(f.temps()).toEqual([]); }
+    else { await expect(operation).rejects.toMatchObject({ code: 'WINDOWS_SELECTION_NO_EFFECT' }); expect(f.nodes.get(PATH)).toEqual(old); expect(f.nodes.get(f.temps()[0]!)?.bytes).toEqual(Buffer.from('bravo\n')); }
+    expect(candidateReads).toBe(outcome === 'no-effect' ? 2 : 1);
+  });
+
   it('publishes absent, different, and repeated selection with new identity and complete canonical bytes', async () => {
     const f = fixture();
     let priorId: number | undefined;

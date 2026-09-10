@@ -7,7 +7,11 @@ import { readAtMostOneBeyond } from '../state/bounded-file-read.js';
 import { containsUnsafeDisplayCharacters, escapeUnsafeDisplayCharacters, replaceUnsafeDisplayCharacters } from '../core/safe-text.js';
 import { isSafeSkillId } from '../skills/skill-id.js';
 import type { SkillCollectionKind } from '../skill-collections/skill-collection-store.js';
+import type { ResourceIdentity } from '../skill-collections/resource-identity.js';
 import { canonicalManagedGitSourceForIdentity, parseManagedGitSource } from './managed-git-source.js';
+
+export interface ManagedGitPathPolicy { basename(path: string): string; isCanonicalAbsolute(path: string): boolean }
+export const posixManagedGitPathPolicy: ManagedGitPathPolicy = { basename, isCanonicalAbsolute: (path) => isAbsolute(path) && resolve(path) === path };
 
 export type ManagedGitResourceKind = 'skill' | SkillCollectionKind;
 export interface ManagedGitRecord {
@@ -27,11 +31,9 @@ export interface PathFreeManagedGitIdentity {
   branch: string;
   revision: string;
 }
-export interface ManagedGitRecordSnapshot {
+export type ManagedGitRecordSnapshot = ResourceIdentity & {
   record: ManagedGitRecord;
   path: string;
-  device: bigint;
-  inode: bigint;
   contentSha256: string;
 }
 export type ManagedGitOperation = 'add' | 'add-exact' | 'update' | 'remove' | 'build';
@@ -52,11 +54,9 @@ export interface ManagedGitJournal {
   backup: string | null;
   resourceStateSha256: string | null;
 }
-export interface ManagedGitJournalSnapshot {
+export type ManagedGitJournalSnapshot = ResourceIdentity & {
   journal: ManagedGitJournal;
   path: string;
-  device: bigint;
-  inode: bigint;
   contentSha256: string;
 }
 export interface ManagedGitRecordDiagnostic {
@@ -93,14 +93,14 @@ export function encodeManagedGitJournal(journal: ManagedGitJournal): string {
   return `${JSON.stringify({ schemaVersion: 1, operation: journal.operation, phase: journal.phase, kind: journal.kind, id: journal.id, remote: journal.remote, fetchUrl: journal.fetchUrl, transport: journal.transport, branch: journal.branch, previousRevision: journal.previousRevision, nextRevision: journal.nextRevision, root: journal.root, staging: journal.staging, backup: journal.backup, resourceStateSha256: journal.resourceStateSha256 }, null, 2)}\n`;
 }
 
-export function decodeManagedGitRecord(value: unknown, expected?: { kind: ManagedGitResourceKind; id: string }): ManagedGitRecord {
+export function decodeManagedGitRecord(value: unknown, expected?: { kind: ManagedGitResourceKind; id: string }, paths: ManagedGitPathPolicy = posixManagedGitPathPolicy): ManagedGitRecord {
   const candidate = exactObject(value, RECORD_KEYS, 'record', invalid);
   if (candidate.schemaVersion !== 1) throw invalid('unsupported schemaVersion');
   const kind = decodeKind(candidate.kind);
   if (typeof candidate.id !== 'string' || !isSafeSkillId(candidate.id)) throw invalid('id is invalid');
   if (expected !== undefined && (kind !== expected.kind || candidate.id !== expected.id)) throw invalid('record identity does not match its path');
-  const root = decodeRoot(candidate.root);
-  if (basename(root) !== candidate.id) throw invalid('root basename does not match id');
+  const root = decodeRoot(candidate.root, paths);
+  if (paths.basename(root) !== candidate.id) throw invalid('root basename does not match id');
   const identity = decodePathFreeManagedGitIdentity({
     remote: candidate.remote,
     fetchUrl: candidate.fetchUrl,
@@ -152,7 +152,7 @@ function assertBoundedPathFreeIdentityInput(candidate: Record<string, unknown>):
   }
 }
 
-export function decodeManagedGitJournal(value: unknown, expected?: { kind: ManagedGitResourceKind; id: string }): ManagedGitJournal {
+export function decodeManagedGitJournal(value: unknown, expected?: { kind: ManagedGitResourceKind; id: string }, paths: ManagedGitPathPolicy = posixManagedGitPathPolicy): ManagedGitJournal {
   const candidate = exactObject(value, JOURNAL_KEYS, 'journal', invalidJournal);
   if (candidate.schemaVersion !== 1) throw invalidJournal('unsupported schemaVersion');
   if (typeof candidate.operation !== 'string' || !OPERATIONS.has(candidate.operation as ManagedGitOperation)) throw invalidJournal('operation is invalid');
@@ -161,7 +161,7 @@ export function decodeManagedGitJournal(value: unknown, expected?: { kind: Manag
   if (candidate.operation === 'build' && kind !== 'package') throw invalidJournal('build operation requires package kind');
   if (typeof candidate.id !== 'string' || !isSafeSkillId(candidate.id)) throw invalidJournal('id is invalid');
   if (expected !== undefined && (kind !== expected.kind || candidate.id !== expected.id)) throw invalidJournal('identity does not match its path');
-  const root = decodeRoot(candidate.root);
+  const root = decodeRoot(candidate.root, paths);
   let identity: PathFreeManagedGitIdentity;
   try {
     identity = decodePathFreeManagedGitIdentity({ remote: candidate.remote, fetchUrl: candidate.fetchUrl, branch: candidate.branch, revision: candidate.nextRevision }, candidate.id);
@@ -170,8 +170,8 @@ export function decodeManagedGitJournal(value: unknown, expected?: { kind: Manag
   if (candidate.transport === 'gh' && !identity.remote.startsWith('github.com/')) throw invalidJournal('gh transport requires a GitHub remote');
   const previousRevision = candidate.previousRevision === null ? null : decodeRevision(candidate.previousRevision);
   const nextRevision = identity.revision;
-  const staging = candidate.staging === null ? null : decodeManagedPath(candidate.staging, 'staging');
-  const backup = candidate.backup === null ? null : decodeManagedPath(candidate.backup, 'backup');
+  const staging = candidate.staging === null ? null : decodeManagedPath(candidate.staging, 'staging', paths);
+  const backup = candidate.backup === null ? null : decodeManagedPath(candidate.backup, 'backup', paths);
   const resourceStateSha256 = candidate.resourceStateSha256 === null ? null : decodeSha256(candidate.resourceStateSha256, 'resourceStateSha256');
   if ((candidate.operation === 'remove') !== (resourceStateSha256 !== null)) throw invalidJournal('resourceStateSha256 must be present exactly for remove operations');
   return { schemaVersion: 1, operation: candidate.operation as ManagedGitOperation, phase: candidate.phase, kind, id: candidate.id, remote: identity.remote, fetchUrl: identity.fetchUrl, transport: candidate.transport, branch: identity.branch, previousRevision, nextRevision, root, staging, backup, resourceStateSha256 };
@@ -276,29 +276,41 @@ export async function managedGitRecordForRoot(home: string, kind: ManagedGitReso
   return snapshot?.record.root === root ? snapshot.record : undefined;
 }
 
-export async function scanManagedGitRecords(home: string): Promise<{ records: ManagedGitRecord[]; diagnostics: ManagedGitRecordDiagnostic[] }> {
+export interface ManagedGitRecordScanServices {
+  join: typeof join;
+  recordsRoot: typeof managedGitRecordsRoot;
+  recoveryRoot: typeof managedGitRecoveryRoot;
+  entries(path: string): Promise<string[]>;
+  readRecord: typeof readManagedGitRecord;
+  readJournal: typeof readManagedGitJournal;
+}
+export async function scanManagedGitRecords(home: string, services?: ManagedGitRecordScanServices): Promise<{ records: ManagedGitRecord[]; diagnostics: ManagedGitRecordDiagnostic[] }> {
+  const pathJoin = services?.join ?? join;
   const records: ManagedGitRecord[] = [];
   const diagnostics: ManagedGitRecordDiagnostic[] = [];
   for (const kind of ['skill', 'library', 'package'] as const) {
-    const directory = join(managedGitRecordsRoot(home), kind);
+    const directory = pathJoin((services?.recordsRoot ?? managedGitRecordsRoot)(home), kind);
     let names: string[];
     try {
+      if (services !== undefined) names = await services.entries(directory);
+      else {
       const metadata = await lstat(directory);
       if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new Error('namespace must be a physical directory');
       names = (await readdir(directory)).sort(compare);
+      }
     } catch (error) {
-      if (errorCode(error) === 'ENOENT') continue;
+      if (errorCode(error) === 'ENOENT' || errorCode(error) === 'WINDOWS_NATIVE_PATH_NOT_FOUND') continue;
       diagnostics.push({ kind, id: '<unknown>', path: directory, message: 'record namespace is invalid' });
       continue;
     }
     for (const name of names) {
       const id = name.endsWith('.json') ? name.slice(0, -5) : '';
-      if (!isSafeSkillId(id)) { diagnostics.push({ kind, id: '<unknown>', path: join(directory, safeName(name)), message: 'record path is invalid' }); continue; }
-      try { records.push((await readManagedGitRecord(home, kind, id)).record); }
-      catch (error) { diagnostics.push({ kind, id, path: join(directory, id + '.json'), message: safeMessage(error) }); }
+      if (!isSafeSkillId(id)) { diagnostics.push({ kind, id: '<unknown>', path: pathJoin(directory, safeName(name)), message: 'record path is invalid' }); continue; }
+      try { records.push((await (services?.readRecord ?? readManagedGitRecord)(home, kind, id)).record); }
+      catch (error) { diagnostics.push({ kind, id, path: pathJoin(directory, id + '.json'), message: safeMessage(error) }); }
     }
   }
-  await scanRecovery(home, diagnostics);
+  await scanRecovery(home, diagnostics, services);
   return { records: records.sort((a, b) => compare(`${a.kind}:${a.id}`, `${b.kind}:${b.id}`)), diagnostics };
 }
 
@@ -309,25 +321,29 @@ export async function canonicalManagedGitRoot(record: ManagedGitRecord): Promise
   return canonical;
 }
 
-async function scanRecovery(home: string, diagnostics: ManagedGitRecordDiagnostic[]): Promise<void> {
-  const root = managedGitRecoveryRoot(home);
+async function scanRecovery(home: string, diagnostics: ManagedGitRecordDiagnostic[], services?: ManagedGitRecordScanServices): Promise<void> {
+  const pathJoin = services?.join ?? join;
+  const root = (services?.recoveryRoot ?? managedGitRecoveryRoot)(home);
   let names: string[];
   try {
+    if (services !== undefined) names = await services.entries(root);
+    else {
     const metadata = await lstat(root);
     if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new Error('recovery namespace must be physical');
     names = (await readdir(root)).sort(compare);
+    }
   } catch (error) {
-    if (errorCode(error) !== 'ENOENT') diagnostics.push({ kind: 'skill', id: '<unknown>', path: root, message: 'recovery namespace is invalid' });
+    if (errorCode(error) !== 'ENOENT' && errorCode(error) !== 'WINDOWS_NATIVE_PATH_NOT_FOUND') diagnostics.push({ kind: 'skill', id: '<unknown>', path: root, message: 'recovery namespace is invalid' });
     return;
   }
   for (const name of names) {
     const match = /^(skill|library|package)-([a-z0-9]+(?:-[a-z0-9]+)*)\.json$/u.exec(name);
-    if (match === null || !isSafeSkillId(match[2]!)) { diagnostics.push({ kind: 'skill', id: '<unknown>', path: join(root, safeName(name)), message: 'recovery record path is invalid' }); continue; }
+    if (match === null || !isSafeSkillId(match[2]!)) { diagnostics.push({ kind: 'skill', id: '<unknown>', path: pathJoin(root, safeName(name)), message: 'recovery record path is invalid' }); continue; }
     const kind = match[1] as ManagedGitResourceKind;
     const id = match[2]!;
-    const path = join(root, name);
+    const path = pathJoin(root, name);
     try {
-      const journal = (await readManagedGitJournal(home, kind, id)).journal;
+      const journal = (await (services?.readJournal ?? readManagedGitJournal)(home, kind, id)).journal;
       const command = recoveryRetryCommand(journal);
       const recovery = journal.operation === 'remove'
         ? `manually inspect ${path} and its recorded root, staging, and backup paths, then retry ${command} with this recovery record retained to finish identity-verified forward removal`
@@ -394,8 +410,8 @@ function boundedManagedGitRecordBytes(
 }
 function exactObject(value: unknown, keys: readonly string[], label: string, failure: (detail: string) => BazframeError): Record<string, unknown> { if (value === null || typeof value !== 'object' || Array.isArray(value)) throw failure(`${label} must be a JSON object`); const candidate = value as Record<string, unknown>; const actual = Object.keys(candidate).sort(); if (actual.length !== keys.length || !actual.every((key, index) => key === keys[index])) throw failure(`${label} must contain exactly the schema-v1 fields`); return candidate; }
 function decodeKind(value: unknown): ManagedGitResourceKind { if (typeof value !== 'string' || !KINDS.has(value as ManagedGitResourceKind)) throw invalid('kind is invalid'); return value as ManagedGitResourceKind; }
-function decodeRoot(value: unknown): string { if (typeof value !== 'string' || value.includes('\u0000') || !isAbsolute(value) || resolve(value) !== value) throw invalid('root is invalid'); return value; }
-function decodeManagedPath(value: unknown, label: string): string { if (typeof value !== 'string' || value.includes('\u0000') || !isAbsolute(value) || resolve(value) !== value) throw invalidJournal(`${label} is invalid`); return value; }
+function decodeRoot(value: unknown, paths: ManagedGitPathPolicy): string { if (typeof value !== 'string' || value.includes('\u0000') || !paths.isCanonicalAbsolute(value)) throw invalid('root is invalid'); return value; }
+function decodeManagedPath(value: unknown, label: string, paths: ManagedGitPathPolicy): string { if (typeof value !== 'string' || value.includes('\u0000') || !paths.isCanonicalAbsolute(value)) throw invalidJournal(`${label} is invalid`); return value; }
 function decodeRevision(value: unknown): string { if (typeof value !== 'string' || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value)) throw invalid('revision is invalid'); return value; }
 function decodeSha256(value: unknown, label: string): string { if (typeof value !== 'string' || !/^[a-f0-9]{64}$/u.test(value)) throw invalidJournal(`${label} is invalid`); return value; }
 function decodeBranch(value: unknown): string { if (typeof value !== 'string' || value.length === 0 || value.length > 255 || containsUnsafeDisplayCharacters(value) || value === '@' || value.toLowerCase() === 'head' || value.startsWith('-') || value.endsWith('/') || value.endsWith('.') || value.includes('..') || value.includes('@{') || value.includes('//') || [...value].some(forbiddenRefCharacter)) throw invalid('branch is invalid'); const components = value.split('/'); if (components.some((part) => part.length === 0 || part.startsWith('.') || part.endsWith('.') || part.endsWith('.lock'))) throw invalid('branch is invalid'); return value; }

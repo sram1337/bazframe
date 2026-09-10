@@ -2,9 +2,9 @@ import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
 import { link, lstat, open, rename, rm, type FileHandle } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
-import type { Readable } from 'node:stream';
+import { Readable } from 'node:stream';
 import { ZipFile as ZipWriter } from 'yazl';
-import { fromFdPromise, type Entry, type LocalFileHeader, type ZipFile } from 'yauzl';
+import { fromFdPromise, fromRandomAccessReaderPromise, RandomAccessReader, type Entry, type LocalFileHeader, type ZipFile } from 'yauzl';
 import { BazframeError, errorCode } from '../core/errors.js';
 import { isSafeProfileId } from '../profiles/profile-id.js';
 import {
@@ -137,18 +137,65 @@ export async function writeProfileZip(
 export async function readProfileZip(path: string, options: ProfileZipReadOptions = {}): Promise<ProfileZipSnapshot> {
   const policy = capturedProfileLimitPolicy(options.limitPolicy);
   let handle: FileHandle | undefined;
-  let zip: ZipFile | undefined;
   try {
     handle = await open(resolve(path), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const before = await handle.stat({ bigint: true });
     if (!before.isFile() || before.size > BigInt(policy.maxAggregateBytes)) throw invalid('archive is not a bounded physical file');
     const fileSize = Number(before.size);
     if (!Number.isSafeInteger(fileSize) || fileSize < 22) throw invalid('archive size is invalid');
-    const eocd = await readExactly(handle, fileSize - 22, 22);
+    return await parseProfileZipSource({ fileSize,
+      readRange: (offset, length) => readExactly(handle!, offset, length),
+      openZip: () => fromFdPromise(handle!.fd, { autoClose: false, lazyEntries: true, decodeStrings: true, validateEntrySizes: true, strictFileNames: true }),
+      async validate() {
+        const after = await handle!.stat({ bigint: true });
+        if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) throw invalid('archive changed while being read');
+      }
+    }, policy);
+  } catch (error) {
+    if (error instanceof BazframeError && error.code === 'PROFILE_ZIP_INVALID') throw error;
+    throw invalid('archive is malformed or unreadable', error);
+  } finally {
+    // fromFdPromise is opened with autoClose:false; the FileHandle remains the sole fd owner.
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+/** An already admitted, bounded, immutable-for-this-read random-access source. */
+export interface ProfileZipRangeSource {
+  fileSize: number;
+  readRange(offset: number, length: number): Promise<Buffer>;
+  validate(): Promise<void>;
+}
+export async function readProfileZipRangeSource(source: ProfileZipRangeSource, options: ProfileZipReadOptions = {}): Promise<ProfileZipSnapshot> {
+  class Reader extends RandomAccessReader {
+    override _readStreamForRange(start: number, end: number): Readable {
+      return Readable.from((async function* () {
+        if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end > source.fileSize) throw invalid('archive range is invalid');
+        for (let offset = start; offset < end;) {
+          const length = Math.min(1024 * 1024, end - offset);
+          const bytes = await source.readRange(offset, length);
+          if (bytes.length !== length) throw invalid('archive record is truncated');
+          yield bytes; offset += length;
+        }
+      })());
+    }
+  }
+  try { return await parseProfileZipSource({ ...source,
+    openZip: () => fromRandomAccessReaderPromise(new Reader(), source.fileSize, { autoClose: false, lazyEntries: true, decodeStrings: true, validateEntrySizes: true, strictFileNames: true })
+  }, capturedProfileLimitPolicy(options.limitPolicy)); }
+  catch (error) {
+    if (error instanceof BazframeError && (error.code === 'PROFILE_ZIP_INVALID' || error.code.startsWith('WINDOWS_'))) throw error;
+    throw invalid('archive is malformed or unreadable', error);
+  }
+}
+async function parseProfileZipSource(source: ProfileZipRangeSource & { openZip(): Promise<ZipFile> }, policy: Readonly<CapturedProfileLimitPolicy>): Promise<ProfileZipSnapshot> {
+  const fileSize = source.fileSize;
+  if (!Number.isSafeInteger(fileSize) || fileSize < 22 || fileSize > policy.maxAggregateBytes) throw invalid('archive size is invalid');
+    const eocd = await source.readRange( fileSize - 22, 22);
     const directory = decodeEndOfCentralDirectory(eocd, fileSize);
-    const first = await readExactly(handle, 0, 4);
+    const first = await source.readRange( 0, 4);
     if (first.readUInt32LE(0) !== LOCAL_SIGNATURE) throw invalid('archive contains prepended bytes or no local header');
-    zip = await fromFdPromise(handle.fd, { autoClose: false, lazyEntries: true, decodeStrings: true, validateEntrySizes: true, strictFileNames: true });
+    const zip = await source.openZip();
     if (zip.comment !== '' || zip.entryCount !== directory.entryCount || zip.entryCount === 0 || zip.entryCount > policy.maxEntries) throw invalid('archive central directory is not canonical');
 
     const entries: Entry[] = [];
@@ -186,7 +233,7 @@ export async function readProfileZip(path: string, options: ProfileZipReadOption
       }
     }
     if (previousEnd !== directory.centralOffset) throw invalid('archive body and central directory are not contiguous');
-    validateRawCentralDirectory(await readExactly(handle, directory.centralOffset, directory.centralSize), entries);
+    validateRawCentralDirectory(await source.readRange( directory.centralOffset, directory.centralSize), entries);
     if (manifestBytes === undefined) throw invalid('archive manifest is missing');
     const profile = decodeCapturedProfileBytes(manifestBytes, policy);
     if (entries.length !== expectedNames.length || entries.some((entry, index) => entry.fileName !== expectedNames[index])) throw invalid('archive entries do not match the manifest closure and order');
@@ -196,16 +243,8 @@ export async function readProfileZip(path: string, options: ProfileZipReadOption
       assertBlobBytes(record, bytesValue);
       return { sha256: record.sha256, bytes: record.bytes, bytesValue: Buffer.from(bytesValue) };
     });
-    const after = await handle.stat({ bigint: true });
-    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) throw invalid('archive changed while being read');
+    await source.validate();
     return { profile, manifestBytes: Buffer.from(manifestBytes), blobs, archiveBytes: fileSize };
-  } catch (error) {
-    if (error instanceof BazframeError && error.code === 'PROFILE_ZIP_INVALID') throw error;
-    throw invalid('archive is malformed or unreadable', error);
-  } finally {
-    // fromFdPromise is opened with autoClose:false; the FileHandle remains the sole fd owner.
-    await handle?.close().catch(() => undefined);
-  }
 }
 
 function validateSource(profile: CapturedProfileV1, blobs: readonly ProfileZipBlob[], policy: Readonly<CapturedProfileLimitPolicy>): { manifestBytes: Buffer; blobs: Array<{ sha256: Sha256; bytes: number; bytesValue: Buffer }> } {

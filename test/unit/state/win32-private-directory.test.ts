@@ -179,6 +179,47 @@ describe('Windows private-directory composition', () => {
     ]);
   });
 
+  it.each(['C:\\', 'C:\\state', 'C:\\state\\child'])(
+    'inspects each chain member as a final path and permits only identity/security-preserving directory time drift: %s', (changedPath) => {
+      for (const drift of ['timestamps', 'identity', 'security']) {
+        const calls: string[] = [];
+        const backend = fakeBackend((path) => {
+          const repeated = calls.includes(path);
+          calls.push(path);
+          const observation = directory(path, { security: security({ descriptorControl: path === 'C:\\' ? 0x1004 : 4 }) });
+          if (path === changedPath && repeated) {
+            if (drift === 'identity') observation.object.fileId = 'f'.repeat(32);
+            else if (drift === 'security') observation.security.daclBytes = privateAcl([ace(0, USER, FILE_GENERIC_READ, 0)]);
+            else {
+              observation.object.lastWriteTime = 'f'.repeat(16);
+              observation.object.changeTime = 'f'.repeat(16);
+            }
+          }
+          return observation;
+        });
+        if (drift === 'timestamps') {
+          expect(admitWindowsPrivateDirectory(backend, 'C:\\state\\child').kind).toBe('directory');
+          expect(calls).toEqual(['C:\\state\\child', 'C:\\state', 'C:\\', 'C:\\', 'C:\\state', 'C:\\state\\child']);
+        } else expect(() => admitWindowsPrivateDirectory(backend, 'C:\\state\\child')).toThrow(
+          expect.objectContaining({ code: 'WINDOWS_PRIVATE_DIRECTORY_PRIVACY_UNPROVED' })
+        );
+      }
+    }
+  );
+
+  it.each(['lastWriteTime', 'changeTime', 'size', 'allocationSize', 'creationTime', 'fileId'] as const)(
+    'retains full regular-file %s revalidation despite directory admission time drift', (field) => {
+      let reads = 0;
+      const backend = fakeBackend((path) => {
+        if (!path.endsWith('file.txt')) return directory(path);
+        const observation = regularFile(path);
+        if (++reads > 1) observation.object[field] = 'f'.repeat(field === 'fileId' ? 32 : 16);
+        return observation;
+      });
+      expect(() => admitWindowsPrivateFile(backend, 'C:\\state\\file.txt')).toThrow();
+    }
+  );
+
   it('refuses an unprotected chain with no protected anchor', () => {
     const backend = fakeBackend((path) => directory(path, { security: security({ descriptorControl: 4 }) }));
     expect(() => admitWindowsPrivateDirectory(backend, 'C:\\state')).toThrow(
@@ -366,6 +407,10 @@ function fakeBackend(
     createPrivateJunction() { throw new Error('unexpected membership mutation'); },
     createPrivateDirectory,
     createPrivateFile,
+    inspectZipSource() { throw new Error('unused ZIP source'); },
+    async readStableFileRange() { throw new Error('range read unused'); },
+    async renameFileNoReplace() { throw new Error('file rename not used by this fixture'); },
+    async moveDirectoryNoReplace() { throw new Error('unexpected cross-parent move'); },
     renameDirectoryNoReplace: async () => { throw new Error('unexpected rename'); },
     readStableFile: async () => { throw new Error('unexpected read'); },
     enumerateStableDirectory: async () => { throw new Error('unexpected enumeration'); }

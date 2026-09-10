@@ -67,6 +67,26 @@ describe('Windows directory closure composition', () => {
     });
   });
 
+  it.each(['lastWriteTime', 'changeTime'] as const)(
+    'retains directory %s stability within enumeration in either closure pass', async (field) => {
+      for (const pass of [1, 2]) {
+        const backend = tree({ 'C:\\state': dir(1) });
+        const enumerate = backend.enumerateStableDirectory;
+        let currentPass = 1;
+        backend.enumerateStableDirectory = async (path, maximum) => {
+          const receipt = await enumerate(path, maximum);
+          if (currentPass === pass) receipt.directoryAfter.object[field] = 'f'.repeat(16);
+          return receipt;
+        };
+        await expect(captureWindowsDirectoryClosure(backend, 'C:\\state', {}, {
+          beforeSecondPass: () => { currentPass = 2; }
+        })).rejects.toMatchObject({ code: 'WINDOWS_DIRECTORY_CLOSURE_CHANGED', cause: {
+          message: 'enumeration-before-vs-after', differingFields: [`object.${field}`]
+        } });
+      }
+    }
+  );
+
   it.each(['size', 'allocationSize'] as const)('still refuses directory %s drift within enumeration receipts', async (field) => {
     const backend = tree({ 'C:\\state': dir(1), 'C:\\state\\empty': dir(2) });
     const enumerate = backend.enumerateStableDirectory;
@@ -433,6 +453,10 @@ function tree(initial: Record<string, TestNode>) {
     createPrivateJunction() { throw new Error('unexpected membership mutation'); },
     createPrivateDirectory() { throw new Error('unexpected mutation'); },
     createPrivateFile() { throw new Error('unexpected mutation'); },
+    inspectZipSource() { throw new Error('unused ZIP source'); },
+    async readStableFileRange() { throw new Error('range read unused'); },
+    async renameFileNoReplace() { throw new Error('file rename not used by this fixture'); },
+    async moveDirectoryNoReplace() { throw new Error('unexpected cross-parent move'); },
     async renameDirectoryNoReplace() { throw new Error('unexpected mutation'); },
     async readStableFile(path, maximum) {
       readCalls.push(path);

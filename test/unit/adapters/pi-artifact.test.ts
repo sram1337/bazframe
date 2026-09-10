@@ -107,7 +107,7 @@ describe('packaged Pi adapter command', () => {
     ['0.84.4-beta.1', false],
     ['not-a-version', false],
     ['0.84.4', true],
-    ['0.85.0', true],
+    ['0.85.0', false],
     ['1.0.0', true]
   ])('enforces the stable Pi minimum for %s', async (piVersion, supported) => {
     const fixture = await activeFixture(`pi-version-${piVersion.replaceAll('.', '-')}`);
@@ -128,7 +128,7 @@ describe('packaged Pi adapter command', () => {
       expect(info.message).toContain('Profile: focused');
     } else {
       expect(notifications).toEqual([{
-        message: `Bazframe profile failed to load: Bazframe requires a stable Pi 0.84.4 or newer; this process is Pi ${piVersion}.`,
+        message: `Bazframe profile failed to load: Bazframe requires a stable Pi 0.84.4 or newer, excluding 0.85.0; this process is Pi ${piVersion}.`,
         level: 'error'
       }]);
     }
@@ -1241,7 +1241,7 @@ async function loadArtifact(
     );
   }
   if (testOptions.poisonResolveState === true) {
-    const marker = 'async function resolveState(cwd: string): Promise<AdapterState> {';
+    const marker = 'async function resolveState(cwd: string, services?: PiRuntimeServices): Promise<AdapterState> {';
     if (!source.includes(marker)) throw new Error('Packaged Pi state resolver marker is missing');
     source = source.replace(marker, `${marker}\n\tthrow new Error("resolveState reached on gated platform");`);
   }

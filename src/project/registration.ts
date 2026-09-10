@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { isAbsolute, join, resolve } from 'node:path';
+import path from 'node:path';
 import { BazframeError } from '../core/errors.js';
 
 export interface LegacyRepositoryRegistration {
@@ -27,9 +27,10 @@ export type RepositoryProjectState =
   | EnabledRepositoryOverride;
 
 export function createRepositoryRegistration(
-  canonicalRepository: string
+  canonicalRepository: string,
+  paths = path
 ): LegacyRepositoryRegistration {
-  assertCanonicalRepository(canonicalRepository, 'Repository registration');
+  assertCanonicalRepository(canonicalRepository, 'Repository registration', paths);
   return {
     schemaVersion: 1,
     repository: canonicalRepository,
@@ -39,9 +40,10 @@ export function createRepositoryRegistration(
 }
 
 export function createDisabledRepositoryOverride(
-  canonicalRepository: string
+  canonicalRepository: string,
+  paths = path
 ): DisabledRepositoryOverride {
-  assertCanonicalRepository(canonicalRepository, 'Repository override');
+  assertCanonicalRepository(canonicalRepository, 'Repository override', paths);
   return {
     schemaVersion: 2,
     repository: canonicalRepository,
@@ -50,9 +52,10 @@ export function createDisabledRepositoryOverride(
 }
 
 export function createEnabledRepositoryOverride(
-  canonicalRepository: string
+  canonicalRepository: string,
+  paths = path
 ): EnabledRepositoryOverride {
-  assertCanonicalRepository(canonicalRepository, 'Repository override');
+  assertCanonicalRepository(canonicalRepository, 'Repository override', paths);
   return {
     schemaVersion: 3,
     repository: canonicalRepository,
@@ -63,7 +66,8 @@ export function createEnabledRepositoryOverride(
 export function decodeRepositoryRegistration(
   text: string,
   source = 'repository project state',
-  expectedRepository?: string
+  expectedRepository?: string,
+  paths = path
 ): RepositoryProjectState {
   let value: unknown;
   try {
@@ -79,7 +83,7 @@ export function decodeRepositoryRegistration(
   const candidate = value as Partial<RepositoryProjectState> & Record<string, unknown>;
   if (
     typeof candidate.repository !== 'string'
-    || !isNormalizedAbsolutePath(candidate.repository)
+    || !isNormalizedAbsolutePath(candidate.repository, paths)
     || (expectedRepository !== undefined && candidate.repository !== expectedRepository)
   ) {
     throw invalidRegistration(source);
@@ -123,28 +127,30 @@ export function decodeRepositoryRegistration(
 }
 
 export function encodeRepositoryRegistration(
-  registration: RepositoryProjectState
+  registration: RepositoryProjectState,
+  paths = path
 ): string {
   const validated = decodeRepositoryRegistration(
     JSON.stringify(registration),
-    'repository project state'
+    'repository project state', undefined, paths
   );
   return `${JSON.stringify(validated, null, 2)}\n`;
 }
 
-export function repositoryRegistrationId(canonicalRepository: string): string {
-  assertCanonicalRepository(canonicalRepository, 'Repository project state');
+export function repositoryRegistrationId(canonicalRepository: string, paths = path): string {
+  assertCanonicalRepository(canonicalRepository, 'Repository project state', paths);
   return createHash('sha256').update(canonicalRepository).digest('hex');
 }
 
 export function repositoryRegistrationPath(
   bazframeHome: string,
-  canonicalRepository: string
+  canonicalRepository: string,
+  paths = path
 ): string {
-  return join(
+  return paths.join(
     bazframeHome,
     'projects',
-    `${repositoryRegistrationId(canonicalRepository)}.json`
+    `${repositoryRegistrationId(canonicalRepository, paths)}.json`
   );
 }
 
@@ -155,15 +161,15 @@ function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): 
     && actual.every((key, index) => key === expected[index]);
 }
 
-function assertCanonicalRepository(repository: string, source: string): void {
-  if (!isNormalizedAbsolutePath(repository)) throw invalidRegistration(source);
+function assertCanonicalRepository(repository: string, source: string, paths: typeof path): void {
+  if (!isNormalizedAbsolutePath(repository, paths)) throw invalidRegistration(source);
 }
 
-function isNormalizedAbsolutePath(path: string): boolean {
-  return path.length > 0
-    && !path.includes('\0')
-    && isAbsolute(path)
-    && resolve(path) === path;
+function isNormalizedAbsolutePath(value: string, paths: typeof path): boolean {
+  return value.length > 0
+    && !value.includes('\0')
+    && paths.isAbsolute(value)
+    && paths.resolve(value) === value;
 }
 
 function invalidRegistration(source: string): BazframeError {

@@ -1,3 +1,6 @@
+import { sameResourceIdentity, resourceIdentityText } from '../skill-collections/resource-identity.js';
+import { defaultPhysicalReads, type PhysicalProfileReadServices, type PhysicalProfileDirectory } from './physical-profile-closure.js';
+import type { ManagedGitInspectionEffects, GitInspectionMetadata } from '../providers/managed-git-acquisition-inspection.js';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, opendir, rm } from 'node:fs/promises';
@@ -19,6 +22,7 @@ import {
   type Sha256
 } from './captured-profile.js';
 import {
+  assertProfileGithubDirectory,
   assertProfileGithubCommand,
   assertProfileGithubOutputConsistency,
   createOwnedProfileGithubDirectory,
@@ -37,13 +41,8 @@ import {
 } from './profile-github.js';
 import { capturedProfileLimitPolicy } from './profile-publishing-policy.js';
 import {
-  assertPhysicalAncestry,
   assertPhysicalDirectoryIdentity,
-  enumerateStableDirectory,
-  openStablePhysicalDirectory,
-  readStablePhysicalFile,
-  stableReadChildPath,
-  type StableDirectory
+  openStablePhysicalDirectory
 } from './profile-filesystem.js';
 
 export interface ProfileGithubGitBlob {
@@ -75,6 +74,7 @@ export interface ProfileGithubGitOptions {
   limitPolicy?: Partial<CapturedProfileLimitPolicy>;
   /** Lower-only resource limits; production defaults remain authoritative. */
   acquisitionLimits?: Partial<ManagedGitAcquisitionLimitPolicy>;
+  effects?: ProfileGithubGitEffects;
 }
 
 export interface ProfileGithubRefUpdateIntent {
@@ -109,9 +109,30 @@ export interface PublishCanonicalProfileGitOptions extends ProfileGithubGitOptio
   beforeRefUpdate?(intent: ProfileGithubRefUpdateIntent): void | Promise<void>;
 }
 
+export interface ProfileGithubGitEffects {
+  join(...parts: string[]): string;
+  createOwnedDirectory: typeof createOwnedProfileGithubDirectory;
+  physical: PhysicalProfileReadServices;
+  inspection: Pick<ManagedGitInspectionEffects, 'stat' | 'opendir'>;
+  openDirectory(path: string, root: string): Promise<{ path: string; assertIdentity(): Promise<void>; close(): Promise<void> }>;
+  createDirectory(path: string): Promise<void>;
+  writeFile(path: string, bytes: Uint8Array): Promise<void>;
+  detachConfig(workspace: OwnedProfileGithubDirectory): Promise<void>;
+  assertAbsent(path: string, label: string): Promise<void>;
+}
+const posixGitEffects: ProfileGithubGitEffects = {
+  join, createOwnedDirectory: createOwnedProfileGithubDirectory, physical: defaultPhysicalReads,
+  inspection: { stat: (path) => lstat(path, { bigint: true }), opendir: (path) => opendir(path) },
+  async openDirectory(path, root) { const directory = await openStablePhysicalDirectory(path, root); return { path, assertIdentity: () => assertPhysicalDirectoryIdentity(directory), close: () => directory.handle.close() }; },
+  async createDirectory(path) { await mkdir(path, { mode: 0o700 }); },
+  writeFile: writeExclusive,
+  async detachConfig(workspace) { await rm(join(workspace.path, '.git', 'config'), { force: true }); },
+  assertAbsent
+};
 interface GitWorkspace {
   owned: OwnedProfileGithubDirectory;
-  gitDirectory: StableDirectory;
+  gitDirectory: Awaited<ReturnType<ProfileGithubGitEffects['openDirectory']>>;
+  effects: ProfileGithubGitEffects;
   acquisitionLimits: Readonly<ManagedGitAcquisitionLimitPolicy>;
 }
 
@@ -298,7 +319,10 @@ export async function publishCanonicalProfileGit(
 
 async function fetchMainHistory(remoteUrl: string, options: ProfileGithubGitOptions, workspace: GitWorkspace): Promise<string[]> {
   const fetched = await git(options, ['-C', workspace.owned.path, 'fetch', '--no-tags', remoteUrl, `${MAIN_REF}:${MAIN_REMOTE_REF}`], true, undefined, workspace);
-  if (fetched.status !== 0 || fetched.failure !== undefined || fetched.error !== undefined || fetched.uncertainTermination === true) {
+  if (fetched.failure !== undefined || fetched.error !== undefined || fetched.monitorError !== undefined || fetched.uncertainTermination === true) {
+    assertProfileGithubCommand(fetched, 'PROFILE_GITHUB_GIT_READ_FAILED', 'Git main transfer failed; availability was not determined.');
+  }
+  if (fetched.status !== 0) {
     throw new BazframeError('PROFILE_GITHUB_MAIN_UNAVAILABLE', 'GitHub profile repository has no readable refs/heads/main.');
   }
   const commitsText = await gitText(options, ['-C', workspace.owned.path, 'rev-list', MAIN_REMOTE_REF], false, 'PROFILE_GITHUB_GIT_READ_FAILED', 'Git main history could not be read.', workspace);
@@ -308,21 +332,21 @@ async function fetchMainHistory(remoteUrl: string, options: ProfileGithubGitOpti
 }
 
 async function createGitWorkspace(options: ProfileGithubGitOptions, prefix: string): Promise<GitWorkspace> {
-  await assertPhysicalDirectoryIdentity(options.isolation.directory);
-  const owned = await createOwnedProfileGithubDirectory(options.quarantineParent, prefix);
-  let gitDirectory: StableDirectory | undefined;
+  await assertProfileGithubDirectory(options.isolation.directory);
+  const effects = options.effects ?? posixGitEffects;
+  const owned = await effects.createOwnedDirectory(options.quarantineParent, prefix);
+  let gitDirectory: GitWorkspace['gitDirectory'] | undefined;
   try {
     await gitRequired(options, ['init', '--quiet', '--template=', owned.path], false, undefined, owned.path);
-    const config = join(owned.path, '.git', 'config');
-    await rm(config, { force: true });
-    gitDirectory = await openStablePhysicalDirectory(join(owned.path, '.git'), owned.path);
-    const workspace = { owned, gitDirectory, acquisitionLimits: managedGitAcquisitionLimitPolicy(options.acquisitionLimits) };
+    await effects.detachConfig(owned);
+    gitDirectory = await effects.openDirectory(effects.join(owned.path, '.git'), owned.path);
+    const workspace = { owned, gitDirectory, effects, acquisitionLimits: managedGitAcquisitionLimitPolicy(options.acquisitionLimits) };
     await proveGitWorkspace(workspace);
     return workspace;
   } catch (error) {
     let failure: unknown = error;
     if (gitDirectory !== undefined) {
-      try { await gitDirectory.handle.close(); }
+      try { await gitDirectory.close(); }
       catch (closeError) { failure = combineOperationAndCleanup(failure, closeError); }
     }
     try { await owned.dispose(); }
@@ -332,18 +356,20 @@ async function createGitWorkspace(options: ProfileGithubGitOptions, prefix: stri
 }
 
 async function proveGitWorkspace(workspace: GitWorkspace): Promise<void> {
-  await assertPhysicalDirectoryIdentity(workspace.owned.parent);
-  await assertPhysicalDirectoryIdentity(workspace.owned.directory);
-  await assertPhysicalDirectoryIdentity(workspace.gitDirectory);
-  await assertAbsent(join(workspace.gitDirectory.path, 'config'), 'local Git config');
-  await assertPhysicalAncestry(workspace.gitDirectory.path, join(workspace.gitDirectory.path, 'objects', 'info'));
-  await assertAbsent(join(workspace.gitDirectory.path, 'objects', 'info', 'alternates'), 'Git object alternates');
+  await assertProfileGithubDirectory(workspace.owned.parent);
+  await assertProfileGithubDirectory(workspace.owned.directory);
+  await workspace.gitDirectory.assertIdentity();
+  const { effects } = workspace;
+  await effects.assertAbsent(effects.join(workspace.gitDirectory.path, 'config'), 'local Git config');
+  const info = await effects.openDirectory(effects.join(workspace.gitDirectory.path, 'objects', 'info'), workspace.gitDirectory.path);
+  await info.assertIdentity(); await info.close();
+  for (const name of ['alternates', 'http-alternates']) await effects.assertAbsent(effects.join(workspace.gitDirectory.path, 'objects', 'info', name), 'Git object alternates');
   await inspectGitObjectsStable(workspace);
 }
 
 async function disposeGitWorkspace(workspace: GitWorkspace): Promise<void> {
   let failure: unknown;
-  try { await workspace.gitDirectory.handle.close(); }
+  try { await workspace.gitDirectory.close(); }
   catch (error) { failure = combineOperationAndCleanup(failure, error); }
   try { await workspace.owned.dispose(); }
   catch (error) { failure = combineOperationAndCleanup(failure, error); }
@@ -386,46 +412,49 @@ async function checkoutCanonicalCapture(
   policy: Readonly<CapturedProfileLimitPolicy>
 ): Promise<{ manifestBytes: Buffer; profile: CapturedProfileV1; blobs: ProfileGithubGitSnapshot['blobs'] }> {
   await gitRequired(options, ['-C', workspace.owned.path, 'read-tree', commit], false, workspace);
-  const checkoutPath = join(workspace.owned.path, 'capture');
-  await mkdir(checkoutPath, { mode: 0o700 });
+  const { effects } = workspace;
+  const checkoutPath = effects.join(workspace.owned.path, 'capture');
+  await effects.createDirectory(checkoutPath);
   await gitRequired(options, ['-C', workspace.owned.path, 'checkout-index', '--all', `--prefix=${checkoutPath}/`], false, workspace);
-  const root = await openStablePhysicalDirectory(checkoutPath, workspace.owned.path);
-  let blobs: StableDirectory | undefined;
+  const root = await effects.physical.openDirectory(checkoutPath, workspace.owned.path);
+  let blobs: PhysicalProfileDirectory | undefined;
   try {
-    const rootNames = await enumerateStableDirectory(root, 2);
+    const rootNames = await root.enumerate(2);
     if (rootNames.join(',') !== 'bazframe-profile.json,blobs') throw invalid('checked-out capture root is not canonical');
-    const manifest = await readStablePhysicalFile(stableReadChildPath(root, 'bazframe-profile.json'), policy.maxManifestBytes);
+    const manifest = await effects.physical.readFile(root.childPath('bazframe-profile.json'), policy.maxManifestBytes);
     const manifestBytes = Buffer.from(manifest.bytes);
     const profile = decodeCapturedProfileBytes(manifestBytes, policy);
-    blobs = await openStablePhysicalDirectory(stableReadChildPath(root, 'blobs'), workspace.owned.path);
-    const blobNames = await enumerateStableDirectory(blobs, policy.maxEntries);
+    blobs = await effects.physical.openDirectory(root.childPath('blobs'), workspace.owned.path);
+    const blobNames = await blobs.enumerate(policy.maxEntries);
     if (blobNames.length !== profile.blobs.length || blobNames.some((name, index) => name !== profile.blobs[index]!.sha256)) {
       throw invalid('checked-out blob closure does not match the canonical manifest');
     }
     const capturedBlobs: ProfileGithubGitSnapshot['blobs'] = [];
     for (const record of profile.blobs) {
-      const file = await readStablePhysicalFile(stableReadChildPath(blobs, record.sha256), policy.maxBlobBytes);
+      const file = await effects.physical.readFile(blobs.childPath(record.sha256), policy.maxBlobBytes);
       const bytesValue = Buffer.from(file.bytes);
       assertBlobBytes(record, bytesValue);
       capturedBlobs.push({ sha256: record.sha256, bytes: record.bytes, bytesValue });
     }
-    await blobs.handle.close();
+    await blobs.assertStable(); await root.assertStable();
+    await blobs.close();
     blobs = undefined;
     return { manifestBytes, profile, blobs: capturedBlobs };
   } catch (error) {
-    await blobs?.handle.close().catch(() => undefined);
+    await blobs?.close().catch(() => undefined);
     throw error;
   } finally {
-    await root.handle.close().catch(() => undefined);
+    await root.close().catch(() => undefined);
   }
 }
 
 async function writeCanonicalTree(workspace: GitWorkspace, manifestBytes: Buffer, blobs: readonly { sha256: Sha256; bytesValue: Buffer }[]): Promise<void> {
   await proveGitWorkspace(workspace);
-  const blobsDirectory = join(workspace.owned.path, 'blobs');
-  await mkdir(blobsDirectory, { mode: 0o700 });
-  await writeExclusive(join(workspace.owned.path, 'bazframe-profile.json'), manifestBytes);
-  for (const blob of blobs) await writeExclusive(join(blobsDirectory, blob.sha256), blob.bytesValue);
+  const { effects } = workspace;
+  const blobsDirectory = effects.join(workspace.owned.path, 'blobs');
+  await effects.createDirectory(blobsDirectory);
+  await effects.writeFile(effects.join(workspace.owned.path, 'bazframe-profile.json'), manifestBytes);
+  for (const blob of blobs) await effects.writeFile(effects.join(blobsDirectory, blob.sha256), blob.bytesValue);
   await proveGitWorkspace(workspace);
 }
 async function writeExclusive(path: string, bytes: Uint8Array): Promise<void> {
@@ -487,7 +516,7 @@ async function gitBytes(options: ProfileGithubGitOptions, args: readonly string[
   return bytes;
 }
 async function git(options: ProfileGithubGitOptions, args: readonly string[], transfer: boolean, maximum?: number, workspace?: GitWorkspace, cwd = options.cwd): Promise<ProfileGithubProcessResult> {
-  await assertPhysicalDirectoryIdentity(options.isolation.directory);
+  await assertProfileGithubDirectory(options.isolation.directory);
   if (workspace !== undefined) await proveGitWorkspace(workspace);
   const result = await runProfileGithubCommand(options.process, options.isolation, 'git', args, workspace?.owned.path ?? cwd, {
     transfer,
@@ -496,14 +525,17 @@ async function git(options: ProfileGithubGitOptions, args: readonly string[], tr
     ...(maximum === undefined ? {} : { maxStdoutBytes: maximum }),
     ...(transfer && workspace !== undefined ? { monitor: () => inspectGitObjectsInProgress(workspace) } : {})
   });
-  if (result.failure === 'monitor-failure' && result.monitorError instanceof BazframeError) throw result.monitorError;
+  if (result.failure === 'monitor-failure' && result.monitorError instanceof BazframeError && result.uncertainTermination !== true) throw result.monitorError;
   assertProfileGithubOutputConsistency(result);
   const stdout = result.stdoutBytes?.byteLength ?? Buffer.byteLength(result.stdout);
   if (stdout > (maximum ?? PROFILE_PORTABILITY_PRODUCTION_LIMITS.gitStreamBytes)
     || Buffer.byteLength(result.stderr) > PROFILE_PORTABILITY_PRODUCTION_LIMITS.gitStreamBytes) {
     throw new BazframeError('PROFILE_GITHUB_OUTPUT_LIMIT', 'Git process output exceeded its bounded capture limit.');
   }
-  await assertPhysicalDirectoryIdentity(options.isolation.directory);
+  // A failed/uncertain process is not a stable payload proof. Retained root disposal
+  // remains a separate obligation, and its failure is combined by the caller.
+  if (result.failure !== undefined || result.error !== undefined || result.monitorError !== undefined || result.uncertainTermination === true) return result;
+  await assertProfileGithubDirectory(options.isolation.directory);
   if (workspace !== undefined) await proveGitWorkspace(workspace);
   return result;
 }
@@ -523,9 +555,9 @@ async function inspectGitObjectsStable(workspace: GitWorkspace): Promise<void> {
 }
 
 async function inspectGitObjects(workspace: GitWorkspace, stable: boolean): Promise<GitObjectInspection> {
-  const root = join(workspace.gitDirectory.path, 'objects');
+  const root = workspace.effects.join(workspace.gitDirectory.path, 'objects');
   const state = { entries: 0n, bytes: 0n, evidence: [] as string[] };
-  await inspectGitObjectDirectory(root, '', 0, workspace.acquisitionLimits, state, stable, true);
+  await inspectGitObjectDirectory(root, '', 0, workspace.acquisitionLimits, state, stable, true, workspace.effects);
   return { entries: Number(state.entries), bytes: Number(state.bytes), evidence: state.evidence.join('\n') };
 }
 
@@ -536,17 +568,18 @@ async function inspectGitObjectDirectory(
   limits: Readonly<ManagedGitAcquisitionLimitPolicy>,
   state: { entries: bigint; bytes: bigint; evidence: string[] },
   stable: boolean,
-  root: boolean
+  root: boolean,
+  effects: ProfileGithubGitEffects
 ): Promise<void> {
   let before;
-  try { before = await lstat(path, { bigint: true }); }
+  try { before = await effects.inspection.stat(path); }
   catch (error) {
     if (!root && !stable && errorCode(error) === 'ENOENT') return;
     throw error;
   }
   if (before.isSymbolicLink() || !before.isDirectory()) throw invalid('Git object storage contains a link or non-directory');
   let directory;
-  try { directory = await opendir(path); }
+  try { directory = await effects.inspection.opendir(path, limits.maxStagingEntries); }
   catch (error) {
     if (!root && !stable && errorCode(error) === 'ENOENT') return;
     throw error;
@@ -556,6 +589,7 @@ async function inspectGitObjectDirectory(
     while (true) {
       const entry = await directory.read();
       if (entry === null) break;
+      if (names.length >= limits.maxStagingEntries) throw objectLimit('entry count');
       names.push(entry.name);
     }
   } finally { await directory.close().catch(() => undefined); }
@@ -567,7 +601,7 @@ async function inspectGitObjectDirectory(
       throw objectLimit('path depth or bytes');
     }
     let metadata;
-    try { metadata = await lstat(join(path, name), { bigint: true }); }
+    try { metadata = await effects.inspection.stat(effects.join(path, name)); }
     catch (error) {
       if (!stable && errorCode(error) === 'ENOENT') continue;
       throw error;
@@ -576,23 +610,24 @@ async function inspectGitObjectDirectory(
     if (state.entries > BigInt(limits.maxStagingEntries)) throw objectLimit('entry count');
     if (metadata.isSymbolicLink()) throw invalid('Git object storage contains a symbolic link');
     if (metadata.isDirectory()) {
-      state.evidence.push(`d\0${childRelative}\0${metadata.dev}:${metadata.ino}`);
-      await inspectGitObjectDirectory(join(path, name), childRelative, childDepth, limits, state, stable, false);
+      state.evidence.push(`d\0${childRelative}\0${resourceIdentityText(objectIdentity(metadata))}`);
+      await inspectGitObjectDirectory(effects.join(path, name), childRelative, childDepth, limits, state, stable, false, effects);
       continue;
     }
     if (!metadata.isFile()) throw invalid('Git object storage contains a special file');
     if (stable && metadata.nlink !== 1n) throw invalid('Git object storage contains a hard-linked file');
     state.bytes += metadata.size;
     if (state.bytes > BigInt(limits.maxGitObjectBytes) || state.bytes > BigInt(limits.maxStagingBytes)) throw objectLimit('aggregate bytes');
-    state.evidence.push(`f\0${childRelative}\0${metadata.dev}:${metadata.ino}:${metadata.size}:${metadata.mtimeNs}:${metadata.ctimeNs}`);
+    state.evidence.push(`f\0${childRelative}\0${resourceIdentityText(objectIdentity(metadata))}:${metadata.size}:${metadata.mtimeNs}:${metadata.ctimeNs}`);
   }
   if (stable) {
-    const after = await lstat(path, { bigint: true });
-    if (!after.isDirectory() || after.isSymbolicLink() || before.dev !== after.dev || before.ino !== after.ino
+    const after = await effects.inspection.stat(path);
+    if (!after.isDirectory() || after.isSymbolicLink() || !sameResourceIdentity(objectIdentity(before), objectIdentity(after))
       || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) throw invalid('Git object directory changed while being proved');
   }
 }
 
+function objectIdentity(value: GitInspectionMetadata) { if (value.identity !== undefined) return value.identity; if (value.dev === undefined || value.ino === undefined) throw invalid('object identity unavailable'); return { device: value.dev, inode: value.ino }; }
 function objectLimit(detail: string): BazframeError {
   return new BazframeError('PROFILE_GITHUB_GIT_OBJECT_LIMIT', `Git object quarantine exceeded its bounded ${detail} limit.`);
 }

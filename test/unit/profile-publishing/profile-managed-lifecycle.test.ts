@@ -234,3 +234,19 @@ describe('hidden managed profile lifecycle', () => {
 });
 
 type RenamePhase = import('../../../src/profile-publishing/transaction-journal.js').RenamePhase;
+
+
+describe('malformed optional lifecycle favorites', () => {
+  it.each(['rename', 'remove', 'absent', 'recover-remove'] as const)('preserves bounded malformed bytes for %s', async (operation) => {
+    const home = await setup();
+    await plainProfile(home, 'source');
+    const bytes = Buffer.from([0xff, 0x7b, 0x00]);
+    await writeFile(join(home, 'profile-favorites.json'), bytes);
+    if (operation === 'rename') await renameManagedProfile(home, 'source', 'renamed');
+    else if (operation === 'recover-remove') {
+      await expect(removeManagedProfile(home, 'source', { afterPhase(phase) { if (phase === 'FAVORITES_MUTATION_INTENT') throw new Error('interruption'); } })).rejects.toThrow('interruption');
+      expect((await recoverProfilePublishingTransactions(home))[0]!.action).toBe('committed');
+    } else await removeManagedProfile(home, operation === 'absent' ? 'missing' : 'source');
+    expect(await readFile(join(home, 'profile-favorites.json'))).toEqual(bytes);
+  });
+});

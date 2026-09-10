@@ -1,3 +1,6 @@
+import { win32 } from 'node:path';
+import { BazframeError } from '../core/errors.js';
+import { executableEnvironmentValue } from '../core/executable-resolution.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 
 export interface ManagedGitProcessLimits {
@@ -7,6 +10,7 @@ export interface ManagedGitProcessLimits {
 }
 
 export type ManagedGitProcessFailure =
+  | 'parent-signal'
   | 'timeout'
   | 'stdout-overflow'
   | 'stderr-overflow'
@@ -16,19 +20,24 @@ export type ManagedGitProcessFailure =
 export interface ManagedGitProcessResult {
   status: number | null;
   stdout: string;
+  /** Exact bytes; text is only a diagnostic representation. */
+  stdoutBytes?: Uint8Array;
   stderr: string;
   error?: Error;
   monitorError?: Error;
   failure?: ManagedGitProcessFailure;
   uncertainTermination?: boolean;
+  signal?: NodeJS.Signals;
 }
 
 export interface ManagedGitProcessOptions {
   /** Serial, interval-free storage sampling. A thrown error stops the process tree. */
   monitor?: () => void | Promise<void>;
+  spawnProcess?: typeof spawn;
+  posixProcessGroups?: boolean;
+  signalProcess?: (pid: number, signal: NodeJS.Signals | 0) => void;
 }
 
-const POSIX_PROCESS_GROUPS = process.platform !== 'win32';
 
 /** Runs one literal managed-provider command without a shell and bounds both captured streams independently. */
 export function runManagedGitProcess(
@@ -41,15 +50,17 @@ export function runManagedGitProcess(
 ): Promise<ManagedGitProcessResult> {
   assertLimits(limits);
   const monitor = options.monitor;
+  const processGroups = options.posixProcessGroups ?? process.platform !== 'win32';
+  const signalProcess = options.signalProcess ?? process.kill.bind(process);
   if (monitor !== undefined && typeof monitor !== 'function') throw new TypeError('Managed Git process monitor must be a function');
   return new Promise((resolve) => {
     let child: ChildProcess;
     try {
-      child = spawn(executable, [...args], {
+      child = (options.spawnProcess ?? spawn)(executable, [...args], {
         cwd,
         env: environment,
         shell: false,
-        detached: POSIX_PROCESS_GROUPS,
+        detached: processGroups,
         stdio: ['inherit', 'pipe', 'pipe']
       });
     } catch (error) {
@@ -74,16 +85,30 @@ export function runManagedGitProcess(
     let graceTimer: NodeJS.Timeout | undefined;
     let confirmationTimer: NodeJS.Timeout | undefined;
 
+    let parentSignal: NodeJS.Signals | undefined;
+    const parentHandlers = (['SIGHUP', 'SIGINT', 'SIGTERM'] as const).map((signal) => {
+      const handler = () => { parentSignal ??= signal; stop('parent-signal'); };
+      process.on(signal, handler); return { signal, handler };
+    });
     const timeoutTimer = setTimeout(() => stop('timeout'), limits.timeoutMilliseconds);
     const settle = (): void => {
       if (settled) return;
       settled = true;
+      // The bounded receipt must also release our event-loop ownership. This is
+      // not proof that this child or any escaped descendant has terminated.
+      if (uncertainTermination) {
+        child.unref?.();
+        for (const stream of [child.stdout, child.stderr]) { stream?.removeAllListeners('data'); stream?.destroy?.(); }
+      }
       clearTimeout(timeoutTimer);
+      for (const { signal, handler } of parentHandlers) process.off(signal, handler);
       if (graceTimer !== undefined) clearTimeout(graceTimer);
       if (confirmationTimer !== undefined) clearTimeout(confirmationTimer);
       resolve({
         status: childStatus,
+        ...(parentSignal === undefined ? {} : { signal: parentSignal }),
         stdout: Buffer.concat(stdout, stdoutBytes).toString('utf8'),
+        stdoutBytes: Buffer.concat(stdout, stdoutBytes),
         stderr: Buffer.concat(stderr, stderrBytes).toString('utf8'),
         ...(processError === undefined ? {} : { error: processError }),
         ...(monitorError === undefined ? {} : { monitorError }),
@@ -123,9 +148,9 @@ export function runManagedGitProcess(
       else void runMonitor(true);
     }
     const processGroupExists = (): boolean | undefined => {
-      if (!POSIX_PROCESS_GROUPS || child.pid === undefined) return undefined;
+      if (!processGroups || child.pid === undefined) return undefined;
       try {
-        process.kill(-child.pid, 0);
+        signalProcess(-child.pid, 0);
         return true;
       } catch (error) {
         const code = errorCode(error);
@@ -135,9 +160,9 @@ export function runManagedGitProcess(
       }
     };
     const signalTree = (signal: NodeJS.Signals): boolean => {
-      if (POSIX_PROCESS_GROUPS && child.pid !== undefined) {
+      if (processGroups && child.pid !== undefined) {
         try {
-          process.kill(-child.pid, signal);
+          signalProcess(-child.pid, signal);
           return true;
         } catch (error) {
           return errorCode(error) === 'ESRCH';
@@ -174,14 +199,15 @@ export function runManagedGitProcess(
       confirmationTimer = setTimeout(confirmOrFail, limits.terminationGraceMilliseconds);
     };
     function stop(reason: ManagedGitProcessFailure): void {
-      if (settled || treeDone) return;
+      if (settled) return;
       failure ??= reason;
+      if (treeDone) return;
       clearTimeout(timeoutTimer);
       if (!signalTree('SIGTERM')) uncertainTermination = true;
       if (graceTimer === undefined) graceTimer = setTimeout(force, limits.terminationGraceMilliseconds);
     }
     const capture = (target: Buffer[], stream: 'stdout' | 'stderr', chunk: Buffer | string): void => {
-      if (failure !== undefined) return;
+      if (settled || failure !== undefined) return;
       const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       const current = stream === 'stdout' ? stdoutBytes : stderrBytes;
       if (current + bytes.byteLength > limits.maxStreamBytes) {
@@ -195,9 +221,20 @@ export function runManagedGitProcess(
 
     child.stdout?.on('data', (chunk: Buffer | string) => capture(stdout, 'stdout', chunk));
     child.stderr?.on('data', (chunk: Buffer | string) => capture(stderr, 'stderr', chunk));
-    child.once('error', (error) => { processError = error; });
+    child.once('error', (error) => {
+      if (settled) return;
+      processError = error;
+      if (child.pid === undefined) completeTree();
+      else stop('termination-uncertain');
+    });
     child.once('close', (status) => {
+      if (settled) return;
       childStatus = status;
+      if (!processGroups) {
+        if (failure !== undefined) uncertainTermination = true;
+        completeTree();
+        return;
+      }
       const descendants = processGroupExists();
       if (failure !== undefined) {
         if (descendants === false) completeTree();
@@ -207,7 +244,7 @@ export function runManagedGitProcess(
         stop('termination-uncertain');
         return;
       }
-      if (descendants === undefined && POSIX_PROCESS_GROUPS && child.pid !== undefined) {
+      if (descendants === undefined && processGroups && child.pid !== undefined) {
         failure = 'termination-uncertain';
         uncertainTermination = true;
       }
@@ -233,3 +270,20 @@ function errorCode(error: unknown): string | undefined {
 }
 
 function asError(error: unknown): Error { return error instanceof Error ? error : new Error(String(error)); }
+
+/** gh's fixed `git` lookup must select exactly the controlled Windows installation. */
+export function managedGithubCloneEnvironment(git: string, environment: NodeJS.ProcessEnv, excludedRoots: readonly string[]): NodeJS.ProcessEnv {
+  if (!win32.isAbsolute(git) || win32.basename(git).toLowerCase() !== 'git.exe') {
+    throw new BazframeError('MANAGED_GIT_GH_HELPER_UNSUPPORTED', 'Authenticated Windows gh clone requires the selected installation\'s git.exe. Set BAZFRAME_GIT_COMMAND to that executable; renamed/custom helpers cannot be substituted.');
+  }
+  const paths = (executableEnvironmentValue(environment, 'PATH', true) ?? '').split(';').filter((path) => /^[a-z]:\\/iu.test(path) && !excludedRoots.some((root) => {
+    const relative = win32.relative(root, path);
+    return relative === '' || (!win32.isAbsolute(relative) && relative !== '..' && !relative.startsWith('..\\'));
+  }));
+  const result = { ...environment };
+  for (const name of Object.keys(result)) if (['PATH', 'PATHEXT', 'NODEFAULTCURRENTDIRECTORYINEXEPATH'].includes(name.toUpperCase())) delete result[name];
+  result.PATH = [win32.dirname(git), ...paths].join(';');
+  result.PATHEXT = '.EXE';
+  result.NoDefaultCurrentDirectoryInExePath = '1';
+  return result;
+}

@@ -1,3 +1,5 @@
+import { createApplicationServices, type ApplicationServices } from '../application/application-services.js';
+import * as nodePaths from 'node:path';
 import { tmpdir } from 'node:os';
 import { lstat } from 'node:fs/promises';
 import { createInterface } from 'node:readline/promises';
@@ -77,6 +79,7 @@ import {
   formatSkillCollectionDiagnostic,
   inspectGlobalSkillCollections,
   loadFlatSkillIdentities,
+  loadFlatSkillIdentitiesWithEffects,
   resolveProfileSkillCollections,
   type GlobalSkillCollectionInspection,
   type ProfileSkillCollectionComposition,
@@ -161,6 +164,7 @@ import { isReservedProfileSiblingName } from '../profile-publishing/publication-
 import { projectManagedProfileRuntime } from '../profile-publishing/profile-runtime-projection.js';
 
 export interface CliDependencies {
+  application?: ApplicationServices;
   cwd?: () => string;
   environment?: NodeJS.ProcessEnv;
   /** Internal test seam. Production callers use process.platform. */
@@ -190,6 +194,7 @@ export interface CliDependencies {
   captureResult?: (result: Record<string, unknown>) => void;
   captureDiagnostic?: (diagnostic: ProtocolDiagnostic) => void;
   launchTui?: (options: {
+    application?: ApplicationServices;
     bazframeHome: string;
     bazframeVersion: string;
     cwd: string;
@@ -203,9 +208,13 @@ export interface CliDependencies {
   }) => Promise<number>;
 }
 
-export async function runCli(
+export function runCli(argv: readonly string[], dependencies: CliDependencies = {}): Promise<number> { return runCliShared(argv, dependencies, true); }
+/** The sole internal gate bypass; every post-gate handler and composition is shared. */
+export function runCliForInternalTesting(argv: readonly string[], dependencies: CliDependencies & { application: ApplicationServices }): Promise<number> { return runCliShared(argv, dependencies, false); }
+async function runCliShared(
   argv: readonly string[],
-  dependencies: CliDependencies = {}
+  dependencies: CliDependencies,
+  publicGate: boolean
 ): Promise<number> {
   const writeStdout = dependencies.writeStdout ?? ((text: string) => process.stdout.write(text));
   const writeStderr = dependencies.writeStderr ?? ((text: string) => process.stderr.write(text));
@@ -218,7 +227,7 @@ export async function runCli(
     environment,
     dependencies.stderrIsTty ?? process.stderr.isTTY === true
   ));
-  const parsed = parseArgv(argv);
+  const parsed = parseArgv(argv, publicGate ? undefined : dependencies.application?.paths.isAbsolute);
   const jsonMode = 'json' in parsed && parsed.json === true;
 
   if (parsed.kind === 'help') {
@@ -243,13 +252,14 @@ export async function runCli(
     let result: Record<string, unknown> | undefined;
     const diagnostics: ProtocolDiagnostic[] = [];
     try {
-      assertBazframePlatformSupported(dependencies.platform);
+      if (publicGate) assertBazframePlatformSupported(dependencies.platform);
+      dependencies = { ...dependencies, application: dependencies.application ?? createApplicationServices() };
       if(parsed.command.name==='profile-publish'&&!parsed.command.yes)throw new BazframeError('PROFILE_PUBLISH_CONFIRMATION_REQUIRED','Profile publication in JSON mode requires --yes.');
       if (parsed.command.name === 'packages-add' && isManagedGitSource(parsed.command.root) && !parsed.command.yes) throw new BazframeError('MANAGED_GIT_BUILD_CONFIRMATION_REQUIRED', 'Package acquisition from a remote Git source in JSON mode requires --yes.');
       if (parsed.command.name === 'packages-update' && !parsed.command.yes) throw new BazframeError('MANAGED_GIT_BUILD_CONFIRMATION_REQUIRED', 'Package update from a remote Git source in JSON mode requires --yes.');
       if (parsed.command.name === 'status') {
-        const bazframeHome = resolveBazframeHome(environment, dependencies.userHome);
-        const inspection = await inspectStatus({ bazframeHome, bazframeVersion: VERSION, environment, cwd: (dependencies.cwd ?? process.cwd)(), ...(dependencies.userHome === undefined ? {} : { userHome: dependencies.userHome }), ...(dependencies.adapterArtifactUrl === undefined ? {} : { artifactUrl: dependencies.adapterArtifactUrl }) });
+        const bazframeHome = resolveBazframeHome(environment, dependencies.userHome, dependencies.application?.paths);
+        const inspection = await inspectStatus({ application: dependencies.application, bazframeHome, bazframeVersion: VERSION, environment, cwd: (dependencies.cwd ?? process.cwd)(), ...(dependencies.userHome === undefined ? {} : { userHome: dependencies.userHome }), ...(dependencies.adapterArtifactUrl === undefined ? {} : { artifactUrl: dependencies.adapterArtifactUrl }) });
         const exitStatus = statusExitStatus(inspection);
         writeStdout(serializeJsonDocument(successDocument(id, statusResult(inspection, exitStatus === EXIT_STATUS.success ? 'ready' : 'attention'))));
         return exitStatus;
@@ -268,7 +278,8 @@ export async function runCli(
   }
 
   try {
-    assertBazframePlatformSupported(dependencies.platform);
+    if (publicGate) assertBazframePlatformSupported(dependencies.platform);
+    dependencies = { ...dependencies, application: dependencies.application ?? createApplicationServices() };
     return await invokeWithProfileRuntime(parsed.command, dependencies, (next) => runCommand(parsed.command,next,writeStdout,writeStderr,stdoutColors,stderrColors));
   } catch (error) {
     const id=commandId(parsed.command);
@@ -282,7 +293,8 @@ export async function runCli(
 }
 
 async function invokeWithProfileRuntime<T>(command: Command, dependencies: CliDependencies, run: (dependencies: CliDependencies) => Promise<T>): Promise<T> {
-  const home = resolveBazframeHome(dependencies.environment ?? process.env, dependencies.userHome);
+  if (isLifecycleCommandId(commandId(command))) dependencies = { ...dependencies, profileLifecycle: { ...dependencies.application?.profileLifecycle, ...dependencies.profileLifecycle } };
+  const home = resolveBazframeHome(dependencies.environment ?? process.env, dependencies.userHome, dependencies.application?.paths);
   const dryRun = command.name === 'profile-import' && command.dryRun;
   const gitAccess = command.name === 'profile-publish' ? 'authenticated'
     : command.name === 'profile-update' || command.name === 'profile-version-list' || command.name === 'profile-version-use' || (command.name === 'profile-import' && command.source.kind === 'git') ? 'import'
@@ -294,7 +306,7 @@ async function invokeWithProfileRuntime<T>(command: Command, dependencies: CliDe
     || (command.name === 'profile-publish' ? dependencies.profilePublicationAdapter !== undefined : dependencies.profileLifecycle?.git !== undefined);
   if (injectedReady) {
     if (mutation && !dryRun) {
-      try { await recoverProfilePublishingTransactions(home, dependencies.profileRecoveryAdapter); }
+      try { await recoverProfilePublishingTransactions(home, dependencies.profileRecoveryAdapter, dependencies.application?.lifecycle); }
       catch (error) {
         if (!(error instanceof BazframeError) || error.code !== 'PROFILE_RECOVERY_ADAPTER_REQUIRED') throw error;
         return runProductionRuntime(command, dependencies, 'authenticated', run);
@@ -309,7 +321,8 @@ async function runProductionRuntime<T>(command: Command, dependencies: CliDepend
   const environment = dependencies.environment ?? process.env;
   const mode: ProfileLifecycleRuntimeOptions['mode'] = command.name === 'profile-import' && command.dryRun ? 'dry-run' : dependencies.jsonMode === true ? 'json' : 'human';
   const wrapped = await (dependencies.profileRuntime ?? withProductionProfileLifecycleRuntime)({
-    home: resolveBazframeHome(environment, dependencies.userHome),
+    ...dependencies.application?.runtimeOptions,
+    home: resolveBazframeHome(environment, dependencies.userHome, dependencies.application?.paths),
     cwd: (dependencies.cwd ?? process.cwd)(), environment, mode, access,
     ...(dependencies.temporaryRoot === undefined ? {} : { temporaryRoot: dependencies.temporaryRoot })
   }, async (session) => run({
@@ -370,6 +383,8 @@ async function runCommand(
   stdoutColors: CliColors,
   stderrColors: CliColors
 ): Promise<number> {
+  const application = dependencies.application;
+  const join = application?.paths.join ?? nodePaths.join;
   const environment = dependencies.environment ?? process.env;
   if (command.name === 'tui') {
     const stdinIsTty = dependencies.stdinIsTty ?? process.stdin.isTTY === true;
@@ -385,7 +400,8 @@ async function runCommand(
       return runTui(options);
     });
     return launchTui({
-      bazframeHome: resolveBazframeHome(environment, dependencies.userHome),
+      application,
+      bazframeHome: resolveBazframeHome(environment, dependencies.userHome, dependencies.application?.paths),
       bazframeVersion: VERSION,
       cwd: (dependencies.cwd ?? process.cwd)(),
       environment,
@@ -400,9 +416,10 @@ async function runCommand(
     });
   }
 
-  const bazframeHome = resolveBazframeHome(environment, dependencies.userHome);
+  const bazframeHome = resolveBazframeHome(environment, dependencies.userHome, dependencies.application?.paths);
   if (command.name === 'adapters-overview') {
     const adapter = await inspectPiAdapter({
+      services: dependencies.application?.adapter?.({ bazframeHome, bazframeVersion: VERSION, environment, userHome: dependencies.userHome }),
       bazframeHome,
       bazframeVersion: VERSION,
       environment,
@@ -417,6 +434,7 @@ async function runCommand(
   }
   if (command.name === 'adapter-install-pi') {
     const result = await installPiAdapter({
+      services: application?.adapter?.({ bazframeHome, bazframeVersion: VERSION, environment, userHome: dependencies.userHome }),
       bazframeHome,
       bazframeVersion: VERSION,
       environment,
@@ -436,6 +454,7 @@ async function runCommand(
   }
   if (command.name === 'adapter-uninstall-pi') {
     const result = await uninstallPiAdapter({
+      services: application?.adapter?.({ bazframeHome, bazframeVersion: VERSION, environment, userHome: dependencies.userHome }),
       bazframeHome,
       bazframeVersion: VERSION,
       environment,
@@ -453,22 +472,22 @@ async function runCommand(
     return EXIT_STATUS.success;
   }
   if (command.name === 'profiles-overview') {
-    const result = await listProfiles(bazframeHome);
+    const result = await listProfiles(bazframeHome, { provisioningServices: application?.provisioning });
     let activeProfile: string | undefined;
     try {
-      activeProfile = await currentProfile(bazframeHome);
+      activeProfile = await currentProfile(bazframeHome, application?.selection);
     } catch (error) {
       if (!(error instanceof BazframeError && error.code === 'NO_ACTIVE_PROFILE')) throw error;
     }
-    const applications=await hasAnyManagedProfileState(bazframeHome,result.profileIds)?projectProfileListApplications(await readProfileSystemView(bazframeHome),activeProfile??null):[];
+    const applications=await hasAnyManagedProfileState(bazframeHome,result.profileIds,application)?projectProfileListApplications(await readProfileSystemView(bazframeHome, application?.view),activeProfile??null):[];
     captureResult(dependencies,profileListResult(result.profileIds,activeProfile,applications));
     writeStdout(formatProfilesOverview(result.profileIds, activeProfile, stdoutColors,applications));
     for (const diagnostic of result.diagnostics) if(!reservedProfileDiagnostic(diagnostic))reportWarning(dependencies,writeStderr,stderrColors,'PROFILE_ENTRY_INVALID',diagnostic);
     return EXIT_STATUS.success;
   }
   if (command.name === 'skills-overview') {
-    const result = await inspectDefaultSkillCatalog(bazframeHome);
-    const view=await optionalManagedSystemView(bazframeHome);
+    const result = await inspectDefaultSkillCatalog(bazframeHome, application?.profiles);
+    const view=await optionalManagedSystemView(bazframeHome,application);
     const skills=view===undefined?result.registrations:view.skills.map((item)=>({id:item.displayName,target:item.directory,stableIdentity:item.stableIdentity,sourceKind:item.sourceKind,directlyAttachable:item.directlyAttachable}));
     captureResult(dependencies,{catalogRoot:result.root,registrations:skills});
     writeStdout(formatSkillsOverview(result.root, skills, stdoutColors));
@@ -476,9 +495,9 @@ async function runCommand(
     return EXIT_STATUS.success;
   }
   if (command.name === 'profile-skills-overview') {
-    const profileId = await readActiveProfile(bazframeHome);
-    const view=await optionalManagedSystemView(bazframeHome);
-    if(view===undefined){const profile=await loadProfile(bazframeHome,profileId);const skillIds=profile.skillDirectories.map((directory)=>directory.split('/').at(-1)!);captureResult(dependencies,{profileId,skills:skillIds.map((id)=>({id}))});writeStdout(formatProfileSkillsOverview(profileId,skillIds,stdoutColors));return EXIT_STATUS.success;}
+    const profileId = await readActiveProfile(bazframeHome, dependencies.application?.selection);
+    const view=await optionalManagedSystemView(bazframeHome,application);
+    if(view===undefined){const profile=await loadProfile(bazframeHome,profileId, application?.profiles);const skillIds=profile.skillDirectories.map((directory)=>(application?.paths.basename ?? nodePaths.basename)(directory));captureResult(dependencies,{profileId,skills:skillIds.map((id)=>({id}))});writeStdout(formatProfileSkillsOverview(profileId,skillIds,stdoutColors));return EXIT_STATUS.success;}
     const skills=view.skills.filter((item)=>item.ownerProfiles.includes(profileId));
     captureResult(dependencies,{profileId,skills:skills.map((item)=>({id:item.displayName,stableIdentity:item.stableIdentity,sourceKind:item.sourceKind}))});
     writeStdout(formatProfileSkillsOverview(profileId,skills.map((item)=>item.displayName),stdoutColors));
@@ -486,39 +505,41 @@ async function runCommand(
   }
   if (command.name === 'libraries-overview' || command.name === 'packages-overview') {
     const kind: SkillCollectionKind = command.name === 'libraries-overview' ? 'library' : 'package';
-    const inspection = await inspectGlobalSkillCollections(bazframeHome);
-    const referenceIndex = await captureProfileCollectionReferenceBulkIndex(bazframeHome);
+    const inspection = await inspectGlobalSkillCollections(bazframeHome, application?.collections?.resolver.definitionLoader, application?.collections?.resolver);
+    const referenceIndex = await captureProfileCollectionReferenceBulkIndex(bazframeHome, application?.collections?.references);
     const referenceCounts = new Map<string, number | 'unknown'>();
     for (const item of inspection.collections) {
       const key = collectionKey(kindForRecord(item.record), idForRecord(item.record));
       referenceCounts.set(key, referenceIndex.diagnostics.length > 0 ? 'unknown' : (referenceIndex.profileIdsByCollection.get(key)?.length ?? 0));
     }
-    const view=await optionalManagedSystemView(bazframeHome);const imported=view?.namespace.filter((item)=>item.kind===kind&&item.stableIdentity.startsWith('imported:'))??[];
+    const view=await optionalManagedSystemView(bazframeHome,application);const imported=view?.namespace.filter((item)=>item.kind===kind&&item.stableIdentity.startsWith('imported:'))??[];
     captureResult(dependencies,{...globalCollectionsResult(kind,inspection,referenceCounts,referenceIndex.diagnostics),imported:imported.map((item)=>({id:item.displayName,stableIdentity:item.stableIdentity,ownerProfiles:item.ownerProfiles,skills:view!.skills.filter((skill)=>skill.sourceResourceIdentity===item.stableIdentity).map((skill)=>({name:skill.displayName}))}))});
     writeStdout(`${formatCollectionsOverview(kind, inspection, referenceCounts, referenceIndex.diagnostics, stdoutColors)}${imported.length===0?'':`Imported ${kind}s:\n${imported.map((item)=>`  - ${item.displayName} [immutable; profiles:${item.ownerProfiles.join(',')}]${view!.skills.filter((skill)=>skill.sourceResourceIdentity===item.stableIdentity).map((skill)=>`\n      - ${skill.displayName}`).join('')}`).join('\n')}\n`}`);
     return EXIT_STATUS.success;
   }
   if (command.name === 'profile-libraries-overview' || command.name === 'profile-packages-overview') {
     const kind: SkillCollectionKind = command.name === 'profile-libraries-overview' ? 'library' : 'package';
-    const profileId = await readActiveProfile(bazframeHome);
-    const profile = await loadProfile(bazframeHome, profileId);
-    const composition = await resolveProfileSkillCollections(profile.directory, loadFlatSkillIdentities(profile.skillDirectories));
-    const view=await optionalManagedSystemView(bazframeHome);const imported=view?.namespace.filter((item)=>item.kind===kind&&item.ownerProfiles.includes(profileId)&&item.stableIdentity.startsWith('imported:'))??[];
+    const profileId = await readActiveProfile(bazframeHome, dependencies.application?.selection);
+    const profile = await loadProfile(bazframeHome, profileId, dependencies.application?.profiles);
+    const flatSkills = application?.projection === undefined ? loadFlatSkillIdentities(profile.skillDirectories) : await loadFlatSkillIdentitiesWithEffects(profile.skillDirectories, application.projection.resolver);
+    const importedSkills = await hasAnyManagedProfileState(bazframeHome, [profileId], application) ? (await projectManagedProfileRuntime(bazframeHome, profileId, application?.projection)).skills : [];
+    const composition = await resolveProfileSkillCollections(profile.directory, [...flatSkills, ...importedSkills], application?.collections?.resolver.definitionLoader, application?.collections?.resolver);
+    const view=await optionalManagedSystemView(bazframeHome,application);const imported=view?.namespace.filter((item)=>item.kind===kind&&item.ownerProfiles.includes(profileId)&&item.stableIdentity.startsWith('imported:'))??[];
     captureResult(dependencies,{...profileCollectionsResult(profileId,kind,composition),importedReferences:imported.map((item)=>({id:item.displayName,stableIdentity:item.stableIdentity,skills:view!.skills.filter((skill)=>skill.sourceResourceIdentity===item.stableIdentity).map((skill)=>({name:skill.displayName}))}))});
     writeStdout(`${formatProfileCollectionsOverview(profileId, kind, composition, stdoutColors)}${imported.length===0?'':`Imported immutable ${kind}s:\n${imported.map((item)=>`  - ${item.displayName}${view!.skills.filter((skill)=>skill.sourceResourceIdentity===item.stableIdentity).map((skill)=>`\n      - ${skill.displayName}`).join('')}`).join('\n')}\n`}`);
     return EXIT_STATUS.success;
   }
   if (command.name === 'profile-export') {
     const result = await exportManagedProfile({ home:bazframeHome, ...(command.profileId===undefined?{}:{profileName:command.profileId}), ...(command.outputPath===undefined?{}:{outputPath:command.outputPath}), overwrite:command.overwrite, bundleRemote:command.bundleRemote, cwd:(dependencies.cwd??process.cwd)() }, dependencies.profileLifecycle);
-    const profile = await projectedProfile(bazframeHome,result.profileName);
+    const profile = await projectedProfile(bazframeHome,result.profileName,application);
     captureResult(dependencies,{ profile, output:result.outputPath, captureSha256:result.captureSha256, files:capturedFiles(result.preview,result.capturedProfile), overwritten:result.overwritten });
     writeStdout(`Exported profile ${result.profileName} to ${boundedPathForDisplay(result.outputPath)}.\n`);
     return EXIT_STATUS.success;
   }
   if (command.name === 'profile-publish') {
     if (dependencies.profilePublicationAdapter === undefined) throw new BazframeError('PROFILE_GIT_ADAPTER_REQUIRED','Profile publication requires GitHub transport.');
-    const result = await publishManagedProfile({ home:bazframeHome, ...(command.profileId===undefined?{}:{profileName:command.profileId}), visibility:command.visibility, bundleRemote:command.bundleRemote, yes:command.yes, ...(command.yes?{}:{authorize:(confirmations,preview)=>confirmPublication(confirmations,preview,dependencies,writeStdout)}) }, dependencies.profilePublicationAdapter);
-    const profile = await projectedProfile(bazframeHome,result.profileName);
+    const result = await publishManagedProfile({ home:bazframeHome, ...(command.profileId===undefined?{}:{profileName:command.profileId}), visibility:command.visibility, bundleRemote:command.bundleRemote, yes:command.yes, ...(command.yes?{}:{authorize:(confirmations,preview)=>confirmPublication(confirmations,preview,dependencies,writeStdout)}) }, dependencies.profilePublicationAdapter, application?.lifecycle);
+    const profile = await projectedProfile(bazframeHome,result.profileName,application);
     captureResult(dependencies,{ profile, repository:result.repository, commit:result.commit, visibility:result.visibility, captureSha256:result.captureSha256, files:capturedFiles(result.preview,result.capturedProfile) });
     writeStdout(`Published profile ${result.profileName} to ${result.repository} at ${result.commit}.\n`);
     return EXIT_STATUS.success;
@@ -539,41 +560,42 @@ async function runCommand(
       },
       authorizePackageBuild:command.yes?async()=>true:dependencies.confirmProfileImportPackageBuild??(interactive?async(report)=>{writeStdout(`${stringifyForTerminal(report)}\n`);return promptLiteralYes('Run this exact package build? [y/N] ');}:undefined)
     },dependencies.profileLifecycle);
-    const profile = await projectedProfile(bazframeHome,result.profileName);
+    const profile = await projectedProfile(bazframeHome,result.profileName,application);
     const inspection=result.inspection;
     captureResult(dependencies,{ mode:'executed', source:inspection.sourceKind==='zip'?{kind:'zip'}:{kind:'git',repository:inspection.canonicalOrigin!,resolvedCommit:inspection.commit!}, requestedName:inspection.requestedName, resolvedName:result.profileName, collisionResolution:result.action==='overwritten'?'overwrite':result.profileName===inspection.requestedName?'none':'safe-suffix', profile, effects:mergeProfileLifecycleMutationEffects(dependencies.lifecycleRuntimeEffects??noProfileLifecycleMutationEffects(),result.effects) });
     writeStdout(`Imported profile ${result.profileName}${result.incomplete?' (incomplete)':''}.\n`);
     return EXIT_STATUS.success;
   }
   if (command.name === 'profile-update') {
-    const before=await projectedProfile(bazframeHome,command.profileId);if(before.publication===null)throw new BazframeError('PROFILE_NOT_PUBLISHED','Profile is not linked to GitHub.');
+    const before=await projectedProfile(bazframeHome,command.profileId,application);if(before.publication===null)throw new BazframeError('PROFILE_NOT_PUBLISHED','Profile is not linked to GitHub.');
     const result=await updateManagedProfile({home:bazframeHome,...(command.profileId===undefined?{}:{profileName:command.profileId}),overwrite:command.overwrite},dependencies.profileLifecycle);
-    const profile=await projectedProfile(bazframeHome,result.profileName);
+    const profile=await projectedProfile(bazframeHome,result.profileName,application);
     const remaining=new Set(profile.missingResources.map(item=>`${item.kind}\0${item.name}`));
     const repairedResources=before.missingResources.filter(item=>!remaining.has(`${item.kind}\0${item.name}`)).map(({kind,name})=>({kind,name}));
     captureResult(dependencies,{profile,previousCommit:before.publication.installedCommit,currentCommit:result.commit,movedToNewCommit:before.publication.installedCommit!==result.commit,repairedResources});
     writeStdout(`Profile ${result.profileName} is at ${result.commit}.\n`);return EXIT_STATUS.success;
   }
   if (command.name === 'profile-version-list') {
-    const profile=await projectedProfile(bazframeHome,command.profileId);if(profile.publication===null)throw new BazframeError('PROFILE_NOT_PUBLISHED','Profile is not linked to GitHub.');
+    const profile=await projectedProfile(bazframeHome,command.profileId,application);if(profile.publication===null)throw new BazframeError('PROFILE_NOT_PUBLISHED','Profile is not linked to GitHub.');
     const versions=await listManagedProfileVersions(bazframeHome,command.profileId,dependencies.profileLifecycle);
     const latestCommit=versions.find((item)=>item.latest)?.commit;if(latestCommit===undefined)throw new BazframeError('PROFILE_LIFECYCLE_INVALID','Profile version listing has no latest entry.');
     captureResult(dependencies,{profile:profile.name,currentCommit:profile.publication.installedCommit,latestCommit,versions});
     writeStdout(`${versions.map(item=>`${item.commit}${item.current?' current':''}${item.latest?' latest':''}`).join('\n')}\n`);return EXIT_STATUS.success;
   }
   if (command.name === 'profile-version-use') {
-    const before=await projectedProfile(bazframeHome,command.profileId);if(before.publication===null)throw new BazframeError('PROFILE_NOT_PUBLISHED','Profile is not linked to GitHub.');
+    const before=await projectedProfile(bazframeHome,command.profileId,application);if(before.publication===null)throw new BazframeError('PROFILE_NOT_PUBLISHED','Profile is not linked to GitHub.');
     const result=await useManagedProfileVersion({home:bazframeHome,revision:command.revision,...(command.profileId===undefined?{}:{profileName:command.profileId}),overwrite:command.overwrite},dependencies.profileLifecycle);
-    const profile=await projectedProfile(bazframeHome,result.profileName);captureResult(dependencies,{profile,previousCommit:before.publication.installedCommit,currentCommit:result.commit});
+    const profile=await projectedProfile(bazframeHome,result.profileName,application);captureResult(dependencies,{profile,previousCommit:before.publication.installedCommit,currentCommit:result.commit});
     writeStdout(`Profile ${result.profileName} now uses ${result.commit}.\n`);return EXIT_STATUS.success;
   }
   if (command.name === 'profile-use') {
-    const result=await useManagedProfile(bazframeHome,command.profileId);
+    const result=await useManagedProfile(bazframeHome,command.profileId,application?.activation);
     captureResult(dependencies,{action:'selected',profileId:result.profile.name,incomplete:result.incomplete});
     writeStdout(`Active profile: ${result.profile.name}${result.warning===null?'':`\nwarning: ${result.warning}`}\n`);return EXIT_STATUS.success;
   }
   if (command.name === 'profile-edit') {
     const result = await editProfileInstructions({
+      ...application?.profileEditor,
       bazframeHome,
       profileId: command.profileId,
       environment,
@@ -585,6 +607,7 @@ async function runCommand(
   }
   if (command.name === 'skill-edit') {
     const result = await editSkillDefinition({
+      ...application?.skillEditor,
       bazframeHome,
       skillId: command.skillId,
       environment,
@@ -595,7 +618,7 @@ async function runCommand(
     return childExitStatus(result);
   }
   if (command.name === 'skill-update') {
-    const result = await updateManagedGitSkill({
+    const result = await (application?.provider?.(bazframeHome).updateManagedGitSkill ?? updateManagedGitSkill)({
       bazframeHome,
       environment,
       acceptRewrite: command.acceptRewrite
@@ -605,31 +628,31 @@ async function runCommand(
     return EXIT_STATUS.success;
   }
   if (command.name === 'profile-add') {
-    const result=await addProfile(bazframeHome,command.profileId);captureResult(dependencies,{action:result.action,profileId:result.profileId,directory:result.directory});writeStdout(formatProfileLifecycle(result));return EXIT_STATUS.success;
+    const result=await addProfile(bazframeHome,command.profileId,{provisioningServices:application?.provisioning});captureResult(dependencies,{action:result.action,profileId:result.profileId,directory:result.directory});writeStdout(formatProfileLifecycle(result));return EXIT_STATUS.success;
   }
   if (command.name === 'profile-duplicate') {
-    const result=await duplicateManagedProfile(bazframeHome,command.sourceProfileId,command.profileId);captureResult(dependencies,{action:'duplicated',sourceProfileId:result.sourceProfileName,profileId:result.profileName,directory:join(bazframeHome,'profiles',result.profileName),activeSelectionUpdated:false});writeStdout(formatManagedDuplicate(result.sourceProfileName,result.profileName,bazframeHome));return EXIT_STATUS.success;
+    const result=await duplicateManagedProfile(bazframeHome,command.sourceProfileId,command.profileId,{},application?.lifecycle,application?.copyProfileEffects===undefined?undefined:(authority)=>application.copyProfileEffects!(bazframeHome,authority));captureResult(dependencies,{action:'duplicated',sourceProfileId:result.sourceProfileName,profileId:result.profileName,directory:join(bazframeHome,'profiles',result.profileName),activeSelectionUpdated:false});writeStdout(formatManagedDuplicate(result.sourceProfileName,result.profileName,bazframeHome,application));return EXIT_STATUS.success;
   }
   if (command.name === 'profile-remove') {
     if(!command.force)return removeLegacyProfileGuard(bazframeHome,command.profileId,dependencies,writeStdout);
-    const result=await removeManagedProfile(bazframeHome,command.profileId);captureResult(dependencies,{action:result.action,profileId:result.profileName,directory:join(bazframeHome,'profiles',result.profileName)});writeStdout(formatProfileLifecycle({action:result.action,profileId:result.profileName,directory:join(bazframeHome,'profiles',result.profileName)}));return EXIT_STATUS.success;
+    const result=await removeManagedProfile(bazframeHome,command.profileId,application?.lifecycle?.header.schemaVersion===2?{expectedRemovalIdentity:await application.lifecycle.capture(bazframeHome,command.profileId)}:{},application?.lifecycle);captureResult(dependencies,{action:result.action,profileId:result.profileName,directory:join(bazframeHome,'profiles',result.profileName)});writeStdout(formatProfileLifecycle({action:result.action,profileId:result.profileName,directory:join(bazframeHome,'profiles',result.profileName)}));return EXIT_STATUS.success;
   }
   if (command.name === 'profile-rename') {
-    const result=await renameManagedProfile(bazframeHome,command.previousProfileId,command.profileId);captureResult(dependencies,{action:'renamed',previousProfileId:result.oldName,profileId:result.newName,directory:join(bazframeHome,'profiles',result.newName),activeSelectionUpdated:result.activeSelectionUpdated});writeStdout(formatManagedRename(result.oldName,result.newName,bazframeHome,result.activeSelectionUpdated));return EXIT_STATUS.success;
+    const result=await renameManagedProfile(bazframeHome,command.previousProfileId,command.profileId,{},application?.lifecycle);captureResult(dependencies,{action:'renamed',previousProfileId:result.oldName,profileId:result.newName,directory:join(bazframeHome,'profiles',result.newName),activeSelectionUpdated:result.activeSelectionUpdated});writeStdout(formatManagedRename(result.oldName,result.newName,bazframeHome,result.activeSelectionUpdated,application));return EXIT_STATUS.success;
   }
   if (command.name === 'profile-list') {
-    const result = await listProfiles(bazframeHome);
+    const result = await listProfiles(bazframeHome, { provisioningServices: application?.provisioning });
     let activeProfile: string | undefined;
-    try { activeProfile = await currentProfile(bazframeHome); }
+    try { activeProfile = await currentProfile(bazframeHome, application?.selection); }
     catch (error) { if (!(error instanceof BazframeError && error.code === 'NO_ACTIVE_PROFILE')) throw error; }
-    const applications=await hasAnyManagedProfileState(bazframeHome,result.profileIds)?projectProfileListApplications(await readProfileSystemView(bazframeHome),activeProfile??null):[];
+    const applications=await hasAnyManagedProfileState(bazframeHome,result.profileIds,application)?projectProfileListApplications(await readProfileSystemView(bazframeHome, application?.view),activeProfile??null):[];
     captureResult(dependencies,profileListResult(result.profileIds,activeProfile,applications));
     writeStdout(formatProfilesOverview(result.profileIds, activeProfile, stdoutColors,applications));
     for (const diagnostic of result.diagnostics) if(!reservedProfileDiagnostic(diagnostic))reportWarning(dependencies,writeStderr,stderrColors,'PROFILE_ENTRY_INVALID',diagnostic);
     return EXIT_STATUS.success;
   }
   if (command.name === 'profile-current') {
-    const profileId=await currentProfile(bazframeHome);captureResult(dependencies,{profileId});
+    const profileId=await currentProfile(bazframeHome, application?.selection);captureResult(dependencies,{profileId});
     writeStdout(`${profileId}\n`);
     return EXIT_STATUS.success;
   }
@@ -640,10 +663,10 @@ async function runCommand(
       ...(dependencies.jsonMode === true ? { childOutputPolicy: 'stdout-and-stderr-to-parent-stderr' as const } : {})
     };
     if (command.name === 'libraries-add' && isManagedGitSource(command.root)) {
-      const result=await addManagedGitLibrary(options,command.root);captureResult(dependencies,managedGitResult(result));writeStdout(formatManagedGitLifecycleResult(result));return EXIT_STATUS.success;
+      const result=await (application?.provider?.(bazframeHome).addManagedGitLibrary ?? addManagedGitLibrary)(options,command.root);captureResult(dependencies,managedGitResult(result));writeStdout(formatManagedGitLifecycleResult(result));return EXIT_STATUS.success;
     }
     if (command.name === 'packages-add' && isManagedGitSource(command.root)) {
-      const result=await addManagedGitPackage({
+      const result=await (application?.provider?.(bazframeHome).addManagedGitPackage ?? addManagedGitPackage)({
         ...options,
         yes: command.yes,
         ...(dependencies.jsonMode === true ? {} : {
@@ -652,11 +675,11 @@ async function runCommand(
         })
       }, command.root);captureResult(dependencies,managedGitResult(result));writeStdout(formatManagedGitLifecycleResult(result));return EXIT_STATUS.success;
     }
-    if (command.name === 'libraries-update' && await isManagedGitResource({ bazframeHome }, 'library', command.id)) {
-      const result=await updateManagedGitLibrary({...options,acceptRewrite:command.acceptRewrite},command.id);captureResult(dependencies,managedGitResult(result));writeStdout(formatManagedGitLifecycleResult(result));return EXIT_STATUS.success;
+    if (command.name === 'libraries-update' && await (application?.provider?.(bazframeHome).isManagedGitResource ?? isManagedGitResource)({ bazframeHome }, 'library', command.id)) {
+      const result=await (application?.provider?.(bazframeHome).updateManagedGitLibrary ?? updateManagedGitLibrary)({...options,acceptRewrite:command.acceptRewrite},command.id);captureResult(dependencies,managedGitResult(result));writeStdout(formatManagedGitLifecycleResult(result));return EXIT_STATUS.success;
     }
     if (command.name === 'packages-update') {
-      const result=await updateManagedGitPackage({
+      const result=await (application?.provider?.(bazframeHome).updateManagedGitPackage ?? updateManagedGitPackage)({
         ...options,
         acceptRewrite: command.acceptRewrite,
         yes: command.yes,
@@ -666,26 +689,26 @@ async function runCommand(
         })
       }, command.id);captureResult(dependencies,managedGitResult(result));writeStdout(formatManagedGitLifecycleResult(result));return EXIT_STATUS.success;
     }
-    if (command.name === 'libraries-remove' && await isManagedGitResource({ bazframeHome }, 'library', command.id)) {
-      const result=await removeManagedGitLibrary(options,command.id);captureResult(dependencies,managedGitResult(result));writeStdout(formatManagedGitLifecycleResult(result));return EXIT_STATUS.success;
+    if (command.name === 'libraries-remove' && await (application?.provider?.(bazframeHome).isManagedGitResource ?? isManagedGitResource)({ bazframeHome }, 'library', command.id)) {
+      const result=await (application?.provider?.(bazframeHome).removeManagedGitLibrary ?? removeManagedGitLibrary)(options,command.id);captureResult(dependencies,managedGitResult(result));writeStdout(formatManagedGitLifecycleResult(result));return EXIT_STATUS.success;
     }
-    if (command.name === 'packages-remove' && await isManagedGitResource({ bazframeHome }, 'package', command.id)) {
-      const result=await removeManagedGitPackage(options,command.id);captureResult(dependencies,managedGitResult(result));writeStdout(formatManagedGitLifecycleResult(result));return EXIT_STATUS.success;
+    if (command.name === 'packages-remove' && await (application?.provider?.(bazframeHome).isManagedGitResource ?? isManagedGitResource)({ bazframeHome }, 'package', command.id)) {
+      const result=await (application?.provider?.(bazframeHome).removeManagedGitPackage ?? removeManagedGitPackage)(options,command.id);captureResult(dependencies,managedGitResult(result));writeStdout(formatManagedGitLifecycleResult(result));return EXIT_STATUS.success;
     }
     let result: SkillCollectionLifecycleResult;
     let managedProvider=false;
     switch (command.name) {
-      case 'libraries-add': result = await addLibrary(options, command.root); break;
+      case 'libraries-add': result = await addLibrary(options,command.root,{services:application?.collections,packageProcessRunner:application?.packageProcessRunner}); break;
       case 'libraries-update':
         if (command.acceptRewrite) throw new BazframeError('MANAGED_GIT_OPTION_INVALID', '--accept-rewrite applies only to libraries acquired from remote Git sources.');
-        result = await updateLibrary(options, command.id); break;
-      case 'libraries-remove': result = await removeLibrary(options, command.id); break;
-      case 'packages-add': result = await addPackage(options, command.root); break;
+        result = await updateLibrary(options,command.id,{services:application?.collections,packageProcessRunner:application?.packageProcessRunner}); break;
+      case 'libraries-remove': result = await removeLibrary(options,command.id,{services:application?.collections,packageProcessRunner:application?.packageProcessRunner}); break;
+      case 'packages-add': result = await addPackage(options,command.root,{services:application?.collections,packageProcessRunner:application?.packageProcessRunner}); break;
       case 'packages-build':
-        managedProvider=await isManagedGitResource({bazframeHome},'package',command.id);
-        result=managedProvider?await buildManagedGitPackage(options,command.id):await buildPackage(options,command.id);
+        managedProvider=await (application?.provider?.(bazframeHome).isManagedGitResource ?? isManagedGitResource)({bazframeHome},'package',command.id);
+        result=managedProvider?await (application?.provider?.(bazframeHome).buildManagedGitPackage ?? buildManagedGitPackage)(options,command.id):await buildPackage(options,command.id,{services:application?.collections,packageProcessRunner:application?.packageProcessRunner});
         break;
-      case 'packages-remove': result = await removePackage(options, command.id); break;
+      case 'packages-remove': result = await removePackage(options,command.id,{services:application?.collections,packageProcessRunner:application?.packageProcessRunner}); break;
       default: throw new Error('unreachable package update dispatch');
     }
     captureResult(dependencies,{...collectionLifecycleResult(result),sourceType:managedProvider?'remoteGit':'local'});
@@ -693,14 +716,14 @@ async function runCommand(
     return EXIT_STATUS.success;
   }
   if (command.name === 'profile-libraries-add' || command.name === 'profile-libraries-remove' || command.name === 'profile-packages-add' || command.name === 'profile-packages-remove') {
-    const options = { bazframeHome };
+    const options = { bazframeHome, platformServices: application?.profiles?.platformServices, selectionReadServices: application?.selection, services: application?.collections };
     const explicit = command.profileId !== undefined;
-    const profileId=command.profileId??await readActiveProfile(bazframeHome);
+    const profileId=command.profileId??await readActiveProfile(bazframeHome, dependencies.application?.selection);
     const kind=command.name.startsWith('profile-libraries-')?'library' as const:'package' as const;
-    const selection=await optionalResourceSelection(bazframeHome,kind,command.id);
+    const selection=await optionalResourceSelection(bazframeHome,kind,command.id,application);
     if(selection!==undefined&&selection.resource.materialization.kind!=='ordinary'){
       if(selection.resource.materialization.kind==='profileLocal')throw new BazframeError('PROFILE_RESOURCE_SELECTOR_INVALID','Profile resource selector is ambiguous, stale, or invalid.');
-      const mutation=await mutateImportedProfileResourceMembership(bazframeHome,profileId,selection.stableIdentity,command.name.endsWith('-add')?'add':'remove');
+      const mutation=await mutateImportedProfileResourceMembership(bazframeHome,profileId,selection.stableIdentity,command.name.endsWith('-add')?'add':'remove',application?.importedMembership);
       captureResult(dependencies,{action:mutation.action,profileTarget:{id:profileId,source:explicit?'explicit':'active-selection'},kind,name:mutation.name,stableIdentity:mutation.stableIdentity});
       writeStdout(`Profile ${kind} reference: ${mutation.action}\nProfile: ${profileId}${explicit?' (explicit)':''}\n${kind==='library'?'Library':'Package'}: ${selection.resource.key.name}\n`);
       return EXIT_STATUS.success;
@@ -717,22 +740,22 @@ async function runCommand(
   }
   if (command.name === 'default-skill-add' || command.name === 'default-skill-remove') {
     if (command.name === 'default-skill-add' && isManagedGitSource(command.skillRoot)) {
-      const result=await addManagedGitSkill({bazframeHome,environment},command.skillRoot);captureResult(dependencies,managedGitResult(result));writeStdout(formatManagedGitLifecycleResult(result));return EXIT_STATUS.success;
+      const result=await (application?.provider?.(bazframeHome).addManagedGitSkill ?? addManagedGitSkill)({bazframeHome,environment},command.skillRoot);captureResult(dependencies,managedGitResult(result));writeStdout(formatManagedGitLifecycleResult(result));return EXIT_STATUS.success;
     }
-    if (command.name === 'default-skill-remove' && await isManagedGitResource({ bazframeHome }, 'skill', command.skillId)) {
-      const result=await removeManagedGitSkill({bazframeHome,environment},command.skillId);captureResult(dependencies,managedGitResult(result));writeStdout(formatManagedGitLifecycleResult(result));return EXIT_STATUS.success;
+    if (command.name === 'default-skill-remove' && await (application?.provider?.(bazframeHome).isManagedGitResource ?? isManagedGitResource)({ bazframeHome }, 'skill', command.skillId)) {
+      const result=await (application?.provider?.(bazframeHome).removeManagedGitSkill ?? removeManagedGitSkill)({bazframeHome,environment},command.skillId);captureResult(dependencies,managedGitResult(result));writeStdout(formatManagedGitLifecycleResult(result));return EXIT_STATUS.success;
     }
-    const result = command.name === 'default-skill-add' ? await addDefaultSkill(bazframeHome,command.skillRoot) : await removeDefaultSkill(bazframeHome,command.skillId);
+    const result = command.name === 'default-skill-add' ? await addDefaultSkill(bazframeHome,command.skillRoot,{platformServices:application?.profiles?.platformServices}) : await removeDefaultSkill(bazframeHome,command.skillId,{platformServices:application?.profiles?.platformServices});
     captureResult(dependencies,{action:result.action,skillId:result.id,registrationPath:result.registrationPath,target:result.target.length===0?null:result.target,profileMembershipChanged:false});writeStdout(formatDefaultSkillResult(result));
     return EXIT_STATUS.success;
   }
   if (command.name === 'profile-skill-add' || command.name === 'profile-skill-remove') {
-    const options = { bazframeHome };
-    const profileId=command.profileId??await readActiveProfile(bazframeHome);
-    const selection=await optionalResourceSelection(bazframeHome,'skill',command.skillId);
+    const options = { bazframeHome, platformServices: application?.profiles?.platformServices, selectionReadServices: application?.selection, services: application?.collections };
+    const profileId=command.profileId??await readActiveProfile(bazframeHome, dependencies.application?.selection);
+    const selection=await optionalResourceSelection(bazframeHome,'skill',command.skillId,application);
     if(selection!==undefined&&selection.resource.materialization.kind!=='ordinary'){
       if(selection.resource.materialization.kind==='profileLocal')throw new BazframeError('PROFILE_RESOURCE_SELECTOR_INVALID','Profile resource selector is ambiguous, stale, or invalid.');
-      const mutation=await mutateImportedProfileResourceMembership(bazframeHome,profileId,selection.stableIdentity,command.name==='profile-skill-add'?'add':'remove');
+      const mutation=await mutateImportedProfileResourceMembership(bazframeHome,profileId,selection.stableIdentity,command.name==='profile-skill-add'?'add':'remove',application?.importedMembership);
       captureResult(dependencies,{action:mutation.action,profileTarget:{id:profileId,source:command.profileId===undefined?'active-selection':'explicit'},skillId:mutation.name,stableIdentity:mutation.stableIdentity});
       writeStdout(`Profile skill membership: ${mutation.action}\nProfile: ${profileId}${command.profileId===undefined?'':' (explicit)'}\nSkill: ${mutation.name}\n`);
       return EXIT_STATUS.success;
@@ -750,16 +773,16 @@ async function runCommand(
     return EXIT_STATUS.success;
   }
   if (command.name === 'global-overview') {
-    const policy = await readGlobalPolicy(bazframeHome);captureResult(dependencies,{policy,statePath:policy==='enabled'?null:globalPolicyPath(bazframeHome)});
-    writeStdout(formatGlobalOverview(policy, globalPolicyPath(bazframeHome), stdoutColors));
+    const policy = await readGlobalPolicy(bazframeHome,application?.policy);captureResult(dependencies,{policy,statePath:policy==='enabled'?null:globalPolicyPath(bazframeHome,application?.paths)});
+    writeStdout(formatGlobalOverview(policy, globalPolicyPath(bazframeHome,application?.paths), stdoutColors));
     return EXIT_STATUS.success;
   }
   if (command.name === 'global-disable') {
-    const action = await disableGlobally(bazframeHome);captureResult(dependencies,{action,policy:'disabled',statePath:globalPolicyPath(bazframeHome)});
+    const action = await disableGlobally(bazframeHome,application?.policy);captureResult(dependencies,{action,policy:'disabled',statePath:globalPolicyPath(bazframeHome,application?.paths)});
     writeStdout([
       `Global policy: disabled`,
       `Policy state: ${action}`,
-      `State file: ${globalPolicyPath(bazframeHome)}`,
+      `State file: ${globalPolicyPath(bazframeHome,application?.paths)}`,
       'Project enabled overrides still take precedence.',
       ''
     ].join('\n'));
@@ -767,7 +790,7 @@ async function runCommand(
   }
   if (command.name === 'global-enable') {
     await validateRuntimeReady(bazframeHome, environment, dependencies);
-    const action = await enableGlobally(bazframeHome);captureResult(dependencies,{action,policy:'enabled',statePath:null});
+    const action = await enableGlobally(bazframeHome,application?.policy);captureResult(dependencies,{action,policy:'enabled',statePath:null});
     writeStdout([
       'Global policy: enabled',
       `Policy state: ${action}`,
@@ -779,13 +802,13 @@ async function runCommand(
 
   const cwd = (dependencies.cwd ?? process.cwd)();
   if (command.name === 'projects-overview') {
-    const result = await listRepositoryProjectStates(bazframeHome);
-    const globalPolicy = await readGlobalPolicy(bazframeHome);
+    const result = await listRepositoryProjectStates(bazframeHome,application?.policy);
+    const globalPolicy = await readGlobalPolicy(bazframeHome,application?.policy);
     let currentWorktree: string | undefined;
     let currentProjectState: RepositoryProjectState | undefined;
     try {
-      currentWorktree = await findGitRoot(cwd, environment);
-      currentProjectState = await readRepositoryProjectState(bazframeHome, currentWorktree);
+      currentWorktree = await findGitRoot(cwd, environment, application?.gitRoot);
+      currentProjectState = await readRepositoryProjectState(bazframeHome, currentWorktree, application?.policy);
     } catch (error) {
       if (!(error instanceof BazframeError && error.code === 'NOT_GIT_WORKTREE')) throw error;
     }
@@ -796,6 +819,7 @@ async function runCommand(
   }
   if (command.name === 'status') {
     const status = await buildStatus({
+      application,
       bazframeHome,
       bazframeVersion: VERSION,
       environment,
@@ -809,8 +833,8 @@ async function runCommand(
     return status.exitStatus;
   }
   if (command.name === 'project-disable') {
-    const repositoryRoot = await findGitRoot(cwd, environment);
-    const result = await disableRepository(bazframeHome, repositoryRoot);captureResult(dependencies,{action:result.action,policy:'disabled',repository:repositoryRoot,globalPolicy:result.globalPolicy,precedence:result.globalPolicy==='disabled'?'inherits-global-disabled':'disabled-project-override'});
+    const repositoryRoot = await findGitRoot(cwd, environment, application?.gitRoot);
+    const result = await disableRepository(bazframeHome, repositoryRoot, application?.policy);captureResult(dependencies,{action:result.action,policy:'disabled',repository:repositoryRoot,globalPolicy:result.globalPolicy,precedence:result.globalPolicy==='disabled'?'inherits-global-disabled':'disabled-project-override'});
     writeStdout([
       'Project policy: disabled',
       `Project state: ${result.action}`,
@@ -822,9 +846,9 @@ async function runCommand(
     return EXIT_STATUS.success;
   }
   if (command.name === 'project-enable') {
-    const repositoryRoot = await findGitRoot(cwd, environment);
+    const repositoryRoot = await findGitRoot(cwd, environment, application?.gitRoot);
     const profileId = await validateRuntimeReady(bazframeHome, environment, dependencies);
-    const result = await enableRepository(bazframeHome, repositoryRoot);captureResult(dependencies,{action:result.action,policy:'enabled',repository:repositoryRoot,globalPolicy:result.globalPolicy,precedence:result.globalPolicy==='disabled'?'enabled-project-override':'inherits-global-enabled',profileId});
+    const result = await enableRepository(bazframeHome, repositoryRoot, application?.policy);captureResult(dependencies,{action:result.action,policy:'enabled',repository:repositoryRoot,globalPolicy:result.globalPolicy,precedence:result.globalPolicy==='disabled'?'enabled-project-override':'inherits-global-enabled',profileId});
     writeStdout([
       'Project policy: enabled',
       `Project state: ${result.action}`,
@@ -841,22 +865,22 @@ async function runCommand(
 
   if (command.name !== 'pi') throw new Error(`Unimplemented command dispatch: ${command.name}`);
 
-  const repositoryRoot = await findGitRoot(cwd, environment);
-  const globalPolicy = await readGlobalPolicy(bazframeHome);
-  const projectState = await readRepositoryProjectState(bazframeHome, repositoryRoot);
+  const repositoryRoot = await findGitRoot(cwd, environment, application?.gitRoot);
+  const globalPolicy = await readGlobalPolicy(bazframeHome,application?.policy);
+  const projectState = await readRepositoryProjectState(bazframeHome, repositoryRoot, application?.policy);
   const effectivePolicy = resolveEffectivePolicy(globalPolicy, projectState);
   if (!effectivePolicy.enabled) {
     throw new Error(
       `Bazframe is disabled for this worktree (${effectivePolicy.reason}). Invoke \`pi\` directly, or run \`bazframe project enable\` first.`
     );
   }
-  const profileId = await readActiveProfile(bazframeHome);
-  const profile = await loadProfile(bazframeHome, profileId);
-  const managedRuntime = await projectManagedProfileRuntime(bazframeHome, profileId);
+  const profileId = await readActiveProfile(bazframeHome, dependencies.application?.selection);
+  const profile = await loadProfile(bazframeHome, profileId, dependencies.application?.profiles);
+  const managedRuntime = await projectManagedProfileRuntime(bazframeHome, profileId, application?.projection);
   const runtimeSkillDirectories = [...new Set([...profile.skillDirectories, ...managedRuntime.skillDirectories])].sort();
-  const runtimeSkillNames = loadFlatSkillIdentities(runtimeSkillDirectories).map((skill) => skill.name);
+  const runtimeSkillNames = (application?.projection===undefined?loadFlatSkillIdentities(runtimeSkillDirectories):await loadFlatSkillIdentitiesWithEffects(runtimeSkillDirectories,application.projection.resolver)).map((skill) => skill.name);
   if (new Set(runtimeSkillNames).size !== runtimeSkillNames.length) throw new BazframeError('PROFILE_RUNTIME_SKILL_COLLISION', 'Managed profile runtime Skills contain duplicate names.');
-  const repositoryInstructions = await loadRootRepositoryInstructions(repositoryRoot);
+  const repositoryInstructions = await loadRootRepositoryInstructions(repositoryRoot,application);
   const effectiveInstructions = composeInstructions({
     profileId,
     profile: { path: profile.instructionsPath, text: profile.instructions },
@@ -896,7 +920,7 @@ async function runCommand(
     return EXIT_STATUS.success;
   }
 
-  const temporary = await createTemporaryInstructionFile(
+  const temporary = await (application?.temporaryInstructions ?? createTemporaryInstructionFile)(
     effectiveInstructions,
     repositoryRoot,
     dependencies.temporaryRoot ?? tmpdir()
@@ -917,7 +941,8 @@ async function runCommand(
       piArgs,
       cwd,
       environment,
-      dependencies.piExecutable ?? 'pi'
+      dependencies.piExecutable ?? 'pi',
+      application?.launcher
     );
     return childExitStatus(child);
   } finally {
@@ -931,6 +956,7 @@ async function validateRuntimeReady(
   dependencies: CliDependencies
 ): Promise<string> {
   const adapter = await inspectPiAdapter({
+      services: dependencies.application?.adapter?.({ bazframeHome, bazframeVersion: VERSION, environment, userHome: dependencies.userHome }),
     bazframeHome,
     bazframeVersion: VERSION,
     environment,
@@ -942,8 +968,8 @@ async function validateRuntimeReady(
   if (adapter.state !== 'current') {
     throw new BazframeError('PI_ADAPTER_NOT_READY',`Pi adapter state is ${adapter.state}. Run \`bazframe adapter install pi\`, then retry.`);
   }
-  const profileId = await readActiveProfile(bazframeHome);
-  await loadProfile(bazframeHome, profileId);
+  const profileId = await readActiveProfile(bazframeHome, dependencies.application?.selection);
+  await loadProfile(bazframeHome, profileId, dependencies.application?.profiles);
   return profileId;
 }
 
@@ -1160,23 +1186,23 @@ async function confirmPublication(confirmations: readonly ('publish-preview'|'pu
 async function promptLiteralYes(question:string):Promise<boolean>{const prompt=createInterface({input:process.stdin,output:process.stdout});try{return await prompt.question(question)==='y';}finally{prompt.close();}}
 async function promptImportCollision(suggestedName:string):Promise<ProfileImportCollisionChoice>{const prompt=createInterface({input:process.stdin,output:process.stdout});try{const answer=await prompt.question(`Destination exists. Use ${suggestedName} [s], overwrite [o], or cancel [C]? `);return answer==='s'?'safe-suffix':answer==='o'?'overwrite':'cancel';}finally{prompt.close();}}
 
-async function projectedProfile(home:string,selected?:string){
-  const view=await readProfileSystemView(home);let active:string|undefined;
-  try{active=await readActiveProfile(home);}catch(error){if(!(error instanceof BazframeError&&error.code==='NO_ACTIVE_PROFILE'))throw error;}
+async function projectedProfile(home:string,selected?:string,application?:ApplicationServices){
+  const view=await readProfileSystemView(home,application?.view);let active:string|undefined;
+  try{active=await readActiveProfile(home,application?.selection);}catch(error){if(!(error instanceof BazframeError&&error.code==='NO_ACTIVE_PROFILE'))throw error;}
   const name=selected??active;if(name===undefined)throw new BazframeError('NO_ACTIVE_PROFILE','No active profile is selected.');
   const profile=view.profiles.find(item=>item.name===name);if(profile===undefined)throw new BazframeError('PROFILE_NOT_FOUND',`Profile not found: ${name}`);
   return projectProfileStateV2(profile,active===name);
 }
 
-async function hasAnyManagedProfileState(home:string,profileIds?:readonly string[]):Promise<boolean>{
-  const ids=profileIds??(await listProfiles(home)).profileIds;
-  for(const id of ids){try{const metadata=await lstat(join(home,'profiles',id,'.bazframe-profile-state.json'));if(!metadata.isFile()||metadata.isSymbolicLink())return true;return true;}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}}
+async function hasAnyManagedProfileState(home:string,profileIds?:readonly string[],application?:ApplicationServices):Promise<boolean>{
+  const ids=profileIds??(await listProfiles(home,{provisioningServices:application?.provisioning})).profileIds;
+  for(const id of ids){try{const metadata=await (application?.reads?.stat??lstat)((application?.paths.join??join)(home,'profiles',id,'.bazframe-profile-state.json'));if(!metadata.isFile()||metadata.isSymbolicLink())return true;return true;}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}}
   return false;
 }
-async function optionalManagedSystemView(home:string){return await hasAnyManagedProfileState(home)?readProfileSystemView(home):undefined;}
-async function optionalResourceSelection(home:string,kind:'skill'|'library'|'package',selector:string){
-  if(!await hasAnyManagedProfileState(home))return undefined;
-  try{return await resolveProfileResourceMembershipSelection(home,kind,selector);}catch(error){if(!selector.includes('/')&&error instanceof BazframeError&&error.code==='PROFILE_RESOURCE_SELECTOR_INVALID')return undefined;throw error;}
+async function optionalManagedSystemView(home:string,application?:ApplicationServices){return await hasAnyManagedProfileState(home,undefined,application)?readProfileSystemView(home,application?.view):undefined;}
+async function optionalResourceSelection(home:string,kind:'skill'|'library'|'package',selector:string,application?:ApplicationServices){
+  if(!await hasAnyManagedProfileState(home,undefined,application))return undefined;
+  try{return await resolveProfileResourceMembershipSelection(home,kind,selector,application?.importedMembership);}catch(error){if(!selector.includes('/')&&error instanceof BazframeError&&error.code==='PROFILE_RESOURCE_SELECTOR_INVALID')return undefined;throw error;}
 }
 
 function capturedFiles(preview:readonly {path:string;sha256:string;bytes:number;executable:boolean}[],profile:{resources:readonly {id:string;key:{kind:'skill'|'library'|'package';name:string}}[]}):JsonCapturedFileV2[]{
@@ -1184,9 +1210,14 @@ function capturedFiles(preview:readonly {path:string;sha256:string;bytes:number;
   return preview.map(item=>{const match=/^resources\/([a-f0-9]{64})\/(.+)$/u.exec(item.path);const key=match===null?undefined:keys.get(match[1]!);return{logicalPath:item.path,resourceKind:key?.kind??'profile',resourceName:key?.name??null,bytes:item.bytes,sha256:item.sha256,executable:item.executable};});
 }
 
-function formatManagedDuplicate(source:string,target:string,home:string):string{return[`Profile lifecycle: duplicated`,`Source profile: ${source}`,`Profile: ${target}`,`Profile directory: ${join(home,'profiles',target)}`,'Active selection updated: no',''].join('\n');}
-function formatManagedRename(source:string,target:string,home:string,active:boolean):string{return[`Profile lifecycle: renamed`,`Previous profile: ${source}`,`Profile: ${target}`,`Profile directory: ${join(home,'profiles',target)}`,`Active selection updated: ${active?'yes':'no'}`,''].join('\n');}
-async function removeLegacyProfileGuard(home:string,profileId:string,dependencies:CliDependencies,writeStdout:(text:string)=>void):Promise<number>{const result=await removeProfile(home,profileId,false);captureResult(dependencies,{action:result.action,profileId:result.profileId,directory:result.directory});writeStdout(formatProfileLifecycle(result));return EXIT_STATUS.success;}
+function formatManagedDuplicate(source:string,target:string,home:string,application?:ApplicationServices):string{const join=application?.paths.join??nodePaths.join;return[`Profile lifecycle: duplicated`,`Source profile: ${source}`,`Profile: ${target}`,`Profile directory: ${join(home,'profiles',target)}`,'Active selection updated: no',''].join('\n');}
+function formatManagedRename(source:string,target:string,home:string,active:boolean,application?:ApplicationServices):string{const join=application?.paths.join??nodePaths.join;return[`Profile lifecycle: renamed`,`Previous profile: ${source}`,`Profile: ${target}`,`Profile directory: ${join(home,'profiles',target)}`,`Active selection updated: ${active?'yes':'no'}`,''].join('\n');}
+async function removeLegacyProfileGuard(home:string,profileId:string,dependencies:CliDependencies,writeStdout:(text:string)=>void):Promise<number>{
+  const application=dependencies.application;
+  const removed=application?.lifecycle===undefined?undefined:await removeManagedProfile(home,profileId,{requireGeneratedEmpty:true},application.lifecycle);
+  const result=removed===undefined?await removeProfile(home,profileId,false):{action:removed.action,profileId:removed.profileName,directory:application!.paths.join(home,'profiles',removed.profileName)};
+  captureResult(dependencies,{action:result.action,profileId:result.profileId,directory:result.directory});writeStdout(formatProfileLifecycle(result));return EXIT_STATUS.success;
+}
 
 function formatProfileLifecycle(result: ProfileLifecycleResult<string>): string {
   return [

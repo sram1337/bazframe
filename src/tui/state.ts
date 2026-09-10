@@ -4,7 +4,6 @@ import type {
   SkillGroupSummary,
   SkillSummary
 } from '../application/tui-service.js';
-import type { ProfileRemovalIdentity } from '../profiles/profile-removal-identity.js';
 
 export const PROFILE_CREATE_ROW_ID = '@create-profile';
 
@@ -34,7 +33,7 @@ export interface TuiModal {
   value: string;
   targetId?: string;
   directory?: string;
-  removalIdentity?: ProfileRemovalIdentity;
+  removalIdentity?: ProfileSummary['removalIdentity'];
   preservedTargets?: readonly string[];
   originId?: string;
   root?: string;

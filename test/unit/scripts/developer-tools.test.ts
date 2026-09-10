@@ -8,6 +8,42 @@ const repeatCommand = join(process.cwd(), 'scripts', 'repeat-command.mjs');
 const summarizeSession = join(process.cwd(), 'scripts', 'summarize-pi-session.mjs');
 
 describe('developer utility scripts', () => {
+  it.each([
+    ['0.84.3', false], ['0.84.4', true], ['0.85.0', false], ['0.85.1', true],
+    ['1.0.0', true], ['0.85.1-beta.1', false], ['not-a-version', false]
+  ])('checks real-Pi %s before packing or installing', (version, supported) => {
+    // Execute unchanged script bytes; intercept only the subprocess boundary in a child.
+    // A supported version stops at pack, so no case builds, installs, or launches Pi.
+    const probe = [
+      "import childProcess from 'node:child_process';",
+      "import { syncBuiltinESMExports } from 'node:module';",
+      "import { pathToFileURL } from 'node:url';",
+      'childProcess.execFileSync = (_file, args) => {',
+      "  if (args.length === 1 && args[0] === '--version') return process.argv[1];",
+      "  if (args[1] === 'pack') throw new Error('TEST_PREFLIGHT_REACHED_PACK');",
+      "  throw new Error('TEST_UNEXPECTED_PROCESS');",
+      '};',
+      'syncBuiltinESMExports();',
+      'await import(pathToFileURL(process.argv[2]).href);'
+    ].join('\n');
+    const result = spawnSync(process.execPath, [
+      '--input-type=module', '-e', probe, version,
+      join(process.cwd(), 'scripts', 'test-real-pi.mjs')
+    ], {
+      encoding: 'utf8', shell: false,
+      env: { ...process.env, npm_execpath: 'test-npm-boundary' }
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).not.toContain('TEST_UNEXPECTED_PROCESS');
+    if (supported) {
+      expect(result.stderr).toContain('TEST_PREFLIGHT_REACHED_PACK');
+      expect(result.stderr).not.toContain('Real-Pi acceptance requires');
+    } else {
+      expect(result.stderr).toContain(`Real-Pi acceptance requires a stable Pi version in >=0.84.4 <0.85.0 || >=0.85.1; found ${version}.`);
+      expect(result.stderr).not.toContain('TEST_PREFLIGHT_REACHED_PACK');
+    }
+  });
+
   it('repeats a command the requested number of times', async () => {
     const directory = await createTempDirectory();
     try {

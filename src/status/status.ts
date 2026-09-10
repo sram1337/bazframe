@@ -1,3 +1,5 @@
+import { projectManagedProfileRuntime } from '../profile-publishing/profile-runtime-projection.js';
+import type { ApplicationServices } from '../application/application-services.js';
 import { lstat, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { inspectPiAdapter } from '../adapters/pi/installer.js';
@@ -16,6 +18,7 @@ import { readRepositoryProjectState } from '../project/registration-store.js';
 import {
   formatSkillCollectionDiagnostic,
   loadFlatSkillIdentities,
+  loadFlatSkillIdentitiesWithEffects,
   resolveProfileSkillCollections,
   type DerivedSkill,
   type DirectSkillCollection,
@@ -35,6 +38,7 @@ export interface AdapterStatusOptions {
   environment: NodeJS.ProcessEnv;
   userHome?: string;
   artifactUrl?: URL;
+  application?: ApplicationServices;
 }
 
 export interface StatusOptions extends AdapterStatusOptions {
@@ -132,6 +136,7 @@ export async function inspectAdapterStatus(
     bazframeVersion: options.bazframeVersion,
     environment: options.environment,
     ...(options.userHome === undefined ? {} : { userHome: options.userHome }),
+    services: options.application?.adapter?.(options),
     ...(options.artifactUrl === undefined ? {} : { artifactUrl: options.artifactUrl })
   });
   return {
@@ -144,17 +149,18 @@ export async function inspectAdapterStatus(
 }
 
 export async function inspectStatus(options: StatusOptions): Promise<StatusInspection> {
+  const application = options.application;
   const corrections = new Map<StatusCorrectiveAction['id'], StatusCorrectiveAction>();
   const adapter = await inspectAdapterStatus(options);
-  const globalPolicy = await readGlobalPolicy(options.bazframeHome);
+  const globalPolicy = await readGlobalPolicy(options.bazframeHome, application?.policy);
 
   let repository: StatusRepository = { kind: 'outside-git' };
   let effectiveBehavior: StatusEffectiveBehavior = globalPolicy === 'enabled'
     ? { kind: 'outside-git', enabled: true, reason: 'global-enabled' }
     : { kind: 'outside-git', enabled: false, reason: 'global-disabled' };
   try {
-    const root = await findGitRoot(options.cwd, options.environment);
-    const state = await readRepositoryProjectState(options.bazframeHome, root);
+    const root = await findGitRoot(options.cwd, options.environment, application?.gitRoot);
+    const state = await readRepositoryProjectState(options.bazframeHome, root, application?.policy);
     repository = {
       kind: 'git-worktree',
       root,
@@ -197,13 +203,14 @@ export async function inspectStatus(options: StatusOptions): Promise<StatusInspe
       });
     }
     try {
-      const profileId = await readActiveProfile(options.bazframeHome);
+      const profileId = await readActiveProfile(options.bazframeHome, application?.selection);
       try {
-        const loaded = await loadProfile(options.bazframeHome, profileId);
-        const flatSkills = loadFlatSkillIdentities(loaded.skillDirectories);
-        const collections = await resolveProfileSkillCollections(loaded.directory, flatSkills);
-        const managedState=await readOptionalManagedProfileState(options.bazframeHome,profileId);
-        const applicationExtension:JsonProfileStateV1OptionalExtension=managedState===undefined?{}:projectStatusProfileApplication(await readProfileSystemView(options.bazframeHome),profileId).extension;
+        const loaded = await loadProfile(options.bazframeHome, profileId, application?.profiles);
+        const flatSkills = application?.projection === undefined ? loadFlatSkillIdentities(loaded.skillDirectories) : await loadFlatSkillIdentitiesWithEffects(loaded.skillDirectories, application.projection.resolver);
+        const managedState=await (application?.view?.readManagedState ?? readOptionalManagedProfileState)(options.bazframeHome,profileId);
+        const imported = managedState === undefined ? { skills: [] } : await projectManagedProfileRuntime(options.bazframeHome, profileId, application?.projection);
+        const collections = await resolveProfileSkillCollections(loaded.directory, [...flatSkills, ...imported.skills], application?.projection?.resolver.definitionLoader, application?.projection?.resolver);
+        const applicationExtension:JsonProfileStateV1OptionalExtension=managedState===undefined?{}:projectStatusProfileApplication(await readProfileSystemView(options.bazframeHome, application?.view),profileId).extension;
         profile = {
           state: 'ready',
           id: profileId,
@@ -252,10 +259,10 @@ export async function inspectStatus(options: StatusOptions): Promise<StatusInspe
     }
   }
 
-  const managedGit = await scanManagedGitRecords(options.bazframeHome);
+  const managedGit = await scanManagedGitRecords(options.bazframeHome, application?.providerRecords);
   const managedGitProviders = await Promise.all(managedGit.records.map(async (record) => ({
     record,
-    health: await inspectManagedGitRecordHealth(record, options.environment) ?? 'ready'
+    health: await (application?.provider?.(options.bazframeHome).inspectManagedGitRecordHealth ?? inspectManagedGitRecordHealth)(record, options.environment) ?? 'ready'
   })));
   const managedGitDiagnostics = managedGit.diagnostics.map((diagnostic) => `${diagnostic.kind} ${diagnostic.id}: ${diagnostic.message} (${diagnostic.path})`);
   if (managedGitDiagnostics.length > 0 || managedGitProviders.some((provider) => provider.health !== 'ready')) {
@@ -267,18 +274,18 @@ export async function inspectStatus(options: StatusOptions): Promise<StatusInspe
 
   return {
     bazframeHome: options.bazframeHome,
-    piAgentDirectory: resolvePiAgentDirectory(options.environment, options.userHome),
+    piAgentDirectory: resolvePiAgentDirectory(options.environment, options.userHome, application?.paths),
     adapter,
     globalPolicy: globalPolicy === 'enabled'
       ? { policy: 'enabled' }
       : {
           policy: 'disabled',
-          statePath: globalPolicyPath(options.bazframeHome)
+          statePath: globalPolicyPath(options.bazframeHome, application?.paths)
         },
     repository,
     effectiveBehavior,
     profile,
-    cachedCollisionAliasCount: await countAliasCache(options.bazframeHome),
+    cachedCollisionAliasCount: await (application?.countAliasCache ?? countAliasCache)(options.bazframeHome),
     managedGitProviders,
     managedGitDiagnostics,
     correctiveActions: [...corrections.values()]

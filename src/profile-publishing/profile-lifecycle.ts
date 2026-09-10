@@ -5,7 +5,7 @@ import { BazframeError, errorCode } from '../core/errors.js';
 import { PROFILE_PORTABILITY_PRODUCTION_LIMITS } from '../profile-portability/profile-portability-policy.js';
 import type { AuthorizePackageBuild } from '../profile-portability/profile-import-package-build.js';
 import { assertSafeProfileId } from '../profiles/profile-id.js';
-import { readActiveProfile, readOptionalActiveProfileSnapshot } from '../profiles/profile-store.js';
+import { readActiveProfile } from '../profiles/profile-store.js';
 import {
   assertBlobBytes,
   capturedProfileContentBaselineSha256,
@@ -16,18 +16,17 @@ import {
   type CapturedResource,
   type Sha256
 } from './captured-profile.js';
-import { readOptionalManagedProfileState } from './managed-profile-state.js';
 import {
   materializeCapturedProfile,
+  type ProfileMaterializationEffects,
   type CapturedBlobSource,
   type RemoteMaterializationResult
 } from './profile-materialization.js';
+import { defaultProfileLifecycleServices, type ProfileLifecycleServices } from './profile-lifecycle-services.js';
 import type { OperationMutationAuthority } from './profile-operation-lock.js';
 import { capturedProfileLimitPolicy } from './profile-publishing-policy.js';
 import { executeProfileCandidateSwap, type CandidateSwapOperation } from './profile-transaction.js';
 import {
-  assertPhysicalProfileExpectation,
-  capturePhysicalProfileExpectation,
   physicalProfileLocalSkillNames,
   type PhysicalProfileExpectation
 } from './physical-profile-closure.js';
@@ -82,6 +81,18 @@ export interface ProfileLifecycleRemoteAdapter {
 }
 
 export interface ProfileLifecycleDependencies {
+  services?: ProfileLifecycleServices;
+  copyExcluded?: (...args: [...Parameters<typeof copyPhysicalProfileLocalExcludedToCandidate>, OperationMutationAuthority]) => Promise<void>;
+  readSelection?: (home: string) => Promise<string | undefined>;
+  homeExists?: (home: string) => Promise<boolean>;
+  profileExists?: (home: string, name: string) => Promise<boolean>;
+  readSystemView?: typeof readProfileSystemView;
+  readSystemViewWithAuthority?: (home: string, authority: OperationMutationAuthority) => ReturnType<typeof readProfileSystemView>;
+  captureCatalogWithAuthority?: (options: Parameters<typeof captureCatalogResource>[0], authority: OperationMutationAuthority) => ReturnType<typeof captureCatalogResource>;
+  defaultZipPath?: typeof defaultProfileZipPath;
+  beforeImportInspection?: (home: string) => Promise<void>;
+  prepareImport?: (home: string) => Promise<void>;
+  materializationEffects?: (home: string, authority: OperationMutationAuthority) => ProfileMaterializationEffects;
   git?: ProfileLifecycleGitAdapter;
   remote?: ProfileLifecycleRemoteAdapter;
   capture?: typeof captureProfile;
@@ -111,14 +122,14 @@ export interface ExportProfileResult {
 }
 
 export async function exportManagedProfile(options: ExportProfileOptions, dependencies: ProfileLifecycleDependencies = {}): Promise<ExportProfileResult> {
-  const profileName = options.profileName ?? await readActiveProfile(options.home);
+  const profileName = options.profileName ?? (dependencies.readSelection === undefined ? await readActiveProfile(options.home) : await dependencies.readSelection(options.home) ?? (() => { throw invalid('active profile is absent'); })());
   assertSafeProfileId(profileName);
   const captured = await (dependencies.capture ?? captureProfile)({
     bazframeHome: options.home,
     profileId: profileName,
     bundleRemote: options.bundleRemote === true
   });
-  const outputPath = options.outputPath ?? defaultProfileZipPath(profileName, options.cwd ?? process.cwd());
+  const outputPath = options.outputPath ?? (dependencies.defaultZipPath ?? defaultProfileZipPath)(profileName, options.cwd ?? process.cwd());
   const written = await (dependencies.writeZip ?? writeProfileZip)(outputPath, captured.profile, captured.blobs, { overwrite: options.overwrite === true });
   return {
     profileName,
@@ -187,32 +198,36 @@ export interface ImportProfileResult {
 }
 
 export async function importManagedProfile(options: ImportProfileOptions, dependencies: ProfileLifecycleDependencies = {}): Promise<ImportProfileResult> {
+  await dependencies.beforeImportInspection?.(options.home);
   const inspected = await inspectImportSnapshot(options.home, options.source, dependencies);
   if (inspected.report.existingLinkedProfile !== null) {
-    return idempotentLinkedImportResult(options.home, inspected.report.existingLinkedProfile, inspected.report);
+    return idempotentLinkedImportResult(options.home, inspected.report.existingLinkedProfile, inspected.report, dependencies);
   }
   const desiredName = options.profileName ?? inspected.report.requestedName;
   assertSafeProfileId(desiredName);
   const desiredReport = desiredName === inspected.report.requestedName ? inspected.report : {
     ...inspected.report,
-    collision: await profileExists(options.home, desiredName),
-    safeSuffix: await profileExists(options.home, desiredName) ? await firstFreeSuffix(options.home, desiredName) : null
+    collision: await (dependencies.profileExists ?? profileExists)(options.home, desiredName),
+    safeSuffix: await (dependencies.profileExists ?? profileExists)(options.home, desiredName) ? await firstFreeSuffix(options.home, desiredName, dependencies) : null
   };
+  const consentBaseline = desiredReport.collision ? await captureOptionalManagedBaseline(options.home, desiredName, dependencies) : undefined;
   const selection = await selectImportDestination(desiredReport, options, desiredName);
+  await dependencies.prepareImport?.(options.home);
   const localized = localizeSnapshot(inspected.snapshot, selection.profileName);
   const publication = gitPublication(inspected.snapshot, localized.profile);
   const operation: CandidateSwapOperation = selection.overwrite ? 'overwrite' : 'fresh-import';
-  const overwriteBaseline = selection.overwrite ? await captureOptionalManagedBaseline(options.home, selection.profileName) : undefined;
+  const overwriteBaseline = selection.overwrite ? consentBaseline : undefined;
   const previous = overwriteBaseline?.state;
   let missingResourceIds: Sha256[] = [];
   let materializationEffects = { cacheWritten: false, buildExecuted: false };
   const swapped = await executeProfileCandidateSwap({
     home: options.home,
+    services: dependencies.services,
     profileName: selection.profileName,
     operation,
     ...(overwriteBaseline === undefined ? {} : { expectedOld: overwriteBaseline.expectation }),
     ...(selection.overwrite ? {} : { freshImportMustRemainInactive: true }),
-    ...(publication === null ? {} : { beforePublication: () => assertOriginUnlinked(options.home, publication.origin) }),
+    ...(publication === null ? {} : { beforePublication: (authority: OperationMutationAuthority) => assertOriginUnlinked(options.home, publication.origin, dependencies, authority) }),
     materialize: async (candidateDirectory, context) => {
       const materialized = await materializeWithPackageOrdering({
         home: options.home,
@@ -269,7 +284,7 @@ export interface UpdateProfileResult {
 }
 
 export async function updateManagedProfile(options: UpdateProfileOptions, dependencies: ProfileLifecycleDependencies = {}): Promise<UpdateProfileResult> {
-  const profileName = options.profileName ?? await readActiveProfile(options.home);
+  const profileName = options.profileName ?? await selectedProfile(options.home, dependencies);
   const baseline = await captureLinkedBaseline(options.home, profileName, options.overwrite === true, dependencies);
   const previous = baseline.state;
   const source = sourceFromPublication(previous.publication!);
@@ -281,7 +296,7 @@ export async function updateManagedProfile(options: UpdateProfileOptions, depend
     && previous.publication!.installedCommit === snapshot.commit
     && previous.publication!.latestSeenCommit === snapshot.latestCommit
     && previous.publication!.visibility === snapshot.visibility) {
-    await assertPhysicalProfileExpectation(options.home, profileName, baseline.expectation);
+    await assertLifecycleExpectation(options.home, profileName, baseline.expectation, dependencies);
     return { action: 'current', profileName, commit: snapshot.commit, latestCommit: snapshot.latestCommit };
   }
   await applyLinkedVersion(options.home, profileName, previous, baseline.expectation, snapshot, 'update', dependencies, options);
@@ -299,8 +314,8 @@ export async function listManagedProfileVersions(
   profileName: string | undefined,
   dependencies: ProfileLifecycleDependencies = {}
 ): Promise<ProfileVersionView[]> {
-  const selected = profileName ?? await readActiveProfile(home);
-  const state = await requiredLinkedState(home, selected);
+  const selected = profileName ?? await selectedProfile(home, dependencies);
+  const state = await requiredLinkedState(home, selected, dependencies);
   const versions = await requiredGit(dependencies).list(sourceFromPublication(state.publication!));
   if (versions.length === 0) throw invalid('linked repository has no refs/heads/main versions');
   const seen = new Set<string>();
@@ -322,7 +337,7 @@ export async function useManagedProfileVersion(
   options: UseManagedProfileVersionOptions,
   dependencies: ProfileLifecycleDependencies = {}
 ): Promise<UpdateProfileResult> {
-  const profileName = options.profileName ?? await readActiveProfile(options.home);
+  const profileName = options.profileName ?? await selectedProfile(options.home, dependencies);
   const baseline = await captureLinkedBaseline(options.home, profileName, options.overwrite === true, dependencies, false);
   const previous = baseline.state;
   assertRevisionSelector(options.revision);
@@ -331,7 +346,7 @@ export async function useManagedProfileVersion(
   if (snapshot.commit === previous.publication!.installedCommit
     && snapshot.latestCommit === previous.publication!.latestSeenCommit
     && snapshot.visibility === previous.publication!.visibility) {
-    await assertPhysicalProfileExpectation(options.home, profileName, baseline.expectation);
+    await assertLifecycleExpectation(options.home, profileName, baseline.expectation, dependencies);
     return { action: 'current', profileName, commit: snapshot.commit, latestCommit: snapshot.latestCommit };
   }
   if (baseline.diverged && options.overwrite !== true) throw new BazframeError('PROFILE_LOCAL_DIVERGENCE', 'Profile has local changes; use --overwrite to discard them.');
@@ -361,16 +376,16 @@ async function inspectImportSnapshot(home: string, source: ProfileImportSource, 
   assertSafeProfileId(requestedName);
   let existingProfiles: Awaited<ReturnType<typeof readProfileSystemView>>['profiles'] = [];
   try {
-    await lstat(home);
-    existingProfiles = (await readProfileSystemView(home)).profiles;
+    if (dependencies.homeExists === undefined) await lstat(home);
+    if (dependencies.homeExists === undefined || await dependencies.homeExists(home)) existingProfiles = (await (dependencies.readSystemView ?? readProfileSystemView)(home)).profiles;
   } catch (error) {
     if (errorCode(error) !== 'ENOENT') throw error;
   }
   const originOwners = origin === null ? [] : existingProfiles.filter((profile) => profile.publication?.origin === origin);
   if (originOwners.length > 1) throw invalid('canonical GitHub origin is linked by more than one profile');
   const existingLinkedProfile = originOwners[0]?.name ?? null;
-  const collision = await profileExists(home, requestedName);
-  const safeSuffix = collision ? await firstFreeSuffix(home, requestedName) : null;
+  const collision = await (dependencies.profileExists ?? profileExists)(home, requestedName);
+  const safeSuffix = collision ? await firstFreeSuffix(home, requestedName, dependencies) : null;
   return {
     snapshot,
     report: {
@@ -432,9 +447,10 @@ async function applyLinkedVersion(
     home,
     profileName,
     operation,
+    services: dependencies.services,
     expectedOld,
-    beforePublication: async () => {
-      await assertSingleOriginOwner(home, publication.origin, profileName);
+    beforePublication: async (authority) => {
+      await assertSingleOriginOwner(home, publication.origin, profileName, dependencies, authority);
       await revalidateOrdinary();
     },
     materialize: async (candidateDirectory, context) => {
@@ -442,7 +458,8 @@ async function applyLinkedVersion(
         const retainedLocalNames = new Set(localized.profile.resources
           .filter((resource) => previous.capturedResourceIds.some((binding) => binding.capturedResourceId === resource.id && binding.identityKind === 'profileLocal'))
           .map((resource) => resource.key.name));
-        await copyPhysicalProfileLocalExcludedToCandidate(home, profileName, expectedOld, candidateDirectory, retainedLocalNames);
+        if (dependencies.copyExcluded === undefined) await copyPhysicalProfileLocalExcludedToCandidate(home, profileName, expectedOld, candidateDirectory, retainedLocalNames);
+        else await dependencies.copyExcluded(home, profileName, expectedOld, candidateDirectory, retainedLocalNames, context.authority);
       }
       const materialized = await materializeWithPackageOrdering({
         home,
@@ -480,6 +497,7 @@ async function materializeWithPackageOrdering(options: {
   let packagesBegun = false;
   const remote = options.dependencies.remote ?? createProductionProfileLifecycleRemoteAdapter();
   return materializeCapturedProfile({
+    effects: options.dependencies.materializationEffects?.(options.home, options.context.authority),
     home: options.home,
     candidateDirectory: options.candidateDirectory,
     authority: options.context.authority,
@@ -489,13 +507,18 @@ async function materializeWithPackageOrdering(options: {
     publication: options.publication,
     allowIncomplete: options.allowIncomplete,
     preserveCapturedResourceBindings: options.preserveCapturedResourceBindings,
-    captureOrdinary: async (resource) => (options.dependencies.captureCatalog ?? captureCatalogResource)({
+    captureOrdinary: async (resource) => {
+      const input = {
       bazframeHome: options.home,
       kind: resource.key.kind,
       name: resource.key.name,
       capturedResourceId: resource.id,
       bundleRemote: resource.payload.kind === 'bundled'
-    }),
+      };
+      return options.dependencies.captureCatalogWithAuthority === undefined
+        ? (options.dependencies.captureCatalog ?? captureCatalogResource)(input)
+        : options.dependencies.captureCatalogWithAuthority(input, options.context.authority);
+    },
     materializeRemote: async (resource) => {
       if (resource.key.kind === 'package' && !packagesBegun) {
         packagesBegun = true;
@@ -516,11 +539,14 @@ interface ManagedProfileBaseline {
   state: ManagedProfileStateV1 | undefined;
 }
 
-async function captureOptionalManagedBaseline(home: string, profileName: string): Promise<ManagedProfileBaseline> {
-  const expectation = await capturePhysicalProfileExpectation(home, profileName);
-  const snapshot = await readOptionalManagedProfileState(home, profileName);
+async function captureOptionalManagedBaseline(home: string, profileName: string, dependencies: ProfileLifecycleDependencies): Promise<ManagedProfileBaseline> {
+  const services = dependencies.services ?? defaultProfileLifecycleServices;
+  const expectation = await services.capture(home, profileName);
+  if (expectation === undefined) throw changed(profileName);
+  const snapshot = await services.readManagedState(home, profileName);
   if ((snapshot?.sha256 ?? null) !== expectation.sidecarSha256) throw changed(profileName);
-  await assertPhysicalProfileExpectation(home, profileName, expectation);
+  const after = await services.capture(home, profileName);
+  if (after === undefined || JSON.stringify(services.proof(expectation)) !== JSON.stringify(services.proof(after))) throw changed(profileName);
   return { expectation, state: snapshot?.state };
 }
 
@@ -531,12 +557,12 @@ async function captureLinkedBaseline(
   dependencies: ProfileLifecycleDependencies,
   enforceDivergence = true
 ): Promise<{ expectation: PhysicalProfileExpectation; state: ManagedProfileStateV1; diverged: boolean }> {
-  const expectation = await capturePhysicalProfileExpectation(home, profileName);
-  const snapshot = await readOptionalManagedProfileState(home, profileName);
+  const { expectation, state } = await captureOptionalManagedBaseline(home, profileName, dependencies);
+  const snapshot = state === undefined ? undefined : { state, sha256: expectation.sidecarSha256 };
   if (snapshot === undefined || snapshot.state.publication === null) throw new BazframeError('PROFILE_NOT_PUBLISHED', `Profile ${JSON.stringify(profileName)} is not linked to GitHub.`);
   if (snapshot.sha256 !== expectation.sidecarSha256) throw changed(profileName);
   const captured = await (dependencies.capture ?? captureProfile)({ bazframeHome: home, profileId: profileName, bundleRemote: false });
-  await assertPhysicalProfileExpectation(home, profileName, expectation);
+  await assertLifecycleExpectation(home, profileName, expectation, dependencies);
   const diverged = capturedProfileContentBaselineSha256(captured.profile, capturedProfileLimitPolicy()) !== snapshot.state.publication.baselineCaptureSha256;
   if (diverged && !overwrite && enforceDivergence) throw new BazframeError('PROFILE_LOCAL_DIVERGENCE', 'Profile has local changes; use --overwrite to discard them.');
   return { expectation, state: snapshot.state, diverged };
@@ -568,16 +594,16 @@ function gitPublication(snapshot: ProfileZipSnapshot | GitProfileSnapshot, local
   };
 }
 
-async function idempotentLinkedImportResult(home: string, profileName: string, inspection: ProfileImportInspection): Promise<ImportProfileResult> {
+async function idempotentLinkedImportResult(home: string, profileName: string, inspection: ProfileImportInspection, dependencies: ProfileLifecycleDependencies): Promise<ImportProfileResult> {
   const origin = inspection.canonicalOrigin;
   if (origin === null) throw changed(profileName);
-  const expectation = await capturePhysicalProfileExpectation(home, profileName);
-  const snapshot = await readOptionalManagedProfileState(home, profileName);
+  const { expectation, state } = await captureOptionalManagedBaseline(home, profileName, dependencies);
+  const snapshot = state === undefined ? undefined : { state, sha256: expectation.sidecarSha256 };
   if (snapshot === undefined || snapshot.sha256 !== expectation.sidecarSha256 || snapshot.state.publication?.origin !== origin) throw changed(profileName);
-  await assertSingleOriginOwner(home, origin, profileName);
-  const active = (await readOptionalActiveProfileSnapshot(home))?.profileId === profileName;
-  await assertPhysicalProfileExpectation(home, profileName, expectation);
-  await assertSingleOriginOwner(home, origin, profileName);
+  await assertSingleOriginOwner(home, origin, profileName, dependencies);
+  const active = (await (dependencies.services ?? defaultProfileLifecycleServices).readSelection(home))?.profileId === profileName;
+  await assertLifecycleExpectation(home, profileName, expectation, dependencies);
+  await assertSingleOriginOwner(home, origin, profileName, dependencies);
   const missingResourceIds = snapshot.state.importedResources
     .filter((resource) => resource.source.kind === 'missingRemoteGit')
     .map((resource) => resource.capturedResourceId)
@@ -589,8 +615,8 @@ async function idempotentLinkedImportResult(home: string, profileName: string, i
   };
 }
 
-async function assertSingleOriginOwner(home: string, origin: string, expectedName: string): Promise<void> {
-  const owners = (await readProfileSystemView(home)).profiles.filter((profile) => profile.publication?.origin === origin);
+async function assertSingleOriginOwner(home: string, origin: string, expectedName: string, dependencies: ProfileLifecycleDependencies, authority?: OperationMutationAuthority): Promise<void> {
+  const owners = (await lifecycleView(home, dependencies, authority)).profiles.filter((profile) => profile.publication?.origin === origin);
   if (owners.length !== 1 || owners[0]?.name !== expectedName) throw changed(expectedName);
 }
 
@@ -600,15 +626,15 @@ function packageAuthorization(yes: boolean, authorize: AuthorizePackageBuild | u
   return { mode: 'decline' };
 }
 
-async function requiredLinkedState(home: string, profileName: string): Promise<ManagedProfileStateV1> {
+async function requiredLinkedState(home: string, profileName: string, dependencies: ProfileLifecycleDependencies): Promise<ManagedProfileStateV1> {
   assertSafeProfileId(profileName);
-  const snapshot = await readOptionalManagedProfileState(home, profileName);
+  const snapshot = await (dependencies.services ?? defaultProfileLifecycleServices).readManagedState(home, profileName);
   if (snapshot?.state.publication === null || snapshot === undefined) throw new BazframeError('PROFILE_NOT_PUBLISHED', `Profile ${JSON.stringify(profileName)} is not linked to GitHub.`);
   return snapshot.state;
 }
 
-async function assertOriginUnlinked(home: string, origin: string): Promise<void> {
-  const view = await readProfileSystemView(home);
+async function assertOriginUnlinked(home: string, origin: string, dependencies: ProfileLifecycleDependencies, authority?: OperationMutationAuthority): Promise<void> {
+  const view = await lifecycleView(home, dependencies, authority);
   const owners = view.profiles.filter((profile) => profile.publication?.origin === origin);
   if (owners.length > 1) throw invalid('canonical GitHub origin is linked by more than one profile');
   const owner = owners[0];
@@ -635,11 +661,11 @@ async function profileExists(home: string, profileName: string): Promise<boolean
   }
 }
 
-async function firstFreeSuffix(home: string, base: string): Promise<string> {
+async function firstFreeSuffix(home: string, base: string, dependencies: ProfileLifecycleDependencies = {}): Promise<string> {
   for (let suffix = 1; suffix <= PROFILE_PORTABILITY_PRODUCTION_LIMITS.profileNamespaceEntries + 1; suffix += 1) {
     const candidate = `${base}-${suffix}`;
     if (candidate.length > 64) throw invalid('profile name has no representable safe suffix');
-    if (!await profileExists(home, candidate)) return candidate;
+    if (!await (dependencies.profileExists ?? profileExists)(home, candidate)) return candidate;
   }
   throw invalid('profile namespace has no free safe suffix');
 }
@@ -671,3 +697,22 @@ function assertCommit(value: string): void {
 function sha256(bytes: Uint8Array): Sha256 { return createHash('sha256').update(bytes).digest('hex'); }
 function changed(profileName: string): BazframeError { return new BazframeError('PROFILE_LIFECYCLE_CHANGED', `Profile ${JSON.stringify(profileName)} changed during lifecycle authorization.`); }
 function invalid(detail: string): BazframeError { return new BazframeError('PROFILE_LIFECYCLE_INVALID', `Invalid profile lifecycle operation: ${detail}.`); }
+
+async function selectedProfile(home: string, dependencies: ProfileLifecycleDependencies): Promise<string> {
+  const name = dependencies.readSelection === undefined
+    ? (await (dependencies.services ?? defaultProfileLifecycleServices).readSelection(home))?.profileId
+    : await dependencies.readSelection(home);
+  if (name === undefined) throw invalid('active profile is absent');
+  return name;
+}
+async function assertLifecycleExpectation(home: string, name: string, expected: PhysicalProfileExpectation, dependencies: ProfileLifecycleDependencies): Promise<void> {
+  const services = dependencies.services ?? defaultProfileLifecycleServices;
+  const current = await services.capture(home, name);
+  if (current === undefined || JSON.stringify(services.proof(current)) !== JSON.stringify(services.proof(expected))) throw new BazframeError('PROFILE_PHYSICAL_CLOSURE_CHANGED', 'Profile changed after authorization.');
+}
+
+function lifecycleView(home: string, dependencies: ProfileLifecycleDependencies, authority?: OperationMutationAuthority): ReturnType<typeof readProfileSystemView> {
+  return authority !== undefined && dependencies.readSystemViewWithAuthority !== undefined
+    ? dependencies.readSystemViewWithAuthority(home, authority)
+    : (dependencies.readSystemView ?? readProfileSystemView)(home);
+}

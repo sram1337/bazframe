@@ -1,3 +1,4 @@
+import { stableWindowsObjectObservation, stableWindowsPathInspection } from '../core/win32-stable-observation.js';
 import { createHash } from 'node:crypto';
 import { win32 } from 'node:path';
 import type { BazframeWin32NativeBackend, WindowsPathInspection } from '../core/win32-native.js';
@@ -9,7 +10,7 @@ import { decodeActiveProfileState, MAX_ACTIVE_PROFILE_STATE_BYTES, type ActivePr
 
 export interface WindowsSelectionSnapshot {
   profileId?: string;
-  /** Onboarding dependent-state digest domain is deliberately unchanged. */
+  /** Windows v2 read-stability digest; earlier unmatched dependencies remain refused. */
   digest: string;
   bytes?: Buffer;
   inspection?: WindowsPathInspection;
@@ -30,7 +31,7 @@ export async function readWindowsSelectionSnapshot(backend: BazframeWin32NativeB
   const { bytes, inspection } = await readWindowsPrivateFileSnapshot(backend, path, MAX_ACTIVE_PROFILE_STATE_BYTES);
   const after = await enumerateWindowsPrivateDirectory(backend, home, PROFILE_PORTABILITY_PRODUCTION_LIMITS.stagingEntries);
   if (after.identity !== namespace.identity) throw invalid('Active selection namespace changed during its read.');
-  return { profileId: decodeActiveProfileState(bytes, path), bytes, inspection, digest: digest(JSON.stringify(inspection), bytes) };
+  return { profileId: decodeActiveProfileState(bytes, path), bytes, inspection, digest: digest(JSON.stringify(stableWindowsPathInspection(inspection)), bytes) };
 }
 
 /** Lossless private opened-file observation, also used for candidate reconciliation. */
@@ -38,9 +39,9 @@ export async function readWindowsPrivateFileSnapshot(backend: BazframeWin32Nativ
   const before = admitWindowsPrivateFile(backend, path);
   const receipt = await backend.readStableFile(path, maxBytes);
   const after = admitWindowsPrivateFile(backend, path);
-  if (JSON.stringify(before) !== JSON.stringify(after)
-    || JSON.stringify(before.object) !== JSON.stringify(receipt.before)
-    || JSON.stringify(receipt.before) !== JSON.stringify(receipt.after)
+  if (JSON.stringify(stableWindowsPathInspection(before)) !== JSON.stringify(stableWindowsPathInspection(after))
+    || JSON.stringify(stableWindowsObjectObservation(before.object)) !== JSON.stringify(stableWindowsObjectObservation(receipt.before))
+    || JSON.stringify(stableWindowsObjectObservation(receipt.before)) !== JSON.stringify(stableWindowsObjectObservation(receipt.after))
     || receipt.bytes.byteLength > maxBytes || receipt.byteCount !== receipt.after.size
     || BigInt(receipt.bytes.byteLength) !== BigInt(`0x${receipt.after.size}`)) throw invalid('Private file changed during its bounded read.');
   return { bytes: Buffer.from(receipt.bytes), inspection: after };
@@ -51,7 +52,7 @@ export function createWindowsProfileSelectionReadServicesForInternalTesting(back
 }
 function key(value: string): string { return value.normalize('NFC').toLowerCase().toUpperCase().toLowerCase(); }
 function digest(value: string, bytes?: Uint8Array): string {
-  const hash = createHash('sha256').update('bazframe-win32-profile-add-selection-v1\0').update(value);
+  const hash = createHash('sha256').update('bazframe-win32-profile-add-selection-v2\0').update(value);
   if (bytes !== undefined) hash.update(bytes);
   return hash.digest('hex');
 }

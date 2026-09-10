@@ -68,7 +68,11 @@ describe('Bazframe-owned Windows native loader', () => {
     ['missing lock-acquire export', { acquireWindowsFileLock: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
     ['missing lock-release export', { releaseWindowsFileLock: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
     ['missing process-inspection export', { inspectWindowsProcessInstance: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
+    ['missing file rename export', { renameWindowsFileNoReplace: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
+    ['missing cross-parent move export', { moveWindowsDirectoryNoReplace: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
     ['missing rename export', { renameWindowsDirectoryNoReplace: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
+    ['missing ZIP source classifier', { inspectWindowsZipSource: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
+    ['missing range read export', { readWindowsFileRangeStable: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
     ['missing enumerate export', { enumerateWindowsDirectoryStable: undefined }, 'WINDOWS_NATIVE_EXPORT_MISSING'],
     ['legacy contract v5', { info: { contractVersion: 5 } }, 'WINDOWS_NATIVE_CONTRACT_MISMATCH'],
     ['contract', { info: { contractVersion: 1 } }, 'WINDOWS_NATIVE_CONTRACT_MISMATCH'],
@@ -152,6 +156,47 @@ describe('Bazframe-owned Windows native loader', () => {
       expect(read).not.toHaveBeenCalled();
     }
   );
+
+  it.each(Array.from({ length: 16 }, (_, index) => 0x9000001a + index * 0x1000))('admits only concrete cloud byte-source tags %s without managed namespace inspection', (tag) => {
+    const inspect = vi.fn(() => { throw new Error('managed inspection must not run'); });
+    const backend = load(module({ inspectWindowsPath: inspect, inspectWindowsZipSource: () => observation({ attributes: 0x420, reparseTag: tag }) }));
+    expect(backend.inspectZipSource('C:\\external\\input.zip').reparseTag).toBe(tag);
+    expect(inspect).not.toHaveBeenCalled();
+  });
+  it.each([
+    { directory: true }, { numberOfLinks: '00000002' }, { deletePending: true },
+    { attributes: 0x420, reparseTag: 0xa0000003 }, { attributes: 0x420, reparseTag: 0xa000000c },
+    { attributes: 0x20, reparseTag: 0x9000001a }, { attributes: 0x420, reparseTag: 0 }, { attributes: 0x60 }
+  ])('refuses special, generic-reparse and inconsistent ZIP source receipts', (change) => {
+    expect(() => load(module({ inspectWindowsZipSource: () => observation(change) })).inspectZipSource('C:\\external\\input.zip')).toThrow();
+  });
+
+  it('reads a bounded range beyond the whole-file ceiling with lossless whole-object evidence', async () => {
+    const size = (70 * 1024 * 1024).toString(16).padStart(16, '0');
+    const receipt = stableRead({ before: { size }, after: { size } });
+    const read = vi.fn(() => Promise.resolve(receipt));
+    const backend = load(module({ readWindowsFileRangeStable: read }));
+    expect((await backend.readStableFileRange('C:\\state\\large.zip', 64 * 1024 * 1024, 3, 1536 * 1024 * 1024)).bytes).toEqual(Buffer.from('abc'));
+    expect(read).toHaveBeenCalledWith('C:\\state\\large.zip', 64 * 1024 * 1024, 3, 1536 * 1024 * 1024);
+  });
+
+  it.each([
+    [-1, 1, 10], [-0, 1, 10], [1.5, 1, 10], [Number.MAX_SAFE_INTEGER, 2, 10],
+    [0, 64 * 1024 * 1024 + 1, 1536 * 1024 * 1024], [0, 1, 1536 * 1024 * 1024 + 1], [10, 1, 10], [0, -1, 10]
+  ])('refuses invalid native range arithmetic %s/%s/%s before invocation', async (offset, length, maximum) => {
+    const read = vi.fn();
+    await expect(load(module({ readWindowsFileRangeStable: read })).readStableFileRange('C:\\state\\archive.zip', offset, length, maximum)).rejects.toMatchObject({ code: 'WINDOWS_NATIVE_READ_LIMIT_INVALID' });
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { bytes: Buffer.from('ab'), byteCount: '0000000000000002' },
+    { after: { fileId: '10000000000000002000000000000001' } },
+    { after: { changeTime: '0000000000000002' } },
+    { before: { size: '0000000000000002' }, after: { size: '0000000000000002' } }
+  ])('refuses truncated or drifting range receipts', async (changed) => {
+    await expect(load(module({ stableRead: stableRead(changed) })).readStableFileRange('C:\\state\\archive.zip', 0, 3, 10)).rejects.toThrow();
+  });
 
   it('accepts only exact no-follow junction membership receipts', () => {
     const backend = load(module());
@@ -325,6 +370,29 @@ describe('Bazframe-owned Windows native loader', () => {
     expect(native.renameWindowsDirectoryNoReplace).toHaveBeenCalledTimes(1);
   });
 
+  it('passes two separately validated parents to directory no-replace movement', async () => {
+    const native = module(); const backend = load(native);
+    await backend.moveDirectoryNoReplace('C:\\staging', 'repo', 'C:\\checkouts', 'repo');
+    expect(native.moveWindowsDirectoryNoReplace).toHaveBeenCalledWith('C:\\staging', 'repo', 'C:\\checkouts', 'repo');
+    for (const component of ['other/repo', '../repo', 'repo\\child']) await expect(backend.moveDirectoryNoReplace('C:\\staging', component, 'C:\\checkouts', 'repo')).rejects.toThrow();
+    await expect(backend.moveDirectoryNoReplace('C:\\staging', 'repo', 'C:\\staging', 'REPO')).rejects.toThrow();
+    expect(native.moveWindowsDirectoryNoReplace).toHaveBeenCalledTimes(1);
+    expect(native.renameWindowsDirectoryNoReplace).not.toHaveBeenCalled();
+  });
+
+  it('uses the distinct regular-file no-replace export and refuses aliases or non-sibling components', async () => {
+    const native = module(); const backend = load(native);
+    await backend.renameFileNoReplace('C:\\state', '.blob-123', 'digest');
+    expect(native.renameWindowsFileNoReplace).toHaveBeenCalledWith('C:\\state', '.blob-123', 'digest');
+    expect(native.renameWindowsDirectoryNoReplace).not.toHaveBeenCalled();
+    for (const [source, destination] of [['DIGEST', 'digest'], ['../outside', 'digest'], ['source', 'other/file']]) {
+      await expect(backend.renameFileNoReplace('C:\\state', source!, destination!)).rejects.toThrow();
+    }
+    expect(native.renameWindowsFileNoReplace).toHaveBeenCalledTimes(1);
+    const occupied = module({ renameWindowsFileNoReplace: () => Promise.reject(coded('GenericFailure', 'ERR_WIN32_ALREADY_EXISTS: occupied')) });
+    await expect(load(occupied).renameFileNoReplace('C:\\state', 'source', 'target')).rejects.toMatchObject({ code: 'WINDOWS_NATIVE_DIRECTORY_OCCUPIED' });
+  });
+
   it('maps native no-replace rename refusals without a fallback', async () => {
     const native = module({
       renameWindowsDirectoryNoReplace: () => Promise.reject(
@@ -453,7 +521,7 @@ function load(
 
 function module(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   const info = {
-    contractVersion: 6,
+    contractVersion: 7,
     packageVersion: VERSION,
     target: 'win32-x64-msvc',
     maxStableReadBytes: BAZFRAME_WIN32_NATIVE_MAX_STABLE_READ_BYTES,
@@ -463,6 +531,7 @@ function module(overrides: Record<string, unknown> = {}): Record<string, unknown
   return {
     getNativeWindowsInfo: () => info,
     inspectWindowsPath: () => overrides.inspection ?? inspection(),
+    inspectWindowsEditorTarget: vi.fn(),
     inspectWindowsMembershipLink: () => overrides.membershipInspection ?? membershipInspection(),
     createWindowsPrivateJunction: () => overrides.junctionCreation ?? junctionCreation(),
     createWindowsPrivateDirectory: () => overrides.creation ?? creation(),
@@ -470,7 +539,11 @@ function module(overrides: Record<string, unknown> = {}): Record<string, unknown
     acquireWindowsFileLock: vi.fn(() => overrides.lockAcquisition ?? lockAcquisition()),
     releaseWindowsFileLock: vi.fn(),
     inspectWindowsProcessInstance: vi.fn(() => overrides.processInspection ?? { state: 'running' }),
+    moveWindowsDirectoryNoReplace: vi.fn(() => Promise.resolve()),
     renameWindowsDirectoryNoReplace: vi.fn(() => Promise.resolve()),
+    renameWindowsFileNoReplace: vi.fn(() => Promise.resolve()),
+    inspectWindowsZipSource: () => inspection().object,
+    readWindowsFileRangeStable: () => Promise.resolve(overrides.stableRead ?? stableRead()),
     readWindowsFileStable: () => Promise.resolve(overrides.stableRead ?? stableRead()),
     enumerateWindowsDirectoryStable: () => Promise.resolve(overrides.enumeration ?? enumeration()),
     ...without(overrides, [
@@ -676,22 +749,37 @@ describe('error-only native read-change diagnosis', async () => {
     expect(sanitizeProductError(JSON.parse(JSON.stringify(sanitized)))).toEqual(sanitized);
     expect(JSON.stringify(sanitized)).not.toContain('PRIVATE');
   });
+  it.each(['drive-root', 'ancestor', 'final'])('transports every exact directory security field through native decode and IPC: %s', async (prefixRole) => {
+    const differingFields = ['security.descriptorControl', 'security.daclPresent', 'security.daclNull',
+      'security.daclDefaulted', 'security.daclBytes', 'security.ownerSid', 'security.ownerDefaulted',
+      'security.groupSid', 'security.groupDefaulted', 'security.currentUserSid'];
+    for (const field of differingFields) {
+      const original = coded('ERR_WIN32_READ_CHANGED', `read-change|reopened-prefix|directory|${prefixRole}|${field}`);
+      const backend = load(module({ inspectWindowsPath() { throw original; } }));
+      let error: unknown;
+      try { backend.inspectPath('C:\\private'); } catch (caught) { error = caught; }
+      expect((error as Error).cause).toBe(original);
+      const sanitized = sanitizeProductError(error);
+      expect(sanitized.nativeReadChange).toEqual({ site: 'reopened-prefix', objectKind: 'directory', prefixRole, differingFields: [field] });
+      expect(sanitizeProductError(JSON.parse(JSON.stringify(sanitized)))).toEqual(sanitized);
+    }
+  });
   const maximalFields = [
     'object.volumeIdentity', 'object.fileId', 'object.size', 'object.allocationSize', 'object.numberOfLinks',
     'object.creationTime', 'object.lastWriteTime', 'object.changeTime', 'object.attributes', 'object.reparseTag',
     'object.deletePending', 'object.directory', 'security.descriptorControl', 'security.daclPresent', 'security.daclNull',
     'security.daclDefaulted', 'security.daclBytes', 'security.ownerSid', 'security.ownerDefaulted', 'security.groupSid',
-    'security.groupDefaulted', 'security.currentUserSid'
+    'security.groupDefaulted', 'security.currentUserSid', 'canonicalPath'
   ];
-  const maximalReason = ['read-change', 'inspect-opened-path', 'regular-file', 'none', maximalFields.join(',')].join('|');
+  const maximalReason = ['read-change', 'reopened-prefix', 'regular-file', 'drive-root', maximalFields.join(',')].join('|');
   it.each(['sync', 'async'])('accepts the maximal supported %s diagnostic with its original cause', async (mode) => {
-    expect(maximalReason.length).toBe(489); // Fixture length, not a production limit.
+    expect(maximalReason.length).toBe(505); // Fixture length, not a production limit.
     const original = coded(mode === 'sync' ? 'ERR_WIN32_READ_CHANGED' : 'GenericFailure',
       mode === 'sync' ? maximalReason : `ERR_WIN32_READ_CHANGED: ${maximalReason}`);
     const backend = load(module({ inspectWindowsPath() { throw original; }, readWindowsFileStable: () => Promise.reject(original) }));
     const error = await (async () => { try { return mode === 'sync' ? backend.inspectPath('C:\\private') : await backend.readStableFile('C:\\private', 3); } catch (error) { return error; } })();
     expect(error).toMatchObject({ code: 'WINDOWS_NATIVE_READ_CHANGED', nativeReadChange: {
-      site: 'inspect-opened-path', objectKind: 'regular-file', prefixRole: 'none', differingFields: maximalFields
+      site: 'reopened-prefix', objectKind: 'regular-file', prefixRole: 'drive-root', differingFields: maximalFields
     } });
     expect((error as Error).cause).toBe(original);
     expect(sanitizeProductError(error).nativeReadChange.differingFields).toEqual(maximalFields);
@@ -712,7 +800,7 @@ describe('error-only native read-change diagnosis', async () => {
   });
   it.each(['iterator-private', 'iterator-throws', 'methods-invalid', 'changing-index', 'sparse', 'duplicate', 'over-count'])(
     'captures only validated indexed fields at the native decoder seam: %s', (mode) => {
-      const fields = mode === 'sparse' ? new Array<string>(1) : mode === 'over-count' ? new Array<string>(14)
+      const fields = mode === 'sparse' ? new Array<string>(1) : mode === 'over-count' ? new Array<string>(24)
         : mode === 'duplicate' ? ['object.changeTime', 'object.changeTime'] : [mode === 'methods-invalid' ? 'PRIVATE' : 'object.changeTime'];
       let iteratorCalls = 0, indexReads = 0;
       Object.defineProperty(fields, Symbol.iterator, { value: function* () {
@@ -766,6 +854,8 @@ describe('error-only native read-change diagnosis', async () => {
     'read-change|reopened-prefix|directory|none|object.size',
     'read-change|reopened-prefix|directory|ancestor|object.size,object.size',
     'read-change|reopened-prefix|directory|ancestor|',
+    'read-change|reopened-prefix|directory|ancestor|security.PRIVATE',
+    'read-change|stable-read-final|regular-file|none|security.daclBytes',
     'read-change|stable-read-growth|regular-file|none|object.size',
     'read-change|stable-read-receipt|regular-file|none|beforeDirectory',
     `PRIVATE ${reason}`, `${reason}\nPRIVATE`

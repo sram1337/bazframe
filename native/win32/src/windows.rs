@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use crate::read_change::{
-    directory_fields, prefix_role, read_changed, security_fields, stable_fields, stable_read_fields,
+    admission_fields, directory_fields, prefix_role, read_changed, security_fields, stable_fields,
+    stable_read_fields,
 };
 use napi::Error;
 use windows_sys::Win32::Foundation::{
@@ -35,7 +36,7 @@ use windows_sys::Win32::Security::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_BEGIN,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_SEQUENTIAL_SCAN,
     FILE_ID_EXTD_DIR_INFO, FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED,
     FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO,
@@ -43,7 +44,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     FileIdInfo, FileStandardInfo, GetDriveTypeW, GetFileInformationByHandleEx,
     GetFinalPathNameByHandleW, GetFullPathNameW, GetVolumeInformationByHandleW,
     LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx, MoveFileExW, OPEN_EXISTING,
-    QueryDosDeviceW, READ_CONTROL, ReadFile, UnlockFileEx, VOLUME_NAME_GUID,
+    QueryDosDeviceW, READ_CONTROL, ReadFile, SetFilePointerEx, UnlockFileEx, VOLUME_NAME_GUID,
 };
 use windows_sys::Win32::System::IO::{DeviceIoControl, IO_STATUS_BLOCK, OVERLAPPED};
 use windows_sys::Win32::System::Ioctl::{FSCTL_GET_REPARSE_POINT, FSCTL_SET_REPARSE_POINT};
@@ -127,6 +128,15 @@ struct PrefixObservation {
     path: String,
     canonical_path: String,
     object: WindowsObjectObservation,
+}
+
+// Admission alone binds direct security to each directory's metadata-bearing handle.
+// Membership ancestry retains its separate, full-stability PrefixObservation proof.
+struct AdmissionPrefixObservation {
+    path: String,
+    canonical_path: String,
+    object: WindowsObjectObservation,
+    directory_security: Option<WindowsSecurityObservation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -679,12 +689,14 @@ fn inspect_opened_path(opened: &OpenedPath) -> NativeResult<WindowsPathInspectio
     let before = snapshot(opened.handle.0)?;
     let security_before = inspect_security(opened.handle.0)?;
     let volume = inspect_volume(opened.handle.0, &opened.canonical_path, &before)?;
+    #[cfg(test)]
+    prefix_reopen_tests::during_opened_inspection();
     let security_after = inspect_security(opened.handle.0)?;
     let after = snapshot(opened.handle.0)?;
-    if !same_stable_observation(&before, &after)
+    if !same_admission_observation(&before, &after)
         || !same_security_observation(&security_before, &security_after)
     {
-        let mut fields = stable_fields(&before, &after);
+        let mut fields = admission_fields(&before, &after);
         fields.extend(security_fields(&security_before, &security_after));
         return read_changed("inspect-opened-path", before.directory, "none", fields);
     }
@@ -743,6 +755,51 @@ pub(crate) fn rename_windows_directory_no_replace(
     source_component: &str,
     destination_component: &str,
 ) -> NativeResult<()> {
+    rename_windows_between_parents_no_replace(
+        parent_path,
+        source_component,
+        parent_path,
+        destination_component,
+        false,
+    )
+}
+
+pub(crate) fn rename_windows_file_no_replace(
+    parent_path: &str,
+    source_component: &str,
+    destination_component: &str,
+) -> NativeResult<()> {
+    rename_windows_between_parents_no_replace(
+        parent_path,
+        source_component,
+        parent_path,
+        destination_component,
+        true,
+    )
+}
+
+pub(crate) fn move_windows_directory_no_replace(
+    source_parent_path: &str,
+    source_component: &str,
+    destination_parent_path: &str,
+    destination_component: &str,
+) -> NativeResult<()> {
+    rename_windows_between_parents_no_replace(
+        source_parent_path,
+        source_component,
+        destination_parent_path,
+        destination_component,
+        false,
+    )
+}
+
+fn rename_windows_between_parents_no_replace(
+    parent_path: &str,
+    source_component: &str,
+    destination_parent_path: &str,
+    destination_component: &str,
+    regular_file: bool,
+) -> NativeResult<()> {
     let parent = open_admitted_path(parent_path, FILE_READ_ATTRIBUTES | READ_CONTROL)?;
     let parent_before = inspect_opened_path(&parent)?;
     if parent_before.kind != "directory" {
@@ -752,10 +809,30 @@ pub(crate) fn rename_windows_directory_no_replace(
         ));
     }
 
+    let destination_parent =
+        open_admitted_path(destination_parent_path, FILE_READ_ATTRIBUTES | READ_CONTROL)?;
+    let destination_before = inspect_opened_path(&destination_parent)?;
+    if destination_before.kind != "directory"
+        || destination_before.volume.identity != parent_before.volume.identity
+    {
+        return Err(native_error(
+            "ERR_WIN32_IO",
+            "no-replace move requires directory parents on the same volume",
+        ));
+    }
     let source_path = join_direct_child(parent_path, source_component);
     let source = open_admitted_path(&source_path, FILE_READ_ATTRIBUTES | READ_CONTROL)?;
     let source_inspection = inspect_opened_path(&source)?;
-    if source_inspection.kind != "directory" {
+    if regular_file
+        && (source_inspection.kind != "regular-file"
+            || source_inspection.object.number_of_links != "00000001")
+    {
+        return Err(native_error(
+            "ERR_WIN32_NOT_REGULAR_FILE",
+            "no-replace file rename requires a single-link regular file",
+        ));
+    }
+    if !regular_file && source_inspection.kind != "directory" {
         return Err(native_error(
             "ERR_WIN32_NOT_DIRECTORY",
             "no-replace directory rename requires a physical directory source",
@@ -780,7 +857,18 @@ pub(crate) fn rename_windows_directory_no_replace(
         );
     }
 
-    let destination_path = join_direct_child(parent_path, destination_component);
+    let destination_after = inspect_opened_path(&destination_parent)?;
+    if !same_directory_identity(&destination_before, &destination_after)
+        || !same_security_observation(&destination_before.security, &destination_after.security)
+    {
+        return read_changed(
+            "rename-destination-parent",
+            destination_before.object.directory,
+            "none",
+            directory_fields(&destination_before, &destination_after),
+        );
+    }
+    let destination_path = join_direct_child(destination_parent_path, destination_component);
     let source_extended = extended_drive_path(&source_path)?;
     let destination_extended = extended_drive_path(&destination_path)?;
     let source_encoded = wide(&source_extended);
@@ -797,6 +885,23 @@ pub(crate) fn rename_windows_directory_no_replace(
 }
 
 pub(crate) fn read_windows_file_stable(path: &str, max_bytes: u32) -> NativeResult<StableReadData> {
+    read_windows_file_bytes(path, max_bytes, None)
+}
+
+pub(crate) fn read_windows_file_range_stable(
+    path: &str,
+    offset: u32,
+    length: u32,
+    max_file_bytes: u32,
+) -> NativeResult<StableReadData> {
+    read_windows_file_bytes(path, length, Some((offset, max_file_bytes)))
+}
+
+fn read_windows_file_bytes(
+    path: &str,
+    max_bytes: u32,
+    range: Option<(u32, u32)>,
+) -> NativeResult<StableReadData> {
     let opened = open_admitted_path(path, GENERIC_READ | FILE_READ_ATTRIBUTES)?;
     let before = snapshot(opened.handle.0)?;
     if before.directory {
@@ -806,13 +911,32 @@ pub(crate) fn read_windows_file_stable(path: &str, max_bytes: u32) -> NativeResu
         ));
     }
     let _volume = inspect_volume(opened.handle.0, &opened.canonical_path, &before)?;
-    let expected = parse_nonnegative_hex_u64(&before.size)?;
-    if expected > u64::from(max_bytes) {
+    let file_size = parse_nonnegative_hex_u64(&before.size)?;
+    let bound = range.map_or(max_bytes, |(_, maximum)| maximum);
+    if file_size > u64::from(bound) {
         return Err(native_error(
             "ERR_WIN32_READ_LIMIT",
             "stable read input exceeds the supplied byte bound",
         ));
     }
+
+    let expected = if let Some((offset, _)) = range {
+        if u64::from(offset) + u64::from(max_bytes) > file_size {
+            return Err(native_error(
+                "ERR_WIN32_READ_INCOMPLETE",
+                "range exceeds observed file size",
+            ));
+        }
+        // SAFETY: the synchronous handle is owned for this entire read; offset is bounded u32.
+        if unsafe { SetFilePointerEx(opened.handle.0, i64::from(offset), null_mut(), FILE_BEGIN) }
+            == 0
+        {
+            return Err(last_win_error("seek stable file range"));
+        }
+        u64::from(max_bytes)
+    } else {
+        file_size
+    };
 
     let expected_usize = usize::try_from(expected).map_err(|_| {
         native_error(
@@ -851,7 +975,7 @@ pub(crate) fn read_windows_file_stable(path: &str, max_bytes: u32) -> NativeResu
         })?;
     }
 
-    if expected < u64::from(max_bytes) {
+    if range.is_none() && expected < u64::from(max_bytes) {
         let mut extra = 0_u8;
         let mut read = 0_u32;
         // SAFETY: the synchronous handle remains positioned after the admitted
@@ -878,16 +1002,22 @@ pub(crate) fn read_windows_file_stable(path: &str, max_bytes: u32) -> NativeResu
         }
     }
 
+    #[cfg(test)]
+    prefix_reopen_tests::at_content_seam("stable-read-final");
     let after = snapshot(opened.handle.0)?;
     if bytes.len() as u64 != expected
-        || parse_nonnegative_hex_u64(&after.size)? != bytes.len() as u64
+        || parse_nonnegative_hex_u64(&after.size)? != file_size
         || !same_stable_observation(&before, &after)
     {
         return read_changed(
             "stable-read-final",
             before.directory,
             "none",
-            stable_read_fields(&before, &after, expected, bytes.len() as u64),
+            if range.is_some() {
+                stable_fields(&before, &after)
+            } else {
+                stable_read_fields(&before, &after, expected, bytes.len() as u64)
+            },
         );
     }
 
@@ -915,6 +1045,8 @@ pub(crate) fn enumerate_windows_directory_stable(
     }
 
     let first = enumerate_directory_pass(opened.handle.0, max_entries)?;
+    #[cfg(test)]
+    prefix_reopen_tests::at_content_seam("enumeration-between-passes");
     let second = enumerate_directory_pass(opened.handle.0, max_entries)?;
     if first != second {
         return Err(native_error(
@@ -923,6 +1055,8 @@ pub(crate) fn enumerate_windows_directory_stable(
         ));
     }
 
+    #[cfg(test)]
+    prefix_reopen_tests::at_content_seam("enumeration-after-passes");
     let directory_after = inspect_opened_path(&opened)?;
     let current = inspect_windows_path(path)?;
     if !same_path_inspection(&directory_before, &directory_after)
@@ -1554,6 +1688,9 @@ fn same_membership_link_inspection(
 }
 
 #[cfg(test)]
+mod prefix_reopen_tests;
+
+#[cfg(test)]
 mod membership_reparse_tests {
     use super::*;
 
@@ -1610,6 +1747,112 @@ mod membership_reparse_tests {
     }
 }
 
+/// Untrusted local ZIP bytes: no managed ACL, fixed-volume or NTFS admission.
+/// Only the documented cloud tag family may occur in this source ancestry.
+pub fn inspect_windows_zip_source(path: &str) -> NativeResult<WindowsObjectObservation> {
+    validate_input_path(path)?;
+    let full = full_path(path)?;
+    let (drive, prefixes) = admitted_prefixes(&full)?;
+    let target = drive_mapping_target(&drive)?;
+    let network =
+        target.starts_with(r"\device\lanmanredirector\") || target.starts_with(r"\device\mup\");
+    if !network && !target.starts_with("\\device\\harddiskvolume") {
+        return Err(native_error(
+            "ERR_WIN32_UNSUPPORTED_TARGET",
+            "ZIP source drive is a substituted or device alias",
+        ));
+    }
+    let mut source_root = None;
+    let mut observations = Vec::new();
+    for (index, prefix) in prefixes.iter().enumerate() {
+        let handle = open_existing(prefix, FILE_READ_ATTRIBUTES)?;
+        // SAFETY: handle is live. Pipes/devices are not regular byte sources.
+        if unsafe { windows_sys::Win32::Storage::FileSystem::GetFileType(handle.0) }
+            != windows_sys::Win32::Storage::FileSystem::FILE_TYPE_DISK
+        {
+            return Err(native_error(
+                "ERR_WIN32_UNSUPPORTED_TARGET",
+                "ZIP source is not a disk file",
+            ));
+        }
+        let tag = attribute_tag(handle.0)?;
+        if tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            && !cloud_source_tag(tag.ReparseTag)
+        {
+            return Err(native_error(
+                "ERR_WIN32_REPARSE_REFUSED",
+                "ZIP source contains an unexpected reparse point",
+            ));
+        }
+        let object = snapshot_with_tag(handle.0, tag.ReparseTag)?;
+        if (index + 1 < prefixes.len() && !object.directory)
+            || (index + 1 == prefixes.len()
+                && (object.directory || object.number_of_links != "00000001"))
+        {
+            return Err(native_error(
+                "ERR_WIN32_UNSUPPORTED_TARGET",
+                "ZIP source is not a single-link regular file",
+            ));
+        }
+        let canonical = final_path_with_volume(handle.0, 0)?;
+        if index == 0 {
+            if network && !canonical.starts_with(r"\\?\UNC\") {
+                return Err(native_error(
+                    "ERR_WIN32_UNSUPPORTED_TARGET",
+                    "ZIP network source has an unexpected namespace",
+                ));
+            }
+            source_root = Some(format!(r"{}\", canonical.trim_end_matches('\\')));
+        }
+        let expected = if network {
+            format!(
+                "{}{}",
+                source_root.as_ref().expect("source root observed"),
+                &prefix[3..]
+            )
+        } else {
+            format!("\\\\?\\{prefix}")
+        };
+        if canonical != expected
+            && !(network
+                && index == 0
+                && format!(r"{}\", canonical.trim_end_matches('\\')) == expected)
+        {
+            return Err(native_error(
+                "ERR_WIN32_UNSUPPORTED_TARGET",
+                "ZIP source has an aliased spelling",
+            ));
+        }
+        observations.push((prefix, object, canonical));
+    }
+    for (prefix, before, canonical) in &observations {
+        let handle = open_existing(prefix, FILE_READ_ATTRIBUTES)?;
+        let tag = attribute_tag(handle.0)?;
+        if tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            && !cloud_source_tag(tag.ReparseTag)
+        {
+            return Err(native_error(
+                "ERR_WIN32_REPARSE_REFUSED",
+                "ZIP source changed reparse kind",
+            ));
+        }
+        if final_path_with_volume(handle.0, 0)? != *canonical
+            || !same_admission_observation(before, &snapshot_with_tag(handle.0, tag.ReparseTag)?)
+        {
+            return Err(native_error(
+                "ERR_WIN32_READ_CHANGED",
+                "ZIP source changed during classification",
+            ));
+        }
+    }
+    Ok(observations.pop().expect("nonempty source prefixes").1)
+}
+
+fn cloud_source_tag(tag: u32) -> bool {
+    // IO_REPARSE_TAG_CLOUD and CLOUD_1..CLOUD_F; not arbitrary Microsoft reparses.
+    tag & !0x0000_f000 == 0x9000_001a
+}
+
 fn open_admitted_path(path: &str, final_access: u32) -> NativeResult<OpenedPath> {
     open_admitted_path_with_final_share(
         path,
@@ -1637,9 +1880,9 @@ fn open_admitted_path_with_final_share(
     let mut observations = Vec::with_capacity(prefixes.len());
     for (index, prefix) in prefixes.iter().enumerate() {
         let access = if index == last {
-            final_access
+            final_access | READ_CONTROL
         } else {
-            FILE_READ_ATTRIBUTES
+            FILE_READ_ATTRIBUTES | READ_CONTROL
         };
         let handle = if index == last {
             open_existing_with_share(prefix, access, final_share)?
@@ -1659,24 +1902,64 @@ fn open_admitted_path_with_final_share(
                 "Windows path ancestry contains a non-directory entry",
             ));
         }
-        observations.push(PrefixObservation {
+        let canonical_path = final_path(handle.0)?;
+        let object = snapshot(handle.0)?;
+        let directory_security = if object.directory {
+            Some(inspect_security(handle.0)?)
+        } else {
+            None
+        };
+        observations.push(AdmissionPrefixObservation {
             path: prefix.clone(),
-            canonical_path: final_path(handle.0)?,
-            object: snapshot(handle.0)?,
+            canonical_path,
+            object,
+            directory_security,
         });
         if index == last {
             final_handle = Some(handle);
         }
     }
     let handle = final_handle.expect("nonempty prefix list must retain final handle");
+    #[cfg(test)]
+    prefix_reopen_tests::after_initial_observations(&observations);
     for (index, expected) in observations.iter().enumerate() {
-        let reopened = open_existing(&expected.path, FILE_READ_ATTRIBUTES)?;
+        let access = FILE_READ_ATTRIBUTES
+            | if expected.object.directory {
+                READ_CONTROL
+            } else {
+                0
+            };
+        let reopened = open_existing(&expected.path, access)?;
         let canonical_path = final_path(reopened.0)?;
         let object = snapshot(reopened.0)?;
+        // Query on this reopened handle; an unreadable descriptor is a refusal, not
+        // permission to use a timestamp-only or metadata-only fallback.
+        let security = if expected.object.directory && object.directory {
+            Some(inspect_security(reopened.0)?)
+        } else {
+            None
+        };
+        let security_matches = match (&expected.directory_security, &security) {
+            (Some(before), Some(after)) => same_security_observation(before, after),
+            (None, None) => !expected.object.directory && !object.directory,
+            _ => false,
+        };
+        #[cfg(test)]
+        prefix_reopen_tests::at_reopened_observation(
+            index,
+            expected,
+            &canonical_path,
+            &object,
+            security.as_ref(),
+        );
         if canonical_path != expected.canonical_path
-            || !same_stable_observation(&expected.object, &object)
+            || !same_admission_observation(&expected.object, &object)
+            || !security_matches
         {
-            let mut fields = stable_fields(&expected.object, &object);
+            let mut fields = admission_fields(&expected.object, &object);
+            if let (Some(before), Some(after)) = (&expected.directory_security, &security) {
+                fields.extend(security_fields(before, after));
+            }
             if canonical_path != expected.canonical_path {
                 fields.push("canonicalPath");
             }
@@ -1806,7 +2089,7 @@ fn admitted_prefixes(full: &str) -> NativeResult<(String, Vec<String>)> {
     Ok((drive_root, prefixes))
 }
 
-fn reject_subst_or_device_alias(drive_root: &str) -> NativeResult<()> {
+fn drive_mapping_target(drive_root: &str) -> NativeResult<String> {
     let device = format!("{}:", drive_root.chars().next().unwrap_or(' '));
     let input = wide(&device);
     let mut buffer = vec![0_u16; 32_768];
@@ -1821,6 +2104,11 @@ fn reject_subst_or_device_alias(drive_root: &str) -> NativeResult<()> {
         .position(|unit| *unit == 0)
         .unwrap_or(written as usize);
     let target = String::from_utf16_lossy(&buffer[..end]).to_ascii_lowercase();
+    Ok(target)
+}
+
+fn reject_subst_or_device_alias(drive_root: &str) -> NativeResult<()> {
+    let target = drive_mapping_target(drive_root)?;
     if !target.starts_with("\\device\\harddiskvolume") {
         return Err(native_error(
             "ERR_WIN32_VOLUME_NOT_FIXED",
@@ -2270,6 +2558,10 @@ fn snapshot(handle: HANDLE) -> NativeResult<WindowsObjectObservation> {
             "Windows object is an unsupported reparse point",
         ));
     }
+    snapshot_with_tag(handle, 0)
+}
+
+fn snapshot_with_tag(handle: HANDLE, reparse_tag: u32) -> NativeResult<WindowsObjectObservation> {
     let id: FILE_ID_INFO = query_file_information(handle, FileIdInfo, "query file identity")?;
     let basic: FILE_BASIC_INFO =
         query_file_information(handle, FileBasicInfo, "query basic file metadata")?;
@@ -2298,7 +2590,7 @@ fn snapshot(handle: HANDLE) -> NativeResult<WindowsObjectObservation> {
         last_write_time: hex_i64_bits(basic.LastWriteTime),
         change_time: hex_i64_bits(basic.ChangeTime),
         attributes: basic.FileAttributes,
-        reparse_tag: 0,
+        reparse_tag,
         delete_pending: false,
         directory: standard.Directory,
     })
@@ -2353,15 +2645,13 @@ fn volume_guid_root(canonical_path: &str) -> NativeResult<String> {
 }
 
 fn final_path(handle: HANDLE) -> NativeResult<String> {
+    final_path_with_volume(handle, VOLUME_NAME_GUID)
+}
+
+fn final_path_with_volume(handle: HANDLE, volume: u32) -> NativeResult<String> {
     // SAFETY: zero-length query asks Windows for the required UTF-16 length.
-    let needed = unsafe {
-        GetFinalPathNameByHandleW(
-            handle,
-            null_mut(),
-            0,
-            FILE_NAME_NORMALIZED | VOLUME_NAME_GUID,
-        )
-    };
+    let needed =
+        unsafe { GetFinalPathNameByHandleW(handle, null_mut(), 0, FILE_NAME_NORMALIZED | volume) };
     if needed == 0 {
         return Err(last_win_error("size canonical Windows path"));
     }
@@ -2372,13 +2662,35 @@ fn final_path(handle: HANDLE) -> NativeResult<String> {
             handle,
             buffer.as_mut_ptr(),
             buffer.len() as u32,
-            FILE_NAME_NORMALIZED | VOLUME_NAME_GUID,
+            FILE_NAME_NORMALIZED | volume,
         )
     };
     if written == 0 || written as usize >= buffer.len() {
         return Err(last_win_error("resolve canonical Windows path"));
     }
     Ok(String::from_utf16_lossy(&buffer[..written as usize]))
+}
+
+// Directory admission is not a content-stability receipt. Its callers must also
+// compare exact security; only these two directory namespace timestamps are exempt.
+// Files/mixed kinds and every content consumer retain the full stable predicate.
+fn same_admission_observation(
+    before: &WindowsObjectObservation,
+    after: &WindowsObjectObservation,
+) -> bool {
+    if !before.directory || !after.directory {
+        return same_stable_observation(before, after);
+    }
+    before.volume_identity == after.volume_identity
+        && before.file_id == after.file_id
+        && before.size == after.size
+        && before.allocation_size == after.allocation_size
+        && before.number_of_links == after.number_of_links
+        && before.creation_time == after.creation_time
+        && before.attributes == after.attributes
+        && before.reparse_tag == after.reparse_tag
+        && before.delete_pending == after.delete_pending
+        && before.directory == after.directory
 }
 
 fn same_stable_observation(
@@ -2469,6 +2781,29 @@ mod tests {
     }
 
     #[test]
+    fn admission_does_not_replace_directory_content_or_membership_target_stability() {
+        use crate::read_change::tests::inspection;
+        for role in [
+            prefix_role(0, 2),
+            prefix_role(1, 2),
+            prefix_role(2, 2),
+            prefix_role(0, 0),
+        ] {
+            assert!(["drive-root", "ancestor", "final"].contains(&role));
+            let before = inspection();
+            let mut after = inspection();
+            after.object.last_write_time = "OTHER".into();
+            after.object.change_time = "OTHER".into();
+            assert!(same_admission_observation(&before.object, &after.object));
+            assert!(same_security_observation(&before.security, &after.security));
+            // Enumeration and membership targets still consume the full predicate.
+            assert!(!same_path_inspection(&before, &after));
+            assert!(!same_stable_observation(&before.object, &after.object));
+            assert!(admission_fields(&before.object, &after.object).is_empty());
+        }
+    }
+
+    #[test]
     fn read_change_diagnostics_match_authoritative_comparisons() {
         use crate::read_change::tests::{inspection, object, security};
         let a = object();
@@ -2480,6 +2815,25 @@ mod tests {
                     same_stable_observation(&a, &b),
                     stable_fields(&a, &b).is_empty()
                 );
+                let exempt = matches!(
+                    stringify!($field),
+                    "last_access_time" | "last_write_time" | "change_time"
+                );
+                assert_eq!(same_admission_observation(&a, &b), exempt);
+                assert_eq!(
+                    same_admission_observation(&a, &b),
+                    admission_fields(&a, &b).is_empty()
+                );
+                let mut file_a = a.clone();
+                let mut file_b = b.clone();
+                file_a.directory = false;
+                file_b.directory = false;
+                assert_eq!(
+                    same_admission_observation(&file_a, &file_b),
+                    same_stable_observation(&file_a, &file_b)
+                );
+                assert!(!same_admission_observation(&a, &file_b));
+                assert!(!same_admission_observation(&file_b, &a));
             }};
         }
         assert!(same_stable_observation(&a, &object()));
@@ -2517,6 +2871,14 @@ mod tests {
                     same_security_observation(&a, &b),
                     security_fields(&a, &b).is_empty()
                 );
+                // Both production admission seams require this exact security proof,
+                // independently of otherwise-admissible directory timestamp drift.
+                let before = object();
+                let mut after = object();
+                after.change_time = "OTHER".into();
+                after.last_write_time = "OTHER".into();
+                assert!(same_admission_observation(&before, &after));
+                assert!(!same_security_observation(&a, &b));
             }};
         }
         assert!(same_security_observation(&a, &security()));
@@ -2731,4 +3093,80 @@ mod tests {
             directory: false,
         }
     }
+}
+
+// Read-only final-file exception; no content reads, link creation or permission changes.
+pub(crate) fn inspect_windows_editor_target(root: &str, path: &str) -> NativeResult<crate::WindowsEditorTargetInspection> {
+    let before = inspect_editor_once(root, path)?;
+    let after = inspect_editor_once(root, path)?;
+    if !same_path_inspection(&before.root, &after.root)
+        || !same_path_inspection(&before.parent, &after.parent)
+        || !same_path_inspection(&before.target, &after.target)
+        || before.entry_path != after.entry_path || before.target_path != after.target_path
+        || !same_stable_observation(&before.entry_object, &after.entry_object)
+        || !same_security_observation(&before.entry_security, &after.entry_security) {
+        return Err(editor_invalid());
+    }
+    Ok(after)
+}
+
+fn editor_invalid() -> Error<String> { native_error("ERR_WIN32_EDITOR_TARGET_INVALID", "Editor target is not a stable admitted regular file or final file symlink") }
+
+fn inspect_editor_once(root: &str, path: &str) -> NativeResult<crate::WindowsEditorTargetInspection> {
+    validate_input_path(path)?;
+    let full = full_path(path)?;
+    let parent_path = Path::new(&full).parent().and_then(Path::to_str).ok_or_else(editor_invalid)?;
+    let root_inspection = inspect_windows_path(root)?;
+    let parent = inspect_windows_path(parent_path)?;
+    if root_inspection.kind != "directory" || parent.kind != "directory" { return Err(editor_invalid()); }
+    let entry = open_existing(&full, FILE_READ_ATTRIBUTES | READ_CONTROL)?;
+    let tag = attribute_tag(entry.0)?;
+    if tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 { return Err(editor_invalid()); }
+    let symlink = tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    if symlink && tag.ReparseTag != 0xa000000c { return Err(editor_invalid()); }
+    let entry_object = snapshot_with_tag(entry.0, if symlink { tag.ReparseTag } else { 0 })?;
+    if entry_object.directory || entry_object.number_of_links != "00000001" { return Err(editor_invalid()); }
+    let entry_path = final_path(entry.0)?;
+    inspect_volume(entry.0, &entry_path, &entry_object)?;
+    let entry_security = inspect_security(entry.0)?;
+    let target_path = if symlink {
+        if entry_security.owner_sid != entry_security.current_user_sid { return Err(editor_invalid()); }
+        let (target, relative) = read_editor_symlink(entry.0)?;
+        if relative {
+            if Path::new(&target).is_absolute() || target.contains(':') || target.starts_with('\\') { return Err(editor_invalid()); }
+            full_path(&Path::new(parent_path).join(target).to_string_lossy())?
+        } else {
+            let target = target.strip_prefix("\\??\\").ok_or_else(editor_invalid)?;
+            validate_input_path(target)?;
+            full_path(target)?
+        }
+    } else { full.clone() };
+    let target = inspect_windows_path(&target_path)?;
+    if target.kind != "regular-file" || target.object.number_of_links != "00000001" { return Err(editor_invalid()); }
+    let prefix = format!("{}\\", root_inspection.canonical_path.trim_end_matches('\\')).to_lowercase();
+    if !parent.canonical_path.eq_ignore_ascii_case(&root_inspection.canonical_path)
+        || !entry_path.to_lowercase().starts_with(&prefix)
+        || !target.canonical_path.to_lowercase().starts_with(&prefix) { return Err(editor_invalid()); }
+    Ok(crate::WindowsEditorTargetInspection { root: root_inspection, parent, entry_path, entry_object, entry_security, target, target_path })
+}
+
+fn read_editor_symlink(handle: HANDLE) -> NativeResult<(String, bool)> {
+    let mut buffer = [0_u8; MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
+    let mut returned = 0_u32;
+    // SAFETY: valid no-follow handle, fixed writable buffer, synchronous call.
+    let ok = unsafe { DeviceIoControl(handle, FSCTL_GET_REPARSE_POINT, null(), 0, buffer.as_mut_ptr().cast(), buffer.len() as u32, &mut returned, null_mut()) };
+    if ok == 0 { return Err(last_win_error("read editor file symlink")); }
+    let length = returned as usize;
+    if length < 20 || length > buffer.len() { return Err(editor_invalid()); }
+    let u16_at = |offset| u16::from_le_bytes([buffer[offset], buffer[offset + 1]]) as usize;
+    if u32::from_le_bytes(buffer[0..4].try_into().unwrap()) != 0xa000000c || u16_at(4) + 8 != length || u16_at(6) != 0 { return Err(editor_invalid()); }
+    let offset = u16_at(8); let bytes = u16_at(10);
+    let print_offset = u16_at(12); let print_bytes = u16_at(14);
+    let flags = u32::from_le_bytes(buffer[16..20].try_into().unwrap());
+    if flags > 1 || offset % 2 != 0 || bytes == 0 || bytes % 2 != 0 || offset + bytes > length - 20
+        || print_offset % 2 != 0 || print_bytes % 2 != 0 || print_offset + print_bytes > length - 20 { return Err(editor_invalid()); }
+    let units: Vec<u16> = buffer[20 + offset..20 + offset + bytes].chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+    let target = String::from_utf16(&units).map_err(|_| editor_invalid())?;
+    if target.contains('\0') || target.contains('/') { return Err(editor_invalid()); }
+    Ok((target, flags == 1))
 }

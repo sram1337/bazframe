@@ -256,6 +256,10 @@ function setup(options: {
     createPrivateJunction,
     createPrivateDirectory: () => { throw new Error('unexpected create directory'); },
     createPrivateFile: () => { throw new Error('unexpected create file'); },
+    inspectZipSource() { throw new Error('unused ZIP source'); },
+    async readStableFileRange() { throw new Error('range read unused'); },
+    async renameFileNoReplace() { throw new Error('file rename not used by this fixture'); },
+    async moveDirectoryNoReplace() { throw new Error('unexpected cross-parent move'); },
     renameDirectoryNoReplace: async () => { throw new Error('unexpected rename'); },
     readStableFile: async () => { throw new Error('unexpected read'); },
     enumerateStableDirectory: async () => { throw new Error('unexpected enumeration'); }

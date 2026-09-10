@@ -1,4 +1,4 @@
-import { isAbsolute, resolve } from 'node:path';
+import path from 'node:path';
 import { BazframeError } from '../../core/errors.js';
 import type { FileIdentity } from '../../state/file-identity.js';
 
@@ -17,7 +17,8 @@ export interface PiAdapterManifest {
 export function createPiAdapterManifest(
   bazframeVersion: string,
   installedPath: string,
-  artifact: FileIdentity
+  artifact: FileIdentity,
+  paths = path
 ): PiAdapterManifest {
   return validateManifest({
     schemaVersion: 1,
@@ -26,12 +27,13 @@ export function createPiAdapterManifest(
     installedPath,
     artifactSha256: artifact.sha256,
     artifactBytes: artifact.bytes
-  }, 'Pi adapter manifest');
+  }, 'Pi adapter manifest', paths);
 }
 
 export function decodePiAdapterManifest(
   text: string,
-  source = 'Pi adapter manifest'
+  source = 'Pi adapter manifest',
+  paths = path
 ): PiAdapterManifest {
   let value: unknown;
   try {
@@ -41,15 +43,15 @@ export function decodePiAdapterManifest(
       cause: error
     });
   }
-  return validateManifest(value, source);
+  return validateManifest(value, source, paths);
 }
 
-export function encodePiAdapterManifest(manifest: PiAdapterManifest): string {
-  const validated = validateManifest(manifest, 'Pi adapter manifest');
+export function encodePiAdapterManifest(manifest: PiAdapterManifest, paths = path): string {
+  const validated = validateManifest(manifest, 'Pi adapter manifest', paths);
   return `${JSON.stringify(validated, null, 2)}\n`;
 }
 
-function validateManifest(value: unknown, source: string): PiAdapterManifest {
+function validateManifest(value: unknown, source: string, paths: typeof path): PiAdapterManifest {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw invalidManifest(source);
   }
@@ -62,7 +64,7 @@ function validateManifest(value: unknown, source: string): PiAdapterManifest {
     || candidate.bazframeVersion.length > MAX_VERSION_LENGTH
     || candidate.bazframeVersion.includes('\0')
     || typeof candidate.installedPath !== 'string'
-    || !isNormalizedAbsolutePath(candidate.installedPath)
+    || !isNormalizedAbsolutePath(candidate.installedPath, paths)
     || typeof candidate.artifactSha256 !== 'string'
     || !SHA256.test(candidate.artifactSha256)
     || typeof candidate.artifactBytes !== 'number'
@@ -81,11 +83,11 @@ function validateManifest(value: unknown, source: string): PiAdapterManifest {
   };
 }
 
-function isNormalizedAbsolutePath(path: string): boolean {
-  return path.length > 0
-    && !path.includes('\0')
-    && isAbsolute(path)
-    && resolve(path) === path;
+function isNormalizedAbsolutePath(value: string, paths: typeof path): boolean {
+  return value.length > 0
+    && !value.includes('\0')
+    && paths.isAbsolute(value)
+    && paths.resolve(value) === value;
 }
 
 function invalidManifest(source: string): BazframeError {

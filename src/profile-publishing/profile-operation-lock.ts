@@ -97,6 +97,13 @@ export function assertOperationMutationAuthority(authority: OperationMutationAut
   assertLiveProof(record);
 }
 
+/** Internal Windows-only provenance gate; issuance and live scope checks stay shared. */
+export function assertWindowsOperationMutationAuthority(authority: OperationMutationAuthority, backend: BazframeWin32NativeBackend, home: string, requiredKeys: readonly string[], transactionId: string): void {
+  const record = activeAuthorityRecord(authority);
+  if (record.proof.kind !== 'windows' || record.proof.backend !== backend) throw invalidAuthority();
+  assertOperationMutationAuthority(authority, home, requiredKeys, transactionId);
+}
+
 export function operationAuthorityTransactionId(authority: OperationMutationAuthority): string {
   const record = activeAuthorityRecord(authority);
   assertLiveProof(record);

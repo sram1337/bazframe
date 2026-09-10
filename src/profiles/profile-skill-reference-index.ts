@@ -1,3 +1,4 @@
+import { isReservedProfileSiblingName } from '../profile-publishing/publication-state.js';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, open, readlink, readdir, type FileHandle } from 'node:fs/promises';
@@ -150,7 +151,8 @@ async function captureWindowsProfileSkillReferenceIndex(
   platformServices: AddedSkillPlatformServices,
   testHooks: ProfileSkillReferenceIndexTestHooks
 ): Promise<ProfileSkillReferenceIndex> {
-  const profilesRoot = join(home, 'profiles');
+  const pathJoin = platformServices.joinPath ?? join;
+  const profilesRoot = pathJoin(home, 'profiles');
   let root;
   try {
     root = await platformServices.enumeratePrivateDirectory(
@@ -167,7 +169,8 @@ async function captureWindowsProfileSkillReferenceIndex(
   const diagnostics: ProfileSkillReferenceDiagnostic[] = [];
   const identityParts = [`profiles:${root.identity}`];
   for (const profileId of root.names) {
-    const profilePath = join(profilesRoot, profileId);
+    if (isReservedProfileSiblingName(profileId)) { identityParts.push(`retained:${profileId}`); continue; }
+    const profilePath = pathJoin(profilesRoot, profileId);
     if (!isSafeProfileId(profileId)) {
       diagnostics.push({ profileId: '<unknown-profile>', path: profilePath });
       identityParts.push(`profile:${profileId}:unsafe`);
@@ -177,7 +180,7 @@ async function captureWindowsProfileSkillReferenceIndex(
       const profile = platformServices.inspectPrivateDirectory(profilePath);
       identityParts.push(`profile:${profileId}:${profile.identity}`);
       await testHooks.afterProfileOpened?.(profileId);
-      const skillsPath = join(profilePath, 'skills');
+      const skillsPath = pathJoin(profilePath, 'skills');
       let skills;
       try {
         skills = await platformServices.enumeratePrivateDirectory(
@@ -199,7 +202,7 @@ async function captureWindowsProfileSkillReferenceIndex(
         if (!isSafeSkillId(entry.name)
           || !entry.directory
           || entry.reparseTag !== 0xa0000003) {
-          diagnostics.push({ profileId, path: join(skillsPath, entry.name) });
+          diagnostics.push({ profileId, path: pathJoin(skillsPath, entry.name) });
           identityParts.push(`skills-entry:${profileId}:${entry.name}:unsupported`);
         }
       }
@@ -208,7 +211,7 @@ async function captureWindowsProfileSkillReferenceIndex(
       if (aliases.length === 0) {
         identityParts.push(`membership:${profileId}:absent`);
       } else if (aliases.length !== 1 || aliases[0] !== skillId) {
-        diagnostics.push({ profileId, path: join(skillsPath, aliases[0] ?? skillId) });
+        diagnostics.push({ profileId, path: pathJoin(skillsPath, aliases[0] ?? skillId) });
         identityParts.push(`membership:${profileId}:ambiguous`);
       } else {
         const membership = platformServices.inspectSkillLink(

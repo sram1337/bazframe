@@ -1,9 +1,17 @@
+import { sameResourceIdentity, resourceIdentityText, type ResourceIdentity } from '../skill-collections/resource-identity.js';
+
 import { createHash } from 'node:crypto';
+
 import { constants } from 'node:fs';
-import { lstat, open, opendir, readlink, type FileHandle } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+
+import { lstat as nativeLstat, open as nativeOpen, opendir as nativeOpendir, readlink as nativeReadlink } from 'node:fs/promises';
+
+import { basename as nativeBasename, join as nativeJoin } from 'node:path';
+
 import { BazframeError, errorCode } from '../core/errors.js';
+
 import type { ManagedGitAcquisitionLimitPolicy } from '../profile-portability/profile-portability-policy.js';
+
 
 export interface ManagedGitAcquisitionInspection {
   checkoutEntries: number;
@@ -14,14 +22,14 @@ export interface ManagedGitAcquisitionInspection {
   fingerprint: string;
 }
 
+
 export interface ManagedGitAcquisitionInspectionTestHooks {
   afterFirstInspection?: () => void | Promise<void>;
 }
 
-export interface ManagedGitAcquisitionContainerIdentity {
-  device: bigint;
-  inode: bigint;
-}
+
+export type ManagedGitAcquisitionContainerIdentity = ResourceIdentity;
+
 
 interface Counters {
   checkoutEntries: bigint;
@@ -32,16 +40,44 @@ interface Counters {
   fingerprint: Buffer;
 }
 
+
 interface HeldDirectory {
   path: string;
   handle: FileHandle;
-  device: bigint;
-  inode: bigint;
+  identity: ResourceIdentity;
   mtimeNs: bigint;
   ctimeNs: bigint;
 }
+export interface GitInspectionMetadata {
+ identity?: ResourceIdentity; dev?: bigint; ino?: bigint;
+ size: bigint; nlink: bigint; mtimeNs: bigint; ctimeNs: bigint;
+ isSymbolicLink(): boolean; isDirectory(): boolean; isFile(): boolean;
+}
+interface FileHandle { stat(options: { bigint: true }): Promise<GitInspectionMetadata>; close(): Promise<void> }
+export interface ManagedGitInspectionEffects {
+ join(...parts: string[]): string; basename(path: string): string;
+ stat(path: string, options?: { bigint: true }): Promise<GitInspectionMetadata>;
+ open(path: string, flags: number): Promise<FileHandle>;
+ opendir(path: string, maxEntries?: number): Promise<{ read(): Promise<{ name: string } | null>; close(): Promise<void> }>;
+ readlink(path: string): Promise<string>;
+}
+function objectIdentity(value: { identity?: ResourceIdentity; dev?: bigint; ino?: bigint }): ResourceIdentity {
+ if (value.identity !== undefined) return value.identity;
+ if (value.dev === undefined || value.ino === undefined) throw new BazframeError('MANAGED_GIT_ACQUISITION_INVALID', 'Physical Git identity is unavailable.');
+ return { device: value.dev, inode: value.ino };
+}
 
-export async function inspectManagedGitAcquisition(
+/** Shared acquisition inspection, including transient sampling and two-pass final proof. */
+export function createManagedGitAcquisitionInspector(effects?: ManagedGitInspectionEffects) {
+const join = effects?.join ?? nativeJoin;
+const basename = effects?.basename ?? nativeBasename;
+const lstat: ManagedGitInspectionEffects['stat'] = effects?.stat ?? ((path) => nativeLstat(path, { bigint: true }));
+const open: ManagedGitInspectionEffects['open'] = effects?.open ?? nativeOpen;
+const opendir: ManagedGitInspectionEffects['opendir'] = effects?.opendir ?? ((path) => nativeOpendir(path));
+const readlink = effects?.readlink ?? nativeReadlink;
+
+
+async function inspectManagedGitAcquisition(
   container: string,
   checkoutRoot: string,
   policy: Readonly<ManagedGitAcquisitionLimitPolicy>,
@@ -54,7 +90,8 @@ export async function inspectManagedGitAcquisition(
   return second;
 }
 
-export async function inspectManagedGitPublishedCheckout(
+
+async function inspectManagedGitPublishedCheckout(
   checkoutRoot: string,
   policy: Readonly<ManagedGitAcquisitionLimitPolicy>
 ): Promise<ManagedGitAcquisitionInspection> {
@@ -64,11 +101,12 @@ export async function inspectManagedGitPublishedCheckout(
   return second;
 }
 
+
 /**
  * One tolerant, no-follow sample of an acquisition that may still be mutating.
  * This can reject an observed breach but is never final cleanliness/publication proof.
  */
-export async function sampleManagedGitAcquisitionInProgress(
+async function sampleManagedGitAcquisitionInProgress(
   container: string,
   checkoutRoot: string,
   policy: Readonly<ManagedGitAcquisitionLimitPolicy>,
@@ -78,13 +116,13 @@ export async function sampleManagedGitAcquisitionInProgress(
     throw changed(container, error);
   });
   if (metadata.isSymbolicLink() || !metadata.isDirectory()
-    || metadata.dev !== expectedContainer.device || metadata.ino !== expectedContainer.inode) {
+    || !sameResourceIdentity(objectIdentity(metadata), expectedContainer)) {
     throw changed(container);
   }
   let rootPresent = false;
   let containerStream: Awaited<ReturnType<typeof opendir>> | undefined;
   try {
-    containerStream = await opendir(container);
+    containerStream = await opendir(container, 2);
     while (true) {
       const entry = await containerStream.read();
       if (entry === null) break;
@@ -113,10 +151,11 @@ export async function sampleManagedGitAcquisitionInProgress(
   await sampleMutableDirectory(checkoutRoot, '', 'checkout', 0, policy, counters);
   const final = await lstat(container, { bigint: true }).catch((error: unknown) => { throw changed(container, error); });
   if (final.isSymbolicLink() || !final.isDirectory()
-    || final.dev !== expectedContainer.device || final.ino !== expectedContainer.inode) {
+    || !sameResourceIdentity(objectIdentity(final), expectedContainer)) {
     throw changed(container);
   }
 }
+
 
 async function sampleMutableDirectory(
   directory: string,
@@ -137,7 +176,7 @@ async function sampleMutableDirectory(
   }
   let stream: Awaited<ReturnType<typeof opendir>> | undefined;
   try {
-    stream = await opendir(directory);
+    stream = await opendir(directory, policy.maxStagingEntries);
     while (true) {
       const entry = await stream.read();
       if (entry === null) break;
@@ -160,6 +199,7 @@ async function sampleMutableDirectory(
     await stream?.close().catch(() => undefined);
   }
 }
+
 
 async function sampleMutableEntry(
   path: string,
@@ -222,9 +262,11 @@ async function sampleMutableEntry(
   if (counters.stagingBytes > BigInt(policy.maxStagingBytes)) limit('staging bytes', policy.maxStagingBytes);
 }
 
+
 function isGitSymlinkCapabilityProbe(relativePath: string, target: string): boolean {
   return /^\.git\/t[0-9A-Za-z]{6}$/u.test(relativePath) && target === 'testing';
 }
+
 
 async function inspect(
   container: string | undefined,
@@ -266,12 +308,13 @@ async function inspect(
   }
 }
 
+
 async function singleContainerEntry(directory: HeldDirectory): Promise<string> {
   let stream: Awaited<ReturnType<typeof opendir>> | undefined;
   const names: string[] = [];
   let operationError: unknown;
   try {
-    stream = await opendir(directory.path);
+    stream = await opendir(directory.path, 2);
     while (true) {
       const entry = await stream.read();
       if (entry === null) break;
@@ -288,6 +331,7 @@ async function singleContainerEntry(directory: HeldDirectory): Promise<string> {
   return names[0]!;
 }
 
+
 async function walkDirectory(
   directory: HeldDirectory,
   relativeDirectory: string,
@@ -300,7 +344,7 @@ async function walkDirectory(
   let stream: Awaited<ReturnType<typeof opendir>> | undefined;
   let operationError: unknown;
   try {
-    stream = await opendir(directory.path);
+    stream = await opendir(directory.path, policy.maxStagingEntries);
     while (true) {
       const entry = await stream.read();
       if (entry === null) break;
@@ -325,6 +369,7 @@ async function walkDirectory(
   await assertDirectoryStable(directory, relativeDirectory || 'checkout root');
 }
 
+
 async function inspectEntry(
   path: string,
   relativePath: string,
@@ -347,14 +392,14 @@ async function inspectEntry(
     if (isMetadata) throw invalid(`Git metadata must not contain symbolic links: ${relativePath}`);
     addCheckoutEntry(depth, policy, counters);
     const target = await readlink(path);
-    addEvidence(counters, `l\0${relativePath}\0${metadata.dev}:${metadata.ino}:${target}\0`);
+    addEvidence(counters, `l\0${relativePath}\0${resourceIdentityText(objectIdentity(metadata))}:${target}\0`);
     const current = await lstat(path, { bigint: true });
-    if (!current.isSymbolicLink() || current.dev !== metadata.dev || current.ino !== metadata.ino || await readlink(path) !== target) throw changed(path);
+    if (!current.isSymbolicLink() || !sameResourceIdentity(objectIdentity(current), objectIdentity(metadata)) || await readlink(path) !== target) throw changed(path);
     return;
   }
   if (metadata.isDirectory()) {
     if (!isMetadata) addCheckoutEntry(depth, policy, counters);
-    addEvidence(counters, `d\0${relativePath}\0${metadata.dev}:${metadata.ino}:${metadata.mtimeNs}:${metadata.ctimeNs}\0`);
+    addEvidence(counters, `d\0${relativePath}\0${resourceIdentityText(objectIdentity(metadata))}:${metadata.mtimeNs}:${metadata.ctimeNs}\0`);
     const child = await holdDirectory(path, relativePath);
     try { await walkDirectory(child, relativePath, category, depth, policy, counters); }
     finally { await child.handle.close().catch(() => undefined); }
@@ -376,8 +421,9 @@ async function inspectEntry(
   counters.stagingBytes += metadata.size;
   if (counters.stagingBytes > BigInt(policy.maxStagingBytes)) limit('staging bytes', policy.maxStagingBytes);
   await assertStableFile(path, metadata);
-  addEvidence(counters, `f\0${relativePath}\0${metadata.dev}:${metadata.ino}:${metadata.nlink}:${metadata.size}:${metadata.mtimeNs}:${metadata.ctimeNs}\0`);
+  addEvidence(counters, `f\0${relativePath}\0${resourceIdentityText(objectIdentity(metadata))}:${metadata.nlink}:${metadata.size}:${metadata.mtimeNs}:${metadata.ctimeNs}\0`);
 }
+
 
 function addStagingEntry(
   depth: number,
@@ -391,6 +437,7 @@ function addStagingEntry(
   if (counters.stagingEntries > BigInt(policy.maxStagingEntries)) limit('staging entries', policy.maxStagingEntries);
 }
 
+
 function isUnsupportedGitMetadataPath(relativePath: string): boolean {
   const folded = asciiCaseFold(relativePath);
   return folded === '.git/commondir'
@@ -403,9 +450,11 @@ function isUnsupportedGitMetadataPath(relativePath: string): boolean {
     || folded === '.git/objects/info/http-alternates';
 }
 
+
 function asciiCaseFold(value: string): string {
   return value.replace(/[A-Z]/gu, (character) => character.toLowerCase());
 }
+
 
 function addCheckoutEntry(depth: number, policy: Readonly<ManagedGitAcquisitionLimitPolicy>, counters: Counters): void {
   if (depth > policy.maxCheckoutDepth) limit('checkout depth', policy.maxCheckoutDepth);
@@ -413,9 +462,11 @@ function addCheckoutEntry(depth: number, policy: Readonly<ManagedGitAcquisitionL
   if (counters.checkoutEntries > BigInt(policy.maxCheckoutEntries)) limit('checkout entries', policy.maxCheckoutEntries);
 }
 
+
 async function assertStableFile(path: string, expected: {
-  dev: bigint;
-  ino: bigint;
+  identity?: ResourceIdentity;
+  dev?: bigint;
+  ino?: bigint;
   nlink: bigint;
   size: bigint;
   mtimeNs: bigint;
@@ -427,8 +478,8 @@ async function assertStableFile(path: string, expected: {
     const opened = await handle.stat({ bigint: true });
     const current = await lstat(path, { bigint: true });
     if (!opened.isFile() || current.isSymbolicLink() || !current.isFile()
-      || opened.dev !== expected.dev || opened.ino !== expected.ino
-      || current.dev !== expected.dev || current.ino !== expected.ino
+      || !sameResourceIdentity(objectIdentity(opened), objectIdentity(expected))
+      || !sameResourceIdentity(objectIdentity(current), objectIdentity(expected))
       || opened.nlink !== 1n || current.nlink !== 1n || opened.nlink !== expected.nlink || current.nlink !== expected.nlink
       || opened.size !== expected.size || current.size !== expected.size
       || opened.mtimeNs !== expected.mtimeNs || current.mtimeNs !== expected.mtimeNs
@@ -439,6 +490,7 @@ async function assertStableFile(path: string, expected: {
   } finally { await handle?.close(); }
 }
 
+
 async function holdDirectory(path: string, label: string): Promise<HeldDirectory> {
   let handle: FileHandle | undefined;
   try {
@@ -446,22 +498,24 @@ async function holdDirectory(path: string, label: string): Promise<HeldDirectory
     if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw invalid(`${label} must be a physical directory`);
     handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
     const opened = await handle.stat({ bigint: true });
-    if (!opened.isDirectory() || opened.dev !== metadata.dev || opened.ino !== metadata.ino
+    if (!opened.isDirectory() || !sameResourceIdentity(objectIdentity(opened), objectIdentity(metadata))
       || opened.mtimeNs !== metadata.mtimeNs || opened.ctimeNs !== metadata.ctimeNs) throw changed(path);
-    const result = { path, handle, device: opened.dev, inode: opened.ino, mtimeNs: opened.mtimeNs, ctimeNs: opened.ctimeNs };
+    const result = { path, handle, identity: objectIdentity(opened), mtimeNs: opened.mtimeNs, ctimeNs: opened.ctimeNs };
     handle = undefined;
     return result;
   } finally { await handle?.close().catch(() => undefined); }
 }
 
+
 async function assertDirectoryStable(directory: HeldDirectory, label: string): Promise<void> {
   const [opened, current] = await Promise.all([directory.handle.stat({ bigint: true }), lstat(directory.path, { bigint: true })]);
   if (!opened.isDirectory() || current.isSymbolicLink() || !current.isDirectory()
-    || opened.dev !== directory.device || opened.ino !== directory.inode
-    || current.dev !== directory.device || current.ino !== directory.inode
+    || !sameResourceIdentity(objectIdentity(opened), directory.identity)
+    || !sameResourceIdentity(objectIdentity(current), directory.identity)
     || opened.mtimeNs !== directory.mtimeNs || opened.ctimeNs !== directory.ctimeNs
     || current.mtimeNs !== directory.mtimeNs || current.ctimeNs !== directory.ctimeNs) throw changed(label);
 }
+
 
 function resultFrom(counters: Counters): ManagedGitAcquisitionInspection {
   return {
@@ -474,10 +528,12 @@ function resultFrom(counters: Counters): ManagedGitAcquisitionInspection {
   };
 }
 
+
 function addEvidence(counters: Counters, evidence: string): void {
   const digest = createHash('sha256').update(evidence).digest();
   for (let index = 0; index < counters.fingerprint.length; index += 1) counters.fingerprint[index] ^= digest[index]!;
 }
+
 
 function sameInspection(left: ManagedGitAcquisitionInspection, right: ManagedGitAcquisitionInspection): boolean {
   return left.checkoutEntries === right.checkoutEntries
@@ -488,12 +544,18 @@ function sameInspection(left: ManagedGitAcquisitionInspection, right: ManagedGit
     && left.fingerprint === right.fingerprint;
 }
 
+
 function limit(label: string, maximum: number): never {
   throw new BazframeError('MANAGED_GIT_ACQUISITION_LIMIT', `Remote Git acquisition exceeds the ${maximum} ${label} limit.`);
 }
+
 function invalid(detail: string): BazframeError {
   return new BazframeError('MANAGED_GIT_ACQUISITION_INVALID', `Remote Git acquisition is invalid: ${detail}.`);
 }
+
 function changed(path: string, cause?: unknown): BazframeError {
   return new BazframeError('MANAGED_GIT_ACQUISITION_CHANGED', `Remote Git acquisition changed while being inspected: ${path}`, cause === undefined ? {} : { cause });
 }
+return { inspectManagedGitAcquisition, inspectManagedGitPublishedCheckout, sampleManagedGitAcquisitionInProgress };
+}
+export const { inspectManagedGitAcquisition, inspectManagedGitPublishedCheckout, sampleManagedGitAcquisitionInProgress } = createManagedGitAcquisitionInspector();

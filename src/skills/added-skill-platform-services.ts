@@ -1,3 +1,6 @@
+import { createWindowsManagedGitRecordEffects } from '../providers/managed-git-services.js';
+import { readWindowsSelectionSnapshot } from '../profiles/win32-profile-selection.js';
+import { stableWindowsObjectObservation, stableWindowsPathInspection } from '../core/win32-stable-observation.js';
 import { createHash } from 'node:crypto';
 import { readlink } from 'node:fs/promises';
 import { win32 } from 'node:path';
@@ -50,7 +53,7 @@ export interface AddedSkillDirectoryEntryProof {
 export interface AddedSkillDirectoryEnumeration {
   names: string[];
   entries: AddedSkillDirectoryEntryProof[];
-  /** Digest of the exact root inspection and complete direct-entry observations. */
+  /** Digest of the stable root inspection and complete direct-entry observations. */
   identity: string;
 }
 
@@ -70,6 +73,11 @@ export type AddedSkillLinkState =
  * Supplying it never bypasses the public Windows platform gate.
  */
 export interface AddedSkillPlatformServices {
+  assertManagedSkillLocation?(home: string, canonicalTarget: string): Promise<void>;
+  joinPath?: typeof win32.join;
+  resolvePath?: typeof win32.resolve;
+  isAbsolutePath?: typeof win32.isAbsolute;
+  selectionReadServices?: import('../profiles/profile-store.js').ActiveProfileReadServices;
   withLock<T>(
     lockPath: string,
     details: AddedSkillLockDetails,
@@ -98,16 +106,24 @@ export interface AddedSkillPlatformServices {
 
 /** Internal construction seam used by native conformance; public dispatch does not import it. */
 export function createWindowsAddedSkillPlatformServicesForInternalTesting(
-  backend: BazframeWin32NativeBackend & BazframeWin32LockBackend
+  backend: BazframeWin32NativeBackend & BazframeWin32LockBackend,
+  options: { lockIo?: import('../state/win32-operation-lock.js').WindowsOperationLockIo; membershipIo?: import('../state/win32-skill-membership.js').WindowsSkillMembershipIo; readLinkPath?: (path: string) => Promise<string> } = {}
 ): AddedSkillPlatformServices {
   return {
+    joinPath: win32.join, resolvePath: win32.resolve, isAbsolutePath: win32.isAbsolute,
+    selectionReadServices: { readSelectedProfileId: async (home) => (await readWindowsSelectionSnapshot(backend, home)).profileId },
+    async assertManagedSkillLocation(home, canonicalTarget) {
+      const id = win32.basename(canonicalTarget);
+      const record = await createWindowsManagedGitRecordEffects(backend).readManagedGitRecord(home, 'skill', id);
+      if (physicalDirectory(backend.inspectPath(record.record.root)).canonicalPath !== canonicalTarget) throw failure('WINDOWS_MANAGED_SKILL_INVALID', 'Managed Skill provenance does not prove its target.');
+    },
     async withLock(lockPath, details, operation) {
       const lockRootPath = win32.dirname(lockPath);
       const lockComponent = win32.basename(lockPath);
       if (!isValidWindowsPathComponent(lockComponent)) {
         throw failure('WINDOWS_ADDED_SKILL_LOCK_INVALID', 'The internal Windows added-Skill lock path is invalid.');
       }
-      return withWindowsOperationLock({ backend, lockRootPath, lockComponent, details }, async (authority) => {
+      return withWindowsOperationLock({ backend, lockRootPath, lockComponent, details, io: options.lockIo }, async (authority) => {
         authority.assertHeld();
         const result = await operation(authority);
         authority.assertHeld();
@@ -188,7 +204,7 @@ export function createWindowsAddedSkillPlatformServicesForInternalTesting(
       }
       let targetPath: string;
       try {
-        targetPath = normalizeNodeJunctionTarget(await readlink(membershipPath));
+        targetPath = normalizeNodeJunctionTarget(await (options.readLinkPath ?? readlink)(membershipPath));
       } catch (error) {
         throw failure(
           'WINDOWS_ADDED_SKILL_LINK_INVALID',
@@ -219,14 +235,14 @@ export function createWindowsAddedSkillPlatformServicesForInternalTesting(
 
     async createSkillLink(authority, parentPath, skillId, targetPath) {
       authority.assertHeld();
-      const created = await createWindowsSkillMembership({ backend, parentPath, skillId, targetPath });
+      const created = await createWindowsSkillMembership({ backend, parentPath, skillId, targetPath, io: options.membershipIo });
       authority.assertHeld();
       return created.action;
     },
 
     async removeSkillLink(authority, parentPath, skillId, targetPath) {
       authority.assertHeld();
-      const removed = await removeWindowsSkillMembership({ backend, parentPath, skillId, targetPath });
+      const removed = await removeWindowsSkillMembership({ backend, parentPath, skillId, targetPath, io: options.membershipIo });
       authority.assertHeld();
       if (removed.outcome === 'present') {
         throw failure(
@@ -283,55 +299,9 @@ function linkState(
 
 function inspectionIdentity(value: WindowsPathInspection): string {
   return createHash('sha256')
-    .update('bazframe-added-skill-inspection-v1\0')
-    .update(JSON.stringify(exactInspection(value)))
+    .update('bazframe-added-skill-inspection-v2\0')
+    .update(JSON.stringify(stableWindowsPathInspection(value)))
     .digest('hex');
-}
-
-function exactInspection(value: WindowsPathInspection) {
-  return {
-    canonicalPath: value.canonicalPath,
-    kind: value.kind,
-    ancestryReparseFree: value.ancestryReparseFree,
-    volume: {
-      identity: value.volume.identity,
-      filesystemName: value.volume.filesystemName,
-      driveType: value.volume.driveType,
-      canonicalVolumeGuidPath: value.volume.canonicalVolumeGuidPath,
-      remoteDevice: value.volume.remoteDevice
-    },
-    object: exactObject(value.object),
-    security: {
-      descriptorControl: value.security.descriptorControl,
-      daclPresent: value.security.daclPresent,
-      daclNull: value.security.daclNull,
-      daclDefaulted: value.security.daclDefaulted,
-      daclBytesBase64: value.security.daclBytes.toString('base64'),
-      ownerSid: value.security.ownerSid,
-      ownerDefaulted: value.security.ownerDefaulted,
-      groupSid: value.security.groupSid,
-      groupDefaulted: value.security.groupDefaulted,
-      currentUserSid: value.security.currentUserSid
-    }
-  };
-}
-
-function exactObject(value: WindowsObjectObservation) {
-  return {
-    volumeIdentity: value.volumeIdentity,
-    fileId: value.fileId,
-    size: value.size,
-    allocationSize: value.allocationSize,
-    numberOfLinks: value.numberOfLinks,
-    creationTime: value.creationTime,
-    lastAccessTime: value.lastAccessTime,
-    lastWriteTime: value.lastWriteTime,
-    changeTime: value.changeTime,
-    attributes: value.attributes,
-    reparseTag: value.reparseTag,
-    deletePending: value.deletePending,
-    directory: value.directory
-  };
 }
 
 function securityIdentity(value: WindowsSecurityObservation): string {
@@ -361,17 +331,11 @@ function requireSameDirectory(left: WindowsPathInspection, right: WindowsPathIns
 }
 
 function requireSameInspection(left: WindowsPathInspection, right: WindowsPathInspection): void {
-  if (JSON.stringify(exactInspection(left)) !== JSON.stringify(exactInspection(right))) changed();
+  if (JSON.stringify(stableWindowsPathInspection(left)) !== JSON.stringify(stableWindowsPathInspection(right))) changed();
 }
 
 function requireSameObject(left: WindowsObjectObservation, right: WindowsObjectObservation): void {
-  if (left.volumeIdentity !== right.volumeIdentity || left.fileId !== right.fileId
-    || left.directory !== right.directory || left.reparseTag !== right.reparseTag
-    || left.numberOfLinks !== right.numberOfLinks || left.size !== right.size
-    || left.allocationSize !== right.allocationSize
-    || left.creationTime !== right.creationTime || left.lastAccessTime !== right.lastAccessTime
-    || left.changeTime !== right.changeTime || left.lastWriteTime !== right.lastWriteTime
-    || left.attributes !== right.attributes || left.deletePending !== right.deletePending) changed();
+  if (JSON.stringify(stableWindowsObjectObservation(left)) !== JSON.stringify(stableWindowsObjectObservation(right))) changed();
 }
 
 function changed(): never {
@@ -405,12 +369,12 @@ function failure(code: string, message: string, cause?: unknown): BazframeError 
 }
 
 /** Native observation shared by bounded internal profile readers; callers own their domain ceiling. */
-export async function enumerateWindowsPrivateDirectory(backend: BazframeWin32NativeBackend, path: string, maxEntries: number): Promise<AddedSkillDirectoryEnumeration & { nativeEntries: WindowsDirectoryEntryObservation[]; inspection: WindowsPathInspection }> {
-  const before = admitWindowsPrivateDirectory(backend, path);
+export async function enumerateWindowsPrivateDirectory(backend: BazframeWin32NativeBackend, path: string, maxEntries: number, admit: (backend: BazframeWin32NativeBackend, path: string) => WindowsPathInspection = admitWindowsPrivateDirectory): Promise<AddedSkillDirectoryEnumeration & { nativeEntries: WindowsDirectoryEntryObservation[]; inspection: WindowsPathInspection }> {
+  const before = admit(backend, path);
   const receipt = await backend.enumerateStableDirectory(path, maxEntries);
   requireSameDirectory(before, receipt.directoryBefore);
   requireSameDirectory(receipt.directoryBefore, receipt.directoryAfter);
-  const after = admitWindowsPrivateDirectory(backend, path);
+  const after = admit(backend, path);
   requireSameDirectory(receipt.directoryAfter, after);
   const entries = [...receipt.entries].sort((left, right) => compare(left.name, right.name));
   const names = entries.map((entry) => entry.name);
@@ -418,7 +382,7 @@ export async function enumerateWindowsPrivateDirectory(backend: BazframeWin32Nat
     throw failure('WINDOWS_ADDED_SKILL_NAMESPACE_INVALID', 'The internal Windows added-Skill namespace is ambiguous.');
   }
   const closure = {
-    root: exactInspection(after),
+    root: stableWindowsPathInspection(after),
     entries: entries.map((entry) => ({
       nameUtf16: utf16Hex(entry.name),
       volumeIdentity: after.object.volumeIdentity,
@@ -442,7 +406,7 @@ export async function enumerateWindowsPrivateDirectory(backend: BazframeWin32Nat
       reparseTag: entry.reparseTag
     })),
     identity: createHash('sha256')
-      .update('bazframe-added-skill-direct-directory-v1\0')
+      .update('bazframe-added-skill-direct-directory-v2\0')
       .update(JSON.stringify(closure))
       .digest('hex')
   };

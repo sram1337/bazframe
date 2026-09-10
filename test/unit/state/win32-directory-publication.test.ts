@@ -386,6 +386,37 @@ describe('Windows directory publication composition', () => {
     expect(fixture.has(fixture.candidate)).toBe(true);
   });
 
+  it('preserves journal read-back ambiguity and the exact post-read admission security cause', async () => {
+    const fixture = harness();
+    const options = fixture.executeOptions('fresh');
+    const backend = options.backend;
+    const inspect = backend.inspectPath;
+    const read = backend.readStableFile;
+    const native = Object.assign(new BazframeError('WINDOWS_NATIVE_READ_CHANGED', 'fixed refusal'), {
+      nativeReadChange: { site: 'reopened-prefix', objectKind: 'directory', prefixRole: 'ancestor', differingFields: ['security.daclBytes'] }
+    });
+    let readJournalPath: string | undefined;
+    backend.readStableFile = async (path, maximum) => {
+      const receipt = await read(path, maximum);
+      if (path.startsWith(`${fixture.journalDirectory}\\`)) readJournalPath = path;
+      return receipt;
+    };
+    backend.inspectPath = (path) => {
+      if (path === readJournalPath) throw native;
+      return inspect(path);
+    };
+    const error = await executeWindowsDirectoryPublication(options).catch((caught: unknown) => caught);
+    expect(readJournalPath).toBeDefined();
+    expect(error).toMatchObject({ code: 'WINDOWS_DIRECTORY_PUBLICATION_JOURNAL_WRITE_AMBIGUOUS',
+      message: expect.stringContaining('during read-back'),
+      cause: { code: 'WINDOWS_DIRECTORY_CLOSURE_CHANGED', cause: native }
+    });
+    expect(((error as Error).cause as Error).cause).toBe(native);
+    expect(fixture.recordPaths()).toHaveLength(1);
+    expect(fixture.renameCalls).toEqual([]);
+    expect(fixture.has(fixture.journalDirectory)).toBe(true);
+  });
+
   it('rejects corrupted or noncanonical journal records without another rename', async () => {
     const fixture = harness();
     fixture.failRenameBeforeEffect = 1;
@@ -610,6 +641,10 @@ function harness(options: { destination?: TestNode; oldFile?: string } = {}) {
       nodes.set(path, created);
       return { parentBefore, created: inspection(path, created), parentAfter: inspection(parentPath, parent) };
     },
+    inspectZipSource() { throw new Error('unused ZIP source'); },
+    async readStableFileRange() { throw new Error('range read unused'); },
+    async renameFileNoReplace() { throw new Error('file rename not used by this fixture'); },
+    async moveDirectoryNoReplace() { throw new Error('unexpected cross-parent move'); },
     async renameDirectoryNoReplace(parentPath, sourceComponent, destinationComponent) {
       renameCalls.push([
         win32.join(parentPath, sourceComponent),

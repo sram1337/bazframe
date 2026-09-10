@@ -4,6 +4,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 // Failure receipts admit only fixed codes/reasons/field names. They never copy
 // raw messages, stacks, paths, observed values, or arbitrary IPC properties.
 const FAILURE_CODES = new Set([
+  'WINDOWS_ADDED_SKILL_NAMESPACE_CHANGED',
   'NO_ACTIVE_PROFILE', 'INVALID_PROFILE_ID', 'INVALID_ACTIVE_PROFILE_STATE',
   'WINDOWS_PROFILE_ACTIVATION_CHANGED', 'WINDOWS_PROFILE_ACTIVATION_UNSUPPORTED_STATE',
   'WINDOWS_PROFILE_ACTIVATION_COMMITTED_CHECK_FAILED',
@@ -100,7 +101,7 @@ const READ_CHANGE_FIELDS = {
     'reparseTagZero', 'notDeletePending', 'objectDirectory', ...READ_CHANGE_SECURITY_FIELDS],
   'stable-read-growth': ['growthProbeNonzero'],
   'stable-read-final': [...READ_CHANGE_OBJECT_FIELDS, 'byteCountExpected', 'afterSizeByteCount'],
-  'reopened-prefix': [...READ_CHANGE_OBJECT_FIELDS, 'canonicalPath'],
+  'reopened-prefix': [...READ_CHANGE_OBJECT_FIELDS, ...READ_CHANGE_SECURITY_FIELDS, 'canonicalPath'],
   'stable-read-receipt': [...READ_CHANGE_OBJECT_FIELDS, 'beforeDirectory', 'afterDirectory', 'beforeReparseTag',
     'afterReparseTag', 'beforeDeletePending', 'afterDeletePending', 'beforeSizeByteCount', 'afterSizeByteCount']
 };

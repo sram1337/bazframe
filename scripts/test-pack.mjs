@@ -111,6 +111,7 @@ try {
   assertExists(join(packageRoot, 'docs', 'research', 'origin-and-rationale.md'));
   assertExists(join(packageRoot, 'docs', 'research', 'prototype-alternatives.md'));
   assertMissing(join(packageRoot, 'docs', 'reviews'));
+  assertMissing(join(packageRoot, 'docs', 'windows-parity-retrospective.md'));
   assertExists(join(packageRoot, 'docs', 'releasing.md'));
   for (const relativePath of [
     'Cargo.lock', 'Cargo.toml', 'NOTICE.md', 'OPENCLAW-LICENSE', 'build.rs',

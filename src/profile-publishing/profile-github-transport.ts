@@ -25,7 +25,7 @@ import type {
   PublicationRecoveryProof,
   PublicationRecoveryRepositoryProof
 } from './profile-recovery.js';
-import type { PublicationJournalV1 } from './transaction-journal.js';
+import type { PublicationLifecycleJournal } from './profile-lifecycle-services.js';
 
 export type ProductionProfileGithubTransportOptions = ProfileGithubGitOptions;
 
@@ -76,6 +76,7 @@ export function createProductionProfileGithubTransportAdapter(
     isolation: options.isolation,
     cwd: options.cwd,
     quarantineParent: options.quarantineParent,
+    ...(options.effects === undefined ? {} : { effects: options.effects }),
     ...(options.allowFileProtocol === undefined ? {} : { allowFileProtocol: options.allowFileProtocol }),
     ...(options.authenticated === undefined ? {} : { authenticated: options.authenticated }),
     ...(options.limitPolicy === undefined ? {} : { limitPolicy: options.limitPolicy }),
@@ -107,7 +108,7 @@ export function createProductionProfileGithubTransportAdapter(
     return history.commits.map((commit) => ({ commit } satisfies GitProfileVersion));
   };
 
-  const proveRepository = async (journal: PublicationJournalV1): Promise<PublicationRecoveryRepositoryProof> => {
+  const proveRepository = async (journal: PublicationLifecycleJournal): Promise<PublicationRecoveryRepositoryProof> => {
     const source = sourceFromOrigin(journal.origin);
     const before = await requiredRepository(control, source);
     const after = await requiredRepository(control, source);
@@ -120,7 +121,7 @@ export function createProductionProfileGithubTransportAdapter(
     };
   };
 
-  const prove = async (journal: PublicationJournalV1): Promise<PublicationRecoveryProof> => {
+  const prove = async (journal: PublicationLifecycleJournal): Promise<PublicationRecoveryProof> => {
     const source = sourceFromOrigin(journal.origin);
     const before = await requiredRepository(control, source);
     let snapshot;
@@ -151,7 +152,7 @@ export function createProductionProfileGithubTransportAdapter(
   };
 
   const setRepositoryVisibility = async (
-    journal: PublicationJournalV1,
+    journal: PublicationLifecycleJournal,
     visibility: 'private' | 'public'
   ): Promise<PublicationRecoveryRepositoryProof> => {
     const source = sourceFromOrigin(journal.origin);
@@ -164,10 +165,10 @@ export function createProductionProfileGithubTransportAdapter(
 
   type SetVisibility = {
     (source: CanonicalProfileGithubSource, visibility: 'private' | 'public'): Promise<ProfileGithubRepositoryMetadata>;
-    (journal: PublicationJournalV1, visibility: 'private' | 'public'): Promise<PublicationRecoveryProof>;
+    (journal: PublicationLifecycleJournal, visibility: 'private' | 'public'): Promise<PublicationRecoveryProof>;
   };
   const setVisibility = (async (
-    journalOrSource: PublicationJournalV1 | CanonicalProfileGithubSource,
+    journalOrSource: PublicationLifecycleJournal | CanonicalProfileGithubSource,
     visibility: 'private' | 'public'
   ): Promise<ProfileGithubRepositoryMetadata | PublicationRecoveryProof> => {
     if ('kind' in journalOrSource) {

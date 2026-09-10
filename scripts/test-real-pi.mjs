@@ -36,11 +36,12 @@ try {
   const piVersion = execFileSync(piExecutable, ['--version'], { encoding: 'utf8' }).trim();
   const piVersionMatch = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u.exec(piVersion);
   const supportedPiVersion = piVersionMatch !== null
+    && piVersion !== '0.85.0'
     && (Number(piVersionMatch[1]) > 0
       || Number(piVersionMatch[2]) > 84
       || (Number(piVersionMatch[2]) === 84 && Number(piVersionMatch[3]) >= 4));
   if (!supportedPiVersion) {
-    throw new Error(`Real-Pi acceptance requires a stable Pi 0.84.4 or newer; found ${piVersion}.`);
+    throw new Error(`Real-Pi acceptance requires a stable Pi version in >=0.84.4 <0.85.0 || >=0.85.1; found ${piVersion}.`);
   }
 
   const [{ filename }] = JSON.parse(execFileSync(

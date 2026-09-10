@@ -1,5 +1,5 @@
 import { assertSafeForwardedPiArgs } from '../agents/pi-args.js';
-import { isAbsolute } from 'node:path';
+import { isAbsolute as nodeIsAbsolute } from 'node:path';
 import { BazframeError } from '../core/errors.js';
 import { escapeUnsafeDisplayCharacters } from '../core/safe-text.js';
 import { isSafeProfileId } from '../profiles/profile-id.js';
@@ -59,11 +59,11 @@ const HELP_FLAGS = new Set(['-h', '--help']);
 const VERSION_FLAGS = new Set(['-v', '--version']);
 const VALUE_OPTIONS = new Set(['--commit', '--output', '--profile']);
 
-export function parseArgv(input: readonly string[]): ParseResult {
+export function parseArgv(input: readonly string[], isAbsolute = nodeIsAbsolute): ParseResult {
   const extracted = extractJson(input);
   if (extracted.error !== undefined) return usage(extracted.error, 'root', 'CLI_USAGE', true);
   const { argv, json } = extracted;
-  const result = parseCanonicalOrMigration(argv);
+  const result = parseCanonicalOrMigration(argv, isAbsolute);
   if (!json) return result;
   if (result.kind === 'help' || result.kind === 'version') {
     return usage('`--json` is not supported for help or version output.', 'root', 'CLI_JSON_UNSUPPORTED', true);
@@ -94,7 +94,7 @@ function extractJson(input: readonly string[]): { argv: string[]; json: boolean;
   return { argv, json };
 }
 
-function parseCanonicalOrMigration(argv: readonly string[]): ParseResult {
+function parseCanonicalOrMigration(argv: readonly string[], isAbsolute: typeof nodeIsAbsolute): ParseResult {
   if (argv.length === 0) return { kind: 'help', topic: 'root' };
   const [first, ...rest] = argv;
   if (first === 'help') return parseHelp(rest);
@@ -109,9 +109,9 @@ function parseCanonicalOrMigration(argv: readonly string[]): ParseResult {
 
   switch (first) {
     case 'profile': return parseProfile(rest);
-    case 'skill': return parseSkill(rest);
-    case 'library': return parseCollection('library', rest);
-    case 'package': return parseCollection('package', rest);
+    case 'skill': return parseSkill(rest, isAbsolute);
+    case 'library': return parseCollection('library', rest, isAbsolute);
+    case 'package': return parseCollection('package', rest, isAbsolute);
     case 'project': return parseSimpleNamespace('project', rest, ['list', 'enable', 'disable']);
     case 'global': return parseSimpleNamespace('global', rest, ['show', 'enable', 'disable']);
     case 'adapter': return parseAdapter(rest);
@@ -230,7 +230,7 @@ function parseProfileVersion(args: readonly string[]): ParseResult {
   return usage('profile version requires `list` or `use`.', 'profile-version');
 }
 
-function parseSkill(args: readonly string[]): ParseResult {
+function parseSkill(args: readonly string[], isAbsolute: typeof nodeIsAbsolute): ParseResult {
   if (args.length === 0) return migration(['skill','list'], 'skills');
   if (args.length === 1 && HELP_FLAGS.has(args[0])) return { kind:'help', topic:'skills' };
   const [verb,...rest]=args; const topic = verb==='add'?'add-skill':verb==='remove'?'remove-skill':(`skill-${verb}` as HelpTopic);
@@ -254,7 +254,7 @@ function parseSkill(args: readonly string[]): ParseResult {
   return usage('skill requires `list`, `add`, `remove`, `update`, or `edit`.', 'skills');
 }
 
-function parseCollection(kind:'library'|'package',args:readonly string[]):ParseResult{
+function parseCollection(kind:'library'|'package',args:readonly string[],isAbsolute:typeof nodeIsAbsolute):ParseResult{
   const plural=kind==='library'?'libraries':'packages';
   if(args.length===0)return migration([kind,'list'],plural);
   if(args.length===1&&HELP_FLAGS.has(args[0]))return{kind:'help',topic:plural};

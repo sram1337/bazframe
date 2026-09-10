@@ -82,7 +82,10 @@ export async function requireProfileGithubAuthentication(
   }
   assertProfileGithubCommand(version, 'PROFILE_GITHUB_CLI_FAILED', 'GitHub CLI could not be started.');
   const status = await gh(options, ['auth', 'status', '--hostname', 'github.com']);
-  if (status.status === 0 && status.failure === undefined && status.error === undefined) return { loginStarted: false };
+  if (status.failure !== undefined || status.error !== undefined || status.monitorError !== undefined || status.uncertainTermination === true) {
+    assertProfileGithubCommand(status, 'PROFILE_GITHUB_AUTH_FAILED', 'GitHub authentication status could not be inspected.');
+  }
+  if (status.status === 0) return { loginStarted: false };
   if (mode !== 'human') {
     throw new BazframeError('PROFILE_GITHUB_AUTH_REQUIRED', 'GitHub authentication is required; JSON and dry-run modes never start login.');
   }
@@ -105,7 +108,7 @@ export async function lookupProfileGithubRepository(
   source: CanonicalProfileGithubSource
 ): Promise<ProfileGithubRepositoryMetadata | undefined> {
   const result = await gh(options, ['api', `repos/${source.repositoryWithOwner}`]);
-  if (result.status === 1 && safeGhNotFound(result.stderr)) return undefined;
+  if (result.status === 1 && result.failure === undefined && result.error === undefined && result.monitorError === undefined && result.uncertainTermination !== true && safeGhNotFound(result.stderr)) return undefined;
   const stdout = checkedOutput(result, 'PROFILE_GITHUB_METADATA_FAILED', 'GitHub repository metadata lookup failed.');
   let value: unknown;
   try { value = JSON.parse(stdout); } catch { throw metadataInvalid(); }
@@ -200,7 +203,7 @@ function assertFakeRespectedBound(result: ProfileGithubProcessResult): void {
 
 function commandMissing(result: ProfileGithubProcessResult): boolean {
   const code = result.error !== undefined && 'code' in result.error ? String((result.error as Error & { code?: unknown }).code) : undefined;
-  return result.status === null && (code === 'ENOENT' || result.failure === 'spawn');
+  return result.status === null && result.uncertainTermination !== true && result.monitorError === undefined && (result.failure === undefined || result.failure === 'spawn') && (code === 'ENOENT' || code === 'EXECUTABLE_NOT_FOUND');
 }
 
 function safeGhNotFound(stderr: string): boolean {

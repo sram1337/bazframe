@@ -1,3 +1,5 @@
+import type { EditorTargetProof } from '../core/win32-editor-target.js';
+import type { ExternalEditorOptions } from '../core/external-editor.js';
 import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import type { ChildResult } from '../core/child-process.js';
@@ -17,7 +19,10 @@ export interface SkillDefinitionEditorOptions {
   bazframeHome: string;
   skillId: string;
   environment: NodeJS.ProcessEnv;
+  platform?: NodeJS.Platform;
   childRunner?: InheritedChildRunner;
+  targetProof?: (home: string, id: string) => Promise<EditorTargetProof>;
+  resolveExecutable?: ExternalEditorOptions['resolveExecutable'];
   testHooks?: {
     beforeRevalidate?: () => void | Promise<void>;
   };
@@ -38,9 +43,13 @@ interface DefinitionIdentity {
 export async function editSkillDefinition(
   options: SkillDefinitionEditorOptions
 ): Promise<ChildResult> {
-  const target = await resolveSkillDefinitionEditorTarget(options);
+  assertSafeSkillId(options.skillId);
+  const proof = options.targetProof === undefined ? await proveSkillDefinitionEditorTarget(options) : await options.targetProof(options.bazframeHome, options.skillId);
   return launchExternalEditor({
-    target: { path: target.definitionPath, cwd: target.providerRoot },
+    platform: options.platform,
+    target: { path: proof.path, cwd: proof.cwd },
+    resolveExecutable: options.resolveExecutable,
+    revalidate: proof.revalidate,
     environment: options.environment,
     ...(options.childRunner === undefined ? {} : { childRunner: options.childRunner })
   });
@@ -49,6 +58,12 @@ export async function editSkillDefinition(
 export async function resolveSkillDefinitionEditorTarget(
   options: Pick<SkillDefinitionEditorOptions, 'bazframeHome' | 'skillId' | 'testHooks'>
 ): Promise<SkillDefinitionEditorTarget> {
+  const proof = await proveSkillDefinitionEditorTarget(options);
+  await proof.revalidate();
+  return { skillId: options.skillId, providerRoot: proof.cwd, definitionPath: proof.path };
+}
+
+async function proveSkillDefinitionEditorTarget(options: Pick<SkillDefinitionEditorOptions, 'bazframeHome' | 'skillId' | 'testHooks'>): Promise<EditorTargetProof> {
   assertSafeSkillId(options.skillId);
   if (await optionalManagedGitRecord(options.bazframeHome, 'skill', options.skillId) !== undefined) {
     throw new BazframeError(
@@ -63,7 +78,9 @@ export async function resolveSkillDefinitionEditorTarget(
   );
   const definitionBefore = await resolveDefinition(before.target, options.skillId);
 
+  return { path: definitionBefore.path, cwd: before.target, async revalidate() {
   await options.testHooks?.beforeRevalidate?.();
+  if (await optionalManagedGitRecord(options.bazframeHome, 'skill', options.skillId) !== undefined) throw new BazframeError('MANAGED_GIT_SKILL_EDIT_REFUSED', 'Remote Git Skill ownership changed before editor launch.');
 
   const after = await readDefaultSkillRegistrationSnapshot(
     options.bazframeHome,
@@ -88,11 +105,7 @@ export async function resolveSkillDefinitionEditorTarget(
     );
   }
 
-  return {
-    skillId: options.skillId,
-    providerRoot: after.target,
-    definitionPath: definitionAfter.path
-  };
+  } };
 }
 
 async function resolveDefinition(providerRoot: string, skillId: string): Promise<DefinitionIdentity> {

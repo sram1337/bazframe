@@ -1,3 +1,4 @@
+import { executableEnvironmentValue } from './executable-resolution.js';
 import {
   spawnInheritedChild,
   type ChildResult,
@@ -17,15 +18,20 @@ export interface ExternalEditorTarget {
 }
 
 export interface ExternalEditorOptions {
+  platform?: NodeJS.Platform;
   target: ExternalEditorTarget;
   environment: NodeJS.ProcessEnv;
   childRunner?: InheritedChildRunner;
+  resolveExecutable?: (command: string, target: ExternalEditorTarget, environment: NodeJS.ProcessEnv) => Promise<string>;
+  revalidate?: () => Promise<void>;
 }
 
 export async function launchExternalEditor(
   options: ExternalEditorOptions
 ): Promise<ChildResult> {
-  const executable = configuredEditor(options.environment, options.target.path);
+  const configured = configuredEditor(options.environment, options.target.path, options.platform);
+  const executable = options.resolveExecutable === undefined ? configured : await options.resolveExecutable(configured, options.target, options.environment);
+  await options.revalidate?.();
   try {
     return await (options.childRunner ?? spawnInheritedChild)(
       executable,
@@ -48,9 +54,11 @@ export async function launchExternalEditor(
   }
 }
 
-function configuredEditor(environment: NodeJS.ProcessEnv, targetPath: string): string {
-  if (environment.VISUAL?.trim()) return environment.VISUAL;
-  if (environment.EDITOR?.trim()) return environment.EDITOR;
+function configuredEditor(environment: NodeJS.ProcessEnv, targetPath: string, platform = process.platform): string {
+  const visual = executableEnvironmentValue(environment, 'VISUAL', platform === 'win32');
+  if (visual?.trim()) return visual;
+  const editor = executableEnvironmentValue(environment, 'EDITOR', platform === 'win32');
+  if (editor?.trim()) return editor;
   throw new BazframeError(
     'EDITOR_NOT_CONFIGURED',
     `No external editor is configured for ${targetPath}. Set VISUAL or EDITOR to one executable name or path; use a wrapper executable when flags are required.`

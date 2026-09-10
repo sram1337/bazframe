@@ -183,7 +183,7 @@ describe('Bazframe TUI service', () => {
     await fixture.directory.write('home/profiles/reviewer/AGENTS.md', 'changed instructions\n');
     const instructionsChanged = (await fixture.service.loadDashboard()).profiles
       .find((profile) => profile.id === 'reviewer')!.removalIdentity;
-    expect(instructionsChanged.fingerprint).not.toBe(original.fingerprint);
+    expect(instructionsChanged).not.toEqual(original);
 
     await fixture.service.addMembership('reviewer', {
       originId: 'default',
@@ -191,7 +191,7 @@ describe('Bazframe TUI service', () => {
     });
     const membershipChanged = (await fixture.service.loadDashboard()).profiles
       .find((profile) => profile.id === 'reviewer')!.removalIdentity;
-    expect(membershipChanged.fingerprint).not.toBe(instructionsChanged.fingerprint);
+    expect(membershipChanged).not.toEqual(instructionsChanged);
 
     await fixture.directory.write('provider/demo-skill/provider-only.txt', 'changed\n');
     const providerChanged = (await fixture.service.loadDashboard()).profiles

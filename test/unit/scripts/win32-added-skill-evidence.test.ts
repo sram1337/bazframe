@@ -465,6 +465,142 @@ describe('independent activation candidate tuple evidence', () => {
     expect(selectionCandidateRetained(candidate, kind === 'missing' ? undefined : retained)).toBe(false);
   });
 
+  function accessPair() {
+    const candidate = snapshot(), retained = snapshot();
+    candidate.inspection.object.lastAccessTime = '0000000000000001';
+    retained.inspection.object.lastAccessTime = '0000000000000002';
+    return { candidate, retained };
+  }
+
+  // Freeze ordinary layers, retain every reference/key order and copy Buffer bytes for both verdicts.
+  function preservedCall(candidate: ReturnType<typeof snapshot>, retained: ReturnType<typeof snapshot>, expected: boolean) {
+    const evidence: { value: object; keys: string[]; json: string; bytes?: Buffer }[] = [];
+    function capture(value: object) {
+      evidence.push({ value, keys: Object.keys(value), json: JSON.stringify(value),
+        ...(Buffer.isBuffer(value) ? { bytes: Buffer.from(value) } : {}) });
+      if (!Buffer.isBuffer(value)) {
+        for (const child of Object.values(value)) if (child !== null && typeof child === 'object') capture(child);
+        Object.freeze(value);
+      }
+    }
+    capture(candidate);
+    capture(retained);
+    const references = evidence.map(({ value }) => Object.values(value));
+    expect(selectionCandidateRetained(candidate, retained)).toBe(expected);
+    expect(selectionCandidateRetained(retained, candidate)).toBe(expected);
+    evidence.forEach(({ value, keys, json, bytes }, index) => {
+      expect(Object.keys(value)).toEqual(keys);
+      expect(JSON.stringify(value)).toBe(json);
+      Object.values(value).forEach((child, childIndex) => expect(child).toBe(references[index]![childIndex]));
+      if (bytes) {
+        expect(Buffer.isBuffer(value)).toBe(true);
+        expect((value as Buffer).equals(bytes)).toBe(true);
+      }
+    });
+  }
+
+  it('retains distinct same-path snapshots with only object access time changed, in both directions without mutation', () => {
+    const { candidate, retained } = accessPair();
+    expect(candidate.inspection).not.toBe(retained.inspection);
+    expect(candidate.inspection.object).not.toBe(retained.inspection.object);
+    expect(candidate.bytes).not.toBe(retained.bytes);
+    preservedCall(candidate, retained, true);
+  });
+
+  it('omits the copied object own access-time key even when only one snapshot has it', () => {
+    const { candidate, retained } = accessPair();
+    delete (retained.inspection.object as Partial<typeof retained.inspection.object>).lastAccessTime;
+    preservedCall(candidate, retained, true);
+  });
+
+  const retainedFields = [
+    ['object', 'volumeIdentity'], ['object', 'fileId'], ['object', 'size'], ['object', 'allocationSize'],
+    ['object', 'numberOfLinks'], ['object', 'creationTime'], ['object', 'lastWriteTime'], ['object', 'changeTime'],
+    ['object', 'attributes'], ['object', 'reparseTag'], ['object', 'deletePending'], ['object', 'directory'],
+    ['volume', 'identity'], ['volume', 'filesystemName'], ['volume', 'driveType'], ['volume', 'canonicalVolumeGuidPath'], ['volume', 'remoteDevice'],
+    ['security', 'descriptorControl'], ['security', 'daclPresent'], ['security', 'daclNull'], ['security', 'daclDefaulted'],
+    ['security', 'daclBytes'], ['security', 'ownerSid'], ['security', 'ownerDefaulted'], ['security', 'groupSid'],
+    ['security', 'groupDefaulted'], ['security', 'currentUserSid'],
+    ['inspection', 'kind'], ['inspection', 'canonicalPath'], ['inspection', 'ancestryReparseFree']
+  ] as const;
+  it.each(retainedFields)('still rejects %s.%s drift with access-time difference present and preserves raw evidence', (layer, field) => {
+    const { candidate, retained } = accessPair();
+    const target = (layer === 'inspection' ? retained.inspection : retained.inspection[layer]) as unknown as Record<string, unknown>;
+    const before = target[field];
+    target[field] = Buffer.isBuffer(before) ? Buffer.from('different-dacl')
+      : typeof before === 'boolean' ? !before : typeof before === 'number' ? before + 1 : `${String(before)}-changed`;
+    preservedCall(candidate, retained, false);
+  });
+
+  it.each(['bytes', 'candidate-buffer', 'temporary-buffer', 'missing-candidate', 'missing-temporary'])(
+    'still refuses %s with access-time difference present', (mode) => {
+      const { candidate, retained } = accessPair();
+      if (mode === 'bytes') retained.bytes = Buffer.from('other\n');
+      if (mode === 'candidate-buffer') Object.assign(candidate, { bytes: new Uint8Array(candidate.bytes) });
+      if (mode === 'temporary-buffer') Object.assign(retained, { bytes: new Uint8Array(retained.bytes) });
+      if (mode.startsWith('missing-')) {
+        expect(selectionCandidateRetained(mode === 'missing-candidate' ? undefined : candidate,
+          mode === 'missing-temporary' ? undefined : retained)).toBe(false);
+      } else if (mode === 'bytes') preservedCall(candidate, retained, false);
+      else {
+        expect(selectionCandidateRetained(candidate, retained)).toBe(false);
+        expect(selectionCandidateRetained(retained, candidate)).toBe(false);
+      }
+    }
+  );
+
+  it.each([
+    ['inspection', 'extension'], ['object', 'extension'], ['volume', 'extension'], ['security', 'extension'],
+    ['inspection', 'lastAccessTime'], ['volume', 'lastAccessTime'], ['security', 'lastAccessTime']
+  ] as const)('compares extra %s.%s keys including unrelated access-time names', (layer, key) => {
+    const { candidate, retained } = accessPair();
+    const left = (layer === 'inspection' ? candidate.inspection : candidate.inspection[layer]) as unknown as Record<string, unknown>;
+    const right = (layer === 'inspection' ? retained.inspection : retained.inspection[layer]) as unknown as Record<string, unknown>;
+    left[key] = { lastAccessTime: 'same' };
+    right[key] = { lastAccessTime: 'changed' };
+    preservedCall(candidate, retained, false);
+  });
+
+  it.each(['inspection', 'object', 'volume', 'security'] as const)('compares extra %s key presence rather than allowlisting known fields', (layer) => {
+    const { candidate, retained } = accessPair();
+    const target = (layer === 'inspection' ? retained.inspection : retained.inspection[layer]) as unknown as Record<string, unknown>;
+    target.extension = 'extra';
+    preservedCall(candidate, retained, false);
+  });
+
+  it.each(['inspection', 'object', 'volume', 'security'] as const)('preserves and compares remaining %s key order', (layer) => {
+    const { candidate, retained } = accessPair();
+    const target = (layer === 'inspection' ? retained.inspection : retained.inspection[layer]) as unknown as Record<string, unknown>;
+    const key = Object.keys(target)[0]!, value = target[key];
+    delete target[key];
+    target[key] = value;
+    preservedCall(candidate, retained, false);
+  });
+
+  it.each(['missing-candidate', 'missing-temporary', 'kind', 'identity', 'security', 'candidate-buffer', 'temporary-buffer', 'bytes'])(
+    'keeps earlier %s guard ahead of bytes and raw projection', (mode) => {
+      const { candidate, retained } = accessPair();
+      const suppressed = () => { throw new Error('later evidence must not be evaluated'); };
+      Object.defineProperty(candidate.inspection, 'canonicalPath', { enumerable: true, get: suppressed });
+      Object.defineProperty(retained.inspection, 'canonicalPath', { enumerable: true, get: suppressed });
+      if (mode === 'kind') retained.inspection.kind = 'directory';
+      if (mode === 'identity') retained.inspection.object.fileId = 'f'.repeat(32);
+      if (mode === 'security') retained.inspection.security.ownerSid = 'different';
+      if (['missing-candidate', 'missing-temporary', 'kind', 'identity', 'security'].includes(mode)) {
+        Object.defineProperty(candidate, 'bytes', { get: suppressed });
+        Object.defineProperty(retained, 'bytes', { get: suppressed });
+      } else if (mode === 'candidate-buffer') {
+        Object.assign(candidate, { bytes: new Uint8Array(candidate.bytes) });
+        Object.defineProperty(retained, 'bytes', { get: suppressed });
+      } else if (mode === 'temporary-buffer') {
+        Object.assign(retained, { bytes: new Uint8Array(retained.bytes) });
+        candidate.bytes.equals = suppressed;
+      } else retained.bytes = Buffer.from('other\n');
+      expect(selectionCandidateRetained(mode === 'missing-candidate' ? undefined : candidate,
+        mode === 'missing-temporary' ? undefined : retained)).toBe(false);
+    }
+  );
+
   it('never mistakes an orphan for the new candidate and refuses missing/ambiguous new names', () => {
     const old = `selection-${'a'.repeat(32)}.tmp`;
     const fresh = `selection-${'b'.repeat(32)}.tmp`;
@@ -670,6 +806,21 @@ describe('marked actual activation harness seams', () => {
     };
     return { ...trace, deps, run: (prior = true) => observeActivationInterruption(deps, stage, 'private-root', trace.mark, prior) };
   }
+  it('retains an access-only changed distinct snapshot at the actual BEFORE_REPLACEMENT interruption seam', async () => {
+    const fixture = interruptionFixture('BEFORE_REPLACEMENT');
+    const candidate = fixture.deps.readCandidate();
+    const retained = { ...candidate, bytes: Buffer.from(candidate.bytes), inspection: { ...candidate.inspection,
+      object: { ...candidate.inspection.object, lastAccessTime: '0000000000000002' } } };
+    expect(candidate.inspection.object.lastAccessTime).not.toBe(retained.inspection.object.lastAccessTime);
+    fixture.events.length = 0;
+    fixture.deps.optionalCandidate = () => {
+      expect(fixture.events.map(({ event }) => event)).toContain('child-exit');
+      return fixture.step('candidate-retained-read', retained);
+    };
+    await expect(fixture.run()).resolves.toEqual({ noRecovery: true, complete: true });
+    expect(fixture.events.map(({ event }) => event).slice(-3)).toEqual(['selection-read', 'candidate-retained-read', 'explicit-use']);
+    expect(fixture.events.map(({ event }) => event)).not.toContain('child-continue');
+  });
   it.each(stages)('attributes every actual interruption read/closure/use/child seam at %s', async (stage) => {
     const successful = interruptionFixture(stage);
     await expect(successful.run()).resolves.toEqual({ noRecovery: true, complete: true });
@@ -736,6 +887,8 @@ describe('native read-change receipt sanitization and IPC', () => {
   });
   it.each([
     null, 'PRIVATE', { ...diagnostic, extra: 'PRIVATE' }, { ...diagnostic, differingFields: ['object.changeTime', 'PRIVATE'] },
+    { ...diagnostic, differingFields: ['security.PRIVATE'] },
+    { ...diagnostic, site: 'stable-read-final', prefixRole: 'none', differingFields: ['security.daclBytes'] },
     { ...diagnostic, differingFields: ['object.changeTime', 'object.changeTime'] }, { ...diagnostic, differingFields: [] },
     { ...diagnostic, site: 'PRIVATE' }, { ...diagnostic, prefixRole: 'PRIVATE' }, { ...diagnostic, objectKind: 'PRIVATE' },
     { ...diagnostic, differingFields: [{ toString() { throw new Error('must not coerce'); } }] },
@@ -745,7 +898,7 @@ describe('native read-change receipt sanitization and IPC', () => {
   });
   it.each(['iterator-private', 'iterator-throws', 'methods-valid', 'methods-invalid', 'changing-index', 'invalid-changing-index', 'sparse', 'duplicate', 'over-count', 'non-string'])(
     'sanitizes an owned, single-read field snapshot without caller array behavior: %s', (mode) => {
-      const fields: unknown[] = mode === 'sparse' ? new Array(1) : mode === 'over-count' ? new Array(14)
+      const fields: unknown[] = mode === 'sparse' ? new Array(1) : mode === 'over-count' ? new Array(24)
         : mode === 'duplicate' ? ['object.changeTime', 'object.changeTime']
           : [mode === 'methods-invalid' ? 'PRIVATE' : mode === 'non-string' ? { toString() { throw new Error('PRIVATE coercion'); } } : 'object.changeTime'];
       let iteratorCalls = 0, indexReads = 0;
@@ -776,7 +929,7 @@ describe('native read-change receipt sanitization and IPC', () => {
     }
   );
   it('also ignores a private-yielding field iterator at the actual refusal IPC sanitizer', async () => {
-    const fields = ['object.changeTime'];
+    const fields = ['security.daclBytes'];
     Object.defineProperty(fields, Symbol.iterator, { value: function* () { yield 'PRIVATE'; } });
     const process = new EventEmitter();
     const child = trackProvisioningChild(process);
@@ -785,7 +938,7 @@ describe('native read-change receipt sanitization and IPC', () => {
     const first = await waiting;
     process.emit('close', 1, null);
     const sanitized = sanitizeProductError(first);
-    expect(sanitized.cause.nativeReadChange.differingFields).toEqual(['object.changeTime']);
+    expect(sanitized.cause.nativeReadChange.differingFields).toEqual(['security.daclBytes']);
     expect(JSON.stringify(sanitized)).not.toContain('PRIVATE');
     expect(sanitizeProductError(sanitized)).toEqual(sanitized);
     expect(await child.next('paused').catch((error: unknown) => error)).toBe(first);
@@ -806,6 +959,33 @@ describe('native read-change receipt sanitization and IPC', () => {
     expect(first).not.toHaveProperty('code');
     expect(sanitizeProductError(first)).toMatchObject({ cause: { code: 'WINDOWS_NATIVE_READ_CHANGED', nativeReadChange: diagnostic } });
     expect(JSON.stringify(sanitizeProductError(first))).not.toContain('PRIVATE');
+    await child.exited;
+  });
+});
+
+
+describe('measured added-Skill namespace refusal privacy', () => {
+  it('admits only the measured category directly and in nested causes, not neighboring codes or private fields', () => {
+    const code = 'WINDOWS_ADDED_SKILL_NAMESPACE_CHANGED';
+    const raw = { code, name: 'PRIVATE', message: 'PRIVATE', stack: 'PRIVATE', path: 'PRIVATE', lastAccessTime: 'PRIVATE', extra: 'PRIVATE' };
+    const clean = { name: 'Error', message: 'sanitized product-slice failure', code };
+    expect(sanitizeProductError(raw)).toEqual(clean);
+    expect(sanitizeProductError({ ...raw, cause: raw })).toEqual({ ...clean, cause: clean });
+    for (const neighbor of ['WINDOWS_ADDED_SKILL_NAMESPACE_INVALID', `${code}_PRIVATE`, 'WINDOWS_ADDED_SKILL_READ_CHANGED']) {
+      expect(sanitizeProductError({ ...raw, code: neighbor })).toEqual({ name: 'Error', message: 'sanitized product-slice failure' });
+    }
+  });
+  it('re-sanitizes the category and nested cause at actual IPC without message, stack or extra evidence', async () => {
+    const process = new EventEmitter(), child = trackProvisioningChild(process);
+    const waiting = child.next('paused').catch((error: unknown) => error);
+    const raw = { code: 'WINDOWS_ADDED_SKILL_NAMESPACE_CHANGED', message: 'PRIVATE', stack: 'PRIVATE', observations: { lastAccessTime: 'PRIVATE' } };
+    process.emit('message', { event: 'result', action: 'refused', failure: { ...raw, cause: raw } });
+    process.emit('close', 1, null);
+    const failure = sanitizeProductError(await waiting), clean = sanitizeProductError(raw);
+    expect(failure.cause).toEqual({ ...clean, cause: clean });
+    expect(JSON.stringify(failure)).not.toContain('PRIVATE');
+    expect(sanitizeProductError(failure)).toEqual(failure);
+    expect(sanitizeProductError(await child.next('result').catch((error: unknown) => error))).toEqual(failure);
     await child.exited;
   });
 });

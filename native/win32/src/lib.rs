@@ -24,7 +24,7 @@ use non_windows as platform;
 #[cfg(windows)]
 use windows as platform;
 
-pub const NATIVE_CONTRACT_VERSION: u32 = 6;
+pub const NATIVE_CONTRACT_VERSION: u32 = 7;
 // Mirrors PROFILE_PORTABILITY_PRODUCTION_LIMITS.checkoutFileBytes. The native
 // boundary may lower a caller's bound but never allocates beyond this product
 // authority.
@@ -120,6 +120,17 @@ pub struct WindowsPathInspection {
     pub object: WindowsObjectObservation,
     pub security: WindowsSecurityObservation,
     pub ancestry_reparse_free: bool,
+}
+
+#[napi(object)]
+pub struct WindowsEditorTargetInspection {
+    pub root: WindowsPathInspection,
+    pub parent: WindowsPathInspection,
+    pub entry_path: String,
+    pub entry_object: WindowsObjectObservation,
+    pub entry_security: WindowsSecurityObservation,
+    pub target: WindowsPathInspection,
+    pub target_path: String,
 }
 
 #[napi(object)]
@@ -242,9 +253,19 @@ pub fn get_native_windows_info() -> NativeWindowsInfo {
     }
 }
 
+#[napi(js_name = "inspectWindowsZipSource")]
+pub fn inspect_windows_zip_source(env: Env, path: String) -> Result<WindowsObjectObservation> {
+    into_napi(env, platform::inspect_windows_zip_source(&path))
+}
+
 #[napi(js_name = "inspectWindowsPath")]
 pub fn inspect_windows_path(env: Env, path: String) -> Result<WindowsPathInspection> {
     into_napi(env, platform::inspect_windows_path(&path))
+}
+
+#[napi(js_name = "inspectWindowsEditorTarget")]
+pub fn inspect_windows_editor_target(env: Env, root: String, path: String) -> Result<WindowsEditorTargetInspection> {
+    into_napi(env, platform::inspect_windows_editor_target(&root, &path))
 }
 
 #[napi(js_name = "inspectWindowsMembershipLink")]
@@ -363,6 +384,7 @@ pub fn inspect_windows_process_instance(
 pub struct StableReadTask {
     path: String,
     max_bytes: u32,
+    range: Option<(u32, u32)>,
 }
 
 impl Task for StableReadTask {
@@ -370,10 +392,15 @@ impl Task for StableReadTask {
     type JsValue = WindowsStableReadReceipt;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        into_async_napi(platform::read_windows_file_stable(
-            &self.path,
-            self.max_bytes,
-        ))
+        into_async_napi(match self.range {
+            Some((offset, maximum)) => platform::read_windows_file_range_stable(
+                &self.path,
+                offset,
+                self.max_bytes,
+                maximum,
+            ),
+            None => platform::read_windows_file_stable(&self.path, self.max_bytes),
+        })
     }
 
     fn resolve(&mut self, _env: Env, data: Self::Output) -> Result<Self::JsValue> {
@@ -431,6 +458,115 @@ pub fn rename_windows_directory_no_replace(
     }))
 }
 
+pub struct NoReplaceDirectoryMoveTask {
+    source_parent_path: String,
+    source_component: String,
+    destination_parent_path: String,
+    destination_component: String,
+}
+
+impl Task for NoReplaceDirectoryMoveTask {
+    type Output = ();
+    type JsValue = ();
+    fn compute(&mut self) -> Result<Self::Output> {
+        into_async_napi(platform::move_windows_directory_no_replace(
+            &self.source_parent_path,
+            &self.source_component,
+            &self.destination_parent_path,
+            &self.destination_component,
+        ))
+    }
+    fn resolve(&mut self, _env: Env, _data: Self::Output) -> Result<Self::JsValue> {
+        Ok(())
+    }
+}
+
+#[napi(js_name = "moveWindowsDirectoryNoReplace")]
+pub fn move_windows_directory_no_replace(
+    source_parent_path: String,
+    source_component: Utf16String,
+    destination_parent_path: String,
+    destination_component: Utf16String,
+) -> Result<AsyncTask<NoReplaceDirectoryMoveTask>> {
+    let source_component = into_async_napi(component::validate_final_component(&source_component))?;
+    let destination_component =
+        into_async_napi(component::validate_final_component(&destination_component))?;
+    Ok(AsyncTask::new(NoReplaceDirectoryMoveTask {
+        source_parent_path,
+        source_component,
+        destination_parent_path,
+        destination_component,
+    }))
+}
+
+pub struct NoReplaceFileRenameTask {
+    parent_path: String,
+    source_component: String,
+    destination_component: String,
+}
+
+impl Task for NoReplaceFileRenameTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        into_async_napi(platform::rename_windows_file_no_replace(
+            &self.parent_path,
+            &self.source_component,
+            &self.destination_component,
+        ))
+    }
+
+    fn resolve(&mut self, _env: Env, _data: Self::Output) -> Result<Self::JsValue> {
+        Ok(())
+    }
+}
+
+#[napi(js_name = "renameWindowsFileNoReplace")]
+pub fn rename_windows_file_no_replace(
+    parent_path: String,
+    source_component: Utf16String,
+    destination_component: Utf16String,
+) -> Result<AsyncTask<NoReplaceFileRenameTask>> {
+    let source_component = into_async_napi(component::validate_final_component(&source_component))?;
+    let destination_component =
+        into_async_napi(component::validate_final_component(&destination_component))?;
+    if source_component == destination_component {
+        return Err(Error::new(
+            Status::InvalidArg,
+            "ERR_WIN32_INVALID_PATH: rename components must be distinct".to_owned(),
+        ));
+    }
+    Ok(AsyncTask::new(NoReplaceFileRenameTask {
+        parent_path,
+        source_component,
+        destination_component,
+    }))
+}
+
+#[napi(js_name = "readWindowsFileRangeStable")]
+pub fn read_windows_file_range_stable(
+    path: String,
+    offset: u32,
+    length: u32,
+    max_file_bytes: u32,
+) -> Result<AsyncTask<StableReadTask>> {
+    if length > MAX_STABLE_READ_BYTES
+        || max_file_bytes > 1536 * 1024 * 1024
+        || u64::from(offset) + u64::from(length) > u64::from(max_file_bytes)
+    {
+        return Err(Error::new(
+            Status::InvalidArg,
+            "ERR_WIN32_READ_LIMIT: invalid bounded file range".to_owned(),
+        ));
+    }
+    Ok(AsyncTask::new(StableReadTask {
+        path,
+        max_bytes: length,
+        range: Some((offset, max_file_bytes)),
+    }))
+}
+
 #[napi(js_name = "readWindowsFileStable")]
 pub fn read_windows_file_stable(path: String, max_bytes: u32) -> Result<AsyncTask<StableReadTask>> {
     if max_bytes > MAX_STABLE_READ_BYTES {
@@ -441,7 +577,11 @@ pub fn read_windows_file_stable(path: String, max_bytes: u32) -> Result<AsyncTas
             ),
         ));
     }
-    Ok(AsyncTask::new(StableReadTask { path, max_bytes }))
+    Ok(AsyncTask::new(StableReadTask {
+        path,
+        max_bytes,
+        range: None,
+    }))
 }
 
 pub struct StableDirectoryEnumerationTask {

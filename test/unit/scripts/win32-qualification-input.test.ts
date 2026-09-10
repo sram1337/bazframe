@@ -197,7 +197,8 @@ describe('qualification-only transfer and promotion', () => {
 describe('whole-tarball reconstruction', () => {
   it('builds independently in two temporary roots and compares real npm whole bytes, refusing drift before a product starts', async () => {
     const root = await mkdtemp(join(tmpdir(), 'bazframe-repack-')); roots.push(root);
-    const files = spawnSync('git', ['ls-files', '-z'], { encoding: 'utf8' }); expect(files.status).toBe(0);
+    // Include nonignored untracked inputs so independent builds reflect development work without staging.
+    const files = spawnSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], { encoding: 'utf8' }); expect(files.status).toBe(0);
     const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
     const run = (command: string, args: string[], cwd: string) => {
       const result = spawnSync(command, args, { cwd, encoding: 'utf8', shell: process.platform === 'win32', env: { ...process.env, BAZFRAME_WIN32_NATIVE_PACK_MODE: 'foundation-evidence' } });

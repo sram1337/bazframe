@@ -1,3 +1,4 @@
+import type { PiRuntimeServices } from '../../src/adapters/pi/runtime-services.js';
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { constants } from "node:fs";
@@ -15,6 +16,8 @@ import {
 	type FileHandle,
 } from "node:fs/promises";
 import { homedir } from "node:os";
+import { pathToFileURL } from "node:url";
+import { win32 } from "node:path";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
 	getAgentDir,
@@ -24,8 +27,12 @@ import {
 	type ExtensionAPI,
 	type ExtensionCommandContext,
 	type ExtensionContext,
-	type Skill,
+	type Skill as PiSkill,
 } from "@earendil-works/pi-coding-agent";
+
+type Skill = Pick<PiSkill, "name" | "description" | "baseDir" | "filePath" | "disableModelInvocation">;
+// Replaced only by the Windows installer with its exact owned reference.
+const WINDOWS_INSTALL_REFERENCE = null;
 
 const MAX_INSTRUCTIONS_BYTES = 1024 * 1024;
 const MAX_STATE_BYTES = 1024;
@@ -187,26 +194,26 @@ interface GitResult {
 	error?: Error;
 }
 
-function initialAdapterState(cwd: string): AdapterState {
+function initialAdapterState(cwd: string, blocked = BAZFRAME_RUNTIME_PLATFORM === "win32"): AdapterState {
 	return {
 		cwd,
 		bazframeHome: process.env.BAZFRAME_HOME ?? join(homedir(), ".bazframe"),
-		initialized: BAZFRAME_RUNTIME_PLATFORM === "win32",
+		initialized: blocked,
 		projectBehavior: "outside-git",
 		globalPolicy: "enabled",
 		skillAliases: [],
-		...(BAZFRAME_RUNTIME_PLATFORM === "win32" ? { error: WINDOWS_PLATFORM_UNSUPPORTED_MESSAGE } : {}),
+		...(blocked ? { error: WINDOWS_PLATFORM_UNSUPPORTED_MESSAGE } : {}),
 	};
 }
 
 function compatibilityFailure(): string | undefined {
 	const piVersion = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(PI_VERSION);
-	const supported = piVersion !== null
+	const supported = PI_VERSION !== "0.85.0" && piVersion !== null
 		&& (Number(piVersion[1]) > 0
 			|| Number(piVersion[2]) > 84
 			|| (Number(piVersion[2]) === 84 && Number(piVersion[3]) >= 4));
 	if (!supported) {
-		return `Bazframe requires a stable Pi 0.84.4 or newer; this process is Pi ${PI_VERSION}.`;
+		return `Bazframe requires a stable Pi 0.84.4 or newer, excluding 0.85.0; this process is Pi ${PI_VERSION}.`;
 	}
 	const [major = 0, minor = 0] = process.versions.node.split(".").map(Number);
 	if (major < 22 || (major === 22 && minor < 19)) {
@@ -1188,10 +1195,10 @@ async function loadGlobalContext(): Promise<InstructionFile | undefined> {
 	return undefined;
 }
 
-async function resolveState(cwd: string): Promise<AdapterState> {
+async function resolveState(cwd: string, services?: PiRuntimeServices): Promise<AdapterState> {
 	let bazframeHome: string;
 	try {
-		bazframeHome = resolveBazframeHome();
+		bazframeHome = services?.home() ?? resolveBazframeHome();
 	} catch (error) {
 		return {
 			cwd,
@@ -1213,7 +1220,7 @@ async function resolveState(cwd: string): Promise<AdapterState> {
 	};
 	let repository: string | undefined;
 	try {
-		repository = await findRepository(cwd);
+		repository = await (services?.findRepository ?? findRepository)(cwd);
 	} catch (error) {
 		return {
 			...base,
@@ -1222,16 +1229,24 @@ async function resolveState(cwd: string): Promise<AdapterState> {
 			error: error instanceof Error ? error.message : String(error),
 		};
 	}
-	const policyPath = globalStatePath(bazframeHome);
+	const policyPath = services?.paths.join(bazframeHome, "global.json") ?? globalStatePath(bazframeHome);
 	const projectStatePath = repository === undefined
 		? undefined
-		: registrationPath(bazframeHome, repository);
+		: services?.paths.join(bazframeHome, "projects", `${createHash("sha256").update(repository).digest("hex")}.json`) ?? registrationPath(bazframeHome, repository);
 	let globalPolicy: GlobalPolicy = "unresolved";
 	let globalPolicyPath: string | undefined;
 	let projectStateResolution: ProjectStateResolution = "unresolved";
 	let projectState: ProjectState | undefined;
 	let projectBehavior: ProjectBehavior = "error";
 	try {
+        if (services !== undefined) {
+            globalPolicy = await services.readGlobalPolicy(bazframeHome);
+            if (globalPolicy === "disabled") globalPolicyPath = policyPath;
+            if (repository !== undefined) {
+                projectState = await services.readProjectState(bazframeHome, repository);
+                projectStateResolution = projectState === undefined ? "absent" : projectState.schemaVersion === 3 ? "enabled-override" : projectState.schemaVersion === 2 ? "disabled-override" : "legacy-inherit";
+            }
+        } else {
 		const policyKind = await pathKind(policyPath);
 		if (policyKind !== "absent" && policyKind !== "file") {
 			throw new Error(`Invalid global policy path: ${policyPath}`);
@@ -1258,6 +1273,8 @@ async function resolveState(cwd: string): Promise<AdapterState> {
 						: "legacy-inherit";
 			}
 		}
+
+        }
 
 		const enabled = projectState?.schemaVersion === 3
 			|| (projectState?.schemaVersion !== 2 && globalPolicy === "enabled");
@@ -1290,8 +1307,8 @@ async function resolveState(cwd: string): Promise<AdapterState> {
 			...(projectStatePath === undefined ? {} : { projectStatePath }),
 			...(repository === undefined ? {} : { projectStateResolution }),
 			...(projectState === undefined ? {} : { projectState }),
-			profile: await loadProfile(bazframeHome),
-			globalContext: await loadGlobalContext(),
+			profile: await (services?.loadProfile ?? loadProfile)(bazframeHome),
+			globalContext: await (services?.loadGlobalContext ?? loadGlobalContext)(),
 		};
 	} catch (error) {
 		return {
@@ -1374,12 +1391,14 @@ async function materializeSkillAlias(
 	state: AdapterState,
 	skill: Skill,
 	aliasName: string,
+  services?: PiRuntimeServices,
 ): Promise<string> {
 	if (state.profile === undefined) throw new Error("Cannot alias a skill without an active profile.");
-	const cacheRoot = join(state.bazframeHome, "adapter-cache", "pi", "skill-aliases");
-	const aliasDirectory = join(cacheRoot, state.profile.id, aliasName);
-	const aliasPath = join(aliasDirectory, "SKILL.md");
-	await writeAliasAtomic(
+	const pathJoin = services?.paths.join ?? join;
+	const cacheRoot = pathJoin(state.bazframeHome, "adapter-cache", "pi", "skill-aliases");
+	const aliasDirectory = pathJoin(cacheRoot, state.profile.id, aliasName);
+	const aliasPath = pathJoin(aliasDirectory, "SKILL.md");
+	await (services?.writeAlias ?? writeAliasAtomic)(
 		aliasPath,
 		[
 			"---",
@@ -1402,6 +1421,7 @@ async function materializeSkillAlias(
 async function prepareProfileSkillPaths(
 	state: AdapterState,
 	pi: ExtensionAPI,
+  services?: PiRuntimeServices,
 ): Promise<{ paths: string[]; aliases: SkillAlias[] }> {
 	if (state.profile === undefined) return { paths: [], aliases: [] };
 	const occupiedNames = new Set(
@@ -1423,7 +1443,7 @@ async function prepareProfileSkillPaths(
 			throw new Error(`Bazframe skill alias also collides: ${skill.name} -> ${aliasName}`);
 		}
 		aliasNames.add(aliasName);
-		const aliasPath = await materializeSkillAlias(state, skill, aliasName);
+		const aliasPath = await materializeSkillAlias(state, skill, aliasName, services);
 		aliases.push({ originalName: skill.name, aliasName, aliasPath });
 		paths.push(aliasPath);
 	}
@@ -1558,13 +1578,18 @@ function showFailure(ctx: ExtensionContext, message: string): void {
 }
 
 export default function bazframePiAdapter(pi: ExtensionAPI): void {
-	let state = initialAdapterState(process.cwd());
+    // This gate precedes binding I/O, package import, native initialization and state reads.
+    installHandlers(pi, undefined, BAZFRAME_RUNTIME_PLATFORM === "win32");
+}
+export function createBazframePiAdapterForInternalTesting(pi: ExtensionAPI, services: PiRuntimeServices): void {
+    installHandlers(pi, services, false);
+}
+function installHandlers(pi: ExtensionAPI, services: PiRuntimeServices | undefined, blocked: boolean): void {
+	let state = initialAdapterState(process.cwd(), blocked);
 	let contextModeNotified = false;
 
 	pi.on("session_start", async (_event, ctx) => {
-		state = BAZFRAME_RUNTIME_PLATFORM === "win32"
-			? initialAdapterState(ctx.cwd)
-			: await resolveState(ctx.cwd);
+		state = blocked ? initialAdapterState(ctx.cwd, true) : await resolveState(ctx.cwd, services);
 		contextModeNotified = false;
 		if (state.error !== undefined && ctx.hasUI) {
 			ctx.ui.notify(`Bazframe profile failed to load: ${state.error}`, "error");
@@ -1572,12 +1597,10 @@ export default function bazframePiAdapter(pi: ExtensionAPI): void {
 	});
 
 	pi.on("resources_discover", async (event, ctx) => {
-		state = BAZFRAME_RUNTIME_PLATFORM === "win32"
-			? initialAdapterState(event.cwd)
-			: await resolveState(event.cwd);
+		state = blocked ? initialAdapterState(event.cwd, true) : await resolveState(event.cwd, services);
 		if (!state.initialized || state.error !== undefined || state.profile === undefined) return;
 		try {
-			const prepared = await prepareProfileSkillPaths(state, pi);
+			const prepared = await prepareProfileSkillPaths(state, pi, services);
 			state = { ...state, skillAliases: prepared.aliases };
 			if (prepared.aliases.length > 0 && ctx.hasUI) {
 				ctx.ui.notify(
@@ -1611,7 +1634,7 @@ export default function bazframePiAdapter(pi: ExtensionAPI): void {
 
 	pi.on("before_agent_start", (event, ctx) => {
 		if (!state.initialized) return;
-		if (BAZFRAME_RUNTIME_PLATFORM !== "win32" && state.profile === undefined) return;
+		if (!blocked && state.profile === undefined) return;
 		if (state.error !== undefined) {
 			showFailure(ctx, state.error);
 			return {
@@ -1656,7 +1679,7 @@ export default function bazframePiAdapter(pi: ExtensionAPI): void {
 		handler: async (args, ctx) => {
 			switch (args.trim()) {
 				case "info":
-					if (BAZFRAME_RUNTIME_PLATFORM === "win32") {
+					if (blocked) {
 						ctx.ui.notify(WINDOWS_PLATFORM_UNSUPPORTED_MESSAGE, "error");
 						return;
 					}
@@ -1671,4 +1694,54 @@ export default function bazframePiAdapter(pi: ExtensionAPI): void {
 			}
 		},
 	});
+}
+
+/** Internal post-gate installed bootstrap. Its reference is part of installed owned code,
+ * not runtime BAZFRAME_HOME or arbitrary record data. Public Windows dispatch stays closed. */
+export async function createWindowsBoundPiAdapterForInternalTesting(pi: ExtensionAPI, effects: {
+    readFile?: typeof readBootstrapBytes;
+    importRuntime?: (url: string) => Promise<{ createBoundPiRuntimeServices(options: object): PiRuntimeServices }>;
+} = {}): Promise<void> {
+    const reference = WINDOWS_INSTALL_REFERENCE as unknown as { path: string; binding: { packageRoot: string; bazframeVersion: string; packageSha256: string; runtimeSha256: string; nativeSha256: string } } | null;
+    const failed = () => new Error("Windows Pi runtime binding is missing, stale or changed. Reinstall the exact Bazframe package, then run bazframe adapter install pi; review drift before --force.");
+    const compatibilityError = compatibilityFailure();
+    if (compatibilityError !== undefined) throw new Error(compatibilityError);
+    try {
+    if (reference === null) throw failed();
+    const read = effects.readFile ?? readBootstrapBytes;
+    const bytes = await read(reference.path, MAX_REGISTRATION_BYTES);
+    let binding: unknown;
+    try { binding = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); } catch { throw failed(); }
+    if (JSON.stringify(binding) !== JSON.stringify(reference.binding)) throw failed();
+    const root = reference.binding.packageRoot;
+    const runtimePath = win32.join(root, "dist", "application", "win32-application-services.js");
+    for (const [path, expected, maximum] of [
+        [win32.join(root, "package.json"), reference.binding.packageSha256, MAX_REGISTRATION_BYTES],
+        [runtimePath, reference.binding.runtimeSha256, MAX_MANAGED_ARTIFACT_FILE_BYTES],
+        [win32.join(root, "artifacts", "native", "win32-x64-msvc", "bazframe-win32.node"), reference.binding.nativeSha256, MAX_MANAGED_ARTIFACT_FILE_BYTES],
+    ] as const) {
+        const data = await read(path, maximum);
+        if (createHash("sha256").update(data).digest("hex") !== expected) throw failed();
+        if (path.endsWith("package.json")) {
+            const manifest = JSON.parse(data.toString("utf8"));
+            if (manifest.name !== "bazframe" || manifest.version !== reference.binding.bazframeVersion) throw failed();
+        }
+    }
+    const hostPi = await import("@earendil-works/pi-coding-agent");
+    const runtime = await (effects.importRuntime ?? ((url: string) => import(url)))(pathToFileURL(runtimePath).href);
+    const services: PiRuntimeServices = runtime.createBoundPiRuntimeServices({ parse: hostPi.parseFrontmatter, environment: process.env, userHome: homedir() });
+    installHandlers(pi, services, false);
+    } catch (cause) { throw new Error(failed().message, { cause }); }
+}
+async function readBootstrapBytes(path: string, maximum: number): Promise<Buffer> {
+    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+        const before = await handle.stat({ bigint: true });
+        if (!before.isFile() || before.nlink !== 1n || before.size > BigInt(maximum)) throw new Error("Invalid bounded install-owned runtime file.");
+        const bytes = Buffer.alloc(Number(before.size) + 1); let count = 0;
+        while (count < bytes.length) { const result = await handle.read(bytes, count, bytes.length - count, count); if (result.bytesRead === 0) break; count += result.bytesRead; }
+        const after = await handle.stat({ bigint: true });
+        if (count !== Number(before.size) || before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) throw new Error("Install-owned runtime file changed during validation.");
+        return bytes.subarray(0, count);
+    } finally { await handle.close(); }
 }

@@ -1,8 +1,11 @@
+import { randomBytes } from 'node:crypto';
+import { captureWindowsDirectoryClosure } from '../state/win32-directory-closure.js';
 import { win32 } from 'node:path';
 import type { BazframeWin32LockBackend, BazframeWin32NativeBackend } from '../core/win32-native.js';
 import { BazframeError, errorCode } from '../core/errors.js';
 import {
   ADDED_SKILL_NAMESPACE_ENTRY_LIMIT,
+  enumerateWindowsPrivateDirectory,
   createWindowsAddedSkillPlatformServicesForInternalTesting
 } from '../skills/added-skill-platform-services.js';
 import {
@@ -41,18 +44,7 @@ export function createWindowsProfileProvisioningServicesForInternalTesting(
 
   const activeSnapshot = (home: string) => readWindowsSelectionSnapshot(backend, home);
 
-  async function absentAliasCache(home: string, profileId: string): Promise<void> {
-    let parent = home;
-    for (const component of ['adapter-cache', 'pi', 'skill-aliases', profileId]) {
-      const entries = await enumerate(parent);
-      const found = entries.names.find((name) => key(name) === key(component));
-      if (found === undefined) return;
-      if (found !== component) throw invalid('Profile alias cache uses an alias spelling.');
-      parent = win32.join(parent, component);
-      admitWindowsPrivateDirectory(backend, parent);
-    }
-    throw invalid('Profile alias cache is occupied; Windows cache reclamation is not supported.');
-  }
+  const absentAliasCache = (home: string, profileId: string, authority: { assertHeld(): void }) => detachWindowsAliasCache(backend, home, ['adapter-cache', 'pi', 'skill-aliases', profileId], authority);
 
   async function current(home: string, profileId: string): Promise<boolean> {
     const entries = await enumerate(win32.join(home, 'profiles'));
@@ -106,7 +98,7 @@ export function createWindowsProfileProvisioningServicesForInternalTesting(
           }
           // A validated completed add does not freeze later legitimate profile edits.
           if (journal.phase === 'COMMITTED' || journal.phase === 'ABORTED') continue;
-          await absentAliasCache(home, profileId);
+          if (!await current(home, profileId)) await absentAliasCache(home, profileId, held);
           if (selection.profileId === profileId && !await current(home, profileId)) {
             throw invalid('A missing profile is already named by active selection.');
           }
@@ -123,7 +115,7 @@ export function createWindowsProfileProvisioningServicesForInternalTesting(
           return { action: 'current', profileId, directory };
         }
         if (selection.profileId === profileId) throw invalid('A missing profile is already named by active selection.');
-        await absentAliasCache(home, profileId);
+        await absentAliasCache(home, profileId, held);
         const transactionId = newWindowsDirectoryPublicationTransactionId();
         const result = await executeWindowsDirectoryPublication({
           ...common, operation: { mode: 'fresh' },
@@ -177,3 +169,38 @@ function key(value: string): string { return value.normalize('NFC').toLowerCase(
 function invalid(message: string): BazframeError {
   return new BazframeError('WINDOWS_PROFILE_PROVISIONING_REFUSED', message);
 }
+
+export async function detachWindowsAliasCache(backend: BazframeWin32NativeBackend, home: string, components: readonly string[], authority: { assertHeld(): void }): Promise<void> {
+    const enumerate = (path: string) => enumerateWindowsPrivateDirectory(backend, path, ADDED_SKILL_NAMESPACE_ENTRY_LIMIT);
+    const profileId = components.at(-1)!;
+    let parent = home;
+    for (const component of components) {
+      const entries = await enumerate(parent);
+      const found = entries.names.find((name) => key(name) === key(component));
+      if (found === undefined) return;
+      if (found !== component) throw invalid('Profile alias cache uses an alias spelling.');
+      parent = win32.join(parent, component);
+      admitWindowsPrivateDirectory(backend, parent);
+    }
+    // Shared provisioning owns only this exact private profile-cache object, not
+    // its parents. Retain it by a guarded sibling move; never recursively delete.
+    authority.assertHeld();
+    const before = await captureWindowsDirectoryClosure(backend, parent);
+    const root = win32.dirname(parent), rootBefore = admitWindowsPrivateDirectory(backend, root);
+    const retained = `.bazframe-cache-${randomBytes(16).toString('hex')}`;
+    authority.assertHeld(); let rejected = false;
+    try { await backend.renameDirectoryNoReplace(root, profileId, retained); } catch { rejected = true; }
+    authority.assertHeld();
+    const rootAfter = admitWindowsPrivateDirectory(backend, root);
+    if (rootBefore.object.fileId !== rootAfter.object.fileId || rootBefore.object.volumeIdentity !== rootAfter.object.volumeIdentity || JSON.stringify(rootBefore.security) !== JSON.stringify(rootAfter.security)) throw invalid('Alias cache parent changed; retained ambiguity.');
+    const names = (await enumerate(root)).names;
+    if (!names.some((name) => key(name) === key(profileId)) && names.includes(retained)) {
+      const moved = await captureWindowsDirectoryClosure(backend, win32.join(root, retained));
+      if (moved.rootIdentity === before.rootIdentity && moved.closureSha256 === before.closureSha256) { authority.assertHeld(); return; }
+    }
+    if (rejected && !names.includes(retained)) {
+      const unchanged = await captureWindowsDirectoryClosure(backend, parent);
+      if (unchanged.rootIdentity === before.rootIdentity && unchanged.closureSha256 === before.closureSha256) throw invalid('Alias cache detach had no effect; retry from current state.');
+    }
+    throw invalid('Alias cache detach is ambiguous; preserve both objects.');
+  }

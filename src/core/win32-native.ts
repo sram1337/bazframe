@@ -2,7 +2,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { BazframeError, errorCode } from './errors.js';
 
-export const BAZFRAME_WIN32_NATIVE_CONTRACT_VERSION = 6;
+export const BAZFRAME_WIN32_NATIVE_CONTRACT_VERSION = 7;
 export const BAZFRAME_WIN32_NATIVE_TARGET = 'win32-x64-msvc';
 // Must remain equal to native/win32/src/lib.rs and the authoritative profile
 // portability production ceilings.
@@ -67,6 +67,19 @@ export interface WindowsPathInspection {
   object: WindowsObjectObservation;
   security: WindowsSecurityObservation;
   ancestryReparseFree: true;
+}
+
+export interface WindowsEditorTargetInspection {
+  root: WindowsPathInspection;
+  parent: WindowsPathInspection;
+  entryPath: string;
+  entryObject: WindowsObjectObservation;
+  entrySecurity: WindowsSecurityObservation;
+  target: WindowsPathInspection;
+  targetPath: string;
+}
+export interface BazframeWin32EditorBackend {
+  inspectEditorTarget(root: string, path: string): WindowsEditorTargetInspection;
 }
 
 export interface WindowsPrivateDirectoryCreationReceipt {
@@ -152,6 +165,7 @@ export interface WindowsStableDirectoryEnumerationReceipt {
 }
 
 export interface BazframeWin32NativeBackend {
+  inspectZipSource(path: string): WindowsObjectObservation;
   inspectPath(path: string): WindowsPathInspection;
   inspectMembershipLink(path: string): WindowsMembershipLinkInspection;
   createPrivateJunction(
@@ -161,11 +175,18 @@ export interface BazframeWin32NativeBackend {
   ): WindowsPrivateJunctionCreationReceipt;
   createPrivateDirectory(parentPath: string, finalComponent: string): WindowsPrivateDirectoryCreationReceipt;
   createPrivateFile(parentPath: string, finalComponent: string): WindowsPrivateFileCreationReceipt;
+  moveDirectoryNoReplace(sourceParentPath: string, sourceComponent: string, destinationParentPath: string, destinationComponent: string): Promise<void>;
   renameDirectoryNoReplace(
     parentPath: string,
     sourceComponent: string,
     destinationComponent: string
   ): Promise<void>;
+  renameFileNoReplace(
+    parentPath: string,
+    sourceComponent: string,
+    destinationComponent: string
+  ): Promise<void>;
+  readStableFileRange(path: string, offset: number, length: number, maxFileBytes: number): Promise<WindowsStableReadReceipt>;
   readStableFile(path: string, maxBytes: number): Promise<WindowsStableReadReceipt>;
   enumerateStableDirectory(
     path: string,
@@ -180,7 +201,9 @@ export interface BazframeWin32LockBackend {
 
 interface RawNativeModule {
   getNativeWindowsInfo: () => unknown;
+  inspectWindowsZipSource: (path: string) => unknown;
   inspectWindowsPath: (path: string) => unknown;
+  inspectWindowsEditorTarget: (root: string, path: string) => unknown;
   inspectWindowsMembershipLink: (path: string) => unknown;
   createWindowsPrivateJunction: (
     parentPath: string,
@@ -192,11 +215,18 @@ interface RawNativeModule {
   acquireWindowsFileLock: (guardPath: string) => unknown;
   releaseWindowsFileLock: (token: string) => unknown;
   inspectWindowsProcessInstance: (pid: number, creationTime: string) => unknown;
+  moveWindowsDirectoryNoReplace: (sourceParentPath: string, sourceComponent: string, destinationParentPath: string, destinationComponent: string) => unknown;
   renameWindowsDirectoryNoReplace: (
     parentPath: string,
     sourceComponent: string,
     destinationComponent: string
   ) => unknown;
+  renameWindowsFileNoReplace: (
+    parentPath: string,
+    sourceComponent: string,
+    destinationComponent: string
+  ) => unknown;
+  readWindowsFileRangeStable: (path: string, offset: number, length: number, maxFileBytes: number) => unknown;
   readWindowsFileStable: (path: string, maxBytes: number) => unknown;
   enumerateWindowsDirectoryStable: (path: string, maxEntries: number) => unknown;
 }
@@ -215,7 +245,7 @@ export interface Win32NativeLoadOptions {
  */
 export function loadBazframeWin32Native(
   options: Win32NativeLoadOptions = {}
-): BazframeWin32NativeBackend & BazframeWin32LockBackend {
+): BazframeWin32NativeBackend & BazframeWin32LockBackend & BazframeWin32EditorBackend {
   const platform = options.platform ?? process.platform;
   const arch = options.arch ?? process.arch;
   if (platform !== 'win32') {
@@ -302,6 +332,16 @@ export function loadBazframeWin32Native(
   }
 
   return Object.freeze({
+    inspectZipSource(path: string): WindowsObjectObservation {
+      requirePath(path);
+      let receipt: unknown;
+      try { receipt = native.inspectWindowsZipSource(path); } catch (error) { throw nativeOperationFailure(error); }
+      const value = objectObservation(receipt);
+      if (value.directory || value.deletePending || value.numberOfLinks !== '00000001' || (value.attributes & 0x50) !== 0
+        || (value.reparseTag === null) !== ((value.attributes & 0x400) === 0)
+        || (value.reparseTag !== null && ((value.reparseTag & ~0xf000) >>> 0) !== 0x9000001a)) invalid();
+      return value;
+    },
     inspectPath(path: string): WindowsPathInspection {
       requirePath(path);
       let receipt: unknown;
@@ -311,6 +351,23 @@ export function loadBazframeWin32Native(
         throw nativeOperationFailure(error);
       }
       return pathInspection(receipt);
+    },
+    inspectEditorTarget(root: string, path: string): WindowsEditorTargetInspection {
+      requirePath(root); requirePath(path);
+      let receipt: unknown;
+      try { receipt = native.inspectWindowsEditorTarget(root, path); } catch (error) { throw nativeOperationFailure(error); }
+      const value = exactRecord(receipt, ['root', 'parent', 'entryPath', 'entryObject', 'entrySecurity', 'target', 'targetPath'], 'editor target');
+      const inspectedRoot = pathInspection(value.root), parent = pathInspection(value.parent), target = pathInspection(value.target);
+      const entryObject = objectObservation(value.entryObject), entrySecurity = securityObservation(value.entrySecurity);
+      const entryPath = canonicalVolumePath(value.entryPath);
+      requirePath(value.targetPath as string);
+      if (inspectedRoot.kind !== 'directory' || parent.kind !== 'directory' || target.kind !== 'regular-file'
+        || entryObject.directory || entryObject.deletePending || entryObject.numberOfLinks !== '00000001'
+        || (entryObject.reparseTag !== null && entryObject.reparseTag !== 0xa000000c)
+        || (entryObject.reparseTag === null) !== ((entryObject.attributes & FILE_ATTRIBUTE_REPARSE_POINT) === 0)
+        || (entryObject.reparseTag !== null && entrySecurity.ownerSid !== entrySecurity.currentUserSid)
+        || entryObject.volumeIdentity !== parent.object.volumeIdentity || target.object.numberOfLinks !== '00000001') invalid();
+      return { root: inspectedRoot, parent, target, entryPath, entryObject, entrySecurity, targetPath: value.targetPath as string };
     },
     inspectMembershipLink(path: string): WindowsMembershipLinkInspection {
       requirePath(path);
@@ -481,6 +538,17 @@ export function loadBazframeWin32Native(
         throw receiptFailure('Native Windows process-instance evidence is malformed.', error);
       }
     },
+    async moveDirectoryNoReplace(sourceParentPath: string, sourceComponent: string, destinationParentPath: string, destinationComponent: string): Promise<void> {
+      requirePath(sourceParentPath);
+      requirePath(destinationParentPath);
+      requireFinalComponent(sourceComponent);
+      requireFinalComponent(destinationComponent);
+      if (sourceParentPath.toLowerCase() === destinationParentPath.toLowerCase() && portableComponentKey(sourceComponent) === portableComponentKey(destinationComponent)) {
+        throw failure('WINDOWS_NATIVE_PATH_INVALID', 'The native Windows move paths must be distinct.');
+      }
+      try { await Promise.resolve(native.moveWindowsDirectoryNoReplace(sourceParentPath, sourceComponent, destinationParentPath, destinationComponent)); }
+      catch (error) { throw nativeOperationFailure(error); }
+    },
     async renameDirectoryNoReplace(
       parentPath: string,
       sourceComponent: string,
@@ -504,6 +572,41 @@ export function loadBazframeWin32Native(
       } catch (error) {
         throw nativeOperationFailure(error);
       }
+    },
+    async renameFileNoReplace(
+      parentPath: string,
+      sourceComponent: string,
+      destinationComponent: string
+    ): Promise<void> {
+      requirePath(parentPath);
+      requireFinalComponent(sourceComponent);
+      requireFinalComponent(destinationComponent);
+      if (portableComponentKey(sourceComponent) === portableComponentKey(destinationComponent)) {
+        throw failure(
+          'WINDOWS_NATIVE_PATH_INVALID',
+          'The native Windows rename components must be distinct.'
+        );
+      }
+      try {
+        await Promise.resolve(native.renameWindowsFileNoReplace(
+          parentPath,
+          sourceComponent,
+          destinationComponent
+        ));
+      } catch (error) {
+        throw nativeOperationFailure(error);
+      }
+    },
+    async readStableFileRange(path: string, offset: number, length: number, maxFileBytes: number): Promise<WindowsStableReadReceipt> {
+      requirePath(path);
+      if (![offset, length, maxFileBytes].every((value) => Number.isSafeInteger(value) && value >= 0 && !Object.is(value, -0))
+        || length > BAZFRAME_WIN32_NATIVE_MAX_STABLE_READ_BYTES || maxFileBytes > 1536 * 1024 * 1024 || offset + length > maxFileBytes) {
+        throw failure('WINDOWS_NATIVE_READ_LIMIT_INVALID', 'The native bounded file range is invalid.');
+      }
+      let value: unknown;
+      try { value = await Promise.resolve(native.readWindowsFileRangeStable(path, offset, length, maxFileBytes)); }
+      catch (error) { throw nativeOperationFailure(error); }
+      return stableReadReceipt(value, length, { offset, maxFileBytes });
     },
     async readStableFile(path: string, maxBytes: number): Promise<WindowsStableReadReceipt> {
       requirePath(path);
@@ -566,16 +669,21 @@ function nativeModule(value: unknown): RawNativeModule {
   const record = plainRecord(value);
   for (const name of [
     'getNativeWindowsInfo',
+    'inspectWindowsZipSource',
     'inspectWindowsPath',
     'inspectWindowsMembershipLink',
+    'inspectWindowsEditorTarget',
     'createWindowsPrivateJunction',
     'createWindowsPrivateDirectory',
     'createWindowsPrivateFile',
     'acquireWindowsFileLock',
     'releaseWindowsFileLock',
     'inspectWindowsProcessInstance',
+    'moveWindowsDirectoryNoReplace',
     'renameWindowsDirectoryNoReplace',
+    'renameWindowsFileNoReplace',
     'readWindowsFileStable',
+    'readWindowsFileRangeStable',
     'enumerateWindowsDirectoryStable'
   ] as const) {
     if (typeof record[name] !== 'function') {
@@ -716,7 +824,7 @@ function privateFileCreationReceipt(
   return { parentBefore, created, parentAfter };
 }
 
-function stableReadReceipt(value: unknown, maxBytes: number): WindowsStableReadReceipt {
+function stableReadReceipt(value: unknown, maxBytes: number, range?: { offset: number; maxFileBytes: number }): WindowsStableReadReceipt {
   try {
     const record = exactRecord(value, ['bytes', 'byteCount', 'before', 'after'], 'stable read');
     if (!(record.bytes instanceof Uint8Array)) invalid();
@@ -726,9 +834,10 @@ function stableReadReceipt(value: unknown, maxBytes: number): WindowsStableReadR
     if (count !== BigInt(bytes.byteLength) || count > BigInt(maxBytes)) invalid();
     const before = objectObservation(record.before);
     const after = objectObservation(record.after);
+    const sizeMatches = range === undefined ? before.size === byteCount && after.size === byteCount
+      : count === BigInt(maxBytes) && BigInt(`0x${before.size}`) <= BigInt(range.maxFileBytes) && BigInt(range.offset) + count <= BigInt(`0x${before.size}`);
     if (before.directory || after.directory || before.reparseTag !== null || after.reparseTag !== null
-      || before.deletePending || after.deletePending || before.size !== byteCount
-      || after.size !== byteCount || !sameStableObservation(before, after)) {
+      || before.deletePending || after.deletePending || !sizeMatches || !sameStableObservation(before, after)) {
       const differingFields = READ_CHANGE_OBJECT_FIELDS.filter((field) => {
         const key = field.slice('object.'.length) as keyof WindowsObjectObservation;
         return before[key] !== after[key];
@@ -1059,7 +1168,7 @@ const READ_CHANGE_FIELDS = {
     'reparseTagZero', 'notDeletePending', 'objectDirectory', ...READ_CHANGE_SECURITY_FIELDS],
   'stable-read-growth': ['growthProbeNonzero'],
   'stable-read-final': [...READ_CHANGE_OBJECT_FIELDS, 'byteCountExpected', 'afterSizeByteCount'],
-  'reopened-prefix': [...READ_CHANGE_OBJECT_FIELDS, 'canonicalPath'],
+  'reopened-prefix': [...READ_CHANGE_OBJECT_FIELDS, ...READ_CHANGE_SECURITY_FIELDS, 'canonicalPath'],
   'stable-read-receipt': [...READ_CHANGE_OBJECT_FIELDS, 'beforeDirectory', 'afterDirectory', 'beforeReparseTag',
     'afterReparseTag', 'beforeDeletePending', 'afterDeletePending', 'beforeSizeByteCount', 'afterSizeByteCount']
 };

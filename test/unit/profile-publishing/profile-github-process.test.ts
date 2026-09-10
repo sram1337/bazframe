@@ -1,3 +1,6 @@
+import { EventEmitter } from 'node:events';
+import { type ChildProcess, type spawn } from 'node:child_process';
+import { runBoundedProfileGithubProcess, createResolvedProfileGithubProcess, type ProfileGithubProcessRequest } from '../../../src/profile-publishing/profile-github-process.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdir, readFile, readdir, rename, symlink, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
@@ -94,5 +97,68 @@ describe('profile GitHub owned-directory disposal', () => {
 
     expect(await readFile(join(owned.path, 'attacker.txt'), 'utf8')).toBe('must survive\n');
     expect(await readFile(join(saved, 'owned.txt'), 'utf8')).toBe('owned\n');
+  });
+});
+
+describe('Windows bounded GitHub process receipts', () => {
+  const request: ProfileGithubProcessRequest = { executable: 'git', args: [], cwd: 'C:\\fetched', environment: {}, stdin: 'ignore', timeoutMilliseconds: 2, terminationGraceMilliseconds: 2, maxStdoutBytes: 4, maxStderrBytes: 4 };
+  function child(closeOnKill: boolean) {
+    const value = new EventEmitter() as ChildProcess;
+    Object.assign(value, { pid: 123, stdout: new EventEmitter(), stderr: new EventEmitter(), kill: () => { if (closeOnKill) queueMicrotask(() => value.emit('close', 0)); return true; } });
+    return value;
+  }
+  it('reports the forwarded parent signal and removes every installed listener after settlement', async () => {
+    const signals = ['SIGHUP', 'SIGINT', 'SIGTERM'] as const;
+    const before = new Map(signals.map((signal) => [signal, new Set(process.listeners(signal))]));
+    const value = child(true);
+    const pending = runBoundedProfileGithubProcess({ ...request, timeoutMilliseconds: 1000 }, { posixProcessGroups: false, spawnProcess: (() => value) as typeof spawn });
+    const handler = process.listeners('SIGINT').find((listener) => !before.get('SIGINT')!.has(listener));
+    expect(handler).toBeDefined(); handler!('SIGINT');
+    expect(await pending).toMatchObject({ failure: 'parent-signal', signal: 'SIGINT', uncertainTermination: true });
+    for (const signal of signals) expect(process.listeners(signal).filter((listener) => !before.get(signal)!.has(listener))).toEqual([]);
+  });
+  it.each([true, false])('retains uncertainty after timeout; closeOnKill=%s', async (closeOnKill) => {
+    const value = child(closeOnKill);
+    const result = await runBoundedProfileGithubProcess(request, { posixProcessGroups: false, spawnProcess: (() => value) as typeof spawn });
+    expect(result).toMatchObject({ failure: 'timeout', uncertainTermination: true });
+  });
+  it.each(['stdout', 'stderr'])('bounds %s and cannot call immediate-child kill tree settlement', async (stream) => {
+    const value = child(true);
+    const pending = runBoundedProfileGithubProcess({ ...request, timeoutMilliseconds: 1000 }, { posixProcessGroups: false, spawnProcess: (() => value) as typeof spawn });
+    value[stream as 'stdout' | 'stderr']!.emit('data', Buffer.from('12345'));
+    expect(await pending).toMatchObject({ failure: `${stream}-overflow`, uncertainTermination: true, stdout: '', stderr: '' });
+  });
+  it('awaits final monitoring and rejects its failure', async () => {
+    const value = child(true); let reject!: (error: Error) => void;
+    const pending = runBoundedProfileGithubProcess({ ...request, monitor: () => new Promise<void>((_resolve, no) => { reject = no; }) }, { posixProcessGroups: false, spawnProcess: (() => value) as typeof spawn });
+    value.emit('close', 0);
+    reject(new Error('monitor rejected'));
+    expect(await pending).toMatchObject({ failure: 'monitor-failure', monitorError: { message: 'monitor rejected' } });
+  });
+
+  it.each(['git', 'gh'] as const)('honors case-insensitive Windows %s override and rejects conflicting spellings', async (name) => {
+    const launches: string[] = [];
+    const launch = { posixProcessGroups: false, spawnProcess: ((executable: string) => { launches.push(executable); const value = child(false); queueMicrotask(() => value.emit('close', 0)); return value; }) as typeof spawn };
+    const effects = { async executable() { return true; }, async canonical(path: string) { return path; }, async readShim() { throw new Error('unexpected'); } };
+    const key = `BAZFRAME_${name.toUpperCase()}_COMMAND`, selected = 'C:\\chosen\\custom.exe';
+    const options = { cwd: 'C:\\caller', platform: 'win32' as const, effects, environment: { Path: 'C:\\tools', [key.toLowerCase()]: selected } };
+    expect(await createResolvedProfileGithubProcess(options, launch)({ ...request, executable: name, timeoutMilliseconds: 1000 })).toMatchObject({ status: 0 });
+    expect(launches).toEqual([selected]);
+    const conflict = createResolvedProfileGithubProcess({ ...options, environment: { ...options.environment, [key]: 'C:\\other.exe' } }, launch);
+    expect(await conflict({ ...request, executable: name })).toMatchObject({ failure: 'spawn', error: { code: 'EXECUTABLE_RESOLUTION_FAILED' } });
+    expect(launches).toEqual([selected]);
+  });
+  it('retains legal POSIX backslashes in the explicitly trusted gh helper path', async () => {
+    let args: readonly string[] = [];
+    const runner = createResolvedProfileGithubProcess({ cwd: '/caller', platform: 'linux', environment: { PATH: '/tools', BAZFRAME_GH_COMMAND: '/tools/back\\slash/gh' }, effects: { async executable() { return true; }, async canonical(path) { return path; }, async readShim() { throw new Error('unexpected'); } } }, { posixProcessGroups: false, spawnProcess: ((_executable: string, input: readonly string[]) => { args = input; const value = child(false); queueMicrotask(() => value.emit('close', 0)); return value; }) as typeof spawn });
+    expect(await runner({ ...request, args: ['-c', 'credential.helper=!gh auth git-credential'], timeoutMilliseconds: 1000 })).toMatchObject({ status: 0 });
+    expect(args).toEqual(['-c', "credential.helper=!'/tools/back\\slash/gh' auth git-credential"]);
+  });
+  it('freezes controlled tools and quotes the trusted gh helper, never selecting fetched executables', async () => {
+    const launches: Array<{ executable: string; args: readonly string[] }> = [];
+    const runner = createResolvedProfileGithubProcess({ cwd: 'C:\\caller', environment: { Path: '.;C:\\fetched;C:\\Tools Dir' }, platform: 'win32', excludedRoots: ['C:\\fetched'], effects: { async executable() { return true; }, async canonical(path) { return path; }, async readShim() { throw new Error('unexpected'); } } }, { posixProcessGroups: false, spawnProcess: ((executable: string, args: readonly string[]) => { launches.push({ executable, args }); const value = child(false); queueMicrotask(() => value.emit('close', 0)); return value; }) as typeof spawn });
+    const result = await runner({ ...request, args: ['-c', 'credential.helper=!gh auth git-credential'], timeoutMilliseconds: 1000 });
+    expect(result).toMatchObject({ status: 0 }); expect(result.failure).toBeUndefined();
+    expect(launches).toEqual([{ executable: 'C:\\Tools Dir\\git.exe', args: ['-c', "credential.helper=!'C:/Tools Dir/gh.exe' auth git-credential"] }]);
   });
 });

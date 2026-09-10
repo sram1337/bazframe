@@ -5,6 +5,21 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { BazframeError, errorCode } from '../core/errors.js';
 import { readAtMostOneBeyond } from '../state/bounded-file-read.js';
 
+/** Disjoint from the decimal POSIX V1 wire identity; never numerically coerced. */
+export type WindowsPhysicalIdentityText = `win32-ntfs:${string}:${string}`;
+export function isPosixPhysicalIdentityText(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9]+:[0-9]+$/u.test(value);
+}
+export function isWindowsPhysicalIdentityText(value: unknown): value is WindowsPhysicalIdentityText {
+  return typeof value === 'string' && /^win32-ntfs:[0-9a-f]{16}:[0-9a-f]{32}$/u.test(value);
+}
+export function windowsPhysicalIdentityText(volumeIdentity: string, fileId: string): WindowsPhysicalIdentityText {
+  if (typeof volumeIdentity !== 'string' || typeof fileId !== 'string' || !/^[0-9a-f]{16}$/u.test(volumeIdentity) || !/^[0-9a-f]{32}$/u.test(fileId)) {
+    throw new BazframeError('PROFILE_PHYSICAL_IDENTITY_INVALID', 'Invalid Windows physical identity.');
+  }
+  return `win32-ntfs:${volumeIdentity}:${fileId}`;
+}
+
 export interface PhysicalIdentity { device: bigint; inode: bigint }
 export interface StableDirectory {
   path: string;

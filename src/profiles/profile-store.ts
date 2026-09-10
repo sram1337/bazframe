@@ -1,3 +1,4 @@
+import { readSkillDeclaredName } from '../skills/skill-metadata.js';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { join } from 'node:path';
@@ -42,7 +43,7 @@ export async function loadProfile(
 ): Promise<Profile> {
   const directory = profileDirectory(bazframeHome, profileId);
   if (options.platformServices !== undefined) {
-    return loadWindowsProfile(bazframeHome, profileId, directory, options.platformServices);
+    return loadWindowsProfile(bazframeHome, profileId, (options.platformServices.joinPath ?? join)(bazframeHome, 'profiles', profileId), options.platformServices);
   }
   let metadata;
   try {
@@ -89,6 +90,7 @@ async function loadWindowsProfile(
   directory: string,
   platformServices: AddedSkillPlatformServices
 ): Promise<Profile> {
+  const pathJoin = platformServices.joinPath ?? join;
   try {
     platformServices.inspectPrivateDirectory(directory);
   } catch (error) {
@@ -104,13 +106,13 @@ async function loadWindowsProfile(
       { cause: error }
     );
   }
-  const instructionsPath = join(directory, 'AGENTS.md');
+  const instructionsPath = pathJoin(directory, 'AGENTS.md');
   const instructions = await platformServices.readStableUtf8File(
     instructionsPath,
     `Profile ${JSON.stringify(profileId)} instructions`,
     MAX_EFFECTIVE_INSTRUCTION_BYTES
   );
-  const skillsRoot = join(directory, 'skills');
+  const skillsRoot = pathJoin(directory, 'skills');
   let enumeration;
   try {
     enumeration = await platformServices.enumeratePrivateDirectory(
@@ -132,8 +134,16 @@ async function loadWindowsProfile(
     if (!isSafeSkillId(skillId)) {
       throw new BazframeError(
         'SKILL_READ_FAILED',
-        `Could not inspect unsafe profile skill candidate: ${join(skillsRoot, skillId)}`
+        `Could not inspect unsafe profile skill candidate: ${pathJoin(skillsRoot, skillId)}`
       );
+    }
+    const entry = enumeration.entries.find((item) => item.name === skillId);
+    if (entry?.directory === true && entry.reparseTag === null) {
+      const local = pathJoin(skillsRoot, skillId);
+      const before = platformServices.inspectPrivateDirectory(local);
+      if (await readSkillDeclaredName(local, platformServices) !== skillId || platformServices.inspectPrivateDirectory(local).identity !== before.identity) throw new BazframeError('SKILL_READ_FAILED', 'Physical profile-local Skill changed or declares another name.');
+      skillDirectories.push(local);
+      continue;
     }
     let registration;
     try {
@@ -151,7 +161,7 @@ async function loadWindowsProfile(
     } catch (error) {
       throw new BazframeError(
         'SKILL_READ_FAILED',
-        `Could not prove catalog-backed profile skill candidate: ${join(skillsRoot, skillId)}${formatErrorCode(error)}`,
+        `Could not prove catalog-backed profile skill candidate: ${pathJoin(skillsRoot, skillId)}${formatErrorCode(error)}`,
         { cause: error }
       );
     }

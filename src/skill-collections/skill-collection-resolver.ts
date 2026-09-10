@@ -1,6 +1,6 @@
 import { lstat, readdir, realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { loadSkillsFromDir, type Skill } from '@earendil-works/pi-coding-agent';
+import { loadSkillsFromDir, parseFrontmatter, type Skill } from '@earendil-works/pi-coding-agent';
 import { BazframeError, errorCode } from '../core/errors.js';
 import {
   readProfileCollectionReference,
@@ -20,23 +20,62 @@ import {
 } from './skill-collection-store.js';
 import { resolvePhysicalRelativeDirectory, verifySkillSnapshot } from './skill-snapshot.js';
 
+export interface SkillCollectionResolverEffects {
+  joinPath: typeof join;
+  dirname: typeof dirname;
+  basename(path: string): string;
+  canonical(path: string): Promise<string>;
+  within(root: string, child: string): boolean;
+  stat(path: string): Promise<{ isDirectory(): boolean; isFile(): boolean; isSymbolicLink(): boolean }>;
+  enumerate(path: string, maximum: number): Promise<string[]>;
+  verifySnapshot: typeof verifySkillSnapshot;
+  resolveDirectory: typeof resolvePhysicalRelativeDirectory;
+  readCollection: typeof readCollection;
+  scanCollections: typeof scanGlobalSkillCollections;
+  references: import('../profiles/profile-skill-collection-reference.js').ProfileCollectionReferenceEffects;
+  definitionLoader: DefinitionLoader;
+}
+
 export const SKILL_COLLECTION_LIMITS = Object.freeze({ depth: 8, entries: 256, skills: 64 });
 export const UNKNOWN_COLLECTION_ID = '<unknown>';
 
-export interface FlatSkillIdentity { name: string; definitionPath: string; }
+export interface RuntimeSkillMetadata { name: string; description: string; filePath: string; baseDir: string; disableModelInvocation: boolean }
+export interface FlatSkillIdentity { name: string; definitionPath: string; loaded?: unknown; }
 export function loadFlatSkillIdentities(skillDirectories: readonly string[]): FlatSkillIdentity[] {
   return skillDirectories.map((directory) => {
     const definitionPath = join(directory, SKILL_DEFINITION);
     let loaded: ReturnType<typeof loadSkillsFromDir>;
     try { loaded = loadSkillsFromDir({ dir: directory, source: 'bazframe-profile' }); }
     catch (error) { throw invalidFlatSkill(directory, [], error); }
-    const hasLoaderError = loaded.diagnostics.some((diagnostic) => diagnostic.type === 'error');
-    const skill = loaded.skills.length === 1 ? loaded.skills[0] : undefined;
-    if (hasLoaderError || skill === undefined || skill.baseDir !== directory || skill.filePath !== definitionPath) {
-      throw invalidFlatSkill(directory, loaded.diagnostics.map((diagnostic) => diagnostic.message));
-    }
-    return { name: skill.name, definitionPath: skill.filePath };
+    return validatedFlatSkill(directory, definitionPath, {
+      skills: loaded.skills.map((skill) => ({ ...skill, definitionPath: skill.filePath })),
+      diagnostics: loaded.diagnostics
+    });
   });
+}
+
+/** Preserve the flat loader result contract with bounded platform definition reads. */
+export async function loadFlatSkillIdentitiesWithEffects(
+  skillDirectories: readonly string[],
+  effects: Pick<SkillCollectionResolverEffects, 'joinPath' | 'definitionLoader'>
+): Promise<FlatSkillIdentity[]> {
+  const result: FlatSkillIdentity[] = [];
+  for (const directory of skillDirectories) {
+    const definitionPath = effects.joinPath(directory, SKILL_DEFINITION);
+    let loaded: DefinitionLoaderResult;
+    try { loaded = await effects.definitionLoader(directory, definitionPath); }
+    catch (error) { throw invalidFlatSkill(directory, [], error); }
+    result.push(validatedFlatSkill(directory, definitionPath, loaded));
+  }
+  return result;
+}
+function validatedFlatSkill(directory: string, definitionPath: string, loaded: DefinitionLoaderResult): FlatSkillIdentity {
+  const skill = loaded.skills.length === 1 ? loaded.skills[0] : undefined;
+  if (loaded.diagnostics.some((diagnostic) => diagnostic.type === 'error')
+    || skill === undefined || skill.baseDir !== directory || skill.definitionPath !== definitionPath) {
+    throw invalidFlatSkill(directory, loaded.diagnostics.map((diagnostic) => diagnostic.message));
+  }
+  return { name: skill.name, definitionPath: skill.definitionPath, ...(skill.loaded === undefined ? {} : { loaded: skill.loaded }) };
 }
 
 export interface DirectSkillCollection {
@@ -85,7 +124,8 @@ class SkillCollectionFailure extends Error {
   constructor(diagnostic: SkillCollectionDiagnostic | SkillCollectionDiagnostic[]) { super('skill collection resolution failed'); this.diagnostic = diagnostic; }
 }
 
-function homeForProfile(profileDirectory: string): string {
+function homeForProfile(profileDirectory: string, effects?: SkillCollectionResolverEffects): string {
+  if (effects !== undefined) return effects.dirname(effects.dirname(profileDirectory));
   const profileParent = dirname(profileDirectory);
   return profileParent.endsWith(`${sep}profiles`) ? dirname(profileParent) : profileParent;
 }
@@ -122,21 +162,23 @@ function directFromRecord(record: SkillCollectionRecord, referencePath: string, 
 
 export async function inspectGlobalSkillCollections<T = unknown>(
   bazframeHome: string,
-  definitionLoader: DefinitionLoader<T> = defaultDefinitionLoader as unknown as DefinitionLoader<T>
+  definitionLoader: DefinitionLoader<T> = defaultDefinitionLoader as unknown as DefinitionLoader<T>,
+  effects?: SkillCollectionResolverEffects
 ): Promise<{ collections: GlobalSkillCollectionInspection<T>[]; diagnostics: SkillCollectionDiagnostic[] }> {
-  const namespace = await scanGlobalSkillCollections(bazframeHome);
+  if (effects !== undefined) definitionLoader = effects.definitionLoader as DefinitionLoader<T>;
+  const namespace = await (effects?.scanCollections ?? scanGlobalSkillCollections)(bazframeHome);
   const diagnostics: SkillCollectionDiagnostic[] = namespace.diagnostics.map((item) => ({
     category: 'invalid-collection', collectionKind: item.key.kind, collectionId: item.key.id, path: item.path
   }));
   const collections: GlobalSkillCollectionInspection<T>[] = [];
   for (const item of namespace.records) {
     try {
-      const record = await readCollection(bazframeHome, item.key);
-      const rebuild = await rebuildAvailability(record.root);
+      const record = await (effects?.readCollection ?? readCollection)(bazframeHome, item.key);
+      const rebuild = await rebuildAvailability(record.root, effects);
       const direct = directFromRecord(record, item.path, item.relativePath, rebuild);
       let skills: DerivedSkill<T>[] = [];
       const collectionDiagnostics: SkillCollectionDiagnostic[] = [];
-      try { skills = await resolveOneCollection(direct, definitionLoader, bazframeHome); }
+      try { skills = await resolveOneCollection(direct, definitionLoader, bazframeHome, effects); }
       catch (error) {
         if (error instanceof SkillCollectionFailure) collectionDiagnostics.push(...(Array.isArray(error.diagnostic) ? error.diagnostic : [error.diagnostic]));
         else collectionDiagnostics.push(baseDiagnostic('io-error', direct, '.'));
@@ -150,13 +192,15 @@ export async function inspectGlobalSkillCollections<T = unknown>(
 export async function resolveGlobalSkillCollection<T = unknown>(
   bazframeHome: string,
   record: SkillCollectionRecord,
-  definitionLoader: DefinitionLoader<T> = defaultDefinitionLoader as unknown as DefinitionLoader<T>
+  definitionLoader: DefinitionLoader<T> = defaultDefinitionLoader as unknown as DefinitionLoader<T>,
+  effects?: SkillCollectionResolverEffects
 ): Promise<DerivedSkill<T>[]> {
+  if (effects !== undefined) definitionLoader = effects.definitionLoader as DefinitionLoader<T>;
   try {
     return await resolveOneCollection(
       directFromRecord(record, '', `${idForRecord(record)}.json`),
       definitionLoader,
-      bazframeHome
+      bazframeHome, effects
     );
   } catch (error) {
     if (error instanceof SkillCollectionFailure) throw invalidCollectionCandidate(error);
@@ -167,11 +211,13 @@ export async function resolveGlobalSkillCollection<T = unknown>(
 export async function resolveProfileSkillCollections<T = unknown>(
   profileDirectory: string,
   flatSkills: readonly FlatSkillIdentity[],
-  definitionLoader: DefinitionLoader<T> = defaultDefinitionLoader as unknown as DefinitionLoader<T>
+  definitionLoader: DefinitionLoader<T> = defaultDefinitionLoader as unknown as DefinitionLoader<T>,
+  effects?: SkillCollectionResolverEffects
 ): Promise<ProfileSkillCollectionComposition<T>> {
-  const bazframeHome = homeForProfile(profileDirectory);
-  const profileId = profileDirectory.split(sep).at(-1)!;
-  const namespace = await scanProfileCollectionReferences(bazframeHome, profileId);
+  if (effects !== undefined) definitionLoader = effects.definitionLoader as DefinitionLoader<T>;
+  const bazframeHome = homeForProfile(profileDirectory, effects);
+  const profileId = effects?.basename(profileDirectory) ?? profileDirectory.split(sep).at(-1)!;
+  const namespace = await scanProfileCollectionReferences(bazframeHome, profileId, effects?.references);
   const directCollections: DirectSkillCollection[] = [];
   const candidates: CandidateCollection<T>[] = [];
   const diagnostics: SkillCollectionDiagnostic[] = namespace.diagnostics.map((item) => ({
@@ -184,7 +230,7 @@ export async function resolveProfileSkillCollections<T = unknown>(
     return { directCollections: [], derivedSkills: [], diagnostics: sortDiagnostics(diagnostics) };
   }
   for (const item of namespace.references) {
-    try { await readProfileCollectionReference(bazframeHome, profileId, item.key); }
+    try { await readProfileCollectionReference(bazframeHome, profileId, item.key, effects?.references); }
     catch {
       diagnostics.push({ category: 'invalid-reference', collectionKind: item.key.kind, collectionId: item.key.id, path: item.relativePath });
     }
@@ -201,14 +247,14 @@ export async function resolveProfileSkillCollections<T = unknown>(
     );
     directCollections.push(referenceDirect);
     let record: SkillCollectionRecord;
-    try { record = await readCollection(bazframeHome, item.key); }
+    try { record = await (effects?.readCollection ?? readCollection)(bazframeHome, item.key); }
     catch {
       diagnostics.push({ category: 'invalid-collection', collectionKind: item.key.kind, collectionId: item.key.id, path: item.relativePath });
       continue;
     }
-    const direct = directFromRecord(record, item.path, item.relativePath, await rebuildAvailability(record.root));
+    const direct = directFromRecord(record, item.path, item.relativePath, await rebuildAvailability(record.root, effects));
     directCollections[directCollections.length - 1] = direct;
-    try { candidates.push({ direct, skills: await resolveOneCollection(direct, definitionLoader, bazframeHome) }); }
+    try { candidates.push({ direct, skills: await resolveOneCollection(direct, definitionLoader, bazframeHome, effects) }); }
     catch (error) {
       direct.preparationState = 'failed';
       if (error instanceof SkillCollectionFailure) {
@@ -257,8 +303,8 @@ function composeCandidates<T>(directCollections: DirectSkillCollection[], candid
   };
 }
 
-async function rebuildAvailability(collectionRoot: string): Promise<'available' | 'unavailable'> {
-  try { const metadata = await lstat(collectionRoot); return !metadata.isSymbolicLink() && metadata.isDirectory() && await realpath(collectionRoot) === collectionRoot ? 'available' : 'unavailable'; }
+async function rebuildAvailability(collectionRoot: string, effects?: SkillCollectionResolverEffects): Promise<'available' | 'unavailable'> {
+  try { const metadata = await (effects?.stat ?? lstat)(collectionRoot); return !metadata.isSymbolicLink() && metadata.isDirectory() && await (effects?.canonical ?? realpath)(collectionRoot) === collectionRoot ? 'available' : 'unavailable'; }
   catch { return 'unavailable'; }
 }
 
@@ -266,11 +312,13 @@ export async function validateProspectiveSkillCollection<T = unknown>(
   profileDirectory: string,
   flatSkills: readonly FlatSkillIdentity[],
   candidate: DirectSkillCollection,
-  definitionLoader: DefinitionLoader<T> = defaultDefinitionLoader as unknown as DefinitionLoader<T>
+  definitionLoader: DefinitionLoader<T> = defaultDefinitionLoader as unknown as DefinitionLoader<T>,
+  effects?: SkillCollectionResolverEffects
 ): Promise<DerivedSkill<T>[]> {
-  const bazframeHome = homeForProfile(profileDirectory);
+  if (effects !== undefined) definitionLoader = effects.definitionLoader as DefinitionLoader<T>;
+  const bazframeHome = homeForProfile(profileDirectory, effects);
   let skills: DerivedSkill<T>[];
-  try { skills = await resolveOneCollection(candidate, definitionLoader, bazframeHome); }
+  try { skills = await resolveOneCollection(candidate, definitionLoader, bazframeHome, effects); }
   catch (error) {
     if (error instanceof SkillCollectionFailure) throw invalidCollectionCandidate(error);
     throw error;
@@ -278,22 +326,22 @@ export async function validateProspectiveSkillCollection<T = unknown>(
   const ownNames = new Map<string, number>();
   for (const skill of skills) ownNames.set(skill.name, (ownNames.get(skill.name) ?? 0) + 1);
   const occupied = new Set(flatSkills.map((skill) => skill.name));
-  for (const skill of await structurallyValidExistingSkills(profileDirectory, collectionKey(candidate.collectionKind, candidate.collectionId), definitionLoader, bazframeHome)) occupied.add(skill.name);
+  for (const skill of await structurallyValidExistingSkills(profileDirectory, collectionKey(candidate.collectionKind, candidate.collectionId), definitionLoader, bazframeHome, effects)) occupied.add(skill.name);
   const conflict = skills.find((skill) => (ownNames.get(skill.name) ?? 0) > 1 || occupied.has(skill.name));
   if (conflict !== undefined) throw new BazframeError('SKILL_COLLECTION_CANDIDATE_DUPLICATE', `Candidate ${candidate.collectionKind} Skill name conflicts with the prospective profile: ${conflict.name}`);
   return skills;
 }
 
-async function structurallyValidExistingSkills<T>(profileDirectory: string, excludedCollectionKey: string, loader: DefinitionLoader<T>, bazframeHome: string): Promise<DerivedSkill<T>[]> {
-  const profileId = profileDirectory.split(sep).at(-1)!;
-  const namespace = await scanProfileCollectionReferences(bazframeHome, profileId);
+async function structurallyValidExistingSkills<T>(profileDirectory: string, excludedCollectionKey: string, loader: DefinitionLoader<T>, bazframeHome: string, effects?: SkillCollectionResolverEffects): Promise<DerivedSkill<T>[]> {
+  const profileId = effects?.basename(profileDirectory) ?? profileDirectory.split(sep).at(-1)!;
+  const namespace = await scanProfileCollectionReferences(bazframeHome, profileId, effects?.references);
   const skills: DerivedSkill<T>[] = [];
   for (const item of namespace.references) {
     if (collectionKey(item.key.kind, item.key.id) === excludedCollectionKey) continue;
     try {
-      await readProfileCollectionReference(bazframeHome, profileId, item.key);
-      const record = await readCollection(bazframeHome, item.key);
-      skills.push(...await resolveOneCollection(directFromRecord(record, item.path, item.relativePath), loader, bazframeHome));
+      await readProfileCollectionReference(bazframeHome, profileId, item.key, effects?.references);
+      const record = await (effects?.readCollection ?? readCollection)(bazframeHome, item.key);
+      skills.push(...await resolveOneCollection(directFromRecord(record, item.path, item.relativePath), loader, bazframeHome, effects));
     } catch { /* unrelated failures do not block activation */ }
   }
   return skills;
@@ -302,7 +350,8 @@ async function structurallyValidExistingSkills<T>(profileDirectory: string, excl
 async function resolveOneCollection<T>(
   direct: DirectSkillCollection,
   loader: DefinitionLoader<T>,
-  bazframeHome: string
+  bazframeHome: string,
+  effects?: SkillCollectionResolverEffects
 ): Promise<DerivedSkill<T>[]> {
   let root: string;
   if (direct.snapshotDigest === undefined || direct.skillsRoot === undefined) {
@@ -314,18 +363,18 @@ async function resolveOneCollection<T>(
     });
   }
   try {
-    const snapshot = await verifySkillSnapshot(bazframeHome, direct.snapshotDigest);
-    root = await resolvePhysicalRelativeDirectory(snapshot.artifactPath, direct.skillsRoot);
+    const snapshot = await (effects?.verifySnapshot ?? verifySkillSnapshot)(bazframeHome, direct.snapshotDigest);
+    root = await (effects?.resolveDirectory ?? resolvePhysicalRelativeDirectory)(snapshot.artifactPath, direct.skillsRoot);
   } catch {
     fail(baseDiagnostic('broken-snapshot', direct, '.'));
   }
   let rootMetadata;
   try {
-    rootMetadata = await lstat(root);
+    rootMetadata = await (effects?.stat ?? lstat)(root);
     if (rootMetadata.isSymbolicLink() || !rootMetadata.isDirectory()) {
       fail(baseDiagnostic('broken-root', direct, '.'));
     }
-    const canonical = await realpath(root);
+    const canonical = await (effects?.canonical ?? realpath)(root);
     if (canonical !== root) fail(baseDiagnostic('broken-root', direct, '.'));
   } catch (error) {
     if (error instanceof SkillCollectionFailure) throw error;
@@ -334,22 +383,22 @@ async function resolveOneCollection<T>(
 
   let entries = 0;
   let skills = 0;
-  const rootHasDefinition = await hasPhysicalRootDefinition(root, direct);
+  const rootHasDefinition = await hasPhysicalRootDefinition(root, direct, effects);
   const candidates: DerivedSkill<T>[] = [];
 
   async function visit(directory: string, relativeDirectory: string, depth: number): Promise<void> {
     let names: string[];
     try {
-      names = (await readdir(directory)).sort(compare);
+      names = (effects === undefined ? await readdir(directory) : await effects.enumerate(directory, SKILL_COLLECTION_LIMITS.entries)).sort(compare);
     } catch {
       fail(baseDiagnostic('io-error', direct, relativeDirectory));
     }
     for (const name of names) {
       const path = relativeDirectory === '.' ? name : `${relativeDirectory}/${name}`;
-      const absolute = join(directory, name);
+      const absolute = (effects?.joinPath ?? join)(directory, name);
       let metadata;
       try {
-        metadata = await lstat(absolute);
+        metadata = await (effects?.stat ?? lstat)(absolute);
       } catch {
         fail(baseDiagnostic('io-error', direct, path));
       }
@@ -370,8 +419,8 @@ async function resolveOneCollection<T>(
         fail(baseDiagnostic('unsupported-entry', direct, path));
       }
       try {
-        const canonical = await realpath(absolute);
-        if (canonical !== resolve(absolute) || !isWithin(canonical, root)) {
+        const canonical = await (effects?.canonical ?? realpath)(absolute);
+        if (effects === undefined ? canonical !== resolve(absolute) || !isWithin(canonical, root) : canonical !== absolute || !effects.within(root, canonical)) {
           fail(baseDiagnostic('io-error', direct, path));
         }
       } catch (error) {
@@ -441,15 +490,27 @@ async function resolveOneCollection<T>(
 
 async function hasPhysicalRootDefinition(
   root: string,
-  direct: DirectSkillCollection
+  direct: DirectSkillCollection,
+  effects?: SkillCollectionResolverEffects
 ): Promise<boolean> {
   try {
-    const metadata = await lstat(join(root, SKILL_DEFINITION));
+    const metadata = await (effects?.stat ?? lstat)((effects?.joinPath ?? join)(root, SKILL_DEFINITION));
     return !metadata.isSymbolicLink() && metadata.isFile();
   } catch (error) {
     if (errorCode(error) === 'ENOENT') return false;
     fail(baseDiagnostic('io-error', direct, SKILL_DEFINITION));
   }
+}
+
+/** Byte-read adapter for the declared SKILL.md subset of Pi's loader contract. */
+export function createPhysicalSkillDefinitionLoader(read: (path: string, maximum: number) => Promise<Buffer>, basename: (path: string) => string, parse = parseFrontmatter): DefinitionLoader<RuntimeSkillMetadata> {
+  return async (baseDir, definitionPath) => {
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(await read(definitionPath, 1024 * 1024));
+    const { frontmatter } = parse<{ name?: unknown; description?: unknown; 'disable-model-invocation'?: unknown }>(text);
+    if (typeof frontmatter.description !== 'string' || frontmatter.description.trim() === '') return { skills: [], diagnostics: [{ type: 'warning', message: 'description is required' }] };
+    const name = typeof frontmatter.name === 'string' && frontmatter.name !== '' ? frontmatter.name : basename(baseDir);
+    return { skills: [{ name, baseDir, definitionPath, loaded: { name, baseDir, filePath: definitionPath, description: frontmatter.description, disableModelInvocation: frontmatter['disable-model-invocation'] === true } }], diagnostics: frontmatter.description.length > 1024 ? [{ type: 'warning', message: 'description exceeds 1024 characters' }] : [] };
+  };
 }
 
 async function defaultDefinitionLoader(

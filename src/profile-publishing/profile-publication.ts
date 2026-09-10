@@ -1,10 +1,11 @@
+import { defaultProfileLifecycleServices, type ProfileLifecycleServices, type PublicationLifecycleJournal } from './profile-lifecycle-services.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { lstat, mkdir, open, rename, symlink } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { BazframeError, errorCode } from '../core/errors.js';
 import { encodeProfileCollectionReference } from '../profiles/profile-skill-collection-reference.js';
 import { assertSafeProfileId } from '../profiles/profile-id.js';
-import { profileDirectory, readActiveProfile, readOptionalActiveProfileSnapshot, type ActiveProfileSnapshot } from '../profiles/profile-store.js';
+import { profileDirectory, readOptionalActiveProfileSnapshot, type ActiveProfileSnapshot } from '../profiles/profile-store.js';
 import { readDefaultSkillRegistrationLink } from '../skills/default-skill-catalog.js';
 import { ensureManagedDirectory } from '../state/atomic-file.js';
 import { withStateLock } from '../state/lock.js';
@@ -19,7 +20,7 @@ import {
   type CapturedResource,
   type Sha256
 } from './captured-profile.js';
-import { readOptionalManagedProfileState, writeCandidateManagedProfileState } from './managed-profile-state.js';
+import { writeCandidateManagedProfileState } from './managed-profile-state.js';
 import {
   assertPhysicalProfileExpectation,
   capturePhysicalCandidateExpectation,
@@ -38,7 +39,6 @@ import {
 import {
   assertOperationMutationAuthority,
   operationAuthorityTransactionId,
-  withProfileOperationLocks,
   type OperationMutationAuthority
 } from './profile-operation-lock.js';
 import { captureProfile, isExcludedCapturedResourcePath, type ProfileCaptureSnapshot } from './profile-capture.js';
@@ -47,7 +47,7 @@ import type { ProfileGithubGitBlob, ProfileGithubPublicationEffects, ProfileGith
 import { encodeManagedProfileState, type CapturedResourceIdBinding, type ManagedProfileStateV1, type PublicationState } from './publication-state.js';
 import { noProfileLifecycleMutationEffects, type ProfileLifecycleMutationEffects } from './profile-lifecycle-effects.js';
 import { capturedProfileLimitPolicy } from './profile-publishing-policy.js';
-import { newTransactionId, writeTransactionJournal, type PublicationJournalV1, type PublicationPhase } from './transaction-journal.js';
+import { newTransactionId, type PublicationJournalV1, type PublicationPhase } from './transaction-journal.js';
 
 export type PublishConfirmation = 'publish-preview' | 'public-visibility';
 
@@ -89,15 +89,17 @@ export interface PublishManagedProfileResult {
   transactionId: string;
 }
 
-export async function publishManagedProfile(options: PublishManagedProfileOptions, adapter: ProfilePublicationAdapter): Promise<PublishManagedProfileResult> {
-  const profileName = options.profileName ?? await readActiveProfile(options.home);
+export async function publishManagedProfile(options: PublishManagedProfileOptions, adapter: ProfilePublicationAdapter, services: ProfileLifecycleServices = defaultProfileLifecycleServices): Promise<PublishManagedProfileResult> {
+  const profileName = options.profileName ?? (await services.readSelection(options.home))?.profileId;
+  if (profileName === undefined) throw invalid('active profile is absent');
   assertSafeProfileId(profileName);
   const desiredVisibility = options.visibility ?? 'preserve';
-  const initialExpectation = await capturePhysicalProfileExpectation(options.home, profileName);
-  const initialState = await readOptionalManagedProfileState(options.home, profileName);
+  const initialExpectation = await services.capture(options.home, profileName);
+  if (initialExpectation === undefined) throw changed();
+  const initialState = await services.readManagedState(options.home, profileName);
   if ((initialState?.sha256 ?? null) !== initialExpectation.sidecarSha256) throw changed();
-  const captured = await captureProfile({ bazframeHome: options.home, profileId: profileName, bundleRemote: options.bundleRemote === true });
-  await assertPhysicalProfileExpectation(options.home, profileName, initialExpectation);
+  const captured = await (services.publication?.capture ?? captureProfile)({ bazframeHome: options.home, profileId: profileName, bundleRemote: options.bundleRemote === true });
+  await assertPublicationExpectation(services, options.home, profileName, initialExpectation);
   if (!captured.complete) throw new BazframeError('PROFILE_PUBLISH_INCOMPLETE', 'Incomplete profiles cannot be published; repair missing resources first.');
   const captureSha256 = sha256(captured.manifestBytes);
   const linked = initialState?.state.publication ?? null;
@@ -118,16 +120,17 @@ export async function publishManagedProfile(options: PublishManagedProfileOption
   if (options.yes !== true && await options.authorize?.(confirmations, captured.preview) !== true) {
     throw new BazframeError('PROFILE_PUBLISH_CONFIRMATION_REQUIRED', 'Profile publication requires confirmation of the exact preview.');
   }
-  await assertPhysicalProfileExpectation(options.home, profileName, initialExpectation);
+  await assertPublicationExpectation(services, options.home, profileName, initialExpectation);
   const transactionId = newTransactionId();
-  return withProfileOperationLocks(options.home, [profileName, '@store'], (authority) => publishWithAuthority({
-    options, adapter, profileName, desiredVisibility, captured, captureSha256, initialExpectation,
+  return services.withOperationLocks(options.home, [profileName, '@store'], (authority) => publishWithAuthority({
+    options, adapter, services, profileName, desiredVisibility, captured, captureSha256, initialExpectation,
     previousState: initialState?.state, linked, source, repositoryBefore, authority
   }), transactionId);
 }
 
 async function publishWithAuthority(context: {
   options: PublishManagedProfileOptions;
+  services: ProfileLifecycleServices;
   adapter: ProfilePublicationAdapter;
   profileName: string;
   desiredVisibility: 'preserve' | 'private' | 'public';
@@ -141,13 +144,14 @@ async function publishWithAuthority(context: {
   authority: OperationMutationAuthority;
 }): Promise<PublishManagedProfileResult> {
   const transactionId = operationAuthorityTransactionId(context.authority);
-  await assertPhysicalProfileExpectation(context.options.home, context.profileName, context.initialExpectation);
-  let journal: PublicationJournalV1 = {
-    schemaVersion: 1,
+  const services = context.services;
+  await assertPublicationExpectation(services, context.options.home, context.profileName, context.initialExpectation);
+  let journal = {
+    ...services.header,
     kind: 'publication',
     transactionId,
     profileName: context.profileName,
-    expectedProfile: persistedExpectation(context.initialExpectation),
+    expectedProfile: services.proof(context.initialExpectation),
     origin: context.source.origin,
     expectedBaseCommit: context.linked?.installedCommit ?? null,
     capturedManifestSha256: context.captureSha256,
@@ -157,10 +161,10 @@ async function publishWithAuthority(context: {
     repositoryId: context.repositoryBefore?.repositoryId ?? null,
     observedCommit: null,
     phase: 'INTENT'
-  };
-  journal = await writeTransactionJournal(context.options.home, context.authority, journal);
-  const advance = async (phase: PublicationPhase, updates: Partial<PublicationJournalV1> = {}): Promise<void> => {
-    journal = await writeTransactionJournal(context.options.home, context.authority, { ...journal, ...updates, phase } as PublicationJournalV1);
+  } as PublicationLifecycleJournal;
+  journal = await services.writeJournal(context.options.home, context.authority, journal);
+  const advance = async (phase: PublicationPhase, updates: Partial<PublicationLifecycleJournal> = {}): Promise<void> => {
+    journal = await services.writeJournal(context.options.home, context.authority, { ...journal, ...updates, phase } as PublicationLifecycleJournal);
   };
 
   let creationProof: unknown;
@@ -175,7 +179,7 @@ async function publishWithAuthority(context: {
       assertRepositoryMetadata(metadata, context.source);
       repositoryId = metadata.repositoryId;
       if (metadata.visibility !== 'private') throw invalid('private repository creation was not proved');
-      await assertPhysicalProfileExpectation(context.options.home, context.profileName, context.initialExpectation);
+      await assertPublicationExpectation(services, context.options.home, context.profileName, context.initialExpectation);
     }
     await advance('REPOSITORY_CREATED', { repositoryCreated: context.repositoryBefore === undefined, repositoryId: metadata.repositoryId });
 
@@ -186,12 +190,12 @@ async function publishWithAuthority(context: {
       assertRepositoryMetadata(metadata, context.source);
       if (metadata.repositoryId !== repositoryId || metadata.visibility !== 'private') throw invalid('private visibility was not proved');
     }
-    await assertPhysicalProfileExpectation(context.options.home, context.profileName, context.initialExpectation);
+    await assertPublicationExpectation(services, context.options.home, context.profileName, context.initialExpectation);
     await advance('PRIVATE_BEFORE_PUSH_PROVEN');
 
     const revalidatedTip = await context.adapter.readTip(context.source);
     if (revalidatedTip !== (context.linked?.installedCommit ?? null)) throw new BazframeError('PROFILE_REMOTE_STALE', 'GitHub refs/heads/main changed before publication.');
-    await assertCapturedProfileUnchanged(context.options.home, context.profileName, context.captured, context.options.bundleRemote === true);
+    await assertCapturedProfileUnchanged(context.options.home, context.profileName, context.captured, context.options.bundleRemote === true, services, context.authority);
     let pushIntentRecorded = false;
     effects = await context.adapter.push({
       source: context.source,
@@ -203,7 +207,7 @@ async function publishWithAuthority(context: {
       beforeRefUpdate: async (intent) => {
         if (pushIntentRecorded || intent.expectedOld !== (context.linked?.installedCommit ?? null) || intent.capturedManifestSha256 !== context.captureSha256) throw invalid('publication push intent is inconsistent');
         pushIntentRecorded = true;
-        await assertCapturedProfileUnchanged(context.options.home, context.profileName, context.captured, context.options.bundleRemote === true);
+        await assertCapturedProfileUnchanged(context.options.home, context.profileName, context.captured, context.options.bundleRemote === true, services, context.authority);
         await advance('PUSH_INTENT');
       }
     });
@@ -224,7 +228,8 @@ async function publishWithAuthority(context: {
     }
     await advance('PUBLIC_AFTER_PUSH_PROVEN');
 
-    const currentExpectation = await capturePhysicalProfileExpectation(context.options.home, context.profileName);
+    const currentExpectation = await services.capture(context.options.home, context.profileName);
+    if (currentExpectation === undefined) throw changed();
     if (currentExpectation.identity !== context.initialExpectation.identity || currentExpectation.sidecarSha256 !== context.initialExpectation.sidecarSha256) throw changed();
     const finalVisibility = context.desiredVisibility === 'preserve' ? metadata.visibility : context.desiredVisibility;
     const state = buildPublishedProfileState(context.previousState, context.captured.profile.resources, {
@@ -232,10 +237,10 @@ async function publishWithAuthority(context: {
       latestSeenCommit: effects.commit, baselineCaptureSha256: capturedProfileContentBaselineSha256(context.captured.profile, capturedProfileLimitPolicy()), visibility: finalVisibility
     }, context.captured.profileInstanceId);
     await advance('LOCAL_STATE_INTENT');
-    await publishSidecarCandidate(context.options.home, context.profileName, currentExpectation, state, context.authority);
+    await (services.publication?.publishSidecar ?? publishSidecarCandidate)(context.options.home, context.profileName, currentExpectation, state, context.authority);
     await advance('LOCAL_STATE_PROVEN');
     await advance('COMMITTED');
-    await cleanupPublicationBackup(context.options.home, context.profileName, transactionId, currentExpectation, context.authority).catch(() => undefined);
+    if (services.header.schemaVersion === 1) await cleanupPublicationBackup(context.options.home, context.profileName, transactionId, currentExpectation, context.authority).catch(() => undefined);
     return {
       profileName: context.profileName,
       repository: context.source.origin,
@@ -362,7 +367,19 @@ function sameContentIgnoringSidecar(left: PhysicalProfileExpectation, right: Phy
   return JSON.stringify(strip(left)) === JSON.stringify(strip(right));
 }
 
-export async function copyPhysicalProfileClosureToCandidate(home: string, profileName: string, expected: PhysicalProfileExpectation, candidatePath: string): Promise<void> {
+export interface ProfileClosureCopyEffects {
+  assertSource(home: string, name: string, expected: PhysicalProfileExpectation): Promise<void>;
+  copyEntry(home: string, name: string, candidate: string, entry: PhysicalProfileClosureEntryV1): Promise<void>;
+  finish(candidate: string, expected: PhysicalProfileExpectation): Promise<void>;
+}
+export async function copyPhysicalProfileClosureToCandidate(home: string, profileName: string, expected: PhysicalProfileExpectation, candidatePath: string, effects?: ProfileClosureCopyEffects): Promise<void> {
+  if (effects !== undefined) {
+    await effects.assertSource(home, profileName, expected);
+    for (const entry of expected.closure.entries) await effects.copyEntry(home, profileName, candidatePath, entry);
+    await effects.finish(candidatePath, expected);
+    await effects.assertSource(home, profileName, expected);
+    return;
+  }
   const resolvedCandidate = resolve(candidatePath);
   if (dirname(resolvedCandidate) !== resolve(home, 'profiles') || !/^\.bazframe-candidate-[a-f0-9]{32}$/u.test(basename(resolvedCandidate))) throw invalid('profile copy destination is not a reserved candidate');
   const candidate = await openStablePhysicalDirectory(resolvedCandidate, home);
@@ -471,9 +488,6 @@ export function buildPublishedProfileState(previous: ManagedProfileStateV1 | und
   };
 }
 
-function persistedExpectation(value: PhysicalProfileExpectation): PublicationJournalV1['expectedProfile'] {
-  return { identity: value.identity, sidecarSha256: value.sidecarSha256, profileClosureSha256: value.profileClosureSha256 };
-}
 async function assertAbsent(path: string, label: string): Promise<void> { try { await lstat(path); } catch (error) { if (errorCode(error) === 'ENOENT') return; throw error; } throw invalid(`${label} is occupied`); }
 async function assertSameActive(left: ActiveProfileSnapshot | undefined, right: ActiveProfileSnapshot | undefined): Promise<void> { if (left === undefined || right === undefined) { if (left === right) return; throw changed(); } if (left.profileId !== right.profileId || left.device !== right.device || left.inode !== right.inode || left.contentSha256 !== right.contentSha256) throw changed(); }
 async function syncDirectory(path: string): Promise<void> { const handle = await open(path, 'r'); try { await handle.sync(); } finally { await handle.close(); } }
@@ -490,8 +504,9 @@ function validEffects(effects: ProfileGithubPublicationEffects, expectedOld: str
     && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(effects.tree)
     && effects.capturedManifestSha256 === captureSha256;
 }
-async function assertCapturedProfileUnchanged(home: string, profileName: string, expected: ProfileCaptureSnapshot, bundleRemote: boolean): Promise<void> {
-  const current = await captureProfile({ bazframeHome: home, profileId: profileName, bundleRemote });
+async function assertCapturedProfileUnchanged(home: string, profileName: string, expected: ProfileCaptureSnapshot, bundleRemote: boolean, services: ProfileLifecycleServices, authority: OperationMutationAuthority): Promise<void> {
+  const input = { bazframeHome: home, profileId: profileName, bundleRemote };
+  const current = services.publication === undefined ? await captureProfile(input) : await services.publication.capture(input, authority);
   if (!current.manifestBytes.equals(expected.manifestBytes)
     || current.blobs.length !== expected.blobs.length
     || current.blobs.some((blob, index) => blob.sha256 !== expected.blobs[index]?.sha256 || !blob.bytesValue.equals(expected.blobs[index]!.bytesValue))) throw changed();
@@ -517,3 +532,8 @@ async function cleanupPublicationBackup(home: string, profileName: string, trans
 function sha256(bytes: Uint8Array): Sha256 { return createHash('sha256').update(bytes).digest('hex'); }
 function changed(): BazframeError { return new BazframeError('PROFILE_PUBLICATION_CHANGED', 'Profile changed during publication; remote effects were retained for recovery and local state was not overwritten.'); }
 function invalid(detail: string): BazframeError { return new BazframeError('PROFILE_PUBLICATION_INVALID', `Invalid profile publication operation: ${detail}.`); }
+
+async function assertPublicationExpectation(services: ProfileLifecycleServices, home: string, name: string, expected: PhysicalProfileExpectation): Promise<void> {
+  const current = await services.capture(home, name);
+  if (current === undefined || !samePhysicalProfileExpectation(current, expected)) throw changed();
+}

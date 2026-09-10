@@ -1,8 +1,5 @@
-import { lstat, readFile, rm } from 'node:fs/promises';
-import { join } from 'node:path';
 import { BazframeError, errorCode } from '../core/errors.js';
-import { writeFileAtomic } from '../state/atomic-file.js';
-import { withStateLock } from '../state/lock.js';
+import { posixPolicyServices, policyText, type PolicyServices } from './policy-services.js';
 
 const MAX_GLOBAL_POLICY_BYTES = 1024;
 
@@ -14,8 +11,8 @@ export interface DisabledGlobalPolicy {
 export type GlobalPolicy = 'enabled' | 'disabled';
 export type GlobalPolicyAction = 'current' | 'enabled' | 'disabled';
 
-export function globalPolicyPath(bazframeHome: string): string {
-  return join(bazframeHome, 'global.json');
+export function globalPolicyPath(bazframeHome: string, paths = posixPolicyServices.paths): string {
+  return paths.join(bazframeHome, 'global.json');
 }
 
 export function decodeDisabledGlobalPolicy(
@@ -49,68 +46,39 @@ export function encodeDisabledGlobalPolicy(): string {
   return `${JSON.stringify({ schemaVersion: 1, disabled: true }, null, 2)}\n`;
 }
 
-export async function readGlobalPolicy(bazframeHome: string): Promise<GlobalPolicy> {
-  const path = globalPolicyPath(bazframeHome);
-  let metadata;
+export async function readGlobalPolicy(bazframeHome: string, services: PolicyServices = posixPolicyServices): Promise<GlobalPolicy> {
+  const path = globalPolicyPath(bazframeHome, services.paths);
   try {
-    metadata = await lstat(path);
-  } catch (error) {
-    if (errorCode(error) === 'ENOENT') return 'enabled';
-    throw globalPolicyReadError(path, error);
-  }
-  if (
-    metadata.isSymbolicLink()
-    || !metadata.isFile()
-    || metadata.size > MAX_GLOBAL_POLICY_BYTES
-  ) {
-    throw new BazframeError(
-      'GLOBAL_POLICY_INVALID',
-      `Global policy must be a physical file no larger than ${MAX_GLOBAL_POLICY_BYTES} bytes: ${path}`
-    );
-  }
-  try {
-    decodeDisabledGlobalPolicy(await readFile(path, 'utf8'), path);
+    const text = policyText(await services.snapshot(path, MAX_GLOBAL_POLICY_BYTES));
+    if (text === undefined) return 'enabled';
+    decodeDisabledGlobalPolicy(text, path);
     return 'disabled';
   } catch (error) {
+    if (errorCode(error) === 'POLICY_FILE_INVALID') throw new BazframeError('GLOBAL_POLICY_INVALID', `Global policy must be a physical file no larger than ${MAX_GLOBAL_POLICY_BYTES} bytes: ${path}`, { cause: error });
     if (error instanceof BazframeError) throw error;
     throw globalPolicyReadError(path, error);
   }
 }
 
-export async function disableGlobally(bazframeHome: string): Promise<GlobalPolicyAction> {
-  const path = globalPolicyPath(bazframeHome);
-  return withStateLock(
-    join(bazframeHome, 'locks', 'state.lock'),
-    { command: 'bazframe global disable', target: path },
-    async () => {
-      if (await readGlobalPolicy(bazframeHome) === 'disabled') return 'current';
-      await writeFileAtomic(path, encodeDisabledGlobalPolicy(), { managedRoot: bazframeHome });
-      return 'disabled';
-    },
-    { managedRoot: bazframeHome }
-  );
+export async function disableGlobally(bazframeHome: string, services: PolicyServices = posixPolicyServices): Promise<GlobalPolicyAction> {
+  const path = globalPolicyPath(bazframeHome, services.paths);
+  return services.withLock(bazframeHome, 'bazframe global disable', async (writer) => {
+    const expected = await services.snapshot(path, MAX_GLOBAL_POLICY_BYTES);
+    if (await readGlobalPolicy(bazframeHome, services) === 'disabled') return 'current';
+    await writer.publish(path, Buffer.from(encodeDisabledGlobalPolicy()), expected, MAX_GLOBAL_POLICY_BYTES);
+    return 'disabled';
+  });
 }
 
-export async function enableGlobally(bazframeHome: string): Promise<GlobalPolicyAction> {
-  const path = globalPolicyPath(bazframeHome);
-  return withStateLock(
-    join(bazframeHome, 'locks', 'state.lock'),
-    { command: 'bazframe global enable', target: path },
-    async () => {
-      if (await readGlobalPolicy(bazframeHome) === 'enabled') return 'current';
-      try {
-        await rm(path);
-      } catch (error) {
-        throw new BazframeError(
-          'GLOBAL_POLICY_REMOVE_FAILED',
-          `Could not remove global policy ${path}${formatErrorCode(error)}`,
-          { cause: error }
-        );
-      }
-      return 'enabled';
-    },
-    { managedRoot: bazframeHome }
-  );
+export async function enableGlobally(bazframeHome: string, services: PolicyServices = posixPolicyServices): Promise<GlobalPolicyAction> {
+  const path = globalPolicyPath(bazframeHome, services.paths);
+  return services.withLock(bazframeHome, 'bazframe global enable', async (writer) => {
+    const expected = await services.snapshot(path, MAX_GLOBAL_POLICY_BYTES);
+    if (await readGlobalPolicy(bazframeHome, services) === 'enabled') return 'current';
+    try { await writer.detach(path, expected, MAX_GLOBAL_POLICY_BYTES); }
+    catch (error) { throw new BazframeError('GLOBAL_POLICY_REMOVE_FAILED', `Could not remove global policy ${path}${formatErrorCode(error)}`, { cause: error }); }
+    return 'enabled';
+  });
 }
 
 function invalidGlobalPolicy(source: string): BazframeError {

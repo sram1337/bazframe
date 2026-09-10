@@ -1,9 +1,11 @@
+import { isReservedProfileSiblingName } from '../profile-publishing/publication-state.js';
+import { sameResourceIdentity, resourceIdentityText, type ResourceIdentity } from '../skill-collections/resource-identity.js';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, open, readdir, type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 import { BazframeError, errorCode } from '../core/errors.js';
-import { boundedStateJsonBytes } from '../profile-portability/profile-portability-policy.js';
+import { boundedStateJsonBytes, PROFILE_PORTABILITY_PRODUCTION_LIMITS } from '../profile-portability/profile-portability-policy.js';
 import { readAtMostOneBeyond } from '../state/bounded-file-read.js';
 import { collectionKey, type SkillCollectionKey, type SkillCollectionKind } from '../skill-collections/skill-collection-store.js';
 import { isSafeSkillId } from '../skills/skill-id.js';
@@ -12,8 +14,9 @@ import { profileDirectory } from './profile-store.js';
 
 export type ProfileSkillCollectionReference = { schemaVersion: 1; library: string } | { schemaVersion: 1; package: string };
 export interface ProfileSkillCollectionReferencePath { key: SkillCollectionKey; path: string; relativePath: string }
-export interface ProfileSkillCollectionReferenceSnapshot { reference: ProfileSkillCollectionReference; path: string; device: bigint; inode: bigint; contentSha256: string }
+export type ProfileSkillCollectionReferenceSnapshot = ResourceIdentity & { reference: ProfileSkillCollectionReference; path: string; contentSha256: string };
 export interface ProfileSkillCollectionReferenceReadOptions {
+  effects?: ProfileCollectionReferenceEffects;
   maxBytes?: number;
   testHooks?: { afterInitialStat?: () => void | Promise<void>; afterPathStat?: () => void | Promise<void>; afterClose?: () => void | Promise<void> };
 }
@@ -39,7 +42,7 @@ export function decodeProfileCollectionReference(value:unknown,kind:SkillCollect
   if(candidate.schemaVersion!==1)throw invalid(kind,'unsupported schemaVersion'); const id=candidate[kind]; if(typeof id!=='string'||!isSafeSkillId(id))throw invalid(kind,`${kind} is invalid`); if(expectedId!==undefined&&id!==expectedId)throw invalid(kind,`${kind} does not match reference path`);
   return kind==='library'?{schemaVersion:1,library:id}:{schemaVersion:1,package:id};
 }
-export async function readProfileCollectionReference(home:string,profileId:string,key:SkillCollectionKey):Promise<ProfileSkillCollectionReference>{return(await readProfileCollectionReferenceSnapshot(home,profileId,key)).reference;}
+export async function readProfileCollectionReference(home:string,profileId:string,key:SkillCollectionKey,effects?:ProfileCollectionReferenceEffects):Promise<ProfileSkillCollectionReference>{return(await readProfileCollectionReferenceSnapshot(home,profileId,key,effects===undefined?{}:{effects})).reference;}
 export async function readProfileCollectionReferenceSnapshot(
   home: string,
   profileId: string,
@@ -49,6 +52,7 @@ export async function readProfileCollectionReferenceSnapshot(
   if (!isSafeProfileId(profileId)) throw invalid(key.kind, 'profile is invalid');
   if (!isSafeSkillId(key.id)) throw invalid(key.kind, `${key.kind} is invalid`);
   const maximum = boundedStateJsonBytes(options.maxBytes);
+  if (options.effects !== undefined) return readReferenceWithEffects(home, profileId, key, options.effects, maximum);
   const directoryPaths = [home, join(home, 'profiles'), profileDirectory(home, profileId), profileCollectionDirectory(home, profileId, key.kind)];
   const path = profileCollectionReferencePath(home, profileId, key);
   const directories: OpenDirectory[] = [];
@@ -104,15 +108,16 @@ export async function readProfileCollectionReferenceSnapshot(
   if (result === undefined) throw new BazframeError('SKILL_COLLECTION_REFERENCE_READ_FAILED', `Could not read profile ${key.kind} reference ${path}.`);
   return result;
 }
-export function sameProfileCollectionReferenceSnapshot(a:ProfileSkillCollectionReferenceSnapshot,b:ProfileSkillCollectionReferenceSnapshot):boolean{return a.device===b.device&&a.inode===b.inode&&a.contentSha256===b.contentSha256;}
-export async function scanProfileCollectionReferences(home:string,profileId:string):Promise<ProfileSkillCollectionReferenceNamespace>{const[libraries,packages]=await Promise.all([scanReferenceRoot(profileCollectionDirectory(home,profileId,'library'),'library'),scanReferenceRoot(profileCollectionDirectory(home,profileId,'package'),'package')]);return{references:[...libraries.references,...packages.references].sort((a,b)=>compare(collectionKey(a.key.kind,a.key.id),collectionKey(b.key.kind,b.key.id))),diagnostics:[...libraries.diagnostics,...packages.diagnostics],namespaceIdentities:{library:libraries.identity,package:packages.identity}};}
-export async function captureProfileCollectionReferenceIndex(home:string,key:SkillCollectionKey):Promise<ProfileSkillCollectionReferenceIndex>{const bulk=await captureProfileCollectionReferenceBulkIndex(home);return{profileIds:[...(bulk.profileIdsByCollection.get(collectionKey(key.kind,key.id))??[])],diagnostics:bulk.diagnostics,identity:bulk.identity};}
+export function sameProfileCollectionReferenceSnapshot(a:ProfileSkillCollectionReferenceSnapshot,b:ProfileSkillCollectionReferenceSnapshot):boolean{return sameResourceIdentity(a,b)&&a.contentSha256===b.contentSha256;}
+export async function scanProfileCollectionReferences(home:string,profileId:string,effects?:ProfileCollectionReferenceEffects):Promise<ProfileSkillCollectionReferenceNamespace>{if(effects!==undefined)return scanReferencesWithEffects(home,profileId,effects);const[libraries,packages]=await Promise.all([scanReferenceRoot(profileCollectionDirectory(home,profileId,'library'),'library'),scanReferenceRoot(profileCollectionDirectory(home,profileId,'package'),'package')]);return{references:[...libraries.references,...packages.references].sort((a,b)=>compare(collectionKey(a.key.kind,a.key.id),collectionKey(b.key.kind,b.key.id))),diagnostics:[...libraries.diagnostics,...packages.diagnostics],namespaceIdentities:{library:libraries.identity,package:packages.identity}};}
+export async function captureProfileCollectionReferenceIndex(home:string,key:SkillCollectionKey,effects?:ProfileCollectionReferenceEffects):Promise<ProfileSkillCollectionReferenceIndex>{const bulk=await captureProfileCollectionReferenceBulkIndex(home,effects);return{profileIds:[...(bulk.profileIdsByCollection.get(collectionKey(key.kind,key.id))??[])],diagnostics:bulk.diagnostics,identity:bulk.identity};}
 export async function findReferencingProfiles(home:string,key:SkillCollectionKey):Promise<ReferencingProfiles>{const{profileIds,diagnostics}=await captureProfileCollectionReferenceIndex(home,key);return{profileIds,diagnostics};}
-export async function captureProfileCollectionReferenceBulkIndex(home:string):Promise<ProfileSkillCollectionReferenceBulkIndex>{
+export async function captureProfileCollectionReferenceBulkIndex(home:string,effects?:ProfileCollectionReferenceEffects):Promise<ProfileSkillCollectionReferenceBulkIndex>{
+  if(effects!==undefined){try{return await captureReferenceIndexWithEffects(home,effects);}catch{return invalidProfileBulkIndex();}}
   const rootPath=join(home,'profiles');let rootMetadata;try{rootMetadata=await lstat(rootPath,{bigint:true});}catch(error){if(errorCode(error)==='ENOENT')return bulkIndexed(new Map(),[],['profiles:absent']);return invalidProfileBulkIndex();}if(rootMetadata.isSymbolicLink()||!rootMetadata.isDirectory())return invalidProfileBulkIndex();let root:OpenDirectory|undefined;
   try{root=await openDirectory(rootPath,identity(rootMetadata));const names=await enumerateDirectory(root);const profileIdsByCollection=new Map<string,string[]>();const diagnostics:ReferencingProfiles['diagnostics']=[];const identityParts=[`profiles:${identityText(identity(rootMetadata))}`];
     for(const profileId of names){const safe=isSafeProfileId(profileId);const profilePath=join(rootPath,profileId);let metadata;try{metadata=await lstat(profilePath,{bigint:true});}catch{diagnostics.push(indexDiagnostic(safe?profileId:'<unknown-profile>'));identityParts.push(`profile:${profileId}:missing`);continue;}identityParts.push(`profile:${profileId}:${metadata.isSymbolicLink()?'link':metadata.isDirectory()?'directory':'other'}:${identityText(identity(metadata))}`);if(!safe||metadata.isSymbolicLink()||!metadata.isDirectory()){diagnostics.push(indexDiagnostic(safe?profileId:'<unknown-profile>'));continue;}let profile:OpenDirectory|undefined;
-      try{profile=await openDirectory(profilePath,identity(metadata));const namespace=await scanProfileCollectionReferences(home,profileId);identityParts.push(`namespace:${profileId}:library:${namespace.namespaceIdentities.library}`,`namespace:${profileId}:package:${namespace.namespaceIdentities.package}`);for(const diagnostic of namespace.diagnostics)diagnostics.push({profileId,diagnostic});for(const path of namespace.references){try{const snapshot=await readProfileCollectionReferenceSnapshot(home,profileId,path.key);identityParts.push(`reference:${profileId}/${path.key.kind}/${path.relativePath}:${snapshot.device}:${snapshot.inode}:${snapshot.contentSha256}`);const key=collectionKey(path.key.kind,path.key.id);const ids=profileIdsByCollection.get(key)??[];ids.push(profileId);profileIdsByCollection.set(key,ids);}catch{diagnostics.push({profileId,diagnostic:diag(path.key.kind,path.key.id,path.relativePath)});identityParts.push(`reference:${profileId}/${path.key.kind}/${path.relativePath}:invalid`);}}await assertDirectoryStable(profile);}catch{diagnostics.push(indexDiagnostic(profileId));identityParts.push(`profile:${profileId}:unstable`);}finally{await profile?.handle.close().catch(()=>undefined);}}
+      try{profile=await openDirectory(profilePath,identity(metadata));const namespace=await scanProfileCollectionReferences(home,profileId);identityParts.push(`namespace:${profileId}:library:${namespace.namespaceIdentities.library}`,`namespace:${profileId}:package:${namespace.namespaceIdentities.package}`);for(const diagnostic of namespace.diagnostics)diagnostics.push({profileId,diagnostic});for(const path of namespace.references){try{const snapshot=await readProfileCollectionReferenceSnapshot(home,profileId,path.key);identityParts.push(`reference:${profileId}/${path.key.kind}/${path.relativePath}:${resourceIdentityText(snapshot)}:${snapshot.contentSha256}`);const key=collectionKey(path.key.kind,path.key.id);const ids=profileIdsByCollection.get(key)??[];ids.push(profileId);profileIdsByCollection.set(key,ids);}catch{diagnostics.push({profileId,diagnostic:diag(path.key.kind,path.key.id,path.relativePath)});identityParts.push(`reference:${profileId}/${path.key.kind}/${path.relativePath}:invalid`);}}await assertDirectoryStable(profile);}catch{diagnostics.push(indexDiagnostic(profileId));identityParts.push(`profile:${profileId}:unstable`);}finally{await profile?.handle.close().catch(()=>undefined);}}
     await assertDirectoryStable(root);return bulkIndexed(profileIdsByCollection,diagnostics,identityParts);
   }catch{return invalidProfileBulkIndex();}finally{await root?.handle.close().catch(()=>undefined);}
 }
@@ -128,3 +133,74 @@ async function assertDirectoryStable(directory:OpenDirectory):Promise<void>{cons
 function identity(metadata:{dev:bigint;ino:bigint}):DirectoryIdentity{return{device:metadata.dev,inode:metadata.ino};}function sameIdentity(a:DirectoryIdentity,b:DirectoryIdentity):boolean{return a.device===b.device&&a.inode===b.inode;}function idFromName(name:string):string|undefined{if(!name.endsWith('.json'))return undefined;const id=name.slice(0,-5);return isSafeSkillId(id)?id:undefined;}
 function bulkIndexed(map:Map<string,string[]>,diagnostics:ReferencingProfiles['diagnostics'],identityParts:string[]):ProfileSkillCollectionReferenceBulkIndex{const sortedDiagnostics=[...diagnostics].sort((a,b)=>compare(`${a.profileId}\0${collectionKey(a.diagnostic.key.kind,a.diagnostic.key.id)}\0${a.diagnostic.path}`,`${b.profileId}\0${collectionKey(b.diagnostic.key.kind,b.diagnostic.key.id)}\0${b.diagnostic.path}`));const sortedMap=new Map([...map.entries()].sort(([a],[b])=>compare(a,b)).map(([key,ids])=>[key,[...new Set(ids)].sort(compare)]as const));const material=[...identityParts.sort(compare),...sortedDiagnostics.map(item=>`diagnostic:${item.profileId}:${collectionKey(item.diagnostic.key.kind,item.diagnostic.key.id)}:${item.diagnostic.path}`)].join('\n');return{profileIdsByCollection:sortedMap,diagnostics:sortedDiagnostics,identity:createHash('sha256').update(material).digest('hex')};}
 function invalidProfileBulkIndex():ProfileSkillCollectionReferenceBulkIndex{return bulkIndexed(new Map(),[indexDiagnostic('<unknown-profile>')],['profiles:invalid']);}function identityText(value:DirectoryIdentity):string{return`${value.device}:${value.inode}`;}function indexDiagnostic(profileId:string):ReferencingProfiles['diagnostics'][number]{return{profileId,diagnostic:diag('library',UNKNOWN_REFERENCE_ID,'.')};}function invalidRoot(kind:SkillCollectionKind):ScannedReferenceRoot{return{references:[],diagnostics:[diag(kind,UNKNOWN_REFERENCE_ID,'.')],identity:'invalid'};}function diag(kind:SkillCollectionKind,id:string,path:string):ProfileSkillCollectionReferenceDiagnostic{return{key:{kind,id},path};}function invalid(kind:SkillCollectionKind,detail:string):BazframeError{return new BazframeError('SKILL_COLLECTION_REFERENCE_INVALID',`Invalid profile ${kind} reference: ${detail}.`);}function formatCode(error:unknown):string{const code=errorCode(error);return code===undefined?'':` (${code})`;}function compare(a:string,b:string):number{return a<b?-1:a>b?1:0;}
+
+export interface ProfileCollectionReferenceEffects {
+  joinPath(...parts: string[]): string;
+  physical: import('../profile-publishing/physical-profile-closure.js').PhysicalProfileReadServices;
+  readFile(path: string, maximum: number): Promise<ResourceIdentity & { bytes: Buffer }>;
+  absent(path: string): Promise<boolean>;
+  retainedFile?(path: string, name: string): Promise<boolean>;
+}
+async function readReferenceWithEffects(home: string, profileId: string, key: SkillCollectionKey, effects: ProfileCollectionReferenceEffects, maximum: number): Promise<ProfileSkillCollectionReferenceSnapshot> {
+  const path = effects.joinPath(home, 'profiles', profileId, key.kind === 'library' ? 'libraries' : 'packages', `${key.id}.json`);
+  const file = await effects.readFile(path, maximum);
+  let value: unknown;
+  try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(file.bytes)); } catch { throw invalid(key.kind, 'reference must contain valid UTF-8 JSON'); }
+  const { bytes, ...identity } = file;
+  return { ...identity, path, reference: decodeProfileCollectionReference(value, key.kind, key.id), contentSha256: createHash('sha256').update(bytes).digest('hex') };
+}
+async function scanReferencesWithEffects(home: string, profileId: string, effects: ProfileCollectionReferenceEffects): Promise<ProfileSkillCollectionReferenceNamespace> {
+  const references: ProfileSkillCollectionReferencePath[] = [];
+  const diagnostics: ProfileSkillCollectionReferenceDiagnostic[] = [];
+  const namespaceIdentities = { library: 'absent', package: 'absent' };
+  for (const kind of ['library', 'package'] as const) {
+    const path = effects.joinPath(home, 'profiles', profileId, kind === 'library' ? 'libraries' : 'packages');
+    if (await effects.absent(path)) continue;
+    const root = await effects.physical.openDirectory(path, home);
+    try {
+      namespaceIdentities[kind] = root.identity;
+      for (const name of await root.enumerate(PROFILE_PORTABILITY_PRODUCTION_LIMITS.profileNamespaceEntries)) {
+        const id = idFromName(name), child = root.childPath(name);
+        if (await effects.retainedFile?.(child, name)) continue;
+        if (id === undefined || await effects.physical.inspectKind(child) !== 'file') diagnostics.push(diag(kind, id ?? UNKNOWN_REFERENCE_ID, name));
+        else references.push({ key: { kind, id }, path: child, relativePath: name });
+      }
+      await root.enumerate(PROFILE_PORTABILITY_PRODUCTION_LIMITS.profileNamespaceEntries);
+      await root.assertStable();
+    } finally { await root.close(); }
+  }
+  return { references, diagnostics, namespaceIdentities };
+}
+async function captureReferenceIndexWithEffects(home: string, effects: ProfileCollectionReferenceEffects): Promise<ProfileSkillCollectionReferenceBulkIndex> {
+  const path = effects.joinPath(home, 'profiles');
+  if (await effects.absent(path)) return bulkIndexed(new Map(), [], ['profiles:absent']);
+  const root = await effects.physical.openDirectory(path, home);
+  try {
+    const map = new Map<string, string[]>(), diagnostics: ReferencingProfiles['diagnostics'] = [];
+    const parts = [`profiles:${root.identity}`]; let count = 0;
+    for (const profileId of await root.enumerate(PROFILE_PORTABILITY_PRODUCTION_LIMITS.profileNamespaceEntries)) {
+      // Reserved retained candidate/backup siblings are not live profile references.
+      if (isReservedProfileSiblingName(profileId)) continue;
+      if (!isSafeProfileId(profileId)) { diagnostics.push(indexDiagnostic('<unknown-profile>')); continue; }
+      const profile = await effects.physical.openDirectory(root.childPath(profileId), home);
+      try {
+        await profile.enumerate(PROFILE_PORTABILITY_PRODUCTION_LIMITS.profileNamespaceEntries);
+        parts.push(`profile:${profileId}:${profile.identity}`);
+        const namespace = await scanProfileCollectionReferences(home, profileId, effects);
+        parts.push(`namespace:${profileId}:${JSON.stringify(namespace.namespaceIdentities)}`);
+        for (const diagnostic of namespace.diagnostics) diagnostics.push({ profileId, diagnostic });
+        for (const reference of namespace.references) {
+          if (++count > PROFILE_PORTABILITY_PRODUCTION_LIMITS.profileNamespaceEntries) throw invalid(reference.key.kind, 'reference index exceeds its entry limit');
+          const snapshot = await readProfileCollectionReferenceSnapshot(home, profileId, reference.key, { effects });
+          parts.push(`reference:${profileId}:${reference.key.kind}:${reference.key.id}:${resourceIdentityText(snapshot)}:${snapshot.contentSha256}`);
+          const key = collectionKey(reference.key.kind, reference.key.id), ids = map.get(key) ?? [];
+          ids.push(profileId); map.set(key, ids);
+        }
+        await profile.enumerate(PROFILE_PORTABILITY_PRODUCTION_LIMITS.profileNamespaceEntries);
+        await profile.assertStable();
+      } finally { await profile.close(); }
+    }
+    await root.enumerate(PROFILE_PORTABILITY_PRODUCTION_LIMITS.profileNamespaceEntries);
+    await root.assertStable(); return bulkIndexed(map, diagnostics, parts);
+  } finally { await root.close(); }
+}

@@ -1,9 +1,10 @@
+import { sameResourceIdentity, type ResourceIdentity } from './resource-identity.js';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, open, readdir, realpath, type FileHandle } from 'node:fs/promises';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { BazframeError, errorCode } from '../core/errors.js';
-import { boundedStateJsonBytes } from '../profile-portability/profile-portability-policy.js';
+import { boundedStateJsonBytes, PROFILE_PORTABILITY_PRODUCTION_LIMITS } from '../profile-portability/profile-portability-policy.js';
 import { readAtMostOneBeyond } from '../state/bounded-file-read.js';
 import { isPortableRelativePath } from './portable-relative-path.js';
 import { isSafeSkillId } from '../skills/skill-id.js';
@@ -13,9 +14,9 @@ export interface SkillCollectionKey { kind: SkillCollectionKind; id: string }
 export interface LibraryRecord { schemaVersion: 1; library: string; root: string; digest: string }
 export interface PackageRecord { schemaVersion: 1; package: string; root: string; digest: string; artifactRoot: string; skillsRoot: string }
 export type SkillCollectionRecord = LibraryRecord | PackageRecord;
-export interface SkillCollectionRecordSnapshot<T extends SkillCollectionRecord = SkillCollectionRecord> {
-  record: T; path: string; device: bigint; inode: bigint; contentSha256: string;
-}
+export type SkillCollectionRecordSnapshot<T extends SkillCollectionRecord = SkillCollectionRecord> = ResourceIdentity & {
+  record: T; path: string; contentSha256: string;
+};
 export interface SkillCollectionRecordReadOptions {
   maxBytes?: number;
   testHooks?: { afterInitialStat?: () => void | Promise<void>; afterPathStat?: () => void | Promise<void>; afterClose?: () => void | Promise<void> };
@@ -24,6 +25,9 @@ export interface SkillCollectionRecordPath { key: SkillCollectionKey; path: stri
 export interface SkillCollectionNamespaceDiagnostic { key: SkillCollectionKey; path: string }
 export interface SkillCollectionNamespace { records: SkillCollectionRecordPath[]; diagnostics: SkillCollectionNamespaceDiagnostic[] }
 export const UNKNOWN_COLLECTION_ID = '<unknown>';
+
+export interface CollectionRootPathPolicy { isCanonicalAbsolute(path: string): boolean; basename(path: string): string }
+const defaultRootPathPolicy: CollectionRootPathPolicy = { isCanonicalAbsolute: (path) => isAbsolute(path) && resolve(path) === path, basename };
 
 const LIBRARY_KEYS = ['digest', 'library', 'root', 'schemaVersion'] as const;
 const PACKAGE_KEYS = ['artifactRoot', 'digest', 'package', 'root', 'schemaVersion', 'skillsRoot'] as const;
@@ -50,28 +54,28 @@ export function encodeSkillCollection(record: SkillCollectionRecord): string { r
 function exactKeys(candidate: Record<string, unknown>, expected: readonly string[]): boolean {
   const keys = Object.keys(candidate).sort(); return keys.length === expected.length && keys.every((key, index) => key === expected[index]);
 }
-function common(candidate: Record<string, unknown>, kind: SkillCollectionKind, expectedId?: string): { id: string; root: string; digest: string } {
+function common(candidate: Record<string, unknown>, kind: SkillCollectionKind, expectedId: string | undefined, pathPolicy: CollectionRootPathPolicy): { id: string; root: string; digest: string } {
   if (candidate.schemaVersion !== 1) throw invalid(kind, 'unsupported schemaVersion');
   const value = candidate[kind];
   if (typeof value !== 'string' || !isSafeSkillId(value)) throw invalid(kind, `${kind} is invalid`);
   if (expectedId !== undefined && value !== expectedId) throw invalid(kind, `${kind} does not match record path`);
-  if (typeof candidate.root !== 'string' || candidate.root.includes('\0') || !isAbsolute(candidate.root) || resolve(candidate.root) !== candidate.root) throw invalid(kind, 'root must be a canonical absolute path');
-  if (basename(candidate.root) !== value) throw invalid(kind, `${kind} must match the canonical root basename`);
+  if (typeof candidate.root !== 'string' || candidate.root.includes('\0') || !pathPolicy.isCanonicalAbsolute(candidate.root)) throw invalid(kind, 'root must be a canonical absolute path');
+  if (pathPolicy.basename(candidate.root) !== value) throw invalid(kind, `${kind} must match the canonical root basename`);
   if (typeof candidate.digest !== 'string' || !/^[a-f0-9]{64}$/u.test(candidate.digest)) throw invalid(kind, 'digest must be lowercase SHA-256');
   return { id: value, root: candidate.root, digest: candidate.digest };
 }
-export function decodeLibrary(value: unknown, expectedId?: string): LibraryRecord {
+export function decodeLibrary(value: unknown, expectedId?: string, pathPolicy: CollectionRootPathPolicy = defaultRootPathPolicy): LibraryRecord {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw invalid('library', 'record must be a JSON object');
   const candidate = value as Record<string, unknown>;
   if (!exactKeys(candidate, LIBRARY_KEYS)) throw invalid('library', 'record must contain exactly the schema-v1 fields');
-  const decoded = common(candidate, 'library', expectedId);
+  const decoded = common(candidate, 'library', expectedId, pathPolicy);
   return { schemaVersion: 1, library: decoded.id, root: decoded.root, digest: decoded.digest };
 }
-export function decodePackage(value: unknown, expectedId?: string): PackageRecord {
+export function decodePackage(value: unknown, expectedId?: string, pathPolicy: CollectionRootPathPolicy = defaultRootPathPolicy): PackageRecord {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw invalid('package', 'record must be a JSON object');
   const candidate = value as Record<string, unknown>;
   if (!exactKeys(candidate, PACKAGE_KEYS)) throw invalid('package', 'record must contain exactly the schema-v1 fields');
-  const decoded = common(candidate, 'package', expectedId);
+  const decoded = common(candidate, 'package', expectedId, pathPolicy);
   if (!isPortableRelativePath(candidate.artifactRoot)) throw invalid('package', 'artifactRoot is invalid');
   if (!isPortableRelativePath(candidate.skillsRoot)) throw invalid('package', 'skillsRoot is invalid');
   return { schemaVersion: 1, package: decoded.id, root: decoded.root, digest: decoded.digest, artifactRoot: candidate.artifactRoot, skillsRoot: candidate.skillsRoot };
@@ -142,7 +146,7 @@ async function readRecord(home: string, kind: SkillCollectionKind, id: string, o
   if (result === undefined) throw new BazframeError('SKILL_COLLECTION_RECORD_READ_FAILED', `Could not read global ${kind} ${path}.`);
   return result;
 }
-export function sameCollectionSnapshot(left: SkillCollectionRecordSnapshot, right: SkillCollectionRecordSnapshot): boolean { return left.device === right.device && left.inode === right.inode && left.contentSha256 === right.contentSha256; }
+export function sameCollectionSnapshot(left: SkillCollectionRecordSnapshot, right: SkillCollectionRecordSnapshot): boolean { return sameResourceIdentity(left, right) && left.contentSha256 === right.contentSha256; }
 
 export async function canonicalPhysicalCollectionRoot(path: string, kind: SkillCollectionKind): Promise<string> {
   if (!isAbsolute(path) || path.includes('\0')) throw new BazframeError('SKILL_COLLECTION_ROOT_INVALID', `${title(kind)} root must be an absolute path: ${path}`);
@@ -150,29 +154,47 @@ export async function canonicalPhysicalCollectionRoot(path: string, kind: SkillC
   const metadata = await lstat(canonical); if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new BazframeError('SKILL_COLLECTION_ROOT_INVALID', `${title(kind)} root must be a physical directory: ${canonical}`);
   return canonical;
 }
-export async function scanGlobalSkillCollections(home: string): Promise<SkillCollectionNamespace> {
-  const [libraries, packages] = await Promise.all([scanNamespace(home, 'library'), scanNamespace(home, 'package')]);
+export interface CollectionNamespaceReadEffects {
+  joinPath: typeof join;
+  physical: import('../profile-publishing/physical-profile-closure.js').PhysicalProfileReadServices;
+  absent(path: string): Promise<boolean>;
+  retainedFile(path: string, name: string): Promise<boolean>;
+}
+export async function scanGlobalSkillCollections(home: string, effects?: CollectionNamespaceReadEffects): Promise<SkillCollectionNamespace> {
+  const [libraries, packages] = await Promise.all([scanNamespace(home, 'library', effects), scanNamespace(home, 'package', effects)]);
   return { records: [...libraries.records, ...packages.records].sort((a,b) => compare(collectionKey(a.key.kind,a.key.id),collectionKey(b.key.kind,b.key.id))), diagnostics: [...libraries.diagnostics, ...packages.diagnostics] };
 }
 
 interface DirectoryIdentity { device: bigint; inode: bigint }
 interface OpenDirectory { path: string; handle: FileHandle; identity: DirectoryIdentity }
-async function scanNamespace(home: string, kind: SkillCollectionKind): Promise<SkillCollectionNamespace> {
-  const rootPath = globalCollectionDirectory(home, kind); let rootMetadata;
-  try { rootMetadata = await lstat(rootPath, { bigint: true }); } catch (error) { if (errorCode(error) === 'ENOENT') return { records: [], diagnostics: [] }; return invalidRoot(kind); }
-  if (rootMetadata.isSymbolicLink() || !rootMetadata.isDirectory()) return invalidRoot(kind);
-  let root: OpenDirectory | undefined;
+async function scanNamespace(home: string, kind: SkillCollectionKind, effects?: CollectionNamespaceReadEffects): Promise<SkillCollectionNamespace> {
+  const rootPath = (effects?.joinPath ?? join)(home, kind === 'library' ? 'libraries' : 'packages');
+  let directory: { enumerate(): Promise<string[]>; file(name: string): Promise<boolean>; stable(): Promise<void>; close(): Promise<void> } | undefined;
   try {
-    root = await openDirectory(rootPath, identity(rootMetadata)); const records: SkillCollectionRecordPath[] = []; const diagnostics: SkillCollectionNamespaceDiagnostic[] = [];
-    for (const name of await enumerateDirectory(root)) {
-      const id = idFromName(name); const path = join(rootPath, name); let child;
-      try { child = await lstat(path); } catch { diagnostics.push(diag(kind, id ?? UNKNOWN_COLLECTION_ID, name)); continue; }
-      if (id === undefined || child.isSymbolicLink() || !child.isFile()) { diagnostics.push(diag(kind, id ?? UNKNOWN_COLLECTION_ID, name)); continue; }
+    if (effects !== undefined) {
+      if (await effects.absent(rootPath)) return { records: [], diagnostics: [] };
+      const root = await effects.physical.openDirectory(rootPath, home);
+      directory = { enumerate: () => root.enumerate(PROFILE_PORTABILITY_PRODUCTION_LIMITS.stagingEntries), file: async (name) => await effects.physical.inspectKind(root.childPath(name)) === 'file', stable: async () => { await root.enumerate(PROFILE_PORTABILITY_PRODUCTION_LIMITS.stagingEntries); await root.assertStable(); }, close: () => root.close() };
+    } else {
+      let metadata;
+      try { metadata = await lstat(rootPath, { bigint: true }); } catch (error) { if (errorCode(error) === 'ENOENT') return { records: [], diagnostics: [] }; throw error; }
+      if (metadata.isSymbolicLink() || !metadata.isDirectory()) return invalidRoot(kind);
+      const root = await openDirectory(rootPath, identity(metadata));
+      directory = { enumerate: () => enumerateDirectory(root), file: async (name) => { const child = await lstat(join(rootPath, name)); return !child.isSymbolicLink() && child.isFile(); }, stable: () => assertDirectoryStable(root), close: () => root.handle.close() };
+    }
+    const records: SkillCollectionRecordPath[] = [], diagnostics: SkillCollectionNamespaceDiagnostic[] = [];
+    for (const name of await directory.enumerate()) {
+      const path = (effects?.joinPath ?? join)(rootPath, name);
+      if (await effects?.retainedFile(path, name)) continue;
+      const id = idFromName(name);
+      try { if (id === undefined || !await directory.file(name)) { diagnostics.push(diag(kind, id ?? UNKNOWN_COLLECTION_ID, name)); continue; } }
+      catch { diagnostics.push(diag(kind, id ?? UNKNOWN_COLLECTION_ID, name)); continue; }
       records.push({ key: { kind, id }, path, relativePath: name });
     }
-    await assertDirectoryStable(root); return { records, diagnostics };
-  } catch { return invalidRoot(kind); } finally { await root?.handle.close().catch(() => undefined); }
+    await directory.stable(); return { records, diagnostics };
+  } catch { return invalidRoot(kind); } finally { await directory?.close().catch(() => undefined); }
 }
+
 async function openExistingDirectory(path: string, detail: string, kind: SkillCollectionKind): Promise<OpenDirectory> { const metadata = await lstat(path, { bigint: true }); if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw invalid(kind, detail); return openDirectory(path, identity(metadata)); }
 async function openDirectory(path: string, expected: DirectoryIdentity): Promise<OpenDirectory> { const handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW); try { const opened = await handle.stat({ bigint: true }); if (!opened.isDirectory() || !sameIdentity(identity(opened), expected)) throw new Error('directory identity changed'); const directory = { path, handle, identity: expected }; await assertDirectoryStable(directory); return directory; } catch (error) { await handle.close().catch(() => undefined); throw error; } }
 async function enumerateDirectory(directory: OpenDirectory): Promise<string[]> { await assertDirectoryStable(directory); const names = (await readdir(directory.path)).sort(compare); await assertDirectoryStable(directory); return names; }

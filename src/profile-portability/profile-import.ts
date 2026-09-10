@@ -337,7 +337,7 @@ export async function executeProfileImport(
           result = await services.addLibrary(lifecycleOptions, resource.id, resource.identity, resource.reuseRequirement);
         } else {
           let approvedInputs: {
-            rootIdentity: { root: string; device: bigint; inode: bigint };
+            rootIdentity: import('../skill-collections/resource-identity.js').ResourceRootIdentity;
             manifestSnapshot: PackageManifestSnapshot;
           } | undefined;
           result = await services.addPackage({
@@ -450,6 +450,7 @@ export async function executeProfileImport(
 
   const skills = authoritative.plan.skills.map((id) => {
     const health = requiredHealth(authoritative, 'skill', id);
+    if (health.root.domain === 'windows') throw new BazframeError('PROFILE_IMPORT_DOMAIN_INVALID', 'POSIX profile import cannot consume Windows source identity.');
     return { id, target: health.root.path, device: health.root.device, inode: health.root.inode };
   });
   let lockedProfileOutcome: 'published' | 'reused' | undefined;

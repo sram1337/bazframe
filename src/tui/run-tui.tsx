@@ -1,9 +1,11 @@
+import type { ApplicationServices } from '../application/application-services.js';
 import { render } from 'ink';
 import { EXIT_STATUS } from '../core/exit-status.js';
 import { createBazframeTuiService } from '../application/tui-service.js';
 import { TuiApp } from './app.js';
 
 export interface RunTuiOptions {
+  application?: ApplicationServices;
   bazframeHome: string;
   bazframeVersion: string;
   cwd: string;
@@ -26,6 +28,7 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
     instance = render(
       <TuiApp
       service={createBazframeTuiService({
+        application: options.application,
         bazframeHome: options.bazframeHome,
         bazframeVersion: options.bazframeVersion,
         cwd: options.cwd,

@@ -1,5 +1,9 @@
+import { homedir } from 'node:os';
+import type { ApplicationServices } from './application-services.js';
+import type { PhysicalProfileExpectation } from '../profile-publishing/physical-profile-closure.js';
 import { lstat, readdir, readlink, realpath } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import * as nodePaths from 'node:path';
+import { dirname } from 'node:path';
 import { readUtf8InstructionFile } from '../core/content.js';
 import type { ChildResult } from '../core/child-process.js';
 import type { InheritedChildRunner } from '../core/external-editor.js';
@@ -27,7 +31,6 @@ import {
   type ProfileRemovalIdentity
 } from '../profiles/profile-removal-identity.js';
 import {
-  profileDirectory,
   readActiveProfile
 } from '../profiles/profile-store.js';
 import { editSkillDefinition as launchSkillDefinitionEditor } from '../skills/skill-definition-editor.js';
@@ -105,7 +108,7 @@ export interface ProfileSummary {
   id: string;
   directory: string;
   instructionsPath: string;
-  removalIdentity: ProfileRemovalIdentity;
+  removalIdentity: ProfileRemovalIdentity | PhysicalProfileExpectation;
   active: boolean;
   favorite: boolean;
   membershipWritable: boolean;
@@ -179,7 +182,7 @@ export type ProfileRemovalAuthorization =
   | {
       kind: 'recursive';
       confirmedProfileId: string;
-      removalIdentity: ProfileRemovalIdentity;
+      removalIdentity: ProfileRemovalIdentity | PhysicalProfileExpectation;
     };
 
 export interface SkillReference {
@@ -263,11 +266,16 @@ export interface BazframeTuiServiceOptions extends ProfileSkillMembershipOptions
   userHome?: string;
   adapterArtifactUrl?: URL;
   editorChildRunner?: InheritedChildRunner;
+  application?: ApplicationServices;
 }
 
 export function createBazframeTuiService(
   options: BazframeTuiServiceOptions
 ): BazframeTuiService {
+  const application = options.application;
+  options = { ...options, platformServices: application?.profiles?.platformServices ?? options.platformServices };
+  const paths = application?.paths;
+  const basename = paths?.basename ?? nodePaths.basename, join = paths?.join ?? nodePaths.join;
   let revision = 0;
 
   return {
@@ -276,19 +284,19 @@ export function createBazframeTuiService(
       return inspectDashboard(options, revision);
     },
     async createProfile(profileId) {
-      await addProfile(options.bazframeHome, profileId);
+      await addProfile(options.bazframeHome, profileId, { provisioningServices: application?.provisioning });
     },
     async duplicateProfile(sourceProfileId, profileId) {
-      await duplicateManagedProfile(options.bazframeHome, sourceProfileId, profileId);
+      await duplicateManagedProfile(options.bazframeHome, sourceProfileId, profileId, {}, application?.lifecycle, application?.copyProfileEffects === undefined ? undefined : (authority) => application.copyProfileEffects!(options.bazframeHome, authority));
     },
     async useProfile(profileId) {
-      await useManagedProfile(options.bazframeHome, profileId);
+      await useManagedProfile(options.bazframeHome, profileId, application?.activation);
     },
     async toggleProfileFavorite(profileId) {
-      await toggleStoredProfileFavorite(options.bazframeHome, profileId);
+      await toggleStoredProfileFavorite(options.bazframeHome, profileId, { services: application?.lifecycle });
     },
     async renameProfile(previousProfileId, profileId) {
-      await renameManagedProfile(options.bazframeHome, previousProfileId, profileId);
+      await renameManagedProfile(options.bazframeHome, previousProfileId, profileId, {}, application?.lifecycle);
     },
     async removeProfile(profileId, authorization) {
       if (authorization.kind === 'recursive') {
@@ -298,13 +306,14 @@ export function createBazframeTuiService(
             `Recursive removal confirmation must exactly match ${JSON.stringify(profileId)}.`
           );
         }
-        await removeManagedProfile(options.bazframeHome, profileId,{expectedRemovalIdentity:authorization.removalIdentity});
+        await removeManagedProfile(options.bazframeHome, profileId,{expectedRemovalIdentity:authorization.removalIdentity}, application?.lifecycle);
         return;
       }
-      await removeManagedProfile(options.bazframeHome,profileId,{requireGeneratedEmpty:true});
+      await removeManagedProfile(options.bazframeHome,profileId,{requireGeneratedEmpty:true}, application?.lifecycle);
     },
     async editProfileInstructions(profileId) {
       return launchProfileInstructionEditor({
+        ...application?.profileEditor,
         bazframeHome: options.bazframeHome,
         profileId,
         environment: options.environment,
@@ -322,6 +331,7 @@ export function createBazframeTuiService(
         );
       }
       return launchSkillDefinitionEditor({
+        ...application?.skillEditor,
         bazframeHome: options.bazframeHome,
         skillId: skill.skillId,
         environment: options.environment,
@@ -332,10 +342,10 @@ export function createBazframeTuiService(
     },
     async addMembership(profileId, skill) {
       if(skill.originId.startsWith('imported:')){
-        const view=await readProfileSystemView(options.bazframeHome);
+        const view=await readProfileSystemView(options.bazframeHome, options.application?.view);
         const projected=view.skills.find((item)=>item.sourceResourceIdentity===skill.originId&&(item.name===skill.skillId||item.displayName===skill.skillId)&&item.directlyAttachable);
         if(projected===undefined)throw new BazframeError('PROFILE_SKILL_MEMBERSHIP_STALE','Stale imported Skill membership reference.');
-        await mutateImportedProfileResourceMembership(options.bazframeHome,profileId,projected.sourceResourceIdentity,'add');
+        await mutateImportedProfileResourceMembership(options.bazframeHome,profileId,projected.sourceResourceIdentity,'add', application?.importedMembership);
         return;
       }
       assertKnownOrigin(skill.originId);
@@ -349,7 +359,7 @@ export function createBazframeTuiService(
           `Stale profile skill membership reference: ${JSON.stringify(membership.membershipId)}`
         );
       }
-      if(membership.originId.startsWith('imported:'))await mutateImportedProfileResourceMembership(options.bazframeHome,profileId,membership.originId,'remove');
+      if(membership.originId.startsWith('imported:'))await mutateImportedProfileResourceMembership(options.bazframeHome,profileId,membership.originId,'remove', application?.importedMembership);
       else { assertKnownOrigin(membership.originId); await removeProfileSkill(options, profileId, membership.skillId); }
     },
     async loadSkillPreview(skill) {
@@ -369,23 +379,23 @@ export function createBazframeTuiService(
         };
       }
       const enteredRoot = expandBrowserPath(options, request.source);
-      const canonicalRoot = await canonicalPhysicalCollectionRoot(enteredRoot, 'library');
+      const canonicalRoot = await (application?.collections?.canonicalRoot ?? canonicalPhysicalCollectionRoot)(enteredRoot, 'library');
       const libraryId = basename(canonicalRoot);
       assertSafeSkillId(libraryId);
       let packageManifest: Extract<LibraryCandidateSummary, { kind: 'directory' }>['packageManifest'] = { state: 'absent' };
-      try { await lstat(join(canonicalRoot, PACKAGE_MANIFEST)); packageManifest = { state: 'present' }; }
+      try { await (application?.reads?.stat ?? lstat)(join(canonicalRoot, PACKAGE_MANIFEST)); packageManifest = { state: 'present' }; }
       catch (error) { if (errorCode(error) !== 'ENOENT') throw error; }
       return { kind: 'directory', libraryId, enteredRoot, canonicalRoot, packageManifest };
     },
     async addLibrary(request) {
       if (isManagedGitSource(request.source)) {
-        return addManagedGitLibrary({
+        return (application?.provider?.(options.bazframeHome).addManagedGitLibrary ?? addManagedGitLibrary)({
           bazframeHome: options.bazframeHome,
           environment: options.environment
         }, request.source);
       }
       const root = expandBrowserPath(options, request.source);
-      return addGlobalLibrary(options, root);
+      return addGlobalLibrary(options, root, { services: application?.collections });
     }
   };
 }
@@ -394,11 +404,12 @@ async function loadSkillPreview(
   options: BazframeTuiServiceOptions,
   reference: SkillReference
 ): Promise<SkillPreview> {
+  const { join } = options.application?.paths ?? nodePaths;
   if(!reference.originId.startsWith('imported:'))assertSafeSkillId(reference.skillId);
   let definitionPath: string | undefined;
   if (reference.originId === DEFAULT_SKILL_SOURCE_ID) {
     try {
-      const registration = await readDefaultSkillRegistration(options.bazframeHome, reference.skillId);
+      const registration = await readDefaultSkillRegistration(options.bazframeHome, reference.skillId, options.application?.profiles);
       definitionPath = join(registration.target, 'SKILL.md');
     } catch (error) {
       throw new BazframeError('SKILL_PREVIEW_STALE', `Skill is no longer available from (default): ${reference.skillId}`, { cause: error });
@@ -406,12 +417,12 @@ async function loadSkillPreview(
   } else if (reference.originId.startsWith('library:') || reference.originId.startsWith('package:')) {
     const [kind, id] = reference.originId.split(':') as [SkillCollectionKind, string];
     if (!isSafeSkillId(id)) throw new BazframeError('SKILL_ORIGIN_UNKNOWN', `Unknown Skill origin: ${reference.originId}`);
-    const global = await inspectGlobalSkillCollections(options.bazframeHome);
+    const global = await inspectGlobalSkillCollections(options.bazframeHome, options.application?.collections?.resolver.definitionLoader, options.application?.collections?.resolver);
     const collection = global.collections.find((item) => kindForRecord(item.record) === kind && idForRecord(item.record) === id);
     if (collection === undefined || collection.diagnostics.length > 0) throw new BazframeError('SKILL_PREVIEW_STALE', `${kind === 'library' ? 'Library' : 'Package'} is unavailable: ${id}`);
     definitionPath = collection.skills.find((skill) => skill.name === reference.skillId)?.definitionPath;
   } else if(reference.originId.startsWith('imported:')){
-    const view=await readProfileSystemView(options.bazframeHome);
+    const view=await readProfileSystemView(options.bazframeHome, options.application?.view);
     definitionPath=view.skills.find((item)=>item.sourceResourceIdentity===reference.originId&&(item.name===reference.skillId||item.displayName===reference.skillId))?.directory;
     if(definitionPath!==undefined)definitionPath=join(definitionPath,'SKILL.md');
   } else {
@@ -426,7 +437,7 @@ async function loadSkillPreview(
   return {
     ...reference,
     path: definitionPath,
-    contents: await readUtf8InstructionFile(definitionPath, 'Skill definition')
+    contents: await (options.application?.reads?.instructions ?? readUtf8InstructionFile)(definitionPath, 'Skill definition')
   };
 }
 
@@ -450,8 +461,9 @@ async function browseDirectories(
   options: BazframeTuiServiceOptions,
   input: string
 ): Promise<DirectoryBrowserSnapshot> {
+  const { join, dirname, basename } = options.application?.paths ?? nodePaths;
   const resolvedPath = expandBrowserPath(options, input);
-  await assertNoExplicitAncestorSymlink(
+  if (options.application?.reads === undefined) await assertNoExplicitAncestorSymlink(
     resolvedPath,
     input.length === 0
       ? resolvedPath
@@ -463,27 +475,27 @@ async function browseDirectories(
   let selectablePath: string | undefined;
   let prefix = '';
   try {
-    const metadata = await lstat(resolvedPath);
+    const metadata = await (options.application?.reads?.stat ?? lstat)(resolvedPath);
     if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
       throw new BazframeError(
         'LIBRARY_BROWSER_PATH_INVALID',
         `Path must be a physical directory: ${resolvedPath}`
       );
     }
-    listRoot = await canonicalPhysicalCollectionRoot(resolvedPath, 'library');
+    listRoot = await (options.application?.collections?.canonicalRoot ?? canonicalPhysicalCollectionRoot)(resolvedPath, 'library');
     selectablePath = resolvedPath;
   } catch (error) {
     if (errorCode(error) !== 'ENOENT') throw error;
     const parent = dirname(resolvedPath);
     prefix = basename(resolvedPath);
-    listRoot = await canonicalPhysicalCollectionRoot(parent, 'library');
+    listRoot = await (options.application?.collections?.canonicalRoot ?? canonicalPhysicalCollectionRoot)(parent, 'library');
   }
   const entries: DirectoryBrowserEntry[] = [];
-  for (const entry of (await readdir(listRoot, { withFileTypes: true }))
+  for (const entry of (await (options.application?.reads?.entries !== undefined ? options.application.reads.entries(listRoot, true) : readdir(listRoot, { withFileTypes: true })))
     .sort((left, right) => lexicalCompare(left.name, right.name))) {
     if (!entry.name.startsWith(prefix)) continue;
     const path = join(listRoot, entry.name);
-    const metadata = await lstat(path);
+    const metadata = await (options.application?.reads?.stat ?? lstat)(path);
     if (metadata.isSymbolicLink() || !metadata.isDirectory()) continue;
     entries.push({ name: entry.name, path });
   }
@@ -523,9 +535,10 @@ async function assertNoExplicitAncestorSymlink(
 }
 
 function expandBrowserPath(options: BazframeTuiServiceOptions, input: string): string {
+  const { isAbsolute, resolve } = options.application?.paths ?? nodePaths;
   const value = input.length === 0 ? options.cwd : input;
   if (value === '~' || value.startsWith('~/')) {
-    const userHome = options.userHome ?? options.environment.HOME;
+    const userHome = options.userHome ?? ((options.application?.paths ?? nodePaths) === nodePaths.win32 ? options.environment.USERPROFILE ?? options.environment.HOME : options.environment.HOME) ?? homedir();
     if (userHome === undefined || !isAbsolute(userHome)) {
       throw new BazframeError('LIBRARY_BROWSER_PATH_INVALID', 'Cannot expand ~ without an absolute user home.');
     }
@@ -545,14 +558,14 @@ async function inspectDashboard(
   revision: number
 ): Promise<DashboardSnapshot> {
   const diagnostics: DashboardDiagnostic[] = [];
-  const activeProfileId = await inspectActiveProfile(options.bazframeHome, diagnostics);
-  const favoriteProfileIds = await inspectProfileFavorites(options.bazframeHome, diagnostics);
+  const activeProfileId = await inspectActiveProfile(options.bazframeHome, diagnostics, options.application);
+  const favoriteProfileIds = await inspectProfileFavorites(options.bazframeHome, diagnostics, options.application);
   const defaultCatalog = await inspectDefaultSkillGroup(options, diagnostics);
-  const global = await inspectGlobalSkillCollections(options.bazframeHome);
+  const global = await inspectGlobalSkillCollections(options.bazframeHome, options.application?.collections?.resolver.definitionLoader, options.application?.collections?.resolver);
   for (const item of global.diagnostics) diagnostics.push({ id: `${item.collectionKind}-${item.collectionId}`, severity: 'error', message: formatSkillCollectionDiagnostic(item) });
   const collections: SkillCollectionSummary[] = [];
   const collectionGroups: SkillGroupSummary[] = [];
-  const referenceIndex = await captureProfileCollectionReferenceBulkIndex(options.bazframeHome);
+  const referenceIndex = await captureProfileCollectionReferenceBulkIndex(options.bazframeHome, options.application?.collections?.references);
   for (const item of referenceIndex.diagnostics) diagnostics.push({ id: `collection-reference-index-${item.profileId}-${item.diagnostic.key.kind}-${item.diagnostic.path}`, severity: 'error', message: `Reference index unavailable at ${item.profileId}:${item.diagnostic.key.kind}:${item.diagnostic.path}.` });
   const referenceIndexReady = referenceIndex.diagnostics.length === 0;
   for (const item of global.collections) {
@@ -560,8 +573,8 @@ async function inspectDashboard(
     const itemDiagnostics = [...item.diagnostics.map(formatSkillCollectionDiagnostic), ...(referenceIndexReady ? [] : ['reference index unavailable'])];
     collections.push({ key, kind, id, root: record.root, digest: record.digest, ...('package' in record ? { artifactRoot: record.artifactRoot } : {}), skillsRoot: skillsRootForRecord(record), refreshAvailability: item.rebuildAvailability, skillCount: item.skills.length, referenceCount: referenceIndexReady ? (referenceIndex.profileIdsByCollection.get(key)?.length ?? 0) : 'unknown', health: item.diagnostics.length === 0 && referenceIndexReady ? 'ready' : 'failed', diagnostics: itemDiagnostics });
     if (item.diagnostics.length === 0) {
-      const snapshot = await verifySkillSnapshot(options.bazframeHome, record.digest);
-      const immutableRoot = await resolvePhysicalRelativeDirectory(snapshot.artifactPath, skillsRootForRecord(record));
+      const snapshot = await (options.application?.collections?.resolver.verifySnapshot ?? verifySkillSnapshot)(options.bazframeHome, record.digest);
+      const immutableRoot = await (options.application?.collections?.resolver.resolveDirectory ?? resolvePhysicalRelativeDirectory)(snapshot.artifactPath, skillsRootForRecord(record));
       collectionGroups.push({ id: key, label: `${kind === 'library' ? 'Library' : 'Package'}: ${id}`, root: immutableRoot, artifactWritesSupported: false, skills: item.skills.map((skill) => ({ id: skill.name, originId: key, directory: skill.baseDir })) });
     }
   }
@@ -572,10 +585,11 @@ async function inspectDashboard(
     activeProfileId,
     new Set(favoriteProfileIds),
     global,
-    diagnostics
+    diagnostics,
+    options.application
   );
   try{
-    const systemView=await readProfileSystemView(options.bazframeHome);
+    const systemView=await readProfileSystemView(options.bazframeHome, options.application?.view);
     const profileApplications=new Map(projectTuiProfileApplications(systemView,activeProfileId??null).map((item)=>[item.name,item.extension]));
     for(const profile of profiles){
       Object.assign(profile,profileApplications.get(profile.id)??{});
@@ -630,6 +644,7 @@ async function inspectSetupStatuses(
 }> {
   const inspectionOptions = {
     bazframeHome: options.bazframeHome,
+    application: options.application,
     bazframeVersion: options.bazframeVersion,
     environment: options.environment,
     ...(options.userHome === undefined ? {} : { userHome: options.userHome }),
@@ -677,10 +692,11 @@ async function inspectSetupStatuses(
 
 async function inspectActiveProfile(
   bazframeHome: string,
-  diagnostics: DashboardDiagnostic[]
+  diagnostics: DashboardDiagnostic[],
+  application?: ApplicationServices
 ): Promise<string | undefined> {
   try {
-    return await readActiveProfile(bazframeHome);
+    return await readActiveProfile(bazframeHome, application?.selection);
   } catch (error) {
     if (error instanceof BazframeError && error.code === 'NO_ACTIVE_PROFILE') return undefined;
     diagnostics.push(diagnostic('active-profile', error));
@@ -690,10 +706,11 @@ async function inspectActiveProfile(
 
 async function inspectProfileFavorites(
   bazframeHome: string,
-  diagnostics: DashboardDiagnostic[]
+  diagnostics: DashboardDiagnostic[],
+  application?: ApplicationServices
 ): Promise<string[]> {
   try {
-    return (await readProfileFavorites(bazframeHome)).favorites;
+    return (await readProfileFavorites(bazframeHome, application?.lifecycle)).favorites;
   } catch (error) {
     diagnostics.push(diagnostic('profile-favorites', error));
     return [];
@@ -705,12 +722,12 @@ async function inspectDefaultSkillGroup(
   diagnostics: DashboardDiagnostic[]
 ): Promise<{ group: SkillGroupSummary; registrations: DefaultSkillRegistration[] } | undefined> {
   try {
-    const listed = await inspectDefaultSkillCatalog(options.bazframeHome);
+    const listed = await inspectDefaultSkillCatalog(options.bazframeHome, options.application?.profiles);
     for (const [index, message] of listed.diagnostics.entries()) {
       diagnostics.push({ id: `default-skill-${index}`, severity: 'warning', message });
     }
     let canonicalRoot: string | undefined;
-    try { canonicalRoot = await realpath(listed.root); }
+    try { canonicalRoot = await (options.application?.reads?.canonical ?? realpath)(listed.root); }
     catch (error) { if (errorCode(error) !== 'ENOENT') throw error; }
     return {
       registrations: listed.registrations,
@@ -739,12 +756,15 @@ async function inspectProfiles(
   activeProfileId: string | undefined,
   favoriteProfileIds: ReadonlySet<string>,
   globalCollections: { collections: GlobalSkillCollectionInspection[]; diagnostics: SkillCollectionDiagnostic[] },
-  diagnostics: DashboardDiagnostic[]
+  diagnostics: DashboardDiagnostic[],
+  application?: ApplicationServices
 ): Promise<ProfileSummary[]> {
+  const join = application?.paths.join ?? nodePaths.join;
+  const stat = application?.reads?.stat ?? lstat;
   const root = join(bazframeHome, 'profiles');
   let rootMetadata;
   try {
-    rootMetadata = await lstat(root);
+    rootMetadata = await stat(root);
   } catch (error) {
     if (errorCode(error) === 'ENOENT') return [];
     diagnostics.push(diagnostic('profiles-root', error));
@@ -761,7 +781,7 @@ async function inspectProfiles(
 
   let entries;
   try {
-    entries = await readdir(root, { withFileTypes: true });
+    entries = await (application?.reads?.entries !== undefined ? application.reads.entries(root) : readdir(root, { withFileTypes: true }));
   } catch (error) {
     diagnostics.push(diagnostic('profiles-root', error));
     return [];
@@ -778,9 +798,9 @@ async function inspectProfiles(
       });
       continue;
     }
-    const directory = profileDirectory(bazframeHome, entry.name);
+    const directory = join(bazframeHome, 'profiles', entry.name);
     try {
-      const metadata = await lstat(directory);
+      const metadata = await stat(directory);
       if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
         throw new BazframeError(
           'PROFILE_NOT_PHYSICAL',
@@ -790,9 +810,9 @@ async function inspectProfiles(
       // Capture before projecting the disclosed paths and memberships. A
       // cooperating mutation can therefore only make this identity stale; it
       // cannot authorize newer profile content than the dashboard described.
-      const removalIdentity = await captureProfileRemovalIdentity(directory);
+      const removalIdentity = await (application?.lifecycle === undefined ? captureProfileRemovalIdentity(directory) : application.lifecycle.removalIdentity(bazframeHome, entry.name));
       const instructionsPath = join(directory, 'AGENTS.md');
-      await readUtf8InstructionFile(
+      await (application?.reads?.instructions ?? readUtf8InstructionFile)(
         instructionsPath,
         `Profile ${JSON.stringify(entry.name)} instructions`
       );
@@ -801,7 +821,7 @@ async function inspectProfiles(
       let membershipDiagnostic: string | undefined;
       let memberships: DirectMembership[] = [];
       try {
-        const skillsMetadata = await lstat(skillsDirectory);
+        const skillsMetadata = await stat(skillsDirectory);
         if (skillsMetadata.isSymbolicLink() || !skillsMetadata.isDirectory()) {
           membershipDiagnostic = `Profile skills path is not a physical directory: ${skillsDirectory}`;
         } else {
@@ -810,7 +830,8 @@ async function inspectProfiles(
             skillsDirectory,
             defaultRegistrations,
             diagnostics,
-            entry.name
+            entry.name,
+            application
           );
         }
       } catch (error) {
@@ -827,12 +848,12 @@ async function inspectProfiles(
       }
       const libraryReferences: ProfileCollectionReferenceSummary[] = [];
       const packageReferences: ProfileCollectionReferenceSummary[] = [];
-      const referenceNamespace = await scanProfileCollectionReferences(bazframeHome, entry.name);
+      const referenceNamespace = await scanProfileCollectionReferences(bazframeHome, entry.name, application?.collections?.references);
       const invalidReferencePaths = referenceNamespace.diagnostics.map((item) => `${item.key.kind}:${item.path}`);
       for (const item of referenceNamespace.diagnostics) diagnostics.push({ id: `profile-${entry.name}-${item.key.kind}-${item.path}`, severity: 'error', message: `Invalid ${item.key.kind} reference ${item.path}.` });
       const readableReferences: Array<{ reference: ProfileSkillCollectionReference; path: string }> = [];
       for (const item of referenceNamespace.references) {
-        try { readableReferences.push({ reference: await readProfileCollectionReference(bazframeHome, entry.name, item.key), path: item.path }); }
+        try { readableReferences.push({ reference: await readProfileCollectionReference(bazframeHome, entry.name, item.key, application?.collections?.references), path: item.path }); }
         catch (error) { invalidReferencePaths.push(`${item.key.kind}:${item.relativePath}`); diagnostics.push(diagnostic(`profile-${entry.name}-${item.key.kind}-${item.relativePath}`, error)); }
       }
       const namespaceDiagnostic = invalidReferencePaths.length === 0 ? undefined : `Profile library/package reference namespace is invalid: ${[...invalidReferencePaths].sort(lexicalCompare).join(', ')}`;
@@ -871,11 +892,13 @@ async function inspectMemberships(
   skillsDirectory: string,
   defaultRegistrations: readonly DefaultSkillRegistration[],
   diagnostics: DashboardDiagnostic[],
-  profileId: string
+  profileId: string,
+  application?: ApplicationServices
 ): Promise<DirectMembership[]> {
+  const join = application?.paths.join ?? nodePaths.join, isAbsolute = application?.paths.isAbsolute ?? nodePaths.isAbsolute;
   let entries;
   try {
-    entries = await readdir(skillsDirectory, { withFileTypes: true });
+    entries = await (application?.reads?.entries !== undefined ? application.reads.entries(skillsDirectory) : readdir(skillsDirectory, { withFileTypes: true }));
   } catch (error) {
     diagnostics.push(diagnostic(`memberships-${profileId}`, error));
     return [];
@@ -899,7 +922,8 @@ async function inspectMemberships(
       continue;
     }
     try {
-      const metadata = await lstat(path);
+      const link = application?.profiles?.platformServices === undefined ? undefined : await application.profiles.platformServices.readSkillLink(skillsDirectory, entry.name);
+      const metadata = link === undefined ? await lstat(path) : { isSymbolicLink: () => link.kind === 'current' };
       if (!metadata.isSymbolicLink()) {
         memberships.push({
           id: entry.name,
@@ -912,7 +936,7 @@ async function inspectMemberships(
         });
         continue;
       }
-      const target = await readlink(path);
+      const target = link?.kind === 'current' ? link.targetPath : await readlink(path);
       const registration = defaultRegistrations.find((item) => item.id === entry.name);
       const managed = registration !== undefined && isAbsolute(target) && target === registration.target;
       memberships.push({

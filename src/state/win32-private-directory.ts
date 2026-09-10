@@ -48,6 +48,13 @@ export function admitWindowsPrivateDirectory(
   return revalidateChain(backend, chain)[0]!.inspection;
 }
 
+/** External ZIP roots need namespace integrity/locality, not managed-tree read privacy. */
+export function admitWindowsNamespaceDirectory(backend: BazframeWin32NativeBackend, path: string): WindowsPathInspection {
+  const chain = inspectPrivateChain(backend, path, false);
+  assertExactSpelling(backend, path);
+  return revalidateChain(backend, chain)[0]!.inspection;
+}
+
 /** Reuses the effective owner-private directory ACL policy for a no-follow child object. */
 export function assertWindowsOwnerPrivateSecurity(
   security: WindowsSecurityObservation,
@@ -62,7 +69,8 @@ export function assertWindowsOwnerPrivateSecurity(
 /** Admits one owner-private, single-link regular file beneath a private directory chain. */
 export function admitWindowsPrivateFile(
   backend: BazframeWin32NativeBackend,
-  path: string
+  path: string,
+  options: { parentPolicy?: 'namespace' } = {}
 ): WindowsPathInspection {
   requireDriveAbsolutePath(path);
   const parentPath = win32.dirname(path);
@@ -70,7 +78,7 @@ export function admitWindowsPrivateFile(
   if (parentPath.toLowerCase() === path.toLowerCase() || !isValidWindowsPathComponent(component)) {
     throw fileInvalid('path does not name one valid child file');
   }
-  const chain = inspectPrivateChain(backend, parentPath);
+  const chain = inspectPrivateChain(backend, parentPath, options.parentPolicy !== 'namespace');
   const admittedParent = revalidateChain(backend, chain)[0]!.inspection;
   const before = backend.inspectPath(path);
   assertPrivateFile(before);
@@ -93,10 +101,11 @@ export function admitWindowsPrivateFile(
 export function createWindowsPrivateDirectory(
   backend: BazframeWin32NativeBackend,
   parentPath: string,
-  finalComponent: string
+  finalComponent: string,
+  options: { parentPolicy?: 'namespace' } = {}
 ): WindowsPathInspection {
   validateFinalComponent(finalComponent);
-  return createPrivateDirectoryUnderChain(backend, parentPath, finalComponent, inspectPrivateChain(backend, parentPath));
+  return createPrivateDirectoryUnderChain(backend, parentPath, finalComponent, inspectPrivateChain(backend, parentPath, options.parentPolicy !== 'namespace'));
 }
 
 function createPrivateDirectoryUnderChain(
@@ -219,7 +228,8 @@ function assertExactSpelling(backend: BazframeWin32NativeBackend, path: string):
 export function createWindowsPrivateFile(
   backend: BazframeWin32NativeBackend,
   parentPath: string,
-  finalComponent: string
+  finalComponent: string,
+  options: { parentPolicy?: 'namespace' } = {}
 ): WindowsPathInspection {
   if (!isValidWindowsPathComponent(finalComponent)) {
     throw failure(
@@ -227,7 +237,7 @@ export function createWindowsPrivateFile(
       'The Windows private-file name is invalid or reserved.'
     );
   }
-  const chain = inspectPrivateChain(backend, parentPath);
+  const chain = inspectPrivateChain(backend, parentPath, options.parentPolicy !== 'namespace');
   const admittedChain = revalidateChain(backend, chain);
   const admittedParent = admittedChain[0]!.inspection;
   let receipt;
@@ -271,11 +281,10 @@ export function createWindowsPrivateFile(
   }
 }
 
-function inspectPrivateChain(backend: BazframeWin32NativeBackend, path: string): ChainEntry[] {
+function inspectPrivateChain(backend: BazframeWin32NativeBackend, path: string, requiresPrivateProof = true): ChainEntry[] {
   requireDriveAbsolutePath(path);
   const chain: ChainEntry[] = [];
   let current = path;
-  let requiresPrivateProof = true;
   while (true) {
     const inspection = backend.inspectPath(current);
     if (requiresPrivateProof) assertPrivateDirectory(inspection);

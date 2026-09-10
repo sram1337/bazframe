@@ -1,3 +1,5 @@
+import type { EditorTargetProof } from '../core/win32-editor-target.js';
+import type { ExternalEditorOptions } from '../core/external-editor.js';
 import { lstat, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ChildResult } from '../core/child-process.js';
@@ -14,7 +16,10 @@ export interface ProfileInstructionEditorOptions {
   bazframeHome: string;
   profileId: string;
   environment: NodeJS.ProcessEnv;
+  platform?: NodeJS.Platform;
   childRunner?: InheritedChildRunner;
+  targetProof?: (home: string, id: string) => Promise<EditorTargetProof>;
+  resolveExecutable?: ExternalEditorOptions['resolveExecutable'];
 }
 
 export interface ProfileInstructionEditorTarget {
@@ -25,13 +30,15 @@ export interface ProfileInstructionEditorTarget {
 export async function editProfileInstructions(
   options: ProfileInstructionEditorOptions
 ): Promise<ChildResult> {
-  const target = await resolveProfileInstructionEditorTarget(
-    options.bazframeHome,
-    options.profileId
-  );
+  assertSafeProfileId(options.profileId);
+  const proof = options.targetProof === undefined ? undefined : await options.targetProof(options.bazframeHome, options.profileId);
+  const target = proof === undefined ? await resolveProfileInstructionEditorTarget(options.bazframeHome, options.profileId) : { instructionsPath: proof.path, profileDirectory: proof.cwd };
   return launchExternalEditor({
+    platform: options.platform,
     target: { path: target.instructionsPath, cwd: target.profileDirectory },
     environment: options.environment,
+    resolveExecutable: options.resolveExecutable,
+    revalidate: proof?.revalidate ?? (async () => { await resolveProfileInstructionEditorTarget(options.bazframeHome, options.profileId); }),
     ...(options.childRunner === undefined ? {} : { childRunner: options.childRunner })
   });
 }

@@ -1,5 +1,5 @@
 import { chmod, mkdir, readFile, realpath, rename, symlink, writeFile } from 'node:fs/promises';
-import { basename } from 'node:path';
+import { basename, win32 } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { measureProviderOperation } from '../../helpers/provider-manifest.js';
 import { createTempDirectory, type TempDirectory } from '../../helpers/temp-directory.js';
@@ -8,12 +8,40 @@ import { encodeLibrary, encodePackage } from '../../../src/skill-collections/ski
 import { encodeProfileCollectionReference } from '../../../src/profiles/profile-skill-collection-reference.js';
 import {
   loadFlatSkillIdentities,
+  loadFlatSkillIdentitiesWithEffects,
+  createPhysicalSkillDefinitionLoader,
   resolveProfileSkillCollections,
   validateCapturedSkillComposition,
   UNKNOWN_COLLECTION_ID,
   type DefinitionLoader,
   type DerivedSkill
 } from '../../../src/skill-collections/skill-collection-resolver.js';
+
+describe('effect-backed shared flat Skill loader contract', () => {
+  const directory = win32.join('C:/profiles/work/skills/local');
+  const definitionPath = win32.join(directory, 'SKILL.md');
+  const skill = { name: 'local', baseDir: directory, definitionPath };
+  it.each(['empty', 'multiple', 'base-directory', 'definition-path', 'error'] as const)('rejects %s loader results', async (adverse) => {
+    const skills = adverse === 'empty' ? [] : adverse === 'multiple' ? [skill, skill] : [{
+      ...skill,
+      ...(adverse === 'base-directory' ? { baseDir: win32.dirname(directory) } : {}),
+      ...(adverse === 'definition-path' ? { definitionPath: win32.join(directory, 'nested', 'SKILL.md') } : {})
+    }];
+    await expect(loadFlatSkillIdentitiesWithEffects([directory], {
+      joinPath: win32.join,
+      definitionLoader: () => ({ skills, diagnostics: adverse === 'error' ? [{ type: 'error', message: 'invalid' }] : [] })
+    })).rejects.toMatchObject({ code: 'INVALID_SKILL_DEFINITION' });
+  });
+  it('uses bounded definition bytes and permits loader warnings for one exact result', async () => {
+    const reads: Array<[string, number]> = [];
+    const definitionLoader = createPhysicalSkillDefinitionLoader(async (path, maximum) => {
+      reads.push([path, maximum]);
+      return Buffer.from(`---\nname: local\ndescription: ${'x'.repeat(1025)}\n---\n`);
+    }, win32.basename);
+    expect(await loadFlatSkillIdentitiesWithEffects([directory], { joinPath: win32.join, definitionLoader })).toEqual([{ name: 'local', definitionPath, loaded: { name: 'local', filePath: definitionPath, baseDir: directory, description: 'x'.repeat(1025), disableModelInvocation: false } }]);
+    expect(reads).toEqual([[definitionPath, 1024 * 1024]]);
+  });
+});
 
 const directories: TempDirectory[] = [];
 

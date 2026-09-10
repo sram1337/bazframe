@@ -1,6 +1,6 @@
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, readlink, realpath, readdir, symlink, unlink, type FileHandle } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, win32 } from 'node:path';
 import { BazframeError, errorCode } from '../core/errors.js';
 import {
   captureProfileSkillReferenceIndex,
@@ -395,7 +395,7 @@ async function inspectWindowsDefaultSkillCatalog(
   bazframeHome: string,
   platformServices: AddedSkillPlatformServices
 ): Promise<DefaultSkillCatalog> {
-  const root = defaultSkillCatalogRoot(bazframeHome);
+  const root = (platformServices.joinPath ?? join)(bazframeHome, 'skills');
   let enumeration;
   try {
     enumeration = await platformServices.enumeratePrivateDirectory(
@@ -448,7 +448,7 @@ async function readWindowsDefaultSkillRegistration(
   skillId: string,
   platformServices: AddedSkillPlatformServices
 ): Promise<DefaultSkillRegistration> {
-  const root = defaultSkillCatalogRoot(bazframeHome);
+  const root = (platformServices.joinPath ?? join)(bazframeHome, 'skills');
   platformServices.inspectPrivateDirectory(root);
   const link = await platformServices.readSkillLink(root, skillId);
   if (link.kind === 'absent') throw notFound(skillId);
@@ -457,16 +457,16 @@ async function readWindowsDefaultSkillRegistration(
   if (link.canonicalTargetPath.toLowerCase() !== targetProof.canonicalPath.toLowerCase()) {
     throw new BazframeError(
       'DEFAULT_SKILL_CHANGED',
-      `Default skill target identity changed while reading: ${join(root, skillId)}`
+      `Default skill target identity changed while reading: ${(platformServices.joinPath ?? join)(root, skillId)}`
     );
   }
-  if (basename(targetProof.canonicalPath) !== skillId) {
+  if (win32.basename(targetProof.canonicalPath) !== skillId) {
     throw new BazframeError(
       'DEFAULT_SKILL_NAME_MISMATCH',
       `Default skill target basename does not match ${JSON.stringify(skillId)}: ${target}`
     );
   }
-  assertWindowsAllowedSkillLocation(
+  await assertWindowsAllowedSkillLocation(
     platformServices,
     bazframeHome,
     targetProof.canonicalPath
@@ -484,10 +484,10 @@ async function readWindowsDefaultSkillRegistration(
     || platformServices.inspectPhysicalDirectory(target).identity !== targetProof.identity) {
     throw new BazframeError(
       'DEFAULT_SKILL_CHANGED',
-      `Default skill registration changed while reading: ${join(root, skillId)}`
+      `Default skill registration changed while reading: ${(platformServices.joinPath ?? join)(root, skillId)}`
     );
   }
-  return { id: skillId, registrationPath: join(root, skillId), target };
+  return { id: skillId, registrationPath: (platformServices.joinPath ?? join)(root, skillId), target };
 }
 
 function inspectWindowsSkillTarget(
@@ -510,18 +510,18 @@ async function addWindowsDefaultSkill(
   enteredRoot: string,
   options: DefaultSkillCatalogTestHooks & { platformServices: AddedSkillPlatformServices }
 ): Promise<DefaultSkillCatalogResult> {
-  if (!isAbsolute(enteredRoot) || enteredRoot.length === 0 || enteredRoot.includes('\0')) {
+  if (!(options.platformServices.isAbsolutePath ?? isAbsolute)(enteredRoot) || enteredRoot.length === 0 || enteredRoot.includes('\0')) {
     throw new BazframeError('INVALID_SKILL_ROOT', 'Skill root must be a non-empty absolute path without NUL bytes.');
   }
-  const target = resolve(enteredRoot);
+  const target = (options.platformServices.resolvePath ?? resolve)(enteredRoot);
   const targetProof = inspectWindowsSkillTarget(
     options.platformServices,
     enteredRoot,
     target
   );
-  const id = basename(targetProof.canonicalPath);
+  const id = win32.basename(targetProof.canonicalPath);
   assertSafeSkillId(id);
-  assertWindowsAllowedSkillLocation(
+  await assertWindowsAllowedSkillLocation(
     options.platformServices,
     bazframeHome,
     targetProof.canonicalPath
@@ -533,10 +533,10 @@ async function addWindowsDefaultSkill(
       `Skill root ${target} declares name ${JSON.stringify(declared)} instead of canonical basename ${JSON.stringify(id)}.`
     );
   }
-  const registrationPath = join(defaultSkillCatalogRoot(bazframeHome), id);
+  const registrationPath = (options.platformServices.joinPath ?? join)((options.platformServices.joinPath ?? join)(bazframeHome, 'skills'), id);
   return windowsCatalogLock(options, bazframeHome, 'bazframe skill add', registrationPath, async (authority) => {
     options.platformServices.ensurePrivateDirectory(bazframeHome, 'skills');
-    const root = defaultSkillCatalogRoot(bazframeHome);
+    const root = (options.platformServices.joinPath ?? join)(bazframeHome, 'skills');
     const before = options.platformServices.inspectSkillLink(root, id, target);
     if (before.kind === 'current') {
       await readWindowsDefaultSkillRegistration(bazframeHome, id, options.platformServices);
@@ -566,8 +566,8 @@ async function removeWindowsDefaultSkill(
   skillId: string,
   options: DefaultSkillCatalogTestHooks & { platformServices: AddedSkillPlatformServices }
 ): Promise<DefaultSkillCatalogResult> {
-  const root = defaultSkillCatalogRoot(bazframeHome);
-  const registrationPath = join(root, skillId);
+  const root = (options.platformServices.joinPath ?? join)(bazframeHome, 'skills');
+  const registrationPath = (options.platformServices.joinPath ?? join)(root, skillId);
   return windowsCatalogLock(options, bazframeHome, 'bazframe skill remove', registrationPath, async (authority) => {
     let before: DefaultSkillRegistration;
     try {
@@ -636,7 +636,7 @@ function windowsCatalogLock<T>(
     );
   }
   return options.platformServices.withLock(
-    join(bazframeHome, 'locks', 'state.lock'),
+    (options.platformServices.joinPath ?? join)(bazframeHome, 'locks', 'state.lock'),
     { command, target },
     operation
   );
@@ -759,14 +759,15 @@ function occupiedRegistration(path: string, raw: RawRegistration | undefined): B
   const detail = raw?.kind === 'link' ? `targets ${JSON.stringify(raw.target)}` : 'is a physical or unreadable entry';
   return new BazframeError('DEFAULT_SKILL_OCCUPIED', `Default skill registration is occupied: ${path} ${detail}.`);
 }
-function assertWindowsAllowedSkillLocation(
+async function assertWindowsAllowedSkillLocation(
   platformServices: AddedSkillPlatformServices,
   home: string,
   canonicalTarget: string
-): void {
+): Promise<void> {
   const canonicalHome = platformServices.inspectPrivateDirectory(home).canonicalPath;
-  if (!isWithin(canonicalHome, canonicalTarget)
-    && !isWithin(canonicalTarget, canonicalHome)) return;
+  const within = (parent: string, child: string) => { const path = win32.relative(parent, child); return path !== '..' && !path.startsWith(`..${win32.sep}`) && !win32.isAbsolute(path); };
+  if (!within(canonicalHome, canonicalTarget) && !within(canonicalTarget, canonicalHome)) return;
+  if (platformServices.assertManagedSkillLocation !== undefined) return platformServices.assertManagedSkillLocation(home, canonicalTarget);
   throw new BazframeError(
     'DEFAULT_SKILL_TARGET_OVERLAPS_BAZFRAME_HOME',
     `Default skill target and BAZFRAME_HOME must not overlap: ${canonicalTarget}`

@@ -1,3 +1,4 @@
+import { sameResourceIdentity, type ResourceRootIdentity } from '../skill-collections/resource-identity.js';
 import { BazframeError } from '../core/errors.js';
 import { PACKAGE_MANIFEST, type PackageManifestSnapshot } from '../packages/package-manifest.js';
 import type { PathFreeManagedGitIdentity } from '../providers/managed-git-record.js';
@@ -102,17 +103,15 @@ export function createPackageBuildAuthorizationReport(
 
 export function sameAuthorizedPackageInputs(
   packageId: string,
-  expectedRoot: { root: string; device: bigint; inode: bigint },
+  expectedRoot: ResourceRootIdentity,
   expectedManifest: PackageManifestSnapshot,
   context: BeforePackageBuildContext
 ): boolean {
   return context.packageId === packageId
     && context.rootIdentity.root === expectedRoot.root
-    && context.rootIdentity.device === expectedRoot.device
-    && context.rootIdentity.inode === expectedRoot.inode
+    && sameResourceIdentity(context.rootIdentity, expectedRoot)
     && context.manifestSnapshot.path === expectedManifest.path
-    && context.manifestSnapshot.device === expectedManifest.device
-    && context.manifestSnapshot.inode === expectedManifest.inode
+    && sameResourceIdentity(context.manifestSnapshot, expectedManifest)
     && context.manifestSnapshot.contentSha256 === expectedManifest.contentSha256;
 }
 

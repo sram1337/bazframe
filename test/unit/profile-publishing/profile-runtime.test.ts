@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { readFile, readdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, win32 } from 'node:path';
 import { createTempDirectory, type TempDirectory } from '../../helpers/temp-directory.js';
-import { withProductionProfileLifecycleRuntime } from '../../../src/profile-publishing/profile-runtime.js';
+import { githubConfigDirectory, withProductionProfileLifecycleRuntime } from '../../../src/profile-publishing/profile-runtime.js';
 import type { ProductionProfileGithubTransportAdapter } from '../../../src/profile-publishing/profile-github-transport.js';
 
 let temporary: TempDirectory | undefined;
@@ -106,3 +106,31 @@ async function snapshot(root: string): Promise<string[]> {
   await visit(root);
   return result.sort();
 }
+
+
+describe('incoming GitHub CLI configuration before isolation', () => {
+  const windows = (environment: NodeJS.ProcessEnv) => githubConfigDirectory(environment, win32.join, 'win32');
+  it('uses documented Windows AppData and HOME defaults without inventing USERPROFILE', () => {
+    expect(windows({ AppData: 'C:\\user\\roaming' })).toBe('C:\\user\\roaming\\GitHub CLI');
+    expect(windows({ home: 'C:\\home' })).toBe('C:\\home\\.config\\gh');
+    expect(windows({ USERPROFILE: 'C:\\user' })).toBeUndefined();
+  });
+  it('preserves override precedence with Windows case-insensitive keys', () => {
+    const defaults = { AppData: 'C:\\roaming', HOME: 'C:\\home' };
+    expect(windows({ ...defaults, xdg_config_home: 'C:\\xdg' })).toBe('C:\\xdg\\gh');
+    expect(windows({ ...defaults, XDG_CONFIG_HOME: 'C:\\xdg', gh_config_dir: 'C:\\explicit' })).toBe('C:\\explicit');
+  });
+  it.each(['GH_CONFIG_DIR', 'XDG_CONFIG_HOME', 'APPDATA', 'HOME'])('refuses conflicting Windows %s spellings', (key) => {
+    expect(() => windows({ [key]: 'C:\\one', [key.toLowerCase()]: 'C:\\two' })).toThrow();
+  });
+  it.each(['GH_CONFIG_DIR', 'XDG_CONFIG_HOME', 'APPDATA', 'HOME'])('refuses relative Windows %s configuration without inspecting or creating it', (key) => {
+    expect(() => windows({ [key]: 'relative', ...(key === 'GH_CONFIG_DIR' ? { APPDATA: 'C:\\fallback' } : {}) })).toThrow(/absolute local Windows path/);
+  });
+  it('preserves POSIX HOME/XDG/explicit selection and ignores Windows-only defaults/casing', () => {
+    const posix = (environment: NodeJS.ProcessEnv) => githubConfigDirectory(environment, join, 'linux');
+    expect(posix({ HOME: '/home/example', APPDATA: '/irrelevant' })).toBe('/home/example/.config/gh');
+    expect(posix({ HOME: '/home', XDG_CONFIG_HOME: '/xdg' })).toBe('/xdg/gh');
+    expect(posix({ HOME: '/home', XDG_CONFIG_HOME: '/xdg', GH_CONFIG_DIR: '/explicit' })).toBe('/explicit');
+    expect(posix({ AppData: 'C:\\roaming', home: '/lowercase', USERPROFILE: 'C:\\user' })).toBeUndefined();
+  });
+});

@@ -1,3 +1,4 @@
+import { ADDED_SKILL_NAMESPACE_ENTRY_LIMIT } from '../skills/added-skill-platform-services.js';
 import { constants } from 'node:fs';
 import { lstat, open, readlink, symlink, unlink, type FileHandle } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
@@ -58,7 +59,7 @@ export async function addProfileSkill(options: ProfileSkillMembershipOptions, pr
 }
 async function addProfileSkillFor(options: ProfileSkillMembershipOptions, profileId: string | undefined, skillId: string): Promise<ProfileSkillMembershipResult> {
   if (options.platformServices !== undefined) {
-    if (profileId === undefined && options.selectionReadServices === undefined) throw windowsExplicitProfileRequired();
+    if (profileId === undefined && options.selectionReadServices === undefined && options.platformServices.selectionReadServices === undefined) throw windowsExplicitProfileRequired();
     return addWindowsProfileSkill(
       { ...options, platformServices: options.platformServices },
       profileId,
@@ -98,7 +99,7 @@ export async function removeProfileSkill(options: ProfileSkillMembershipOptions,
 }
 async function removeProfileSkillFor(options: ProfileSkillMembershipOptions, profileId: string | undefined, skillId: string): Promise<ProfileSkillMembershipResult> {
   if (options.platformServices !== undefined) {
-    if (profileId === undefined && options.selectionReadServices === undefined) throw windowsExplicitProfileRequired();
+    if (profileId === undefined && options.selectionReadServices === undefined && options.platformServices.selectionReadServices === undefined) throw windowsExplicitProfileRequired();
     return removeWindowsProfileSkill(
       { ...options, platformServices: options.platformServices },
       profileId,
@@ -135,13 +136,13 @@ async function addWindowsProfileSkill(
     profileId,
     skillId,
     'bazframe profile skill add',
-    async (membershipPath, skillsDirectory, authority, namespaceIdentity, resolvedProfileId) => {
+    async (membershipPath, skillsDirectory, authority, namespaceIdentity, resolvedProfileId, validateSelection, ensureNamespace) => {
       const registration = await resolveRegistration(
         options.bazframeHome,
         skillId,
         options.platformServices
       );
-      const existing = options.platformServices.inspectSkillLink(
+      const existing = namespaceIdentity === undefined ? { kind: 'absent' as const } : options.platformServices.inspectSkillLink(
         skillsDirectory,
         skillId,
         registration.target
@@ -156,12 +157,8 @@ async function addWindowsProfileSkill(
         { platformServices: options.platformServices }
       );
       if (current.target !== registration.target) throw changedRegistration(skillId);
-      if (options.platformServices.inspectPrivateDirectory(skillsDirectory).identity !== namespaceIdentity) {
-        throw new BazframeError(
-          'PROFILE_SKILL_NAMESPACE_CHANGED',
-          `Profile skill namespace changed while in use: ${skillsDirectory}`
-        );
-      }
+      await validateSelection();
+      await ensureNamespace();
       const action = await options.platformServices.createSkillLink(
         authority,
         skillsDirectory,
@@ -183,12 +180,13 @@ async function removeWindowsProfileSkill(
     profileId,
     skillId,
     'bazframe profile skill remove',
-    async (membershipPath, skillsDirectory, authority, namespaceIdentity, resolvedProfileId) => {
+    async (membershipPath, skillsDirectory, authority, namespaceIdentity, resolvedProfileId, validateSelection) => {
       const registration = await readDefaultSkillRegistrationLink(
         options.bazframeHome,
         skillId,
         { platformServices: options.platformServices }
       );
+      if (namespaceIdentity === undefined) return windowsResult(resolvedProfileId, membershipPath, registration.target, skillId, 'absent');
       const existing = options.platformServices.inspectSkillLink(
         skillsDirectory,
         skillId,
@@ -210,6 +208,7 @@ async function removeWindowsProfileSkill(
           `Profile skill namespace changed while in use: ${skillsDirectory}`
         );
       }
+      await validateSelection();
       const action = await options.platformServices.removeSkillLink(
         authority,
         skillsDirectory,
@@ -230,33 +229,63 @@ async function withWindowsProfileMembershipLock<T>(
     membershipPath: string,
     skillsDirectory: string,
     authority: AddedSkillMutationAuthority,
-    namespaceIdentity: string,
-    resolvedProfileId: string
+    namespaceIdentity: string | undefined,
+    resolvedProfileId: string,
+    validateSelection: () => Promise<void>,
+    ensureNamespace: () => Promise<void>
   ) => Promise<T>
 ): Promise<T> {
+  const pathJoin = options.platformServices.joinPath ?? join;
+  const selectionReads = options.selectionReadServices ?? options.platformServices.selectionReadServices;
   return options.platformServices.withLock(
-    join(options.bazframeHome, 'locks', 'state.lock'),
-    { command, target: profileId === undefined ? join(options.bazframeHome, 'active-profile') : profileDirectory(options.bazframeHome, profileId) },
+    pathJoin(options.bazframeHome, 'locks', 'state.lock'),
+    { command, target: profileId === undefined ? pathJoin(options.bazframeHome, 'active-profile') : pathJoin(options.bazframeHome, 'profiles', profileId) },
     async (stateAuthority) => {
-      const resolvedProfileId = profileId ?? await readActiveProfile(options.bazframeHome, options.selectionReadServices);
-      const directory = profileDirectory(options.bazframeHome, resolvedProfileId);
-      const skillsDirectory = join(directory, 'skills');
-      const membershipPath = join(skillsDirectory, skillId);
+      const resolvedProfileId = profileId ?? await readActiveProfile(options.bazframeHome, selectionReads);
+      const directory = pathJoin(options.bazframeHome, 'profiles', resolvedProfileId);
+      const skillsDirectory = pathJoin(directory, 'skills');
+      const membershipPath = pathJoin(skillsDirectory, skillId);
       return options.platformServices.withLock(
-        join(options.bazframeHome, 'locks', 'profiles', `${resolvedProfileId}.skills.lock`),
+        pathJoin(options.bazframeHome, 'locks', 'profiles', `${resolvedProfileId}.skills.lock`),
         { command, target: membershipPath },
         async (profileAuthority) => {
           const authority = { assertHeld() { stateAuthority.assertHeld(); profileAuthority.assertHeld(); } };
           authority.assertHeld();
-          options.platformServices.inspectPrivateDirectory(join(options.bazframeHome, 'profiles'));
-          options.platformServices.inspectPrivateDirectory(directory);
-          await options.platformServices.readStableUtf8File(join(directory, 'AGENTS.md'), `Profile ${JSON.stringify(resolvedProfileId)} instructions`, MAX_EFFECTIVE_INSTRUCTION_BYTES);
-          const namespace = options.platformServices.inspectPrivateDirectory(skillsDirectory);
-          return operation(membershipPath, skillsDirectory, authority, namespace.identity, resolvedProfileId);
+          options.platformServices.inspectPrivateDirectory(pathJoin(options.bazframeHome, 'profiles'));
+          const profile = options.platformServices.inspectPrivateDirectory(directory);
+          await options.platformServices.readStableUtf8File(pathJoin(directory, 'AGENTS.md'), `Profile ${JSON.stringify(resolvedProfileId)} instructions`, MAX_EFFECTIVE_INSTRUCTION_BYTES);
+          const namespace = await optionalWindowsSkillNamespace(options.platformServices, directory, skillsDirectory);
+          async function validateSelection() {
+            authority.assertHeld();
+            if (profileId === undefined && await readActiveProfile(options.bazframeHome, selectionReads) !== resolvedProfileId) throw new BazframeError('PROFILE_SELECTION_CHANGED', 'Active profile changed before membership mutation.');
+            authority.assertHeld();
+          }
+          await validateSelection();
+          async function ensureNamespace() {
+            await validateSelection();
+            if (options.platformServices.inspectPrivateDirectory(directory).identity !== profile.identity) throw new BazframeError('PROFILE_SKILL_NAMESPACE_CHANGED', 'Profile changed before creating Skill membership.');
+            const current = await optionalWindowsSkillNamespace(options.platformServices, directory, skillsDirectory);
+            if (current?.identity !== namespace?.identity) throw new BazframeError('PROFILE_SKILL_NAMESPACE_CHANGED', 'Skill namespace changed before membership mutation.');
+            authority.assertHeld();
+            if (current === undefined) options.platformServices.ensurePrivateDirectory(directory, 'skills');
+            authority.assertHeld();
+          }
+          const value = await operation(membershipPath, skillsDirectory, authority, namespace?.identity, resolvedProfileId, validateSelection, ensureNamespace);
+          await validateSelection(); return value;
         }
       );
     }
   );
+}
+
+async function optionalWindowsSkillNamespace(platform: AddedSkillPlatformServices, profile: string, skills: string) {
+  try { return platform.inspectPrivateDirectory(skills); }
+  catch (error) {
+    if (errorCode(error) !== 'WINDOWS_NATIVE_PATH_NOT_FOUND') throw error;
+    const names = (await platform.enumeratePrivateDirectory(profile, ADDED_SKILL_NAMESPACE_ENTRY_LIMIT)).names;
+    if (names.some((name) => name.normalize('NFC').toLowerCase() === 'skills')) throw error;
+    return undefined;
+  }
 }
 
 function windowsResult(

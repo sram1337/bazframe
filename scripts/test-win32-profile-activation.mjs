@@ -316,7 +316,14 @@ export function selectionCandidateCommitted(candidate, destination, temporary) {
 export function selectionCandidateRetained(candidate, temporary) {
   return sameSelectionCandidateObject(candidate, temporary)
     && Buffer.isBuffer(candidate.bytes) && Buffer.isBuffer(temporary.bytes) && candidate.bytes.equals(temporary.bytes)
-    && JSON.stringify(candidate.inspection) === JSON.stringify(temporary.inspection);
+    && (() => {
+      const before = { ...candidate.inspection, object: { ...candidate.inspection.object } };
+      const after = { ...temporary.inspection, object: { ...temporary.inspection.object } };
+      // Same-path retention excludes only incidental object access time, not other raw evidence.
+      delete before.object.lastAccessTime;
+      delete after.object.lastAccessTime;
+      return JSON.stringify(before) === JSON.stringify(after);
+    })();
 }
 export function newSelectionCandidateName(previousNames, currentNames) {
   const previous = new Set(previousNames);
@@ -349,7 +356,7 @@ export async function code(operation, expected, expectedCause) {
   }
 }
 function requireCondition(condition) { if (!condition) throw new Error('activation evidence condition failed'); }
-async function withSharingDenied(path, operation) {
+export async function withSharingDenied(path, operation) {
   const command = `$f=[System.IO.File]::Open('${path.replaceAll("'", "''")}',[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite); try { [Console]::Out.WriteLine('ready'); [Console]::Out.Flush(); [Console]::In.ReadLine() | Out-Null } finally { $f.Dispose() }`;
   const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { stdio: ['pipe', 'pipe', 'ignore'] });
   let readyResolve, readyReject;

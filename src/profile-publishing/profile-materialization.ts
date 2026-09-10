@@ -47,7 +47,28 @@ export interface OrdinaryResourceMaterializationSnapshot {
   blobs: readonly CapturedBlobSource[];
 }
 
+export interface ProfileMaterializationEffects {
+  basename(path: string): string;
+  writeInstructions(candidate: string, home: string, bytes: Uint8Array, executable: boolean): Promise<void>;
+  writeProfileLocalSkill: typeof writeProfileLocalSkill;
+  writeOrdinaryMembership: typeof writeOrdinaryMembership;
+  publishBlob: typeof publishStoredBlob;
+  publishTree: typeof publishArtifactTree;
+  readTree: typeof readArtifactTree;
+  readSystemView: typeof readProfileSystemView;
+  finishCandidate?(options: ProfileMaterializationOptions, state: ManagedProfileStateV1): Promise<void>;
+}
+const defaultMaterializationEffects: ProfileMaterializationEffects = {
+  basename, writeProfileLocalSkill, writeOrdinaryMembership,
+  publishBlob: publishStoredBlob, publishTree: publishArtifactTree, readTree: readArtifactTree, readSystemView: readProfileSystemView,
+  async writeInstructions(path, home, bytes, executable) {
+    const candidate = await openStablePhysicalDirectory(path, home);
+    try { await writeOwnedStagingFileAtomic(candidate, 'AGENTS.md', bytes, executable ? 0o700 : 0o600); }
+    finally { await candidate.handle.close().catch(() => undefined); }
+  }
+};
 export interface ProfileMaterializationOptions {
+  effects?: ProfileMaterializationEffects;
   home: string;
   candidateDirectory: string;
   authority: OperationMutationAuthority;
@@ -71,15 +92,13 @@ export interface ProfileMaterializationResult {
 }
 
 export async function materializeCapturedProfile(options: ProfileMaterializationOptions): Promise<ProfileMaterializationResult> {
+  const effects = options.effects ?? defaultMaterializationEffects;
   const transactionId = operationAuthorityTransactionId(options.authority);
-  if (basename(options.candidateDirectory) !== `.bazframe-candidate-${transactionId}`) throw invalid('candidate does not belong to the active transaction');
+  if (effects.basename(options.candidateDirectory) !== `.bazframe-candidate-${transactionId}`) throw invalid('candidate does not belong to the active transaction');
   const captured = decodeCapturedProfileObject(options.captured, capturedProfileLimitPolicy());
   const blobByDigest = validatedBlobMap(captured, options.blobs);
   const instructions = requiredBlob(captured.profile.instructions.sha256, blobByDigest);
-  const candidate = await openStablePhysicalDirectory(options.candidateDirectory, options.home);
-  try {
-    await writeOwnedStagingFileAtomic(candidate, 'AGENTS.md', instructions.bytesValue, options.captured.profile.instructions.executable ? 0o700 : 0o600);
-  } finally { await candidate.handle.close().catch(() => undefined); }
+  await effects.writeInstructions(options.candidateDirectory, options.home, instructions.bytesValue, captured.profile.instructions.executable);
 
   const profileInstanceId = options.previousState?.profileInstanceId ?? randomUUID();
   const previousByCapture = new Map((options.previousState?.importedResources ?? []).map((resource) => [resource.capturedResourceId, resource]));
@@ -103,7 +122,7 @@ export async function materializeCapturedProfile(options: ProfileMaterialization
       if (options.captureOrdinary === undefined) throw invalid('retained ordinary resource cannot be proved from the catalog');
       const snapshot = copyOrdinarySnapshot(await options.captureOrdinary(resource));
       assertOrdinarySnapshot(resource, snapshot, blobByDigest);
-      await writeOrdinaryMembership(options.home, options.candidateDirectory, resource);
+      await effects.writeOrdinaryMembership(options.home, options.candidateDirectory, resource);
       currentBindings.push({ ...retained });
       ordinaryProofs.push({ resource: structuredClone(resource), snapshot });
       continue;
@@ -116,7 +135,7 @@ export async function materializeCapturedProfile(options: ProfileMaterialization
       if (resource.key.kind !== 'skill' || resource.payload.kind !== 'bundled' || resource.payload.role !== 'skill' || resource.payload.origin !== undefined || resource.payload.sourceForm !== 'profile-local' || previous !== undefined || expectedLocalInstanceId === undefined || expectedLocalIdentity === undefined) throw invalid('retained profile-local resource is not a marked local bundled Skill');
       const expectedDigest = resourceIdentityDigest(expectedLocalIdentity);
       if (retained !== undefined && (retained.instanceId !== expectedLocalInstanceId || retained.resourceIdentityDigest !== expectedDigest)) throw invalid('retained profile-local binding does not match its resource key');
-      await writeProfileLocalSkill(options.candidateDirectory, resource, blobByDigest);
+      await effects.writeProfileLocalSkill(options.candidateDirectory, resource, blobByDigest);
       currentBindings.push(retained ?? { resourceIdentityDigest: expectedDigest, capturedResourceId: resource.id, identityKind: 'profileLocal', instanceId: expectedLocalInstanceId });
       continue;
     }
@@ -130,7 +149,7 @@ export async function materializeCapturedProfile(options: ProfileMaterialization
     if (resource.payload.kind === 'bundled') {
       for (const file of resource.payload.files) {
         const blob = requiredBlob(file.sha256, blobByDigest);
-        const published = await publishStoredBlob(options.home, options.authority, blob.bytesValue, blob.sha256);
+        const published = await effects.publishBlob(options.home, options.authority, blob.bytesValue, blob.sha256);
         cacheWritten ||= !published.reused;
       }
       const manifest: ArtifactTreeManifestV1 = {
@@ -139,7 +158,7 @@ export async function materializeCapturedProfile(options: ProfileMaterialization
         role: resource.payload.role,
         files: resource.payload.files.map((file) => ({ ...file }))
       };
-      const tree = await publishArtifactTree(options.home, options.authority, manifest);
+      const tree = await effects.publishTree(options.home, options.authority, manifest);
       cacheWritten ||= !tree.reused;
       treeIds.add(tree.treeId);
       importedResources.push({
@@ -153,7 +172,7 @@ export async function materializeCapturedProfile(options: ProfileMaterialization
       continue;
     }
 
-    const cachedTreeId = await findCachedRemoteTree(options.home, resource);
+    const cachedTreeId = await findCachedRemoteTree(options.home, resource, effects);
     const remote = cachedTreeId === undefined
       ? validateRemoteResult(await options.materializeRemote(resource))
       : { kind: 'ready' as const, treeId: cachedTreeId, identity: structuredClone(resource.payload.identity), cacheWritten: false, buildExecuted: false };
@@ -161,7 +180,7 @@ export async function materializeCapturedProfile(options: ProfileMaterialization
     buildExecuted ||= remote.buildExecuted;
     if (remote.kind === 'ready') {
       if (!sameExactIdentity(remote.identity, resource.payload.identity)) throw invalid('remote materialization identity does not match the captured exact revision');
-      const tree = await readArtifactTree(options.home, remote.treeId);
+      const tree = await effects.readTree(options.home, remote.treeId);
       if (tree.manifest.role !== roleFor(resource.key.kind)) throw invalid('remote materialization artifact role does not match the captured resource');
       treeIds.add(remote.treeId);
       importedResources.push({
@@ -204,6 +223,7 @@ export async function materializeCapturedProfile(options: ProfileMaterialization
     capturedResourceIds,
     importedResources
   };
+  await effects.finishCandidate?.({ ...options, captured }, state);
   return {
     state,
     missingResourceIds,
@@ -374,9 +394,9 @@ function roleFor(kind: CapturedResource['key']['kind']): ArtifactTreeManifestV1[
   return kind === 'package' ? 'packageArtifacts' : kind;
 }
 
-async function findCachedRemoteTree(home: string, resource: CapturedResource): Promise<Sha256 | undefined> {
+async function findCachedRemoteTree(home: string, resource: CapturedResource, effects: ProfileMaterializationEffects): Promise<Sha256 | undefined> {
   if (resource.payload.kind !== 'remoteGit') return undefined;
-  const view = await readProfileSystemView(home);
+  const view = await effects.readSystemView(home);
   const treeIds = new Set<Sha256>();
   for (const existing of view.resources) {
     if (existing.key.kind !== resource.key.kind || existing.key.name !== resource.key.name) continue;

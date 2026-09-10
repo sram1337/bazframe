@@ -90,6 +90,7 @@ export async function spawnInheritedChild(
     };
 
     child.once('error', (error) => {
+      if (settled) return;
       if (!settled) {
         settled = true;
         removeSignalHandlers();
@@ -155,6 +156,12 @@ export function spawnBoundedPackageProcess(
     const finish = (): void => {
       if (settled) return;
       settled = true;
+      // The bounded receipt must also release our event-loop ownership. This is
+      // not proof that this child or any escaped descendant has terminated.
+      if (uncertainTermination) {
+        child.unref?.();
+        for (const stream of [child.stdout, child.stderr]) { stream?.removeAllListeners('data'); stream?.destroy?.(); }
+      }
       clearTimeout(timeoutTimer);
       if (graceTimer !== undefined) clearTimeout(graceTimer);
       if (confirmationTimer !== undefined) clearTimeout(confirmationTimer);
@@ -218,6 +225,7 @@ export function spawnBoundedPackageProcess(
     }
 
     child.once('error', (error) => {
+      if (settled) return;
       processError = asError(error);
       if (child.pid === undefined) {
         failure = 'spawn-error';
@@ -227,6 +235,7 @@ export function spawnBoundedPackageProcess(
       }
     });
     child.once('close', (status, signal) => {
+      if (settled) return;
       exitCode = status;
       exitSignal = signal;
       if (!processGroups) {

@@ -1,3 +1,6 @@
+import type { ProfileLifecycleServices } from './profile-lifecycle-services.js';
+import type { OperationMutationAuthority } from './profile-operation-lock.js';
+import type { ProfileClosureCopyEffects } from './profile-publication.js';
 import { BazframeError } from '../core/errors.js';
 import { assertSafeProfileId } from '../profiles/profile-id.js';
 import { capturePhysicalProfileExpectation } from './physical-profile-closure.js';
@@ -7,6 +10,14 @@ import { importedResourceIdentity, profileInstanceIdFromPhysicalIdentity, type R
 import { readOptionalManagedProfileState } from './managed-profile-state.js';
 import { readProfileSystemView, resolveProfileResourceSelector, type ProfileResourceInstanceView } from './profile-view.js';
 import type { CapturedResourceIdBinding, ImportedResourceState, ManagedProfileStateV1 } from './publication-state.js';
+
+export interface ProfileResourceMembershipDependencies {
+  services?: ProfileLifecycleServices;
+  readSystemView?: (home: string, authority?: OperationMutationAuthority) => ReturnType<typeof readProfileSystemView>;
+  capture?: typeof capturePhysicalProfileExpectation;
+  readState?: (home: string, profileId: string) => Promise<import('./managed-profile-state.js').ManagedProfileStateContentSnapshot | undefined>;
+  copyEffects?: (home: string, authority: OperationMutationAuthority) => ProfileClosureCopyEffects;
+}
 
 export interface ProfileResourceMembershipSelection {
   stableIdentity: string;
@@ -24,9 +35,10 @@ export interface ImportedProfileResourceMembershipResult {
 export async function resolveProfileResourceMembershipSelection(
   home: string,
   kind: ResourceKind,
-  selector: string
+  selector: string,
+  dependencies: ProfileResourceMembershipDependencies = {}
 ): Promise<ProfileResourceMembershipSelection> {
-  const view = await readProfileSystemView(home);
+  const view = await (dependencies.readSystemView ?? ((root: string) => readProfileSystemView(root)))(home);
   const stableIdentity = resolveProfileResourceSelector(view, kind, selector);
   const resource = view.resources.find((candidate) => candidate.stableIdentity === stableIdentity);
   if (resource === undefined) throw invalid('resolved resource is absent from the system view');
@@ -37,11 +49,12 @@ export async function mutateImportedProfileResourceMembership(
   home: string,
   profileId: string,
   stableIdentity: string,
-  action: 'add' | 'remove'
+  action: 'add' | 'remove',
+  dependencies: ProfileResourceMembershipDependencies = {}
 ): Promise<ImportedProfileResourceMembershipResult> {
   assertSafeProfileId(profileId);
   if (!stableIdentity.startsWith('imported:')) throw invalid('resource is not an imported immutable instance');
-  const initialView = await readProfileSystemView(home);
+  const initialView = await (dependencies.readSystemView ?? ((root: string) => readProfileSystemView(root)))(home);
   const selected = requiredImported(initialView.resources, stableIdentity);
   const target = initialView.profiles.find((profile) => profile.name === profileId);
   if (target === undefined) throw new BazframeError('PROFILE_NOT_FOUND', `Profile not found: ${profileId}`);
@@ -54,9 +67,9 @@ export async function mutateImportedProfileResourceMembership(
     throw new BazframeError('PROFILE_RESOURCE_SELECTOR_INVALID', 'Profile resource selector is ambiguous, stale, or invalid.');
   }
 
-  const source = await importedStateFor(initialView, home, selected);
-  const expected = await capturePhysicalProfileExpectation(home, profileId);
-  const targetSnapshot = await readOptionalManagedProfileState(home, profileId);
+  const source = await importedStateFor(initialView, home, selected, dependencies);
+  const expected = await (dependencies.capture ?? capturePhysicalProfileExpectation)(home, profileId);
+  const targetSnapshot = await (dependencies.readState ?? readOptionalManagedProfileState)(home, profileId);
   if ((targetSnapshot?.sha256 ?? null) !== expected.sidecarSha256) throw changed();
   const targetState = targetSnapshot?.state ?? emptyState(profileInstanceIdFromPhysicalIdentity(expected.identity));
   const nextState = updateState(targetState, source.resource, source.binding, action);
@@ -64,20 +77,21 @@ export async function mutateImportedProfileResourceMembership(
 
   await executeProfileCandidateSwap({
     home,
+    ...(dependencies.services === undefined ? {} : { services: dependencies.services }),
     profileName: profileId,
     operation: 'update',
     expectedOld: expected,
     additionalOperationLockKeys: lockKeys,
-    beforePublication: async () => {
-      const current = requiredImported((await readProfileSystemView(home)).resources, stableIdentity);
+    beforePublication: async (authority) => {
+      const current = requiredImported((await (dependencies.readSystemView ?? ((root: string) => readProfileSystemView(root)))(home, authority)).resources, stableIdentity);
       if (JSON.stringify(current) !== JSON.stringify(selected)) throw changed();
     },
-    materialize: async (candidateDirectory) => {
-      await copyPhysicalProfileClosureToCandidate(home, profileId, expected, candidateDirectory);
-      const currentView = await readProfileSystemView(home);
+    materialize: async (candidateDirectory, context) => {
+      await copyPhysicalProfileClosureToCandidate(home, profileId, expected, candidateDirectory, dependencies.copyEffects?.(home, context.authority));
+      const currentView = await (dependencies.readSystemView ?? ((root: string) => readProfileSystemView(root)))(home, context.authority);
       const current = requiredImported(currentView.resources, stableIdentity);
       if (JSON.stringify(current) !== JSON.stringify(selected)) throw changed();
-      const currentSource = await importedStateFor(currentView, home, current);
+      const currentSource = await importedStateFor(currentView, home, current, dependencies);
       if (JSON.stringify(currentSource) !== JSON.stringify(source)) throw changed();
       return { state: nextState };
     }
@@ -96,11 +110,12 @@ function requiredImported(resources: readonly ProfileResourceInstanceView[], sta
 async function importedStateFor(
   view: Awaited<ReturnType<typeof readProfileSystemView>>,
   home: string,
-  resource: ProfileResourceInstanceView
+  resource: ProfileResourceInstanceView,
+  dependencies: ProfileResourceMembershipDependencies
 ): Promise<{ resource: ImportedResourceState; binding: CapturedResourceIdBinding }> {
   let found: { resource: ImportedResourceState; binding: CapturedResourceIdBinding } | undefined;
   for (const owner of resource.ownerProfiles) {
-    const snapshot = await readOptionalManagedProfileState(home, owner);
+    const snapshot = await (dependencies.readState ?? readOptionalManagedProfileState)(home, owner);
     if (snapshot === undefined) throw changed();
     const imported = snapshot.state.importedResources.find((candidate) => importedResourceIdentity(candidate.instanceId) === resource.stableIdentity);
     if (imported === undefined) throw changed();

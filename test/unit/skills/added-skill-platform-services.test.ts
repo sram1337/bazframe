@@ -1,12 +1,96 @@
+import { createHash } from 'node:crypto';
+import { stableWindowsPathInspection } from '../../../src/core/win32-stable-observation.js';
+import { windowsProvisioningFixture } from '../../helpers/windows-provisioning-fixture.js';
 import { describe, expect, it, vi } from 'vitest';
 import type {
   BazframeWin32LockBackend,
   BazframeWin32NativeBackend,
   WindowsPathInspection
 } from '../../../src/core/win32-native.js';
-import { createWindowsAddedSkillPlatformServicesForInternalTesting } from '../../../src/skills/added-skill-platform-services.js';
+import { createWindowsAddedSkillPlatformServicesForInternalTesting, enumerateWindowsPrivateDirectory } from '../../../src/skills/added-skill-platform-services.js';
 
 describe('Windows added-Skill platform services', () => {
+  it.each(['name', 'fileId', 'size', 'allocationSize', 'creationTime', 'lastWriteTime', 'changeTime', 'attributes', 'reparseTag', 'directory'] as const)('retains complete enumeration entry %s in raw evidence and digest', async (field) => {
+    const f = windowsProvisioningFixture(); f.file('C:\\boundary\\entry', 'bytes');
+    const before = await enumerateWindowsPrivateDirectory(f.backend, 'C:\\boundary', 10);
+    const enumerate = f.backend.enumerateStableDirectory;
+    f.backend.enumerateStableDirectory = async (...args) => {
+      const value = await enumerate(...args);
+      return { ...value, entries: value.entries.map((entry) => ({ ...entry, [field]: field === 'directory' ? !entry.directory : field === 'attributes' ? entry.attributes ^ 1 : field === 'reparseTag' ? 0xa0000003 : field === 'name' ? 'renamed' : 'f'.repeat(String(entry[field]).length) })) };
+    };
+    const after = await enumerateWindowsPrivateDirectory(f.backend, 'C:\\boundary', 10);
+    expect(after.identity).not.toBe(before.identity);
+    expect(after.nativeEntries[0]![field]).not.toBe(before.nativeEntries[0]![field]);
+    expect(f.nodes.get('C:\\boundary\\entry')?.bytes).toEqual(Buffer.from('bytes'));
+  });
+
+  it.each(['admitted-to-native', 'native-before-after', 'native-to-final'] as const)('accepts access-only drift at %s and reaches final admission with raw evidence', async (boundary) => {
+    const f = windowsProvisioningFixture(), path = 'C:\\boundary';
+    const inspect = f.backend.inspectPath, enumerate = f.backend.enumerateStableDirectory;
+    let returned = false, finalAdmissions = 0;
+    const access = (value: WindowsPathInspection) => ({ ...value, object: { ...value.object, lastAccessTime: '0000000000000099' } });
+    const baseline = await enumerateWindowsPrivateDirectory(f.backend, path, 10);
+    f.backend.inspectPath = (name) => {
+      const value = inspect(name);
+      if (returned && name === path) { finalAdmissions++; return access(value); }
+      return value;
+    };
+    f.backend.enumerateStableDirectory = async (...args) => {
+      const value = await enumerate(...args); returned = true;
+      return { ...value,
+        directoryBefore: boundary === 'admitted-to-native' ? access(value.directoryBefore) : value.directoryBefore,
+        directoryAfter: boundary === 'native-to-final' ? value.directoryAfter : access(value.directoryAfter) };
+    };
+    const result = await enumerateWindowsPrivateDirectory(f.backend, path, 10);
+    expect(finalAdmissions).toBeGreaterThan(0);
+    expect(result.identity).toBe(baseline.identity);
+    expect(result.inspection.object.lastAccessTime).toBe('0000000000000099');
+    expect(result.nativeEntries).toEqual(baseline.nativeEntries);
+    expect(inspect(path).object.lastAccessTime).toBe('0000000000000001');
+    const payload = JSON.stringify({ root: stableWindowsPathInspection(result.inspection), entries: [] });
+    expect(result.identity).toBe(createHash('sha256').update('bazframe-added-skill-direct-directory-v2\0').update(payload).digest('hex'));
+    expect(result.identity).not.toBe(createHash('sha256').update('bazframe-added-skill-direct-directory-v1\0').update(payload).digest('hex'));
+  });
+
+  it.each(['admitted-to-native', 'native-before-after', 'native-to-final'] as const)('retains write-time refusal at original %s boundary', async (boundary) => {
+    const f = windowsProvisioningFixture(), path = 'C:\\boundary';
+    const inspect = f.backend.inspectPath, enumerate = f.backend.enumerateStableDirectory;
+    let returned = false, finalAdmissions = 0;
+    const drift = (value: WindowsPathInspection) => ({ ...value, object: { ...value.object, lastWriteTime: '0000000000000099' } });
+    f.backend.inspectPath = (name) => {
+      const value = inspect(name);
+      if (returned && name === path) { finalAdmissions++; return boundary === 'native-to-final' ? drift(value) : value; }
+      return value;
+    };
+    f.backend.enumerateStableDirectory = async (...args) => {
+      const value = await enumerate(...args); returned = true;
+      return { ...value,
+        directoryBefore: boundary === 'admitted-to-native' ? drift(value.directoryBefore) : value.directoryBefore,
+        directoryAfter: boundary === 'native-before-after' ? drift(value.directoryAfter) : value.directoryAfter };
+    };
+    await expect(enumerateWindowsPrivateDirectory(f.backend, path, 10)).rejects.toMatchObject({ code: 'WINDOWS_ADDED_SKILL_NAMESPACE_CHANGED' });
+    expect(finalAdmissions > 0).toBe(boundary === 'native-to-final');
+  });
+
+  it('keeps directory proof domain explicit and Skill read boundaries access-insensitive without changing raw receipts', async () => {
+    const f = windowsProvisioningFixture(), path = 'C:\\boundary\\SKILL.md';
+    f.file(path, 'skill bytes');
+    const services = createWindowsAddedSkillPlatformServicesForInternalTesting(f.backend);
+    const before = services.inspectPhysicalDirectory('C:\\boundary');
+    const inspect = f.backend.inspectPath, read = f.backend.readStableFile;
+    let clock = 10;
+    f.backend.inspectPath = (name) => { const value = inspect(name); return { ...value, object: { ...value.object, lastAccessTime: (++clock).toString(16).padStart(16, '0') } }; };
+    let receipt: Awaited<ReturnType<typeof read>> | undefined;
+    let raw = '';
+    f.backend.readStableFile = async (...args) => { const value = await read(...args); receipt = { ...value, before: { ...value.before, lastAccessTime: '0000000000000098' }, after: { ...value.after, lastAccessTime: '0000000000000099' } }; raw = JSON.stringify(receipt); return receipt; };
+    expect(services.inspectPhysicalDirectory('C:\\boundary')).toEqual(before);
+    const payload = JSON.stringify(stableWindowsPathInspection(inspect('C:\\boundary')));
+    expect(before.identity).toBe(createHash('sha256').update('bazframe-added-skill-inspection-v2\0').update(payload).digest('hex'));
+    expect(before.identity).not.toBe(createHash('sha256').update('bazframe-added-skill-inspection-v1\0').update(payload).digest('hex'));
+    await expect(services.readStableUtf8File(path, 'Skill', 11)).resolves.toBe('skill bytes');
+    expect(JSON.stringify(receipt)).toBe(raw);
+  });
+
   it('proves a physical target and performs one bounded stable UTF-8 read', async () => {
     const inspected = inspection();
     const file = inspection({ directory: false, attributes: 0 });
@@ -34,7 +118,7 @@ describe('Windows added-Skill platform services', () => {
 
   it.each([
     ['final object metadata', (value: WindowsPathInspection) => {
-      value.object.lastAccessTime = '0000000000000099';
+      value.object.lastWriteTime = '0000000000000099';
     }],
     ['final security flags', (value: WindowsPathInspection) => {
       value.security.daclPresent = false;

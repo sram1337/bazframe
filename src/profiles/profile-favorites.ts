@@ -1,3 +1,4 @@
+import type { ProfileLifecycleServices, LifecycleStateAuthority } from '../profile-publishing/profile-lifecycle-services.js';
 import { constants } from 'node:fs';
 import { lstat, open, type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -23,7 +24,12 @@ export interface ProfileFavoriteResult {
   favorites: string[];
 }
 
+export type ProfileFavoriteServices = Pick<ProfileLifecycleServices, 'withStateLock' | 'readFavorites' | 'publishFavorites'> & {
+  profileIdentity(home: string, profileId: string): Promise<string>;
+  loadProfile: typeof loadProfile;
+};
 export interface ProfileFavoriteDependencies {
+  services?: ProfileFavoriteServices;
   beforeTargetRevalidation?: () => Promise<void>;
   directorySync?: (path: string) => Promise<void>;
 }
@@ -87,7 +93,12 @@ export function encodeProfileFavorites(profileIds: readonly string[]): string {
   return encoded;
 }
 
-export async function readProfileFavorites(bazframeHome: string): Promise<ProfileFavoritesState> {
+export async function readProfileFavorites(bazframeHome: string, services?: ProfileFavoriteServices): Promise<ProfileFavoritesState> {
+  if (services !== undefined) {
+    const state = await services.readFavorites(bazframeHome);
+    if (!state.valid) throw invalidProfileFavorites(PROFILE_FAVORITES_FILE, 'malformed preference state');
+    return { schemaVersion: 1, favorites: [...state.favorites] };
+  }
   const path = profileFavoritesPath(bazframeHome);
   let homeHandle: FileHandle | undefined;
   let handle: FileHandle | undefined;
@@ -174,32 +185,35 @@ export async function toggleProfileFavorite(
 ): Promise<ProfileFavoriteResult> {
   assertSafeProfileId(profileId);
   const statePath = profileFavoritesPath(bazframeHome);
-  return withStateLock(
-    join(bazframeHome, 'locks', 'state.lock'),
-    { command: 'bazframe tui profile favorite', target: statePath },
-    async () => {
-      const directory = profileDirectory(bazframeHome, profileId);
-      const initial = await physicalProfileIdentity(directory, profileId);
-      await loadProfile(bazframeHome, profileId);
-      const state = await readProfileFavorites(bazframeHome);
-      const favorites = new Set(state.favorites);
-      const action: ProfileFavoriteAction = favorites.delete(profileId)
-        ? 'unfavorited'
-        : (favorites.add(profileId), 'favorited');
-      await dependencies.beforeTargetRevalidation?.();
-      const current = await physicalProfileIdentity(directory, profileId);
-      if (initial.device !== current.device || initial.inode !== current.inode) {
-        throw new BazframeError(
-          'PROFILE_FAVORITE_TARGET_STALE',
-          `Profile ${JSON.stringify(profileId)} changed before its favorite state could be updated. Refresh and try again.`
-        );
-      }
-      const sorted = [...favorites].sort(lexicalCompare);
-      await writeProfileFavoritesUnlocked(bazframeHome, sorted, dependencies);
-      return { action, profileId, favorites: sorted };
-    },
-    { managedRoot: bazframeHome }
-  );
+  const services = dependencies.services;
+  const operation = async (authority?: LifecycleStateAuthority): Promise<ProfileFavoriteResult> => {
+    async function targetIdentity(): Promise<string> {
+      if (services !== undefined) return services.profileIdentity(bazframeHome, profileId);
+      const value = await physicalProfileIdentity(profileDirectory(bazframeHome, profileId), profileId);
+      return `${value.device}:${value.inode}`;
+    }
+    const initial = await targetIdentity();
+    await (services?.loadProfile ?? loadProfile)(bazframeHome, profileId);
+    const expected = await services?.readFavorites(bazframeHome);
+    const state = await readProfileFavorites(bazframeHome, services);
+    const favorites = new Set(state.favorites);
+    const action: ProfileFavoriteAction = favorites.delete(profileId) ? 'unfavorited' : (favorites.add(profileId), 'favorited');
+    await dependencies.beforeTargetRevalidation?.();
+    async function revalidate() {
+      if (initial !== await targetIdentity()) throw new BazframeError('PROFILE_FAVORITE_TARGET_STALE', `Profile ${JSON.stringify(profileId)} changed before its favorite state could be updated. Refresh and try again.`);
+    }
+    await revalidate();
+    const sorted = [...favorites].sort(lexicalCompare);
+    if (services !== undefined) {
+      authority!.assertHeld();
+      await services.publishFavorites(bazframeHome, sorted, authority!, expected!, revalidate);
+      authority!.assertHeld();
+    } else await writeProfileFavoritesUnlocked(bazframeHome, sorted, dependencies);
+    return { action, profileId, favorites: sorted };
+  };
+  return services === undefined
+    ? withStateLock(join(bazframeHome, 'locks', 'state.lock'), { command: 'bazframe tui profile favorite', target: statePath }, () => operation(), { managedRoot: bazframeHome })
+    : services.withStateLock(bazframeHome, profileId, operation);
 }
 
 /** Read optional preference state for lifecycle cleanup without blocking lifecycle on malformed state. */

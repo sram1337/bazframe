@@ -17,6 +17,7 @@
     "dist/",
     "docs/",
     "!docs/reviews/",
+    "!docs/windows-parity-retrospective.md",
     "examples/",
     "native/win32/Cargo.lock",
     "native/win32/Cargo.toml",

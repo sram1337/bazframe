@@ -1,9 +1,6 @@
-import { lstat, readFile, readdir, rm } from 'node:fs/promises';
-import { join } from 'node:path';
 import { BazframeError, errorCode } from '../core/errors.js';
 import { readGlobalPolicy, type GlobalPolicy } from '../policy/global-policy.js';
-import { writeFileAtomic } from '../state/atomic-file.js';
-import { withStateLock } from '../state/lock.js';
+import { posixPolicyServices, policyText, type PolicyServices } from '../policy/policy-services.js';
 import {
   createDisabledRepositoryOverride,
   createEnabledRepositoryOverride,
@@ -33,125 +30,70 @@ export interface RepositoryProjectStateList {
 
 export async function readRepositoryProjectState(
   bazframeHome: string,
-  canonicalRepository: string
+  canonicalRepository: string,
+  services: PolicyServices = posixPolicyServices
 ): Promise<RepositoryProjectState | undefined> {
-  const path = repositoryRegistrationPath(bazframeHome, canonicalRepository);
-  let metadata;
+  const path = repositoryRegistrationPath(bazframeHome, canonicalRepository, services.paths);
   try {
-    metadata = await lstat(path);
+    const text = policyText(await services.snapshot(path, MAX_REGISTRATION_BYTES));
+    return text === undefined ? undefined : decodeRepositoryRegistration(text, path, canonicalRepository, services.paths);
   } catch (error) {
-    if (errorCode(error) === 'ENOENT') return undefined;
-    throw projectStateReadError(path, error);
-  }
-  if (
-    metadata.isSymbolicLink()
-    || !metadata.isFile()
-    || metadata.size > MAX_REGISTRATION_BYTES
-  ) {
-    throw new BazframeError(
-      'REGISTRATION_INVALID',
-      `Repository project state must be a physical file no larger than ${MAX_REGISTRATION_BYTES} bytes: ${path}`
-    );
-  }
-  try {
-    return decodeRepositoryRegistration(
-      await readFile(path, 'utf8'),
-      path,
-      canonicalRepository
-    );
-  } catch (error) {
+    if (errorCode(error) === 'POLICY_FILE_INVALID') throw new BazframeError('REGISTRATION_INVALID', `Repository state must be a bounded physical file: ${path}`, { cause: error });
     if (error instanceof BazframeError) throw error;
     throw projectStateReadError(path, error);
   }
 }
 
-export async function listRepositoryProjectStates(
-  bazframeHome: string
-): Promise<RepositoryProjectStateList> {
-  const projectsRoot = join(bazframeHome, 'projects');
-  let rootMetadata;
-  try {
-    rootMetadata = await lstat(projectsRoot);
-  } catch (error) {
-    if (errorCode(error) === 'ENOENT') return { projectStates: [], diagnostics: [] };
-    throw projectStateReadError(projectsRoot, error);
-  }
-  if (rootMetadata.isSymbolicLink() || !rootMetadata.isDirectory()) {
-    throw new BazframeError(
-      'REGISTRATION_DIRECTORY_INVALID',
-      `Repository project-state path must be a physical directory: ${projectsRoot}`
-    );
-  }
-
-  const projectStates: RepositoryProjectState[] = [];
-  const diagnostics: string[] = [];
-  const entries = await readdir(projectsRoot, { withFileTypes: true });
-  entries.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
-  for (const entry of entries) {
-    const path = join(projectsRoot, entry.name);
+export async function listRepositoryProjectStates(bazframeHome: string, services: PolicyServices = posixPolicyServices): Promise<RepositoryProjectStateList> {
+  const projectsRoot = services.paths.join(bazframeHome, 'projects');
+  const projectStates: RepositoryProjectState[] = [], diagnostics: string[] = [];
+  for (const name of await services.entries(projectsRoot)) {
+    if (services.retained(name)) continue;
+    const path = services.paths.join(projectsRoot, name);
     try {
-      const metadata = await lstat(path);
-      if (
-        metadata.isSymbolicLink()
-        || !metadata.isFile()
-        || metadata.size > MAX_REGISTRATION_BYTES
-      ) {
-        throw new BazframeError(
-          'REGISTRATION_INVALID',
-          `Repository project state must be a physical file no larger than ${MAX_REGISTRATION_BYTES} bytes: ${path}`
-        );
-      }
-      const projectState = decodeRepositoryRegistration(await readFile(path, 'utf8'), path);
-      if (repositoryRegistrationPath(bazframeHome, projectState.repository) !== path) {
-        throw new BazframeError(
-          'REGISTRATION_INVALID',
-          `Repository project-state filename does not match its canonical repository: ${path}`
-        );
-      }
-      projectStates.push(projectState);
-    } catch (error) {
-      diagnostics.push(
-        `Skipping invalid repository project state ${JSON.stringify(entry.name)}: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
+      const text = policyText(await services.snapshot(path, MAX_REGISTRATION_BYTES));
+      if (text === undefined) throw new BazframeError('REGISTRATION_INVALID', `Project state disappeared: ${path}`);
+      const state = decodeRepositoryRegistration(text, path, undefined, services.paths);
+      if (repositoryRegistrationPath(bazframeHome, state.repository, services.paths) !== path) throw new BazframeError('REGISTRATION_INVALID', `Repository project-state filename does not match its canonical repository: ${path}`);
+      projectStates.push(state);
+    } catch (error) { diagnostics.push(`Skipping invalid repository project state ${JSON.stringify(name)}: ${error instanceof Error ? error.message : String(error)}`); }
   }
-  projectStates.sort((left, right) => left.repository < right.repository
-    ? -1
-    : left.repository > right.repository ? 1 : 0);
+  projectStates.sort((a, b) => a.repository < b.repository ? -1 : a.repository > b.repository ? 1 : 0);
   return { projectStates, diagnostics };
 }
 
 export async function enableRepository(
   bazframeHome: string,
-  canonicalRepository: string
+  canonicalRepository: string,
+  services: PolicyServices = posixPolicyServices
 ): Promise<RepositoryPolicyResult> {
-  return setRepositoryPolicy(bazframeHome, canonicalRepository, true);
+  return setRepositoryPolicy(bazframeHome, canonicalRepository, true, services);
 }
 
 export async function disableRepository(
   bazframeHome: string,
-  canonicalRepository: string
+  canonicalRepository: string,
+  services: PolicyServices = posixPolicyServices
 ): Promise<RepositoryPolicyResult> {
-  return setRepositoryPolicy(bazframeHome, canonicalRepository, false);
+  return setRepositoryPolicy(bazframeHome, canonicalRepository, false, services);
 }
 
 async function setRepositoryPolicy(
   bazframeHome: string,
   canonicalRepository: string,
-  enabled: boolean
+  enabled: boolean,
+  services: PolicyServices
 ): Promise<RepositoryPolicyResult> {
-  const path = repositoryRegistrationPath(bazframeHome, canonicalRepository);
+  const path = repositoryRegistrationPath(bazframeHome, canonicalRepository, services.paths);
   const command = `bazframe project ${enabled ? 'enable' : 'disable'}`;
-  return withStateLock(
-    join(bazframeHome, 'locks', 'state.lock'),
-    { command, target: path },
-    async () => {
-      const globalPolicy = await readGlobalPolicy(bazframeHome);
-      const existing = await readRepositoryProjectState(bazframeHome, canonicalRepository);
+  return services.withLock(bazframeHome, command, async (writer) => {
+      const expected = await services.snapshot(path, MAX_REGISTRATION_BYTES);
+      const globalPolicy = await readGlobalPolicy(bazframeHome, services);
+      const existing = await readRepositoryProjectState(bazframeHome, canonicalRepository, services);
       const inheritsRequestedPolicy = (globalPolicy === 'enabled') === enabled;
       if (inheritsRequestedPolicy) {
         if (existing === undefined) return { action: 'inherited', globalPolicy };
-        await removeProjectState(path);
+        await writer.detach(path, expected, MAX_REGISTRATION_BYTES);
         return { action: 'override-removed', globalPolicy };
       }
 
@@ -160,27 +102,11 @@ async function setRepositoryPolicy(
         return { action: 'current', globalPolicy };
       }
       const override = enabled
-        ? createEnabledRepositoryOverride(canonicalRepository)
-        : createDisabledRepositoryOverride(canonicalRepository);
-      await writeFileAtomic(path, encodeRepositoryRegistration(override), {
-        managedRoot: bazframeHome
-      });
+        ? createEnabledRepositoryOverride(canonicalRepository, services.paths)
+        : createDisabledRepositoryOverride(canonicalRepository, services.paths);
+      await writer.publish(path, Buffer.from(encodeRepositoryRegistration(override, services.paths)), expected, MAX_REGISTRATION_BYTES);
       return { action: 'override-added', globalPolicy };
-    },
-    { managedRoot: bazframeHome }
-  );
-}
-
-async function removeProjectState(path: string): Promise<void> {
-  try {
-    await rm(path);
-  } catch (error) {
-    throw new BazframeError(
-      'REGISTRATION_REMOVE_FAILED',
-      `Could not remove repository project state ${path}${formatErrorCode(error)}`,
-      { cause: error }
-    );
-  }
+    });
 }
 
 function projectStateReadError(path: string, error: unknown): BazframeError {

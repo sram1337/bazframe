@@ -363,6 +363,10 @@ function createFixture() {
     },
     acquireFileLock,
     inspectProcessInstance,
+    inspectZipSource() { throw new Error('unused ZIP source'); },
+    async readStableFileRange() { throw new Error('range read unused'); },
+    async renameFileNoReplace() { throw new Error('file rename not used by this fixture'); },
+    async moveDirectoryNoReplace() { throw new Error('unexpected cross-parent move'); },
     async renameDirectoryNoReplace() {},
     async readStableFile(path, maxBytes) {
       const bytes = Buffer.from(files.get(path) ?? Buffer.alloc(0));

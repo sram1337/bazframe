@@ -1,3 +1,4 @@
+import { resolveControlledExecutable, executableEnvironmentValue, type ExecutableResolutionOptions } from '../core/executable-resolution.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { constants } from 'node:fs';
 import { lstat, mkdir, mkdtemp, open } from 'node:fs/promises';
@@ -14,6 +15,8 @@ export type ProfileGithubInteractionMode = 'human' | 'json' | 'dry-run';
 
 export interface ProfileGithubProcessRequest {
   executable: 'git' | 'gh';
+  /** Absolute launch selected outside acquired cwd; logical executable stays in receipts. */
+  resolvedExecutable?: string;
   args: readonly string[];
   cwd: string;
   environment: Readonly<NodeJS.ProcessEnv>;
@@ -32,8 +35,9 @@ export interface ProfileGithubProcessResult {
   stderr: string;
   /** Exact stdout bytes for Git object reads; injected fakes may omit this for UTF-8 output. */
   stdoutBytes?: Uint8Array;
-  failure?: 'timeout' | 'stdout-overflow' | 'stderr-overflow' | 'spawn' | 'monitor-failure' | 'process-tree-survived' | 'termination-uncertain';
+  failure?: 'parent-signal' | 'timeout' | 'stdout-overflow' | 'stderr-overflow' | 'spawn' | 'monitor-failure' | 'process-tree-survived' | 'termination-uncertain';
   uncertainTermination?: boolean;
+  signal?: NodeJS.Signals;
   error?: Error;
   monitorError?: Error;
 }
@@ -45,10 +49,14 @@ export interface ProfileGithubDisposalResult {
   identityProved: true;
 }
 
+export type ProfileGithubDirectoryProof = StableDirectory | { path: string; assertIdentity(): Promise<void>; close(): Promise<void> };
+export async function assertProfileGithubDirectory(directory: ProfileGithubDirectoryProof): Promise<void> {
+  if ('assertIdentity' in directory) await directory.assertIdentity(); else await assertPhysicalDirectoryIdentity(directory);
+}
 export interface OwnedProfileGithubDirectory {
   path: string;
-  directory: StableDirectory;
-  parent: StableDirectory;
+  directory: ProfileGithubDirectoryProof;
+  parent: ProfileGithubDirectoryProof;
   dispose(): Promise<ProfileGithubDisposalResult>;
 }
 
@@ -66,12 +74,16 @@ export interface ProfileGithubIsolation {
   hooksDirectory: string;
   globalConfigFile: string;
   environment: Readonly<NodeJS.ProcessEnv>;
-  directory: StableDirectory;
+  directory: ProfileGithubDirectoryProof;
   dispose(): Promise<ProfileGithubDisposalResult>;
 }
 
 const ALLOWED_INHERITED_ENVIRONMENT = new Set(['PATH', 'PATHEXT', 'SystemRoot', 'WINDIR', 'TMPDIR', 'TMP', 'TEMP']);
-const POSIX_PROCESS_GROUPS = process.platform !== 'win32';
+export interface ProfileGithubProcessEffects {
+  spawnProcess?: typeof spawn;
+  posixProcessGroups?: boolean;
+  signalProcess?: (pid: number, signal: NodeJS.Signals | 0) => void;
+}
 
 /**
  * Creates and identity-tracks a private physical child.
@@ -150,7 +162,7 @@ export async function createProfileGithubIsolation(
     ]);
     const config = await open(globalConfigFile, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
     await config.close();
-    await assertPhysicalDirectoryIdentity(owned.directory);
+    await assertProfileGithubDirectory(owned.directory);
   } catch (error) {
     try { await owned.dispose(); }
     catch (cleanupError) { throw new AggregateError([error, cleanupError], 'GitHub isolation setup and cleanup both failed.', { cause: cleanupError }); }
@@ -158,7 +170,7 @@ export async function createProfileGithubIsolation(
   }
   const environment: NodeJS.ProcessEnv = {};
   for (const key of ALLOWED_INHERITED_ENVIRONMENT) {
-    const value = inherited[key];
+    const value = executableEnvironmentValue(inherited, key);
     if (value !== undefined) environment[key] = value;
   }
   environment.LANG = 'C';
@@ -237,161 +249,219 @@ export async function runProfileGithubCommand(
 }
 
 /** Default literal-argv runner with bounded independent streams and fail-closed process-tree lifetime. */
-export const defaultProfileGithubProcess: ProfileGithubProcess = async (request) => new Promise((resolve) => {
-  assertRequest(request);
-  let child: ChildProcess;
-  try {
-    child = spawn(request.executable, [...request.args], {
-      cwd: request.cwd,
-      env: { ...request.environment },
-      shell: false,
-      detached: POSIX_PROCESS_GROUPS,
-      stdio: [request.stdin, 'pipe', 'pipe']
-    });
-  } catch (error) {
-    resolve({ status: null, stdout: '', stderr: '', failure: 'spawn', error: asError(error) });
-    return;
-  }
-  const stdout: Buffer[] = [];
-  const stderr: Buffer[] = [];
-  let stdoutBytes = 0;
-  let stderrBytes = 0;
-  let failure: ProfileGithubProcessResult['failure'];
-  let error: Error | undefined;
-  let monitorError: Error | undefined;
-  let uncertainTermination = false;
-  let status: number | null = null;
-  let settled = false;
-  let graceTimer: NodeJS.Timeout | undefined;
-  let confirmationTimer: NodeJS.Timeout | undefined;
-  let treeDone = false;
-  let monitorRunning = false;
-  let monitorScheduled = false;
-  let finalMonitorStarted = false;
-  const timeoutTimer = setTimeout(() => stop('timeout'), request.timeoutMilliseconds);
+export const defaultProfileGithubProcess: ProfileGithubProcess = (request) => createResolvedProfileGithubProcess({ cwd: process.cwd(), environment: request.environment, excludedRoots: request.cwd === process.cwd() ? [] : [request.cwd] })(request);
 
-  const groupExists = (): boolean | undefined => {
-    if (!POSIX_PROCESS_GROUPS || child.pid === undefined) return undefined;
-    try { process.kill(-child.pid, 0); return true; }
-    catch (cause) {
-      const code = processErrorCode(cause);
-      if (code === 'ESRCH') return false;
-      if (code === 'EPERM') return true;
-      return undefined;
+/** One operation freezes controlled helper selection outside every fetched cwd. */
+export function createResolvedProfileGithubProcess(options: ExecutableResolutionOptions, effects: ProfileGithubProcessEffects = {}): ProfileGithubProcess {
+  options = { ...options, environment: Object.freeze({ ...options.environment }), excludedRoots: [...(options.excludedRoots ?? [])] };
+  const tools = new Map<string, Promise<string>>();
+  const tool = (name: 'git' | 'gh'): Promise<string> => {
+    let result = tools.get(name);
+    if (result === undefined) {
+      result = resolveControlledExecutable(executableEnvironmentValue(options.environment, name === 'git' ? 'BAZFRAME_GIT_COMMAND' : 'BAZFRAME_GH_COMMAND', (options.platform ?? process.platform) === 'win32') || name, options);
+      tools.set(name, result);
     }
+    return result;
   };
-  const signalTree = (signal: NodeJS.Signals): boolean => {
-    if (POSIX_PROCESS_GROUPS && child.pid !== undefined) {
-      try { process.kill(-child.pid, signal); return true; }
-      catch (cause) { return processErrorCode(cause) === 'ESRCH'; }
+  return async (request) => {
+    let resolvedExecutable: string;
+    let args = [...request.args];
+    try {
+      resolvedExecutable = await tool(request.executable);
+      if (args.includes('credential.helper=!gh auth git-credential')) {
+        const selected = await tool('gh');
+        const helper = (options.platform ?? process.platform) === 'win32' ? selected.replace(/\\/gu, '/') : selected;
+        // Git's explicitly trusted credential-helper shell exception, not a general shell boundary.
+        const quoted = "'" + helper.replace(/'/gu, "'\\''") + "'";
+        args = args.map((arg) => arg === 'credential.helper=!gh auth git-credential' ? `credential.helper=!${quoted} auth git-credential` : arg);
+      }
+    } catch (cause) {
+      return { status: null, stdout: '', stderr: '', failure: 'spawn', error: asError(cause) };
     }
-    try { child.kill(signal); } catch { return false; }
-    return true;
+    return runBoundedProfileGithubProcess({ ...request, args, resolvedExecutable }, effects);
   };
-  const finish = (): void => {
-    if (settled) return;
-    settled = true;
-    clearTimeout(timeoutTimer);
-    if (graceTimer !== undefined) clearTimeout(graceTimer);
-    if (confirmationTimer !== undefined) clearTimeout(confirmationTimer);
-    const exactStdout = Buffer.concat(stdout, stdoutBytes);
-    resolve({
-      status,
-      stdout: exactStdout.toString('utf8'),
-      stderr: Buffer.concat(stderr, stderrBytes).toString('utf8'),
-      stdoutBytes: exactStdout,
-      ...(failure === undefined ? {} : { failure }),
-      ...(uncertainTermination ? { uncertainTermination: true } : {}),
-      ...(error === undefined ? {} : { error }),
-      ...(monitorError === undefined ? {} : { monitorError })
-    });
-  };
-  const runMonitor = async (final: boolean): Promise<void> => {
-    if (request.monitor === undefined || monitorError !== undefined) return;
-    monitorRunning = true;
-    try { await request.monitor(); }
-    catch (cause) {
-      monitorError = asError(cause);
-      stop('monitor-failure');
-    } finally { monitorRunning = false; }
-    if (final) finish();
-    else if (treeDone) beginFinalMonitor();
-    else scheduleMonitor();
-  };
-  const scheduleMonitor = (): void => {
-    if (request.monitor === undefined || monitorError !== undefined || treeDone || monitorRunning || monitorScheduled) return;
-    monitorScheduled = true;
-    setImmediate(() => {
-      monitorScheduled = false;
-      if (treeDone) beginFinalMonitor();
-      else void runMonitor(false);
-    });
-  };
-  function beginFinalMonitor(): void {
-    if (!treeDone || finalMonitorStarted || settled || monitorRunning) return;
-    finalMonitorStarted = true;
-    if (request.monitor === undefined || monitorError !== undefined) finish();
-    else void runMonitor(true);
-  }
-  const completeTree = (): void => {
-    if (treeDone) return;
-    treeDone = true;
-    clearTimeout(timeoutTimer);
-    if (!monitorRunning) beginFinalMonitor();
-  };
-  const confirm = (): void => {
-    if (settled) return;
-    if (groupExists() !== false) {
-      uncertainTermination = true;
-      failure ??= 'termination-uncertain';
-    }
-    completeTree();
-  };
-  const force = (): void => {
-    if (settled) return;
-    if (groupExists() === false) { completeTree(); return; }
-    if (!signalTree('SIGKILL')) uncertainTermination = true;
-    confirmationTimer = setTimeout(confirm, request.terminationGraceMilliseconds);
-  };
-  function stop(reason: NonNullable<ProfileGithubProcessResult['failure']>): void {
-    if (settled || failure !== undefined) return;
-    failure = reason;
-    clearTimeout(timeoutTimer);
-    if (!signalTree('SIGTERM')) uncertainTermination = true;
-    graceTimer = setTimeout(force, request.terminationGraceMilliseconds);
-  }
-  const capture = (target: Buffer[], stream: 'stdout' | 'stderr', chunk: Buffer | string): void => {
-    if (failure !== undefined) return;
-    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    const current = stream === 'stdout' ? stdoutBytes : stderrBytes;
-    const maximum = stream === 'stdout' ? request.maxStdoutBytes : request.maxStderrBytes;
-    if (current + bytes.byteLength > maximum) {
-      stop(stream === 'stdout' ? 'stdout-overflow' : 'stderr-overflow');
+}
+
+export function runBoundedProfileGithubProcess(request: ProfileGithubProcessRequest, effects: ProfileGithubProcessEffects = {}): Promise<ProfileGithubProcessResult> {
+  const processGroups = effects.posixProcessGroups ?? process.platform !== 'win32';
+  const signalProcess = effects.signalProcess ?? process.kill.bind(process);
+  return new Promise((resolve) => {
+    assertRequest(request);
+    let child: ChildProcess;
+    try {
+      child = (effects.spawnProcess ?? spawn)(request.resolvedExecutable ?? request.executable, [...request.args], {
+        cwd: request.cwd,
+        env: { ...request.environment },
+        shell: false,
+        detached: processGroups,
+        stdio: [request.stdin, 'pipe', 'pipe']
+      });
+    } catch (error) {
+      resolve({ status: null, stdout: '', stderr: '', failure: 'spawn', error: asError(error) });
       return;
     }
-    target.push(bytes);
-    if (stream === 'stdout') stdoutBytes += bytes.byteLength;
-    else stderrBytes += bytes.byteLength;
-  };
-  child.stdout?.on('data', (chunk: Buffer | string) => capture(stdout, 'stdout', chunk));
-  child.stderr?.on('data', (chunk: Buffer | string) => capture(stderr, 'stderr', chunk));
-  child.once('error', (cause) => {
-    error = asError(cause);
-    if (child.pid === undefined) {
-      failure ??= 'spawn';
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let failure: ProfileGithubProcessResult['failure'];
+    let error: Error | undefined;
+    let monitorError: Error | undefined;
+    let uncertainTermination = false;
+    let status: number | null = null;
+    let settled = false;
+    let graceTimer: NodeJS.Timeout | undefined;
+    let confirmationTimer: NodeJS.Timeout | undefined;
+    let treeDone = false;
+    let monitorRunning = false;
+    let monitorScheduled = false;
+    let finalMonitorStarted = false;
+    let parentSignal: NodeJS.Signals | undefined;
+    const parentHandlers = (['SIGHUP', 'SIGINT', 'SIGTERM'] as const).map((signal) => {
+      const handler = () => { parentSignal ??= signal; stop('parent-signal'); };
+      process.on(signal, handler); return { signal, handler };
+    });
+    const timeoutTimer = setTimeout(() => stop('timeout'), request.timeoutMilliseconds);
+
+    const groupExists = (): boolean | undefined => {
+      if (!processGroups || child.pid === undefined) return undefined;
+      try { signalProcess(-child.pid, 0); return true; }
+      catch (cause) {
+        const code = processErrorCode(cause);
+        if (code === 'ESRCH') return false;
+        if (code === 'EPERM') return true;
+        return undefined;
+      }
+    };
+    const signalTree = (signal: NodeJS.Signals): boolean => {
+      if (processGroups && child.pid !== undefined) {
+        try { signalProcess(-child.pid, signal); return true; }
+        catch (cause) { return processErrorCode(cause) === 'ESRCH'; }
+      }
+      try { child.kill(signal); } catch { /* immediate-child fallback only */ }
+      return false;
+    };
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      // The bounded receipt must also release our event-loop ownership. This is
+      // not proof that this child or any escaped descendant has terminated.
+      if (uncertainTermination) {
+        child.unref?.();
+        for (const stream of [child.stdout, child.stderr]) { stream?.removeAllListeners('data'); stream?.destroy?.(); }
+      }
+      clearTimeout(timeoutTimer);
+      for (const { signal, handler } of parentHandlers) process.off(signal, handler);
+      if (graceTimer !== undefined) clearTimeout(graceTimer);
+      if (confirmationTimer !== undefined) clearTimeout(confirmationTimer);
+      const exactStdout = Buffer.concat(stdout, stdoutBytes);
+      resolve({
+        status,
+        ...(parentSignal === undefined ? {} : { signal: parentSignal }),
+        stdout: exactStdout.toString('utf8'),
+        stderr: Buffer.concat(stderr, stderrBytes).toString('utf8'),
+        stdoutBytes: exactStdout,
+        ...(failure === undefined ? {} : { failure }),
+        ...(uncertainTermination ? { uncertainTermination: true } : {}),
+        ...(error === undefined ? {} : { error }),
+        ...(monitorError === undefined ? {} : { monitorError })
+      });
+    };
+    const runMonitor = async (final: boolean): Promise<void> => {
+      if (request.monitor === undefined || monitorError !== undefined) return;
+      monitorRunning = true;
+      try { await request.monitor(); }
+      catch (cause) {
+        monitorError = asError(cause);
+        stop('monitor-failure');
+      } finally { monitorRunning = false; }
+      if (final) finish();
+      else if (treeDone) beginFinalMonitor();
+      else scheduleMonitor();
+    };
+    const scheduleMonitor = (): void => {
+      if (request.monitor === undefined || monitorError !== undefined || treeDone || monitorRunning || monitorScheduled) return;
+      monitorScheduled = true;
+      setImmediate(() => {
+        monitorScheduled = false;
+        if (treeDone) beginFinalMonitor();
+        else void runMonitor(false);
+      });
+    };
+    function beginFinalMonitor(): void {
+      if (!treeDone || finalMonitorStarted || settled || monitorRunning) return;
+      finalMonitorStarted = true;
+      if (request.monitor === undefined || monitorError !== undefined) finish();
+      else void runMonitor(true);
+    }
+    const completeTree = (): void => {
+      if (treeDone) return;
+      treeDone = true;
+      clearTimeout(timeoutTimer);
+      if (!monitorRunning) beginFinalMonitor();
+    };
+    const confirm = (): void => {
+      if (settled) return;
+      if (groupExists() !== false) {
+        uncertainTermination = true;
+        failure ??= 'termination-uncertain';
+      }
       completeTree();
-    } else stop('spawn');
+    };
+    const force = (): void => {
+      if (settled) return;
+      if (groupExists() === false) { completeTree(); return; }
+      if (!signalTree('SIGKILL')) uncertainTermination = true;
+      confirmationTimer = setTimeout(confirm, request.terminationGraceMilliseconds);
+    };
+    function stop(reason: NonNullable<ProfileGithubProcessResult['failure']>): void {
+      if (settled || failure !== undefined) return;
+      failure = reason;
+      if (treeDone) return;
+      clearTimeout(timeoutTimer);
+      if (!signalTree('SIGTERM')) uncertainTermination = true;
+      graceTimer = setTimeout(force, request.terminationGraceMilliseconds);
+    }
+    const capture = (target: Buffer[], stream: 'stdout' | 'stderr', chunk: Buffer | string): void => {
+      if (settled || failure !== undefined) return;
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const current = stream === 'stdout' ? stdoutBytes : stderrBytes;
+      const maximum = stream === 'stdout' ? request.maxStdoutBytes : request.maxStderrBytes;
+      if (current + bytes.byteLength > maximum) {
+        stop(stream === 'stdout' ? 'stdout-overflow' : 'stderr-overflow');
+        return;
+      }
+      target.push(bytes);
+      if (stream === 'stdout') stdoutBytes += bytes.byteLength;
+      else stderrBytes += bytes.byteLength;
+    };
+    child.stdout?.on('data', (chunk: Buffer | string) => capture(stdout, 'stdout', chunk));
+    child.stderr?.on('data', (chunk: Buffer | string) => capture(stderr, 'stderr', chunk));
+    child.once('error', (cause) => {
+      if (settled) return;
+      error = asError(cause);
+      if (child.pid === undefined) {
+        failure ??= 'spawn';
+        completeTree();
+      } else stop('spawn');
+    });
+    child.once('close', (code) => {
+      if (settled) return;
+      status = code;
+      const descendants = groupExists();
+      if (!processGroups) {
+        if (failure !== undefined) uncertainTermination = true;
+        completeTree();
+        return;
+      }
+      if (descendants === false) { completeTree(); return; }
+      if (failure === undefined) stop(descendants === true ? 'process-tree-survived' : 'termination-uncertain');
+      if (descendants === undefined) uncertainTermination = true;
+    });
+    if (request.monitor === undefined) scheduleMonitor();
+    else void runMonitor(false);
   });
-  child.once('close', (code) => {
-    status = code;
-    const descendants = groupExists();
-    if (descendants === false || !POSIX_PROCESS_GROUPS) { completeTree(); return; }
-    if (failure === undefined) stop(descendants === true ? 'process-tree-survived' : 'termination-uncertain');
-    if (descendants === undefined) uncertainTermination = true;
-  });
-  if (request.monitor === undefined) scheduleMonitor();
-  else void runMonitor(false);
-});
+}
 
 export function assertProfileGithubOutputConsistency(result: ProfileGithubProcessResult): void {
   if (result.stdoutBytes !== undefined && Buffer.from(result.stdoutBytes).toString('utf8') !== result.stdout) {
@@ -401,8 +471,11 @@ export function assertProfileGithubOutputConsistency(result: ProfileGithubProces
 
 export function assertProfileGithubCommand(result: ProfileGithubProcessResult, code: string, message: string): string {
   assertProfileGithubOutputConsistency(result);
-  if (result.status !== 0 || result.failure !== undefined || result.error !== undefined || result.uncertainTermination === true) {
-    throw new BazframeError(code, message, result.error === undefined ? {} : { cause: result.error });
+  if (result.status !== 0 || result.failure !== undefined || result.error !== undefined || result.monitorError !== undefined || result.uncertainTermination === true) {
+    const cause = result.monitorError ?? result.error;
+    const failure = new BazframeError(code, result.uncertainTermination === true ? `${message} Process termination is uncertain; the private workspace is retained.` : message, cause === undefined ? {} : { cause });
+    Object.assign(failure, { uncertainTermination: result.uncertainTermination === true, processFailure: result.failure, status: result.status });
+    throw failure;
   }
   return result.stdout;
 }

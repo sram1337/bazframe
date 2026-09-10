@@ -79,6 +79,18 @@ pub(crate) fn stable_fields(
     fields
 }
 
+// Diagnosis of the admission comparison only, never of enumeration or reads.
+pub(crate) fn admission_fields(
+    a: &WindowsObjectObservation,
+    b: &WindowsObjectObservation,
+) -> Vec<&'static str> {
+    let mut fields = stable_fields(a, b);
+    if a.directory && b.directory {
+        fields.retain(|field| !matches!(*field, "object.lastWriteTime" | "object.changeTime"));
+    }
+    fields
+}
+
 pub(crate) fn stable_read_fields(
     before: &WindowsObjectObservation,
     after: &WindowsObjectObservation,
@@ -229,6 +241,21 @@ pub(crate) mod tests {
                 let mut b = object();
                 b.$field = $value;
                 assert_eq!(stable_fields(&a, &b), vec![$name]);
+                let exempt = matches!($name, "object.lastWriteTime" | "object.changeTime");
+                assert_eq!(
+                    admission_fields(&a, &b),
+                    if exempt { vec![] } else { vec![$name] }
+                );
+                let mut file_a = a.clone();
+                file_a.directory = false;
+                let mut file_b = b.clone();
+                file_b.directory = false;
+                assert_eq!(
+                    admission_fields(&file_a, &file_b),
+                    stable_fields(&file_a, &file_b)
+                );
+                assert_eq!(admission_fields(&a, &file_b), stable_fields(&a, &file_b));
+                assert_eq!(admission_fields(&file_b, &a), stable_fields(&file_b, &a));
             }};
         }
         changed!(volume_identity, "OTHER".into(), "object.volumeIdentity");
@@ -246,6 +273,7 @@ pub(crate) mod tests {
         let mut access = object();
         access.last_access_time = "OTHER".into();
         assert!(stable_fields(&a, &access).is_empty());
+        assert!(admission_fields(&a, &access).is_empty());
     }
 
     #[test]

@@ -1,8 +1,10 @@
+import { EventEmitter } from 'node:events';
+import { type ChildProcess, type spawn } from 'node:child_process';
 import { lstat, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { runManagedGitProcess } from '../../../src/providers/managed-git-process.js';
+import { managedGithubCloneEnvironment, runManagedGitProcess } from '../../../src/providers/managed-git-process.js';
 
 const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
@@ -170,5 +172,49 @@ describe('managed Git process runner', () => {
     if (result.uncertainTermination !== true) {
       await expect(lstat(marker)).rejects.toMatchObject({ code: 'ENOENT' });
     }
+  });
+});
+
+describe('Windows immediate-child bounded receipts', () => {
+  it('reports parent cancellation with uncertainty and removes signal listeners', async () => {
+    const signals = ['SIGHUP', 'SIGINT', 'SIGTERM'] as const;
+    const before = new Map(signals.map((signal) => [signal, new Set(process.listeners(signal))]));
+    const child = new EventEmitter() as ChildProcess;
+    Object.assign(child, { pid: 123, stdout: new EventEmitter(), stderr: new EventEmitter(), kill: () => { queueMicrotask(() => child.emit('close', null)); return true; } });
+    const pending = runManagedGitProcess('C:\\tools\\git.exe', [], 'C:\\fetched', {}, quick, { posixProcessGroups: false, spawnProcess: (() => child) as typeof spawn });
+    const handler = process.listeners('SIGTERM').find((listener) => !before.get('SIGTERM')!.has(listener));
+    handler!('SIGTERM');
+    expect(await pending).toMatchObject({ failure: 'parent-signal', signal: 'SIGTERM', uncertainTermination: true });
+    for (const signal of signals) expect(process.listeners(signal).filter((listener) => !before.get(signal)!.has(listener))).toEqual([]);
+  });
+  it('retains uncertainty when close arrives after timeout even if kill reports success', async () => {
+    const child = new EventEmitter() as ChildProcess;
+    Object.assign(child, { pid: 123, stdout: new EventEmitter(), stderr: new EventEmitter(), kill: () => { queueMicrotask(() => child.emit('close', 0)); return true; } });
+    const result = await runManagedGitProcess('C:\\tools\\git.exe', [], 'C:\\fetched', {}, { ...quick, timeoutMilliseconds: 1 }, { posixProcessGroups: false, spawnProcess: (() => child) as typeof spawn });
+    expect(result).toMatchObject({ failure: 'timeout', uncertainTermination: true });
+  });
+  it('settles pid-less spawn error without waiting for timeout or close', async () => {
+    const child = new EventEmitter() as ChildProcess;
+    Object.assign(child, { stdout: new EventEmitter(), stderr: new EventEmitter() });
+    const result = await runManagedGitProcess('C:\\tools\\git.exe', [], 'C:\\fetched', {}, quick, { posixProcessGroups: false, spawnProcess: (() => { queueMicrotask(() => child.emit('error', new Error('spawn refused'))); return child; }) as typeof spawn });
+    expect(result.error?.message).toBe('spawn refused');
+    expect(result.uncertainTermination).toBeUndefined();
+  });
+  it('returns exact binary bytes separately from diagnostic text', async () => {
+    const result = await runManagedGitProcess(process.execPath, ['-e', 'process.stdout.write(Buffer.from([0,255,13,10]))'], tmpdir(), process.env, quick);
+    expect(Buffer.from(result.stdoutBytes!)).toEqual(Buffer.from([0,255,13,10]));
+  });
+});
+
+describe('Windows gh clone exact secondary helper lookup', () => {
+  it('pins git.exe lookup extensions and excludes implicit, relative and acquired PATH directories', () => {
+    const environment = managedGithubCloneEnvironment('C:\\Git Dir\\git.exe', { Path: ';.;C:relative;C:\\fetched;C:\\tools', Pathext: '.COM;.CMD;.EXE', NoDefaultCurrentDirectoryInExePath: '0', SystemRoot: 'C:\\Windows' }, ['C:\\fetched']);
+    expect(environment).toMatchObject({ PATH: 'C:\\Git Dir;C:\\tools', PATHEXT: '.EXE', NoDefaultCurrentDirectoryInExePath: '1', SystemRoot: 'C:\\Windows' });
+    expect(environment.Path).toBeUndefined(); expect(environment.Pathext).toBeUndefined();
+    // Go/Windows lookup receives no .COM/.CMD candidates and no cwd fallback.
+    expect(environment.PATHEXT!.split(';').map((suffix) => `C:\\Git Dir\\git${suffix.toLowerCase()}`)).toEqual(['C:\\Git Dir\\git.exe']);
+  });
+  it.each(['C:\\tools\\custom.exe', 'C:\\tools\\git.com', 'C:\\tools\\git.cmd'])('refuses %s rather than selecting another git.exe', (git) => {
+    expect(() => managedGithubCloneEnvironment(git, {}, [])).toThrow(expect.objectContaining({ code: 'MANAGED_GIT_GH_HELPER_UNSUPPORTED' }));
   });
 });

@@ -1,3 +1,4 @@
+import { sameResourceIdentity, type ResourceIdentity } from '../skill-collections/resource-identity.js';
 import { createHash } from 'node:crypto';
 import { constants, type BigIntStats } from 'node:fs';
 import { lstat, open, type FileHandle } from 'node:fs/promises';
@@ -20,11 +21,9 @@ export interface PackageManifest {
   skillsRoot: string;
 }
 
-export interface PackageManifestSnapshot {
+export type PackageManifestSnapshot = ResourceIdentity & {
   manifest: PackageManifest;
   path: string;
-  device: bigint;
-  inode: bigint;
   contentSha256: string;
 }
 
@@ -94,7 +93,7 @@ export async function readPackageManifest(
 }
 
 export function samePackageManifestSnapshot(left: PackageManifestSnapshot, right: PackageManifestSnapshot): boolean {
-  return left.device === right.device && left.inode === right.inode && left.contentSha256 === right.contentSha256;
+  return sameResourceIdentity(left, right) && left.contentSha256 === right.contentSha256;
 }
 
 function stablePhysicalFile(before: BigIntStats, after: BigIntStats, pathMetadata: BigIntStats): boolean {

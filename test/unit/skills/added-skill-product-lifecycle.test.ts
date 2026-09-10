@@ -79,19 +79,48 @@ describe('internal Windows added-Skill product lifecycle', () => {
     const fixture = await setup();
     const options = { platformServices: fixture.services };
     await addDefaultSkill(fixture.home, fixture.target, options);
-    let reads = 0;
+    const events: string[] = [];
     const selectionReadServices = { async readSelectedProfileId() {
-      reads += 1;
-      expect(fixture.lockEvents.at(-1)).toBe(`enter:${join(fixture.home, 'locks', 'state.lock')}`);
+      events.push('selection');
+      const stateLock = join(fixture.home, 'locks', 'state.lock');
+      expect(fixture.lockEvents.lastIndexOf(`enter:${stateLock}`)).toBeGreaterThan(fixture.lockEvents.lastIndexOf(`exit:${stateLock}`));
       return 'focused';
     } };
-    const membership = { bazframeHome: fixture.home, ...options, selectionReadServices };
+    const inspectSkillLink = fixture.services.inspectSkillLink;
+    fixture.services.inspectSkillLink = (...args) => {
+      events.push('inspect');
+      return inspectSkillLink(...args);
+    };
+    const createSkillLink = fixture.services.createSkillLink;
+    fixture.services.createSkillLink = async (...args) => {
+      events.push('create');
+      return createSkillLink(...args);
+    };
+    const membership = {
+      bazframeHome: fixture.home, ...options, selectionReadServices,
+      testHooks: { beforeCommit() { events.push('before-commit'); } }
+    };
     expect(await addActiveProfileSkill(membership, 'demo-skill')).toMatchObject({ profileId: 'focused', action: 'added' });
+    expect(events[0]).toBe('selection');
+    const commit = events.indexOf('before-commit');
+    const create = events.indexOf('create');
+    expect(commit).toBeGreaterThan(events.indexOf('inspect'));
+    expect(create).toBeGreaterThan(commit);
+    expect(events.slice(commit + 1, create)).toContain('selection');
+    expect(events.slice(create + 1)).toContain('selection');
+    events.length = 0;
     expect(await addActiveProfileSkill(membership, 'demo-skill')).toMatchObject({ profileId: 'focused', action: 'current' });
-    expect(reads).toBe(2);
+    expect(events[0]).toBe('selection');
+    expect(events).toContain('inspect');
+    expect(events.slice(events.indexOf('inspect') + 1)).toContain('selection');
+    expect(events).not.toContain('create');
     await removeProfileSkill({ ...membership, selectionReadServices: { async readSelectedProfileId() { throw new Error('must not read'); } } }, 'focused', 'demo-skill');
+    events.length = 0;
     expect(await removeActiveProfileSkill(membership, 'demo-skill')).toMatchObject({ profileId: 'focused', action: 'absent' });
-    expect(reads).toBe(3);
+    expect(events[0]).toBe('selection');
+    expect(events).toContain('inspect');
+    expect(events.slice(events.indexOf('inspect') + 1)).toContain('selection');
+    expect(events).not.toContain('before-commit');
     const before = [...fixture.links];
     await expect(addActiveProfileSkill({ ...membership, selectionReadServices: { async readSelectedProfileId() { return undefined; } } }, 'demo-skill')).rejects.toMatchObject({ code: 'NO_ACTIVE_PROFILE' });
     expect([...fixture.links]).toEqual(before);

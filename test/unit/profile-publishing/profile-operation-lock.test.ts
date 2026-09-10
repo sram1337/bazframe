@@ -3,7 +3,7 @@ import { fork, type ChildProcess } from 'node:child_process';
 import { lstat, mkdir, readdir, rename, unlink } from 'node:fs/promises';
 import { basename, join, win32 } from 'node:path';
 import { createTempDirectory, type TempDirectory } from '../../helpers/temp-directory.js';
-import { assertOperationMutationAuthority, operationAuthorityTransactionId, profileOperationSocketPath, withProfileOperationLocks, withWindowsProfileOperationLocksForInternalTesting, type OperationMutationAuthority } from '../../../src/profile-publishing/profile-operation-lock.js';
+import { assertWindowsOperationMutationAuthority, assertOperationMutationAuthority, operationAuthorityTransactionId, profileOperationSocketPath, withProfileOperationLocks, withWindowsProfileOperationLocksForInternalTesting, type OperationMutationAuthority } from '../../../src/profile-publishing/profile-operation-lock.js';
 import { createHash } from 'node:crypto';
 import { BazframeError } from '../../../src/core/errors.js';
 import { windowsProvisioningFixture } from '../../helpers/windows-provisioning-fixture.js';
@@ -33,6 +33,44 @@ function windowsLocks() {
 function windowsComponent(key: string): string { return createHash('sha256').update('bazframe-profile-operation-key-v1\0').update(key).digest('hex'); }
 
 describe('shared authority from internal Windows profile locks', () => {
+  it('accepts only the issued Windows authority with the same backend and live scope without effects', async () => {
+    const f = windowsLocks();
+    let escaped: OperationMutationAuthority | undefined;
+    await f.run(async (authority) => {
+      escaped = authority;
+      const before = f.snapshot();
+      expect(() => assertWindowsOperationMutationAuthority(authority, f.backend, WINDOWS_HOME, ['work', '@store'], TRANSACTION_ID)).not.toThrow();
+      expect(() => assertWindowsOperationMutationAuthority(authority, f.backend, `${WINDOWS_HOME}\\.`, ['work'], TRANSACTION_ID)).not.toThrow();
+      const checks = [
+        () => assertWindowsOperationMutationAuthority({} as OperationMutationAuthority, f.backend, WINDOWS_HOME, ['work'], TRANSACTION_ID),
+        () => assertWindowsOperationMutationAuthority({ ...authority, assertHeld() {} } as OperationMutationAuthority, f.backend, WINDOWS_HOME, ['work'], TRANSACTION_ID),
+        () => assertWindowsOperationMutationAuthority(authority, { ...f.backend }, WINDOWS_HOME, ['work'], TRANSACTION_ID),
+        () => assertWindowsOperationMutationAuthority(authority, f.backend, `${WINDOWS_HOME}-other`, ['work'], TRANSACTION_ID),
+        () => assertWindowsOperationMutationAuthority(authority, f.backend, WINDOWS_HOME.toLowerCase(), ['work'], TRANSACTION_ID),
+        () => assertWindowsOperationMutationAuthority(authority, f.backend, WINDOWS_HOME, ['work', '@store', 'other'], TRANSACTION_ID),
+        () => assertWindowsOperationMutationAuthority(authority, f.backend, WINDOWS_HOME, ['work'], 'b'.repeat(32))
+      ];
+      for (const check of checks) expect(check).toThrow(expect.objectContaining({ code: 'PROFILE_OPERATION_AUTHORITY_INVALID' }));
+      expect(f.snapshot()).toBe(before);
+    });
+    const afterRelease = f.snapshot();
+    expect(() => assertWindowsOperationMutationAuthority(escaped!, f.backend, WINDOWS_HOME, ['work'], TRANSACTION_ID)).toThrow(expect.objectContaining({ code: 'PROFILE_OPERATION_AUTHORITY_INVALID' }));
+    expect(f.snapshot()).toBe(afterRelease);
+  });
+
+  it('rejects actual supported-platform issuance even with matching scope before Windows inspection or effects', async () => {
+    temporary = await createTempDirectory('/tmp/bzf-op-');
+    const f = windowsLocks();
+    const before = f.snapshot();
+    const inspect = vi.spyOn(f.backend, 'inspectPath');
+    await withProfileOperationLocks(temporary.root, ['work', '@store'], async (authority) => {
+      assertOperationMutationAuthority(authority, temporary!.root, ['work', '@store'], TRANSACTION_ID);
+      expect(() => assertWindowsOperationMutationAuthority(authority, f.backend, temporary!.root, ['work', '@store'], TRANSACTION_ID)).toThrow(expect.objectContaining({ code: 'PROFILE_OPERATION_AUTHORITY_INVALID' }));
+    }, TRANSACTION_ID);
+    expect(inspect).not.toHaveBeenCalled();
+    expect(f.snapshot()).toBe(before);
+  });
+
   it('issues only after sorted full acquisition, retains announcement bindings, and expires before reverse native release', async () => {
     const f = windowsLocks();
     const events: string[] = [];
@@ -43,6 +81,7 @@ describe('shared authority from internal Windows profile locks', () => {
       if (result.state !== 'acquired') return result;
       return { ...result, capability: { assertHeld: () => result.capability.assertHeld(), release() {
         expect(() => assertOperationMutationAuthority(escaped!, WINDOWS_HOME, ['work'])).toThrow();
+        expect(() => assertWindowsOperationMutationAuthority(escaped!, f.backend, WINDOWS_HOME, ['work'], TRANSACTION_ID)).toThrow();
         expect(() => operationAuthorityTransactionId(escaped!)).toThrow();
         events.push(`release:${win32.basename(win32.dirname(path))}`);
         result.capability.release();
@@ -71,7 +110,7 @@ describe('shared authority from internal Windows profile locks', () => {
     expect(() => operationAuthorityTransactionId({} as OperationMutationAuthority)).toThrow();
   });
 
-  it.each(['identity', 'admission', 'capability'] as const)('both accessors revalidate live %s proof without masking native refusals', async (kind) => {
+  it.each(['identity', 'admission', 'capability'] as const)('all authority accessors revalidate live %s proof without masking native refusals', async (kind) => {
     const f = windowsLocks();
     const nativeFailure = new BazframeError('WINDOWS_NATIVE_TEST_REFUSAL', 'native refusal');
     let failCapability = false;
@@ -90,7 +129,7 @@ describe('shared authority from internal Windows profile locks', () => {
       if (kind === 'admission') f.reparse(WINDOWS_HOME);
       if (kind === 'capability') failCapability = true;
       try {
-        const checks = [() => assertOperationMutationAuthority(authority, WINDOWS_HOME, ['work'], TRANSACTION_ID), () => operationAuthorityTransactionId(authority)];
+        const checks = [() => assertOperationMutationAuthority(authority, WINDOWS_HOME, ['work'], TRANSACTION_ID), () => assertWindowsOperationMutationAuthority(authority, f.backend, WINDOWS_HOME, ['work'], TRANSACTION_ID), () => operationAuthorityTransactionId(authority)];
         for (const check of checks) {
           if (kind === 'capability') expect(check).toThrow(nativeFailure);
           else expect(check).toThrow();

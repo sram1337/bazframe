@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { realpath } from 'node:fs/promises';
-import { isAbsolute, relative, sep } from 'node:path';
+import path from 'node:path';
 import { BazframeError, errorCode } from '../core/errors.js';
 
 const GIT_REPOSITORY_SELECTION_VARIABLES = [
@@ -14,22 +14,31 @@ const GIT_REPOSITORY_SELECTION_VARIABLES = [
   'GIT_DISCOVERY_ACROSS_FILESYSTEM'
 ] as const;
 
+export interface GitRootServices {
+  paths: typeof path;
+  canonical(directory: string): Promise<string>;
+  run(cwd: string, environment: NodeJS.ProcessEnv): Promise<GitResult>;
+  windows?: boolean;
+}
+const defaults: GitRootServices = { paths: path, canonical: realpath, run: runGit };
+
 export async function findGitRoot(
   cwd: string,
-  environment: NodeJS.ProcessEnv = process.env
+  environment: NodeJS.ProcessEnv = process.env,
+  services: GitRootServices = defaults
 ): Promise<string> {
   let canonicalCwd: string;
   try {
-    canonicalCwd = await realpath(cwd);
+    canonicalCwd = await services.canonical(cwd);
   } catch (error) {
     throw new BazframeError(
-      'NOT_GIT_WORKTREE',
-      `Current directory is not inside a Git worktree: ${cwd}`,
+      'GIT_ROOT_INVALID',
+      `Could not admit current directory: ${cwd}`,
       { cause: error }
     );
   }
 
-  const result = await runGit(canonicalCwd, environment);
+  const result = await services.run(canonicalCwd, gitDiscoveryEnvironment(environment, services.windows));
   if (result.error !== undefined) {
     if (errorCode(result.error) === 'ENOENT') {
       throw new BazframeError(
@@ -38,11 +47,12 @@ export async function findGitRoot(
         { cause: result.error }
       );
     }
-    throw new BazframeError(
-      'NOT_GIT_WORKTREE',
-      `Current directory is not inside a Git worktree: ${cwd}`,
-      { cause: result.error }
-    );
+    let diagnostic = '';
+    try { diagnostic = new TextDecoder('utf-8', { fatal: true }).decode(result.stderr).trim(); } catch { /* not confirmed outside Git */ }
+    const confirmed = result.error.code === 128 && result.error.killed !== true && result.error.signal == null
+      && diagnostic === 'fatal: not a git repository (or any of the parent directories): .git';
+    throw new BazframeError(confirmed ? 'NOT_GIT_WORKTREE' : 'GIT_DISCOVERY_FAILED',
+      confirmed ? `Current directory is not inside a Git worktree: ${cwd}` : `Git worktree discovery failed: ${cwd}`, { cause: result.error });
   }
 
   let decoded: string;
@@ -60,7 +70,7 @@ export async function findGitRoot(
     : decoded.endsWith('\n')
       ? decoded.slice(0, -1)
       : decoded;
-  if (root.length === 0 || root.includes('\0') || !isAbsolute(root)) {
+  if (root.length === 0 || root.includes('\0') || !services.paths.isAbsolute(root)) {
     throw new BazframeError(
       'GIT_ROOT_INVALID',
       `Git returned an invalid worktree root: ${JSON.stringify(root)}`
@@ -69,7 +79,7 @@ export async function findGitRoot(
 
   let canonicalRoot: string;
   try {
-    canonicalRoot = await realpath(root);
+    canonicalRoot = await services.canonical(root);
   } catch (error) {
     throw new BazframeError(
       'GIT_ROOT_INVALID',
@@ -78,7 +88,7 @@ export async function findGitRoot(
     );
   }
 
-  if (!containsPath(canonicalRoot, canonicalCwd)) {
+  if (!containsPath(canonicalRoot, canonicalCwd, services.paths)) {
     throw new BazframeError(
       'GIT_ROOT_MISMATCH',
       `Git returned a worktree root that does not contain the current directory: ${canonicalRoot}`
@@ -87,16 +97,13 @@ export async function findGitRoot(
   return canonicalRoot;
 }
 
-interface GitResult {
+export interface GitResult {
   stdout: Uint8Array;
-  error?: Error;
+  stderr: Uint8Array;
+  error?: Error & { code?: string | number | null; killed?: boolean; signal?: string | null };
 }
 
 function runGit(cwd: string, environment: NodeJS.ProcessEnv): Promise<GitResult> {
-  const gitEnvironment = { ...environment };
-  for (const variable of GIT_REPOSITORY_SELECTION_VARIABLES) {
-    delete gitEnvironment[variable];
-  }
 
   return new Promise((resolveResult) => {
     execFile(
@@ -104,14 +111,15 @@ function runGit(cwd: string, environment: NodeJS.ProcessEnv): Promise<GitResult>
       ['-c', 'core.quotePath=false', 'rev-parse', '--path-format=absolute', '--show-toplevel'],
       {
         cwd,
-        env: gitEnvironment,
+        env: environment,
         encoding: 'buffer',
         maxBuffer: 64 * 1024,
         timeout: 5000
       },
-      (error, stdout) => {
+      (error, stdout, stderr) => {
         resolveResult({
           stdout: Uint8Array.from(stdout),
+          stderr: Uint8Array.from(stderr),
           ...(error === null ? {} : { error })
         });
       }
@@ -119,8 +127,14 @@ function runGit(cwd: string, environment: NodeJS.ProcessEnv): Promise<GitResult>
   });
 }
 
-function containsPath(parent: string, candidate: string): boolean {
-  const childPath = relative(parent, candidate);
+function containsPath(parent: string, candidate: string, paths: typeof path): boolean {
+  const childPath = paths.relative(parent, candidate);
   return childPath === ''
-    || (childPath !== '..' && !childPath.startsWith(`..${sep}`) && !isAbsolute(childPath));
+    || (childPath !== '..' && !childPath.startsWith(`..${paths.sep}`) && !paths.isAbsolute(childPath));
+}
+
+export function gitDiscoveryEnvironment(environment: NodeJS.ProcessEnv, windows = process.platform === 'win32'): NodeJS.ProcessEnv {
+  const result = { ...environment };
+  for (const name of Object.keys(result)) if (GIT_REPOSITORY_SELECTION_VARIABLES.some((variable) => variable === (windows ? name.toUpperCase() : name)) || (windows && ['LANG', 'LC_ALL'].includes(name.toUpperCase()))) delete result[name];
+  return { ...result, LANG: 'C', LC_ALL: 'C' };
 }
