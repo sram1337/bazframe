@@ -46,11 +46,16 @@ export function createWindowsProfileProvisioningServicesForInternalTesting(
 
   const absentAliasCache = (home: string, profileId: string, authority: { assertHeld(): void }) => detachWindowsAliasCache(backend, home, ['adapter-cache', 'pi', 'skill-aliases', profileId], authority);
 
-  async function current(home: string, profileId: string): Promise<boolean> {
+  async function present(home: string, profileId: string): Promise<boolean> {
     const entries = await enumerate(win32.join(home, 'profiles'));
     const found = entries.names.find((name) => key(name) === key(profileId));
     if (found === undefined) return false;
     if (found !== profileId) throw invalid('Profile destination uses an alias spelling.');
+    return true;
+  }
+
+  async function current(home: string, profileId: string): Promise<boolean> {
+    if (!await present(home, profileId)) return false;
     await loadProfile(home, profileId, { platformServices: services });
     return true;
   }
@@ -98,8 +103,10 @@ export function createWindowsProfileProvisioningServicesForInternalTesting(
           }
           // A validated completed add does not freeze later legitimate profile edits.
           if (journal.phase === 'COMMITTED' || journal.phase === 'ABORTED') continue;
-          if (!await current(home, profileId)) await absentAliasCache(home, profileId, held);
-          if (selection.profileId === profileId && !await current(home, profileId)) {
+          // Only namespace presence belongs here: recovery must classify occupied
+          // destinations and retain ambiguity before current() validates a profile.
+          if (!await present(home, profileId)) await absentAliasCache(home, profileId, held);
+          if (selection.profileId === profileId && !await present(home, profileId)) {
             throw invalid('A missing profile is already named by active selection.');
           }
           const recovered = await recoverWindowsDirectoryPublication({

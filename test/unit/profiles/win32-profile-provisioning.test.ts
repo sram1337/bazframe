@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { executeWindowsDirectoryPublication, decodeWindowsDirectoryPublicationJournal } from '../../../src/state/win32-directory-publication.js';
 import { describe, expect, it } from 'vitest';
-import { BazframeError } from '../../../src/core/errors.js';
+import { BazframeError, errorCode } from '../../../src/core/errors.js';
 import { addProfile, listProfiles } from '../../../src/profiles/profile-management.js';
 import {
   createWindowsProfileProvisioningServicesForInternalTesting,
@@ -142,7 +142,9 @@ describe('internal Windows inactive profile provisioning', () => {
     f.directory(`${HOME}\\profiles\\Focused`);
     await expect(addProfile(HOME, 'focused', f)).rejects.toMatchObject({ code: 'WINDOWS_PROFILE_PROVISIONING_REFUSED' });
     f.file(`${HOME}\\profiles\\occupied`, 'keep');
-    await expect(addProfile(HOME, 'occupied', f)).rejects.toThrow();
+    await expect(addProfile(HOME, 'occupied', f)).rejects.toMatchObject({
+      code: 'PROFILE_READ_FAILED', cause: { code: 'WINDOWS_PRIVATE_DIRECTORY_PRIVACY_UNPROVED' }
+    });
     expect(f.nodes.get(`${HOME}\\profiles\\occupied`)?.bytes?.toString()).toBe('keep');
   });
 
@@ -160,6 +162,119 @@ describe('internal Windows inactive profile provisioning', () => {
       expect(await listProfiles(HOME, retry)).toMatchObject({ profileIds: ['focused'] });
     }
   );
+
+  describe.each([undefined, 'other\r\n'])('occupied recovery with selection %j', (selection) => {
+    it.each(['file', 'reparse', 'foreign-owner', 'unsafe-child'] as const)(
+      'records one immutable ambiguity for an interrupted own journal and %s destination', async (kind) => {
+        const f = fixture({ hooks: { afterPhase(phase) { if (phase === 'CANDIDATE_RENAME_INTENT') throw new Error('interrupted'); } } });
+        ensureWindowsPrivateDirectoryPath(f.backend, HOME);
+        if (selection !== undefined) f.file(`${HOME}\\active-profile`, selection);
+        await expect(addProfile(HOME, 'focused', f)).rejects.toThrow('interrupted');
+        const journalRoot = `${HOME}\\windows-transactions\\profile-add\\focused`;
+        const records = () => [...f.nodes].filter(([path]) => path.startsWith(`${journalRoot}\\`) && path.endsWith('.json'));
+        const planned = decodeWindowsDirectoryPublicationJournal(records().at(-1)![1].bytes!);
+        expect(planned).toMatchObject({ phase: 'CANDIDATE_RENAME_INTENT', mode: 'fresh', destinationName: 'focused' });
+        expect(new Set(records().map(([path]) => path.slice(0, path.lastIndexOf('\\')))).size).toBe(1);
+        const candidate = `${HOME}\\profiles\\${planned.candidateName}`;
+        expect(f.nodes.get(candidate)?.kind).toBe('directory');
+        expect(f.nodes.get(`${candidate}\\AGENTS.md`)?.bytes).toEqual(Buffer.alloc(0));
+        expect(f.nodes.get(`${candidate}\\skills`)?.kind).toBe('directory');
+        const destination = `${HOME}\\profiles\\focused`;
+        if (kind === 'file') f.file(destination, 'occupied destination must survive\n');
+        else if (kind === 'reparse') f.reparse(destination);
+        else {
+          f.directory(destination);
+          f.file(`${destination}\\AGENTS.md`, 'retain authored bytes\n');
+          if (kind === 'foreign-owner') f.nodes.get(destination)!.security = { ...f.backend.inspectPath(destination).security, ownerSid: 'S-1-5-18' };
+          else f.nodes.get(`${destination}\\AGENTS.md`)!.numberOfLinks = 2;
+        }
+        // Presence must not admit or detach this unsafe cache, either.
+        const cache = `${HOME}\\adapter-cache\\pi\\skill-aliases`;
+        ensureWindowsPrivateDirectoryPath(f.backend, cache);
+        f.reparse(`${cache}\\focused`);
+        // Lock acquisition/release announcements are the only permitted rewrites.
+        const retained = () => [...f.nodes].filter(([path]) => !path.startsWith(`${HOME}\\locks\\`));
+        const before = JSON.stringify(retained());
+        const beforePaths = new Set(retained().map(([path]) => path));
+        const journalCount = records().length;
+        const retry = { provisioningServices: f.createServices({ hooks: {} }) };
+        const beforeList = f.snapshot();
+        await listProfiles(HOME, retry);
+        expect(f.snapshot()).toBe(beforeList);
+        const refused: unknown = await addProfile(HOME, 'focused', retry).catch((error: unknown) => error);
+        expect(refused).toBeInstanceOf(BazframeError);
+        expect({ code: errorCode(refused), cause: errorCode((refused as Error).cause) }).toEqual({
+          code: 'WINDOWS_PROFILE_PROVISIONING_REFUSED', cause: undefined
+        });
+        expect(JSON.stringify(retained().filter(([path]) => beforePaths.has(path)))).toBe(before);
+        const appended = retained().filter(([path]) => !beforePaths.has(path));
+        expect(appended).toHaveLength(1);
+        expect(records()).toHaveLength(journalCount + 1);
+        expect(appended[0]![0]).toBe(records().at(-1)![0]);
+        expect(decodeWindowsDirectoryPublicationJournal(appended[0]![1].bytes!)).toMatchObject({
+          phase: 'AMBIGUOUS', transactionId: planned.transactionId, candidate: planned.candidate,
+          dependentStateSha256: planned.dependentStateSha256
+        });
+        const terminal = JSON.stringify(retained());
+        await expect(addProfile(HOME, 'focused', retry)).rejects.toMatchObject({ code: 'WINDOWS_PROFILE_PROVISIONING_REFUSED' });
+        expect(JSON.stringify(retained())).toBe(terminal);
+      }
+    );
+  });
+
+  it.each(['alias', 'selected-missing'] as const)('preserves the pre-recovery %s guard without advancing the own journal', async (kind) => {
+    const f = fixture({ hooks: { afterPhase(phase) { if (phase === 'CANDIDATE_RENAME_INTENT') throw new Error('interrupted'); } } });
+    await expect(addProfile(HOME, 'focused', f)).rejects.toThrow('interrupted');
+    if (kind === 'alias') f.file(`${HOME}\\profiles\\Focused`, 'retain alias occupant');
+    else f.file(`${HOME}\\active-profile`, 'focused\r\n');
+    const retained = () => JSON.stringify([...f.nodes].filter(([path]) => !path.startsWith(`${HOME}\\locks\\`)));
+    const before = retained();
+    await expect(addProfile(HOME, 'focused', { provisioningServices: f.createServices({ hooks: {} }) })).rejects.toMatchObject({ code: 'WINDOWS_PROFILE_PROVISIONING_REFUSED' });
+    expect(retained()).toBe(before);
+  });
+
+  it('detaches only the absent recovering profile cache under live authority and preserves sibling caches', async () => {
+    const f = fixture({ hooks: { afterPhase(phase) { if (phase === 'CANDIDATE_RENAME_INTENT') throw new Error('interrupted'); } } });
+    await expect(addProfile(HOME, 'focused', f)).rejects.toThrow('interrupted');
+    const root = `${HOME}\\adapter-cache\\pi\\skill-aliases`;
+    ensureWindowsPrivateDirectoryPath(f.backend, `${root}\\focused`);
+    f.file(`${root}\\focused\\cached`, 'stale cache bytes');
+    ensureWindowsPrivateDirectoryPath(f.backend, `${root}\\other`);
+    f.file(`${root}\\other\\cached`, 'unrelated cache bytes');
+    const cacheId = f.nodes.get(`${root}\\focused`)!.id;
+    const cacheFile = JSON.stringify(f.nodes.get(`${root}\\focused\\cached`));
+    const siblings = JSON.stringify([...f.nodes].filter(([path]) => path === root || path.startsWith(`${root}\\other`)));
+    const retry = { provisioningServices: f.createServices({ hooks: {} }) };
+    const acquire = f.backend.acquireFileLock, enumerate = f.backend.enumerateStableDirectory;
+    let expired = false;
+    f.backend.acquireFileLock = (path) => {
+      const acquired = acquire(path);
+      if (acquired.state !== 'acquired') return acquired;
+      return { ...acquired, capability: { ...acquired.capability, assertHeld() {
+        acquired.capability.assertHeld();
+        if (expired) throw new Error('expired cache authority');
+      } } };
+    };
+    f.backend.enumerateStableDirectory = async (...args) => {
+      const receipt = await enumerate(...args);
+      if (args[0] === `${root}\\focused`) expired = true;
+      return receipt;
+    };
+    const retained = () => JSON.stringify([...f.nodes].filter(([path]) => !path.startsWith(`${HOME}\\locks\\`)));
+    const before = retained();
+    await expect(addProfile(HOME, 'focused', retry)).rejects.toMatchObject({
+      code: 'WINDOWS_OPERATION_LOCK_RELEASE_AMBIGUOUS', cause: { message: 'expired cache authority' }
+    });
+    expect(retained()).toBe(before);
+    expired = false;
+    f.backend.enumerateStableDirectory = enumerate;
+    expect(await addProfile(HOME, 'focused', retry)).toMatchObject({ action: 'current' });
+    expect(f.nodes.has(`${root}\\focused`)).toBe(false);
+    const moved = [...f.nodes].filter(([path, node]) => path.startsWith(`${root}\\.bazframe-cache-`) && node.id === cacheId);
+    expect(moved).toHaveLength(1);
+    expect(JSON.stringify(f.nodes.get(`${moved[0]![0]}\\cached`))).toBe(cacheFile);
+    expect(JSON.stringify([...f.nodes].filter(([path]) => path === root || path.startsWith(`${root}\\other`)))).toBe(siblings);
+  });
 
   it('reconciles interruption immediately after final rename without replacing the complete live profile', async () => {
     const f = fixture({ hooks: { afterCandidateRename() { throw new Error('interrupted'); } } });
