@@ -310,6 +310,7 @@ export function runBoundedProfileGithubProcess(request: ProfileGithubProcessRequ
     let uncertainTermination = false;
     let status: number | null = null;
     let settled = false;
+    let settlementTimer: NodeJS.Timeout | undefined;
     let graceTimer: NodeJS.Timeout | undefined;
     let confirmationTimer: NodeJS.Timeout | undefined;
     let treeDone = false;
@@ -352,6 +353,7 @@ export function runBoundedProfileGithubProcess(request: ProfileGithubProcessRequ
       }
       clearTimeout(timeoutTimer);
       for (const { signal, handler } of parentHandlers) process.off(signal, handler);
+      if (settlementTimer !== undefined) clearTimeout(settlementTimer);
       if (graceTimer !== undefined) clearTimeout(graceTimer);
       if (confirmationTimer !== undefined) clearTimeout(confirmationTimer);
       const exactStdout = Buffer.concat(stdout, stdoutBytes);
@@ -397,7 +399,10 @@ export function runBoundedProfileGithubProcess(request: ProfileGithubProcessRequ
     const completeTree = (): void => {
       if (treeDone) return;
       treeDone = true;
-      clearTimeout(timeoutTimer);
+      if (settlementTimer !== undefined) clearTimeout(settlementTimer);
+      if (graceTimer !== undefined) clearTimeout(graceTimer);
+      if (confirmationTimer !== undefined) clearTimeout(confirmationTimer);
+      // Normal settlement still owns the overall timeout through the final drain.
       if (!monitorRunning) beginFinalMonitor();
     };
     const confirm = (): void => {
@@ -417,6 +422,7 @@ export function runBoundedProfileGithubProcess(request: ProfileGithubProcessRequ
     function stop(reason: NonNullable<ProfileGithubProcessResult['failure']>): void {
       if (settled || failure !== undefined) return;
       failure = reason;
+      if (settlementTimer !== undefined) clearTimeout(settlementTimer);
       if (treeDone) return;
       clearTimeout(timeoutTimer);
       if (!signalTree('SIGTERM')) uncertainTermination = true;
@@ -455,6 +461,19 @@ export function runBoundedProfileGithubProcess(request: ProfileGithubProcessRequ
         return;
       }
       if (descendants === false) { completeTree(); return; }
+      if (failure === undefined && descendants === true) {
+        // Root close can precede natural group exit/reaping. Recheck once using
+        // the existing grace bound, without signaling or clearing the timeout.
+        settlementTimer = setTimeout(() => {
+          settlementTimer = undefined;
+          if (settled || treeDone || failure !== undefined) return;
+          const remaining = groupExists();
+          if (remaining === false) { completeTree(); return; }
+          if (remaining === undefined) uncertainTermination = true;
+          stop(remaining === true ? 'process-tree-survived' : 'termination-uncertain');
+        }, request.terminationGraceMilliseconds);
+        return;
+      }
       if (failure === undefined) stop(descendants === true ? 'process-tree-survived' : 'termination-uncertain');
       if (descendants === undefined) uncertainTermination = true;
     });

@@ -126,7 +126,7 @@ export async function runWindowsProfileActivationEvidence(context) {
   const { publicationSidecarName } = await load('dist/profile-publishing/publication-state.js');
   privateState.createWindowsPrivateFile(backend, deferredProfile, publicationSidecarName());
   await writeFile(join(deferredProfile, publicationSidecarName()), '{}');
-  observations.occupiedOtherProfileRefused = await code(() => use('alpha', undefined, deferredHome), 'WINDOWS_PROFILE_ACTIVATION_UNSUPPORTED_STATE')
+  observations.occupiedOtherProfileRefused = await code(() => use('alpha', undefined, deferredHome), 'PROFILE_PUBLICATION_STATE_INVALID')
     && same(deferredOld, await read(deferredHome)) && (await readFile(join(deferredProfile, publicationSidecarName()), 'utf8')) === '{}';
   const statePath = join(scenarioHome, 'active-profile');
   const io = { async writeExistingFile(path, bytes) { const file = await open(path, 'r+'); try { await file.writeFile(bytes); await file.sync(); } finally { await file.close(); } }, rename };

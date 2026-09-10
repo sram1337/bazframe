@@ -217,12 +217,24 @@ describe('actual managed activation with native observations', () => {
 
   it.each(['sidecar', 'local-skill', 'collections', 'imported', 'other-profile'] as const)('refuses occupied %s before lock/publication and never enters ordinary fallback', async (kind) => {
     const f = await fixture();
-    if (kind === 'sidecar' || kind === 'other-profile') f.file(`${HOME}\\profiles\\${kind === 'sidecar' ? 'alpha' : 'bravo'}\\.bazframe-profile-state.json`, '{}');
+    const sidecar = kind === 'sidecar' || kind === 'other-profile' ? `${HOME}\\profiles\\${kind === 'sidecar' ? 'alpha' : 'bravo'}\\.bazframe-profile-state.json` : undefined;
+    if (sidecar !== undefined) {
+      await useManagedProfile(HOME, 'alpha', f.services());
+      f.file(sidecar, '{}');
+    }
+    const selectionBefore = { ...f.nodes.get(`${HOME}\\active-profile`) };
     if (kind === 'local-skill') f.directory(`${HOME}\\profiles\\alpha\\skills\\demo-skill`);
     if (kind === 'collections') { f.directory(`${HOME}\\libraries`); f.file(`${HOME}\\libraries\\demo.json`, '{}'); }
     if (kind === 'imported') { ensureWindowsPrivateDirectoryPath(f.backend, `${HOME}\\profile-publishing\\trees`); f.file(`${HOME}\\profile-publishing\\trees\\occupied`, 'keep'); }
     const before = f.snapshot();
-    await expect(useManagedProfile(HOME, 'alpha', f.services())).rejects.toThrow();
+    const refused = expect(useManagedProfile(HOME, 'alpha', f.services())).rejects;
+    if (sidecar === undefined) await refused.toThrow();
+    else {
+      await refused.toMatchObject({ code: 'PROFILE_PUBLICATION_STATE_INVALID' });
+      expect(await currentProfile(HOME, f.selection)).toBe('alpha');
+      expect(f.nodes.get(`${HOME}\\active-profile`)).toEqual(selectionBefore);
+      expect(f.nodes.get(sidecar)?.bytes).toEqual(Buffer.from('{}'));
+    }
     expect(f.snapshot()).toBe(before);
   });
   it('resolves expected old selection only after state lock and refuses profile drift there', async () => {

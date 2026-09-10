@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { type ChildProcess, type spawn } from 'node:child_process';
 import { runBoundedProfileGithubProcess, createResolvedProfileGithubProcess, type ProfileGithubProcessRequest } from '../../../src/profile-publishing/profile-github-process.js';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdir, readFile, readdir, rename, symlink, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { createTempDirectory, type TempDirectory } from '../../helpers/temp-directory.js';
@@ -97,6 +97,177 @@ describe('profile GitHub owned-directory disposal', () => {
 
     expect(await readFile(join(owned.path, 'attacker.txt'), 'utf8')).toBe('must survive\n');
     expect(await readFile(join(saved, 'owned.txt'), 'utf8')).toBe('owned\n');
+  });
+});
+
+describe('POSIX bounded GitHub process settlement', () => {
+  const request: ProfileGithubProcessRequest = { executable: 'git', args: [], cwd: '/fetched', environment: {}, stdin: 'ignore', timeoutMilliseconds: 100, terminationGraceMilliseconds: 10, maxStdoutBytes: 4, maxStderrBytes: 4 };
+  function start(probe: () => void, options: Partial<ProfileGithubProcessRequest> = {}, signal: (signal: NodeJS.Signals) => void = () => {}) {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const child = new EventEmitter() as ChildProcess;
+    Object.assign(child, { pid: 123, stdout: new EventEmitter(), stderr: new EventEmitter() });
+    const signals: Array<NodeJS.Signals | 0> = [];
+    const before = new Set(process.listeners('SIGINT'));
+    const pending = runBoundedProfileGithubProcess({ ...request, ...options }, {
+      posixProcessGroups: true,
+      spawnProcess: (() => child) as typeof spawn,
+      signalProcess: (pid, value) => { expect(pid).toBe(-123); signals.push(value); if (value === 0) probe(); else signal(value); }
+    });
+    const interrupt = () => process.listeners('SIGINT').find((listener) => !before.has(listener))!('SIGINT');
+    return { child, pending, signals, interrupt };
+  }
+  function absent(): never { throw Object.assign(new Error('gone'), { code: 'ESRCH' }); }
+  function monitored() {
+    const samples: Array<{ resolve(): void; reject(error: Error): void }> = [];
+    const monitor = () => new Promise<void>((resolve, reject) => { samples.push({ resolve, reject }); });
+    return { samples, monitor };
+  }
+  afterEach(() => { vi.useRealTimers(); });
+
+  it.each([[0, false], [128, false], [0, true], [128, true]] as const)('accepts normal status %s only after transient group existence settles naturally; EPERM=%s', async (status, denied) => {
+    let probes = 0;
+    const run = start(() => {
+      if (++probes > 1) absent();
+      if (denied) throw Object.assign(new Error('probe denied'), { code: 'EPERM' });
+    });
+    run.child.emit('close', status);
+    await vi.advanceTimersByTimeAsync(10);
+    const result = await run.pending;
+    expect(result).toMatchObject({ status });
+    expect(result.failure).toBeUndefined();
+    expect(result.uncertainTermination).toBeUndefined();
+    expect(run.signals).toEqual([0, 0]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('drains the serial active sample and exactly one final sample after proved absence', async () => {
+    let probes = 0, settled = false;
+    const monitoring = monitored();
+    const run = start(() => { if (++probes > 1) absent(); }, monitoring);
+    void run.pending.then(() => { settled = true; });
+    run.child.emit('close', 128);
+    await vi.advanceTimersByTimeAsync(9);
+    expect(run.signals).toEqual([0]);
+    expect(monitoring.samples).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(run.signals).toEqual([0, 0]);
+    expect(settled).toBe(false);
+    monitoring.samples[0]!.resolve();
+    await Promise.resolve();
+    expect(monitoring.samples).toHaveLength(2);
+    expect(settled).toBe(false);
+    monitoring.samples[1]!.resolve();
+    expect(await run.pending).toMatchObject({ status: 128 });
+    expect((await run.pending).failure).toBeUndefined();
+    expect(monitoring.samples).toHaveLength(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('refuses an active monitor rejection after natural absence without starting a final sample', async () => {
+    let probes = 0;
+    const monitoring = monitored();
+    const run = start(() => { if (++probes > 1) absent(); }, monitoring);
+    run.child.emit('close', 128);
+    await vi.advanceTimersByTimeAsync(10);
+    monitoring.samples[0]!.reject(new Error('late active refusal'));
+    expect(await run.pending).toMatchObject({ status: 128, failure: 'monitor-failure', monitorError: { message: 'late active refusal' } });
+    expect(monitoring.samples).toHaveLength(1);
+    expect(run.signals).toEqual([0, 0]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['exists', 'EPERM', 'unknown'] as const)('fails closed for persistent %s group probes', async (kind) => {
+    const run = start(() => { if (kind !== 'exists') throw Object.assign(new Error('probe failed'), { code: kind === 'EPERM' ? 'EPERM' : 'EIO' }); }, {}, () => {
+      if (kind === 'EPERM') throw Object.assign(new Error('signal denied'), { code: 'EPERM' });
+    });
+    run.child.emit('close', 128);
+    await vi.advanceTimersByTimeAsync(30);
+    expect(await run.pending).toMatchObject({ status: 128, failure: kind === 'unknown' ? 'termination-uncertain' : 'process-tree-survived', uncertainTermination: true });
+    expect(run.signals).toEqual(kind === 'unknown' ? [0, 'SIGTERM', 0, 'SIGKILL', 0] : [0, 0, 'SIGTERM', 0, 'SIGKILL', 0]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['SIGTERM', 'SIGKILL'] as const)('never turns successful %s intervention into ordinary status', async (intervention) => {
+    let gone = false;
+    const run = start(() => { if (gone) absent(); }, {}, (signal) => { if (signal === intervention) gone = true; });
+    run.child.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(30);
+    expect(await run.pending).toMatchObject({ status: 0, failure: 'process-tree-survived' });
+    expect((await run.pending).uncertainTermination).toBeUndefined();
+    expect(run.signals).toEqual(intervention === 'SIGTERM' ? [0, 0, 'SIGTERM', 0] : [0, 0, 'SIGTERM', 0, 'SIGKILL', 0]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['initial-unknown', 'recheck-unknown', 'signal-denied'] as const)('retains %s uncertainty even after later absence', async (kind) => {
+    let probes = 0;
+    const run = start(() => {
+      probes += 1;
+      if ((kind === 'initial-unknown' && probes === 1) || (kind === 'recheck-unknown' && probes === 2)) throw new Error('unknown probe');
+      if (probes > (kind === 'initial-unknown' ? 1 : 2)) absent();
+    }, {}, () => { if (kind === 'signal-denied') throw Object.assign(new Error('denied'), { code: 'EPERM' }); });
+    run.child.emit('close', 128);
+    await vi.advanceTimersByTimeAsync(20);
+    expect(await run.pending).toMatchObject({ status: 128, failure: kind === 'signal-denied' ? 'process-tree-survived' : 'termination-uncertain', uncertainTermination: true });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['before-close', 'natural-settlement', 'final-drain'] as const)('preserves failure events during %s despite subsequent absence', async (phase) => {
+    // Each failure source is exercised at each lifecycle boundary without real signals.
+    for (const reason of ['timeout', 'stdout-overflow', 'stderr-overflow', 'parent-signal', 'spawn', 'monitor-failure'] as const) {
+      let probes = 0, gone = false;
+      const monitoring = monitored();
+      const run = start(() => { if (gone || ++probes > 1) absent(); }, { ...monitoring, timeoutMilliseconds: reason === 'timeout' && phase !== 'final-drain' ? 5 : 100 });
+      const trigger = async () => {
+        if (reason === 'timeout') await vi.advanceTimersByTimeAsync(phase === 'final-drain' ? 90 : 5);
+        else if (reason === 'stdout-overflow' || reason === 'stderr-overflow') run.child[reason === 'stdout-overflow' ? 'stdout' : 'stderr']!.emit('data', Buffer.from('12345'));
+        else if (reason === 'parent-signal') run.interrupt();
+        else if (reason === 'spawn') run.child.emit('error', new Error('spawn failed'));
+        else { monitoring.samples[phase === 'final-drain' ? 1 : 0]!.reject(new Error('monitor rejected')); await Promise.resolve(); }
+      };
+      if (phase === 'before-close') { await trigger(); gone = true; run.child.emit('close', 128); }
+      else {
+        run.child.emit('close', 128);
+        if (phase === 'final-drain') {
+          await vi.advanceTimersByTimeAsync(10);
+          monitoring.samples[0]!.resolve();
+          await Promise.resolve();
+        }
+        await trigger();
+        gone = true;
+        if (phase === 'natural-settlement') await vi.advanceTimersByTimeAsync(10);
+      }
+      if (reason !== 'monitor-failure') {
+        if (phase !== 'final-drain') { monitoring.samples[0]!.resolve(); await Promise.resolve(); }
+        monitoring.samples[1]!.resolve();
+      }
+      const result = await run.pending;
+      expect(result, `${phase}/${reason}`).toMatchObject({ status: 128, failure: reason });
+      if (reason === 'monitor-failure') expect(result.monitorError?.message).toBe('monitor rejected');
+      if (reason === 'spawn') expect(result.error?.message).toBe('spawn failed');
+      if (reason === 'parent-signal') expect(result.signal).toBe('SIGINT');
+      expect(run.signals.filter((signal) => signal !== 0)).toEqual(phase === 'final-drain' ? [] : ['SIGTERM']);
+      expect(vi.getTimerCount()).toBe(0);
+    }
+  });
+
+  it('cancels pending termination timers before a slow final drain and removes parent listeners', async () => {
+    let gone = false;
+    const monitoring = monitored();
+    const signals = ['SIGHUP', 'SIGINT', 'SIGTERM'] as const;
+    const before = signals.map((signal) => process.listeners(signal));
+    const run = start(() => { if (gone) absent(); }, monitoring);
+    run.child.emit('close', 128);
+    await vi.advanceTimersByTimeAsync(10);
+    gone = true;
+    await vi.advanceTimersByTimeAsync(10);
+    monitoring.samples[0]!.resolve();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(run.signals).toEqual([0, 0, 'SIGTERM', 0]);
+    monitoring.samples[1]!.resolve();
+    expect(await run.pending).toMatchObject({ failure: 'process-tree-survived' });
+    expect(vi.getTimerCount()).toBe(0);
+    signals.forEach((signal, index) => expect(process.listeners(signal)).toEqual(before[index]));
   });
 });
 

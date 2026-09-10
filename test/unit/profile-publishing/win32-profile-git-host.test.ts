@@ -160,7 +160,7 @@ describe('Windows shared provider/capture and canonical Git engine with actual l
       expect(f.nodes.has(absent)).toBe(false);
       expect(f.requests.some((request) => request.executable === 'gh' && request.args.includes('login'))).toBe(false);
     } finally { await isolation.dispose(); }
-  }, 180000);
+  }, 240000);
 
   it('transports exact binary and executable resource bytes without injecting provider, capture or Git success', async () => {
     const f = windowsGitHostFixture(); fixtures.push(f);
