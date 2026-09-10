@@ -202,6 +202,12 @@ pub fn inspect_windows_zip_source(
     ))
 }
 
-pub(crate) fn inspect_windows_editor_target(_root: &str, _path: &str) -> NativeResult<crate::WindowsEditorTargetInspection> {
-    Err(native_error("ERR_WIN32_UNSUPPORTED_TARGET", "Windows editor inspection requires win32-x64-msvc"))
+pub(crate) fn inspect_windows_editor_target(
+    _root: &str,
+    _path: &str,
+) -> NativeResult<crate::WindowsEditorTargetInspection> {
+    Err(native_error(
+        "ERR_WIN32_UNSUPPORTED_TARGET",
+        "Windows editor inspection requires win32-x64-msvc",
+    ))
 }

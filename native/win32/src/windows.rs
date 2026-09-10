@@ -3096,77 +3096,163 @@ mod tests {
 }
 
 // Read-only final-file exception; no content reads, link creation or permission changes.
-pub(crate) fn inspect_windows_editor_target(root: &str, path: &str) -> NativeResult<crate::WindowsEditorTargetInspection> {
+pub(crate) fn inspect_windows_editor_target(
+    root: &str,
+    path: &str,
+) -> NativeResult<crate::WindowsEditorTargetInspection> {
     let before = inspect_editor_once(root, path)?;
     let after = inspect_editor_once(root, path)?;
     if !same_path_inspection(&before.root, &after.root)
         || !same_path_inspection(&before.parent, &after.parent)
         || !same_path_inspection(&before.target, &after.target)
-        || before.entry_path != after.entry_path || before.target_path != after.target_path
+        || before.entry_path != after.entry_path
+        || before.target_path != after.target_path
         || !same_stable_observation(&before.entry_object, &after.entry_object)
-        || !same_security_observation(&before.entry_security, &after.entry_security) {
+        || !same_security_observation(&before.entry_security, &after.entry_security)
+    {
         return Err(editor_invalid());
     }
     Ok(after)
 }
 
-fn editor_invalid() -> Error<String> { native_error("ERR_WIN32_EDITOR_TARGET_INVALID", "Editor target is not a stable admitted regular file or final file symlink") }
+fn editor_invalid() -> Error<String> {
+    native_error(
+        "ERR_WIN32_EDITOR_TARGET_INVALID",
+        "Editor target is not a stable admitted regular file or final file symlink",
+    )
+}
 
-fn inspect_editor_once(root: &str, path: &str) -> NativeResult<crate::WindowsEditorTargetInspection> {
+fn inspect_editor_once(
+    root: &str,
+    path: &str,
+) -> NativeResult<crate::WindowsEditorTargetInspection> {
     validate_input_path(path)?;
     let full = full_path(path)?;
-    let parent_path = Path::new(&full).parent().and_then(Path::to_str).ok_or_else(editor_invalid)?;
+    let parent_path = Path::new(&full)
+        .parent()
+        .and_then(Path::to_str)
+        .ok_or_else(editor_invalid)?;
     let root_inspection = inspect_windows_path(root)?;
     let parent = inspect_windows_path(parent_path)?;
-    if root_inspection.kind != "directory" || parent.kind != "directory" { return Err(editor_invalid()); }
+    if root_inspection.kind != "directory" || parent.kind != "directory" {
+        return Err(editor_invalid());
+    }
     let entry = open_existing(&full, FILE_READ_ATTRIBUTES | READ_CONTROL)?;
     let tag = attribute_tag(entry.0)?;
-    if tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 { return Err(editor_invalid()); }
+    if tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        return Err(editor_invalid());
+    }
     let symlink = tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
-    if symlink && tag.ReparseTag != 0xa000000c { return Err(editor_invalid()); }
+    if symlink && tag.ReparseTag != 0xa000000c {
+        return Err(editor_invalid());
+    }
     let entry_object = snapshot_with_tag(entry.0, if symlink { tag.ReparseTag } else { 0 })?;
-    if entry_object.directory || entry_object.number_of_links != "00000001" { return Err(editor_invalid()); }
+    if entry_object.directory || entry_object.number_of_links != "00000001" {
+        return Err(editor_invalid());
+    }
     let entry_path = final_path(entry.0)?;
     inspect_volume(entry.0, &entry_path, &entry_object)?;
     let entry_security = inspect_security(entry.0)?;
     let target_path = if symlink {
-        if entry_security.owner_sid != entry_security.current_user_sid { return Err(editor_invalid()); }
+        if entry_security.owner_sid != entry_security.current_user_sid {
+            return Err(editor_invalid());
+        }
         let (target, relative) = read_editor_symlink(entry.0)?;
         if relative {
-            if Path::new(&target).is_absolute() || target.contains(':') || target.starts_with('\\') { return Err(editor_invalid()); }
+            if Path::new(&target).is_absolute() || target.contains(':') || target.starts_with('\\')
+            {
+                return Err(editor_invalid());
+            }
             full_path(&Path::new(parent_path).join(target).to_string_lossy())?
         } else {
             let target = target.strip_prefix("\\??\\").ok_or_else(editor_invalid)?;
             validate_input_path(target)?;
             full_path(target)?
         }
-    } else { full.clone() };
+    } else {
+        full.clone()
+    };
     let target = inspect_windows_path(&target_path)?;
-    if target.kind != "regular-file" || target.object.number_of_links != "00000001" { return Err(editor_invalid()); }
-    let prefix = format!("{}\\", root_inspection.canonical_path.trim_end_matches('\\')).to_lowercase();
-    if !parent.canonical_path.eq_ignore_ascii_case(&root_inspection.canonical_path)
+    if target.kind != "regular-file" || target.object.number_of_links != "00000001" {
+        return Err(editor_invalid());
+    }
+    let prefix = format!(
+        "{}\\",
+        root_inspection.canonical_path.trim_end_matches('\\')
+    )
+    .to_lowercase();
+    if !parent
+        .canonical_path
+        .eq_ignore_ascii_case(&root_inspection.canonical_path)
         || !entry_path.to_lowercase().starts_with(&prefix)
-        || !target.canonical_path.to_lowercase().starts_with(&prefix) { return Err(editor_invalid()); }
-    Ok(crate::WindowsEditorTargetInspection { root: root_inspection, parent, entry_path, entry_object, entry_security, target, target_path })
+        || !target.canonical_path.to_lowercase().starts_with(&prefix)
+    {
+        return Err(editor_invalid());
+    }
+    Ok(crate::WindowsEditorTargetInspection {
+        root: root_inspection,
+        parent,
+        entry_path,
+        entry_object,
+        entry_security,
+        target,
+        target_path,
+    })
 }
 
 fn read_editor_symlink(handle: HANDLE) -> NativeResult<(String, bool)> {
     let mut buffer = [0_u8; MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
     let mut returned = 0_u32;
     // SAFETY: valid no-follow handle, fixed writable buffer, synchronous call.
-    let ok = unsafe { DeviceIoControl(handle, FSCTL_GET_REPARSE_POINT, null(), 0, buffer.as_mut_ptr().cast(), buffer.len() as u32, &mut returned, null_mut()) };
-    if ok == 0 { return Err(last_win_error("read editor file symlink")); }
+    let ok = unsafe {
+        DeviceIoControl(
+            handle,
+            FSCTL_GET_REPARSE_POINT,
+            null(),
+            0,
+            buffer.as_mut_ptr().cast(),
+            buffer.len() as u32,
+            &mut returned,
+            null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(last_win_error("read editor file symlink"));
+    }
     let length = returned as usize;
-    if length < 20 || length > buffer.len() { return Err(editor_invalid()); }
+    if length < 20 || length > buffer.len() {
+        return Err(editor_invalid());
+    }
     let u16_at = |offset| u16::from_le_bytes([buffer[offset], buffer[offset + 1]]) as usize;
-    if u32::from_le_bytes(buffer[0..4].try_into().unwrap()) != 0xa000000c || u16_at(4) + 8 != length || u16_at(6) != 0 { return Err(editor_invalid()); }
-    let offset = u16_at(8); let bytes = u16_at(10);
-    let print_offset = u16_at(12); let print_bytes = u16_at(14);
+    if u32::from_le_bytes(buffer[0..4].try_into().unwrap()) != 0xa000000c
+        || u16_at(4) + 8 != length
+        || u16_at(6) != 0
+    {
+        return Err(editor_invalid());
+    }
+    let offset = u16_at(8);
+    let bytes = u16_at(10);
+    let print_offset = u16_at(12);
+    let print_bytes = u16_at(14);
     let flags = u32::from_le_bytes(buffer[16..20].try_into().unwrap());
-    if flags > 1 || offset % 2 != 0 || bytes == 0 || bytes % 2 != 0 || offset + bytes > length - 20
-        || print_offset % 2 != 0 || print_bytes % 2 != 0 || print_offset + print_bytes > length - 20 { return Err(editor_invalid()); }
-    let units: Vec<u16> = buffer[20 + offset..20 + offset + bytes].chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+    if flags > 1
+        || offset % 2 != 0
+        || bytes == 0
+        || bytes % 2 != 0
+        || offset + bytes > length - 20
+        || print_offset % 2 != 0
+        || print_bytes % 2 != 0
+        || print_offset + print_bytes > length - 20
+    {
+        return Err(editor_invalid());
+    }
+    let units: Vec<u16> = buffer[20 + offset..20 + offset + bytes]
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
     let target = String::from_utf16(&units).map_err(|_| editor_invalid())?;
-    if target.contains('\0') || target.contains('/') { return Err(editor_invalid()); }
+    if target.contains('\0') || target.contains('/') {
+        return Err(editor_invalid());
+    }
     Ok((target, flags == 1))
 }

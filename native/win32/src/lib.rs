@@ -264,7 +264,11 @@ pub fn inspect_windows_path(env: Env, path: String) -> Result<WindowsPathInspect
 }
 
 #[napi(js_name = "inspectWindowsEditorTarget")]
-pub fn inspect_windows_editor_target(env: Env, root: String, path: String) -> Result<WindowsEditorTargetInspection> {
+pub fn inspect_windows_editor_target(
+    env: Env,
+    root: String,
+    path: String,
+) -> Result<WindowsEditorTargetInspection> {
     into_napi(env, platform::inspect_windows_editor_target(&root, &path))
 }
 
