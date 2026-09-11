@@ -59,6 +59,36 @@ describe('shared Windows application composition (host receipts, not native acce
     expect(await f.application.countAliasCache!(HOME)).toBe(0);
     expect(f.nodes.get(HOME + '\\active-profile')?.bytes?.toString()).toBe('renamed\n');
   });
+  it('connects ordinary CLI/list/view/Pi, resource reads and mutations without existing owner/ACL admission', async () => {
+    const f = windowsApplicationFixture();
+    await cli(f, ['profile', 'add', 'work']);
+    await cli(f, ['profile', 'use', 'work']);
+    const instructions = HOME + '\\profiles\\work\\AGENTS.md';
+    f.file(instructions, 'Readable hardlinked instructions');
+    f.nodes.get(instructions)!.numberOfLinks = 2;
+    f.file('C:\\boundary\\source\\local\\SKILL.md', '---\nname: local\ndescription: Readable local Skill\n---\n');
+    await cli(f, ['skill', 'add', 'C:\\boundary\\source\\local']);
+    await cli(f, ['profile', 'skill', 'add', 'local']);
+    f.nodes.get('C:\\boundary\\source\\local\\SKILL.md')!.numberOfLinks = 2;
+    for (const [path, node] of f.nodes) node.security = { ...f.security(path), ownerSid: 'S-1-5-21-999', descriptorControl: 4, daclBytes: Buffer.alloc(0) };
+    const before = f.snapshot(), homeNode = f.nodes.get(HOME)!;
+    const listed = await cli(f, ['profile', 'list', '--json']);
+    expect(listed.status, listed.stdout || listed.stderr).toBe(0);
+    expect(listed.stdout).toContain('work');
+    const profile = await f.runtime().loadProfile(HOME);
+    expect(profile.skills.map((skill) => skill.name)).toContain('local');
+    expect(f.snapshot()).toBe(before);
+    // Atomic policy publication creates a new private object, not a permission repair of home.
+    expect((await cli(f, ['global', 'disable'])).status).toBe(0);
+    expect(f.nodes.get(HOME)).toBe(homeNode);
+    expect(f.security(HOME).ownerSid).toBe('S-1-5-21-999');
+    expect(f.security(HOME + '\\global.json').descriptorControl & 0x1000).toBe(0x1000);
+    const original = f.nodes.get(HOME + '\\profiles\\work')!;
+    expect((await cli(f, ['profile', 'rename', 'work', 'renamed'])).status).toBe(0);
+    expect(f.nodes.get(HOME + '\\profiles\\renamed')).toBe(original);
+    expect(f.security(HOME + '\\profiles\\renamed').ownerSid).toBe('S-1-5-21-999');
+  });
+
   it('never bootstraps state during disabled status, dashboard, discovery and missing-home listing', async () => {
     const f = windowsApplicationFixture(), before = f.snapshot();
     expect((await cli(f, ['profile', 'list', '--json'])).status).toBe(0);

@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import type {
   BazframeWin32NativeBackend,
-  WindowsMembershipLinkInspection,
-  WindowsPathInspection,
+  WindowsMembershipLinkInspection as PhysicalMembershipInspection,
+  WindowsPathInspection as PhysicalPathInspection,
   WindowsPrivateJunctionCreationReceipt,
   WindowsSecurityObservation
 } from '../../../src/core/win32-native.js';
@@ -13,6 +13,11 @@ import {
   removeWindowsSkillMembership,
   type WindowsSkillMembershipIo
 } from '../../../src/state/win32-skill-membership.js';
+
+// Synthetic fixture metadata is not part of ordinary native physical receipts.
+type WindowsPathInspection = PhysicalPathInspection & { security: WindowsSecurityObservation };
+
+type WindowsMembershipLinkInspection = PhysicalMembershipInspection & { security: WindowsSecurityObservation };
 
 const USER = 'S-1-5-21-1000';
 const SYSTEM = 'S-1-5-18';
@@ -48,7 +53,7 @@ describe('Windows Skill membership composition', () => {
     const fixture = setup({ present: true });
     const inspectLink = fixture.backend.inspectMembershipLink;
     fixture.backend.inspectMembershipLink = (path) => {
-      const result = inspectLink(path);
+      const result = inspectLink(path) as WindowsMembershipLinkInspection;
       result.security = security({ inherited: true });
       return result;
     };
@@ -56,7 +61,7 @@ describe('Windows Skill membership composition', () => {
     expect(fixture.createPrivateJunction).not.toHaveBeenCalled();
   });
 
-  it('refuses a foreign or parent-user-mismatched link ACL', () => {
+  it('admits authorized existing links without an owner or ACL template', () => {
     for (const change of [
       (value: WindowsSecurityObservation) => { value.daclBytes = acl(3, true); },
       (value: WindowsSecurityObservation) => {
@@ -70,13 +75,11 @@ describe('Windows Skill membership composition', () => {
       const fixture = setup({ present: true });
       const inspectLink = fixture.backend.inspectMembershipLink;
       fixture.backend.inspectMembershipLink = (path) => {
-        const result = inspectLink(path);
+        const result = inspectLink(path) as WindowsMembershipLinkInspection;
         change(result.security);
         return result;
       };
-      expect(() => inspectWindowsSkillMembership(fixture.options)).toThrow(
-        expect.objectContaining({ code: 'WINDOWS_SKILL_MEMBERSHIP_LINK_SECURITY_INVALID' })
-      );
+      expect(() => inspectWindowsSkillMembership(fixture.options)).not.toThrow();
     }
   });
 
@@ -88,14 +91,16 @@ describe('Windows Skill membership composition', () => {
     expect(fixture.io.unlink).not.toHaveBeenCalled();
   });
 
-  it('reconciles before- and after-effect creation errors', async () => {
+  it('distinguishes no-effect creation from retained receipt-loss ambiguity', async () => {
     const before = setup({ createError: 'before' });
     await expect(createWindowsSkillMembership(before.options)).rejects.toMatchObject({
       code: 'WINDOWS_SKILL_MEMBERSHIP_CREATE_FAILED'
     });
 
     const after = setup({ createError: 'after' });
-    await expect(createWindowsSkillMembership(after.options)).resolves.toMatchObject({ action: 'added' });
+    await expect(createWindowsSkillMembership(after.options)).rejects.toMatchObject({ code: 'WINDOWS_SKILL_MEMBERSHIP_CREATE_AMBIGUOUS' });
+    expect(inspectWindowsSkillMembership(after.options).link.targetFileId).toBe(id(TARGET));
+    await expect(createWindowsSkillMembership(after.options)).resolves.toMatchObject({ action: 'current' });
   });
 
   it('reconciles before- and after-effect unlink errors without touching the target', async () => {
@@ -153,16 +158,16 @@ describe('Windows Skill membership composition', () => {
       return result;
     };
     expect(() => inspectWindowsSkillMembership(changedParent.options)).toThrow(
-      expect.objectContaining({ code: 'WINDOWS_PRIVATE_DIRECTORY_PRIVACY_UNPROVED' })
+      expect.objectContaining({ code: 'WINDOWS_DIRECTORY_PROOF_INVALID' })
     );
 
     const changedLink = setup({ present: true });
     const inspectLink = changedLink.backend.inspectMembershipLink;
     let linkReads = 0;
     changedLink.backend.inspectMembershipLink = (path) => {
-      const result = inspectLink(path);
+      const result = inspectLink(path) as WindowsMembershipLinkInspection;
       if (++linkReads > 1) {
-        result.security.groupSid = SYSTEM;
+        result.object.fileId = 'f'.repeat(32);
       }
       return result;
     };
@@ -176,7 +181,7 @@ describe('Windows Skill membership composition', () => {
     const inspectLink = substituted.backend.inspectMembershipLink;
     let reads = 0;
     substituted.backend.inspectMembershipLink = (path) => {
-      const result = inspectLink(path);
+      const result = inspectLink(path) as WindowsMembershipLinkInspection;
       if (++reads > 2) result.object.fileId = 'cccccccccccccccccccccccccccccccc';
       return result;
     };
@@ -299,6 +304,7 @@ function junctionReceipt(
 ): WindowsPrivateJunctionCreationReceipt {
   return {
     parentBefore: directory(PARENT),
+    creationSecurity: created.security,
     created,
     parentAfter: directory(PARENT)
   };

@@ -5,7 +5,6 @@ import type {
   BazframeWin32NativeBackend,
   WindowsDirectoryEntryObservation,
   WindowsPathInspection,
-  WindowsSecurityObservation,
   WindowsStableDirectoryEnumerationReceipt
 } from '../core/win32-native.js';
 import { BazframeError } from '../core/errors.js';
@@ -16,8 +15,8 @@ import {
   type WindowsDirectoryClosureExpectation
 } from './win32-directory-closure.js';
 import {
-  admitWindowsPrivateDirectory,
-  admitWindowsPrivateFile,
+  admitWindowsPhysicalDirectory,
+  admitWindowsPhysicalFile,
   createWindowsPrivateDirectory,
   createWindowsPrivateFile,
   isValidWindowsPathComponent
@@ -198,7 +197,7 @@ export async function executeWindowsDirectoryPublication(
     options.journalRootPath,
     transactionId
   );
-  requireSameVolumeAndUser(roots.parent, roots.journalRoot, journalDirectory);
+  requireSameVolume(roots.parent, roots.journalRoot, journalDirectory);
   let journal: WindowsDirectoryPublicationJournalV1 = validateJournal({
     schemaVersion: 1,
     kind: 'windows-directory-publication',
@@ -705,14 +704,15 @@ async function createAndWritePrivateFile(
   const created = createWindowsPrivateFile(backend, parentPath, finalComponent);
   const path = win32.join(parentPath, finalComponent);
   await io.writeExistingFile(path, bytes);
-  const after = admitWindowsPrivateFile(backend, path);
+  const after = admitWindowsPhysicalFile(backend, path);
   if (created.canonicalPath.toLowerCase() !== after.canonicalPath.toLowerCase()
     || created.volume.identity !== after.volume.identity
     || created.object.volumeIdentity !== after.object.volumeIdentity
-    || created.object.fileId !== after.object.fileId) {
+    || created.object.fileId !== after.object.fileId
+    || created.object.numberOfLinks !== after.object.numberOfLinks) {
     throw ambiguous('private file identity changed while its bytes were written');
   }
-  requireSameSecurity(created.security, after.security);
+
   return after;
 }
 
@@ -802,9 +802,9 @@ function assertJournalBindings(
   journalDirectory: string,
   journal: WindowsDirectoryPublicationJournalV1
 ): void {
-  const parent = admitWindowsPrivateDirectory(backend, parentPath);
-  const journalRoot = admitWindowsPrivateDirectory(backend, journalRootPath);
-  const directory = admitWindowsPrivateDirectory(backend, journalDirectory);
+  const parent = admitWindowsPhysicalDirectory(backend, parentPath);
+  const journalRoot = admitWindowsPhysicalDirectory(backend, journalRootPath);
+  const directory = admitWindowsPhysicalDirectory(backend, journalDirectory);
   if (windowsPathsOverlap(parent.canonicalPath, journalRoot.canonicalPath)) {
     throw new BazframeError(
       'WINDOWS_DIRECTORY_PUBLICATION_STORAGE_INVALID',
@@ -816,7 +816,7 @@ function assertJournalBindings(
     || identity(directory) !== journal.journalDirectoryIdentity) {
     throw journalInvalid('bound directory identity changed');
   }
-  requireSameVolumeAndUser(parent, journalRoot, directory);
+  requireSameVolume(parent, journalRoot, directory);
 }
 
 async function observeNamespace(
@@ -824,15 +824,15 @@ async function observeNamespace(
   parentPath: string,
   names: { destinationName: string; candidateName: string; backupName: string }
 ): Promise<NamespaceObservation> {
-  const parent = admitWindowsPrivateDirectory(backend, parentPath);
+  const parent = admitWindowsPhysicalDirectory(backend, parentPath);
   const before = await backend.enumerateStableDirectory(
     parentPath,
     PROFILE_PORTABILITY_PRODUCTION_LIMITS.stagingEntries
   );
   requireSameDirectory(parent, before.directoryBefore);
-  requireSameSecurity(parent.security, before.directoryBefore.security);
+
   requireSameDirectory(before.directoryBefore, before.directoryAfter);
-  requireSameSecurity(before.directoryBefore.security, before.directoryAfter.security);
+
   const matched = new Map<keyof typeof names, WindowsDirectoryEntryObservation | undefined>();
   for (const key of Object.keys(names) as Array<keyof typeof names>) {
     const targetKey = portableKey(names[key]);
@@ -867,9 +867,9 @@ async function observeNamespace(
     PROFILE_PORTABILITY_PRODUCTION_LIMITS.stagingEntries
   );
   if (!sameEnumeration(before, after)) throw ambiguous('parent namespace changed while it was observed');
-  const finalParent = admitWindowsPrivateDirectory(backend, parentPath);
+  const finalParent = admitWindowsPhysicalDirectory(backend, parentPath);
   requireSameDirectory(parent, finalParent);
-  requireSameSecurity(parent.security, finalParent.security);
+
   return { destination, candidate, backup };
 }
 
@@ -1107,26 +1107,26 @@ function admitRoots(
   parentPath: string,
   journalRootPath: string
 ): { parent: WindowsPathInspection; journalRoot: WindowsPathInspection } {
-  const parent = admitWindowsPrivateDirectory(backend, parentPath);
-  const journalRoot = admitWindowsPrivateDirectory(backend, journalRootPath);
+  const parent = admitWindowsPhysicalDirectory(backend, parentPath);
+  const journalRoot = admitWindowsPhysicalDirectory(backend, journalRootPath);
   if (windowsPathsOverlap(parent.canonicalPath, journalRoot.canonicalPath)) {
     throw new BazframeError(
       'WINDOWS_DIRECTORY_PUBLICATION_STORAGE_INVALID',
       'Publication and journal roots must be physically disjoint.'
     );
   }
-  requireSameVolumeAndUser(parent, journalRoot);
+  requireSameVolume(parent, journalRoot);
   return { parent, journalRoot };
 }
 
-function requireSameVolumeAndUser(...values: WindowsPathInspection[]): void {
+function requireSameVolume(...values: WindowsPathInspection[]): void {
   const first = values[0];
   if (first === undefined || values.some((value) => value.volume.identity !== first.volume.identity
     || value.object.volumeIdentity !== first.object.volumeIdentity
-    || value.security.currentUserSid !== first.security.currentUserSid)) {
+   )) {
     throw new BazframeError(
       'WINDOWS_DIRECTORY_PUBLICATION_STORAGE_INVALID',
-      'Publication parent, journal, candidate, and backup must share one admitted local NTFS volume and current user.'
+      'Publication parent, journal, candidate, and backup must share one admitted local NTFS volume.'
     );
   }
 }
@@ -1207,16 +1207,6 @@ function requireSameDirectory(a: WindowsPathInspection, b: WindowsPathInspection
   }
 }
 
-function requireSameSecurity(a: WindowsSecurityObservation, b: WindowsSecurityObservation): void {
-  if (a.descriptorControl !== b.descriptorControl || a.daclPresent !== b.daclPresent
-    || a.daclNull !== b.daclNull || a.daclDefaulted !== b.daclDefaulted
-    || !a.daclBytes.equals(b.daclBytes) || a.ownerSid !== b.ownerSid
-    || a.ownerDefaulted !== b.ownerDefaulted || a.groupSid !== b.groupSid
-    || a.groupDefaulted !== b.groupDefaulted || a.currentUserSid !== b.currentUserSid) {
-    throw ambiguous('directory security changed');
-  }
-}
-
 function sameEnumeration(
   a: WindowsStableDirectoryEnumerationReceipt,
   b: WindowsStableDirectoryEnumerationReceipt
@@ -1224,8 +1214,7 @@ function sameEnumeration(
   try {
     requireSameDirectory(a.directoryBefore, b.directoryBefore);
     requireSameDirectory(a.directoryAfter, b.directoryAfter);
-    requireSameSecurity(a.directoryBefore.security, b.directoryBefore.security);
-    requireSameSecurity(a.directoryAfter.security, b.directoryAfter.security);
+
     return JSON.stringify(a.entries) === JSON.stringify(b.entries);
   } catch {
     return false;

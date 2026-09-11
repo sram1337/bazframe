@@ -1,5 +1,6 @@
+import { readStablePhysicalFile } from '../../src/profile-publishing/profile-filesystem.js';
 import { spawn } from 'node:child_process';
-import { chmod, lstat, mkdir, readFile, realpath, symlink } from 'node:fs/promises';
+import { chmod, link, lstat, mkdir, readFile, realpath, symlink } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { snapshotFilesystem } from '../helpers/filesystem-snapshot.js';
@@ -13,6 +14,27 @@ afterEach(async () => {
 });
 
 describe('profile management CLI', () => {
+  it('reads existing non-private-mode and hardlinked profile input without chmod or rewriting it', async () => {
+    if (process.platform === 'win32') return;
+    const directory = await createTempDirectory('bazframe readable profile ');
+    temporaryDirectories.push(directory);
+    const home = directory.path('home'), cwd = await directory.mkdir('cwd');
+    const environment = { ...process.env, BAZFRAME_HOME: home };
+    expect((await runCli(['profile', 'add', 'readable'], cwd, environment)).status).toBe(0);
+    const root = directory.path('home/profiles/readable'), file = directory.path('home/profiles/readable/AGENTS.md');
+    await directory.write('home/profiles/readable/AGENTS.md', 'existing authored bytes\n');
+    for (const path of [home, directory.path('home/profiles'), root]) await chmod(path, 0o755);
+    await chmod(file, 0o644);
+    await link(file, directory.path('authored-alias'));
+    const before = await snapshotFilesystem(home);
+    expect((await runCli(['profile', 'list'], cwd, environment)).stdout).toContain('readable');
+    expect((await readStablePhysicalFile(file, 1024)).bytes.toString()).toBe('existing authored bytes\n');
+    expect(await snapshotFilesystem(home)).toEqual(before);
+    expect((await lstat(root)).mode & 0o777).toBe(0o755);
+    expect((await lstat(file)).mode & 0o777).toBe(0o644);
+    expect((await lstat(file)).nlink).toBe(2);
+  });
+
   it('runs the lifecycle outside Git while preserving skill providers', async () => {
     if (process.platform === 'win32') return;
     const directory = await createTempDirectory('bazframe profile integration ');

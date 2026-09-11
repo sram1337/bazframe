@@ -4,11 +4,11 @@ import { win32 } from 'node:path';
 import { BazframeError, errorCode } from '../core/errors.js';
 import type { BazframeWin32NativeBackend, WindowsDirectoryEntryObservation, WindowsPathInspection } from '../core/win32-native.js';
 import { stableWindowsPathInspection } from '../core/win32-stable-observation.js';
-import { readWindowsPrivateFileSnapshot } from '../profiles/win32-profile-selection.js';
-import { enumerateWindowsPrivateDirectory } from '../skills/added-skill-platform-services.js';
+import { readWindowsPhysicalFileSnapshot } from '../profiles/win32-profile-selection.js';
+import { enumerateWindowsPhysicalDirectory } from '../skills/added-skill-platform-services.js';
 import { profilePublishingTransactionRoot } from '../state/paths.js';
 import { requireDirectChild, requireEntryMatchesObject } from '../state/win32-directory-closure.js';
-import { admitWindowsPrivateDirectory, admitWindowsPrivateFile, createWindowsPrivateDirectory, createWindowsPrivateFile } from '../state/win32-private-directory.js';
+import { admitWindowsPhysicalDirectory, admitWindowsPhysicalFile, createWindowsPrivateDirectory, createWindowsPrivateFile } from '../state/win32-private-directory.js';
 import { assertWindowsOperationMutationAuthority, type OperationMutationAuthority } from './profile-operation-lock.js';
 import { capturedProfileLimitPolicy, type CapturedProfileLimitPolicy } from './profile-publishing-policy.js';
 import { decodeTransactionJournalBytes, encodeTransactionJournal, isTransactionJournalName, transactionJournalRequiredAuthorityKeys, validateTransactionJournalUpdate, type TransactionJournalV2 } from './transaction-journal.js';
@@ -26,8 +26,8 @@ export interface WindowsTransactionJournalOptions {
     afterReplacement?(): void | Promise<void>;
   };
 }
-type FileSnapshot = Awaited<ReturnType<typeof readWindowsPrivateFileSnapshot>>;
-type Enumeration = Awaited<ReturnType<typeof enumerateWindowsPrivateDirectory>>;
+type FileSnapshot = Awaited<ReturnType<typeof readWindowsPhysicalFileSnapshot>>;
+type Enumeration = Awaited<ReturnType<typeof enumerateWindowsPhysicalDirectory>>;
 interface RequestedState {
   enumeration: Enumeration;
   payloads: Map<string, FileSnapshot>;
@@ -65,7 +65,7 @@ export async function scanWindowsTransactionJournals(backend: BazframeWin32Nativ
   // payloads. The recovery loop reads one bounded final at a time, again under locks.
   const root = win32.normalize(profilePublishingTransactionRoot(home));
   for (const entry of found.enumeration.nativeEntries) {
-    reconcile(found.enumeration, entry, admitWindowsPrivateFile(backend, win32.join(root, entry.name)));
+    reconcile(found.enumeration, entry, admitWindowsPhysicalFile(backend, win32.join(root, entry.name)));
   }
   const admitted = required(await scan(backend, home, policy, []));
   assertAnchors(found, admitted);
@@ -89,7 +89,7 @@ export async function writeWindowsTransactionJournal<T extends TransactionJourna
     next = decoded;
     const name = finalName(next.transactionId);
     assertHeld();
-    const admittedHome = ownInspection(admitWindowsPrivateDirectory(backend, home));
+    const admittedHome = ownInspection(admitWindowsPhysicalDirectory(backend, home));
     const initial = await scan(backend, home, policy, [name]);
     previous = initial?.payloads.get(name);
     validateTransactionJournalUpdate(previous === undefined ? undefined : decode(previous.bytes, next.transactionId, policy), next, policy);
@@ -107,7 +107,7 @@ export async function writeWindowsTransactionJournal<T extends TransactionJourna
     baseline = fresh;
     component = previous === undefined ? name : `.tmp-${randomBytes(16).toString('hex')}`;
     assertHeld();
-    if (!sameDirectoryAnchor(baseline.enumeration.inspection, admitWindowsPrivateDirectory(backend, root))) throw failure('REFUSED');
+    if (!sameDirectoryAnchor(baseline.enumeration.inspection, admitWindowsPhysicalDirectory(backend, root))) throw failure('REFUSED');
     const created = ownInspection(createWindowsPrivateFile(backend, root, component));
     await options.hooks?.afterPrivateCreation?.();
     assertHeld();
@@ -115,7 +115,7 @@ export async function writeWindowsTransactionJournal<T extends TransactionJourna
     if (!exactInspection(created, empty.inspection) || empty.bytes.length !== 0) throw failure('REFUSED');
     // A rejected write includes flush/close uncertainty: never infer completion from readable bytes.
     assertHeld();
-    if (!sameDirectoryAnchor(baseline.enumeration.inspection, admitWindowsPrivateDirectory(backend, root))) throw failure('REFUSED');
+    if (!sameDirectoryAnchor(baseline.enumeration.inspection, admitWindowsPhysicalDirectory(backend, root))) throw failure('REFUSED');
     await io.writeExistingFile(win32.join(root, component), Buffer.from(bytes));
     candidate = await readFile(backend, win32.join(root, component), policy.maxManifestBytes);
     if (!sameDirectoryAnchor(created, candidate.inspection) || !candidate.bytes.equals(bytes)) throw failure('REFUSED');
@@ -163,26 +163,26 @@ export async function writeWindowsTransactionJournal<T extends TransactionJourna
 
 /** Stable parent enumeration, not missing-read exceptions, is the only absence authority. */
 async function directoryChild(backend: BazframeWin32NativeBackend, parent: string, component: string, policy: CapturedProfileLimitPolicy): Promise<{ enumeration: Enumeration; child?: WindowsPathInspection }> {
-  const enumeration = await enumerateWindowsPrivateDirectory(backend, parent, policy.maxEntries);
+  const enumeration = await enumerateWindowsPhysicalDirectory(backend, parent, policy.maxEntries);
   const matches = enumeration.nativeEntries.filter((entry) => key(entry.name) === key(component));
   let child: WindowsPathInspection | undefined;
   if (matches.length !== 0) {
     if (matches.length !== 1 || matches[0]!.name !== component) throw failure('REFUSED');
-    child = ownInspection(admitWindowsPrivateDirectory(backend, win32.join(parent, component)));
+    child = ownInspection(admitWindowsPhysicalDirectory(backend, win32.join(parent, component)));
     reconcile(enumeration, matches[0]!, child);
   }
-  if (!sameDirectoryAnchor(enumeration.inspection, admitWindowsPrivateDirectory(backend, parent))) throw failure('REFUSED');
+  if (!sameDirectoryAnchor(enumeration.inspection, admitWindowsPhysicalDirectory(backend, parent))) throw failure('REFUSED');
   return { enumeration, ...(child === undefined ? {} : { child }) };
 }
 async function ensureRoot(backend: BazframeWin32NativeBackend, home: string, policy: CapturedProfileLimitPolicy, assertHeld: () => void): Promise<void> {
   let parent = home;
-  admitWindowsPrivateDirectory(backend, parent);
+  admitWindowsPhysicalDirectory(backend, parent);
   for (const component of ['profile-publishing', 'transactions']) {
     const before = await directoryChild(backend, parent, component, policy);
     if (before.child === undefined) {
       room(before.enumeration, policy);
       assertHeld();
-      if (!sameDirectoryAnchor(before.enumeration.inspection, admitWindowsPrivateDirectory(backend, parent))) throw failure('REFUSED');
+      if (!sameDirectoryAnchor(before.enumeration.inspection, admitWindowsPhysicalDirectory(backend, parent))) throw failure('REFUSED');
       try { createWindowsPrivateDirectory(backend, parent, component); }
       catch (cause) { if (errorCode(cause) !== 'WINDOWS_PRIVATE_DIRECTORY_OCCUPIED') throw cause; }
       // Exact occupied races may be freshly admitted; ambiguous creation never retries.
@@ -195,7 +195,7 @@ async function ensureRoot(backend: BazframeWin32NativeBackend, home: string, pol
 }
 async function scan(backend: BazframeWin32NativeBackend, home: string, policy: CapturedProfileLimitPolicy, readNames: readonly string[]): Promise<RequestedState | undefined> {
   let parent = home;
-  const anchors = [ownInspection(admitWindowsPrivateDirectory(backend, home))];
+  const anchors = [ownInspection(admitWindowsPhysicalDirectory(backend, home))];
   const paths = [home];
   for (const component of ['profile-publishing', 'transactions']) {
     const found = await directoryChild(backend, parent, component, policy);
@@ -208,7 +208,7 @@ async function scan(backend: BazframeWin32NativeBackend, home: string, policy: C
     parent = win32.join(parent, component);
     paths.push(parent);
   }
-  const enumeration = await enumerateWindowsPrivateDirectory(backend, parent, policy.maxEntries);
+  const enumeration = await enumerateWindowsPhysicalDirectory(backend, parent, policy.maxEntries);
   if (!sameDirectoryAnchor(anchors[anchors.length - 1]!, enumeration.inspection)) throw failure('REFUSED');
   const payloads = new Map<string, FileSnapshot>();
   for (const name of new Set(readNames)) {
@@ -216,7 +216,7 @@ async function scan(backend: BazframeWin32NativeBackend, home: string, policy: C
     if (matches.length === 0) continue;
     if (matches.length !== 1 || matches[0]!.name !== name) throw failure('REFUSED');
     const path = win32.join(parent, name);
-    const inspection = ownInspection(admitWindowsPrivateFile(backend, path));
+    const inspection = ownInspection(admitWindowsPhysicalFile(backend, path));
     reconcile(enumeration, matches[0]!, inspection);
     const file = await readFile(backend, path, policy.maxManifestBytes);
     if (!exactInspection(inspection, file.inspection)) throw failure('REFUSED');
@@ -226,7 +226,7 @@ async function scan(backend: BazframeWin32NativeBackend, home: string, policy: C
   return { enumeration, payloads, anchors };
   function revalidateAnchors() {
     for (const [index, path] of paths.entries()) {
-      if (!sameDirectoryAnchor(anchors[index]!, admitWindowsPrivateDirectory(backend, path))) throw failure('REFUSED');
+      if (!sameDirectoryAnchor(anchors[index]!, admitWindowsPhysicalDirectory(backend, path))) throw failure('REFUSED');
     }
   }
 }
@@ -250,13 +250,13 @@ function sameDirectoryAnchor(a: WindowsPathInspection, b: WindowsPathInspection)
 function sameObject(a: WindowsPathInspection, b: WindowsPathInspection): boolean {
   return a.kind === b.kind && a.object.volumeIdentity === b.object.volumeIdentity && a.object.fileId === b.object.fileId
     && a.object.creationTime === b.object.creationTime && a.object.numberOfLinks === b.object.numberOfLinks
-    && a.object.attributes === b.object.attributes && JSON.stringify(a.security) === JSON.stringify(b.security);
+    && a.object.attributes === b.object.attributes;
 }
 function ownInspection(value: WindowsPathInspection): WindowsPathInspection {
-  return { ...value, volume: { ...value.volume }, object: { ...value.object }, security: { ...value.security, daclBytes: Buffer.from(value.security.daclBytes) } };
+  return { ...value, volume: { ...value.volume }, object: { ...value.object } };
 }
 async function readFile(backend: BazframeWin32NativeBackend, path: string, maxBytes: number): Promise<FileSnapshot> {
-  const value = await readWindowsPrivateFileSnapshot(backend, path, maxBytes);
+  const value = await readWindowsPhysicalFileSnapshot(backend, path, maxBytes);
   return { bytes: Buffer.from(value.bytes), inspection: ownInspection(value.inspection) };
 }
 function exactInspection(a: WindowsPathInspection, b: WindowsPathInspection): boolean { return JSON.stringify(stableWindowsPathInspection(a)) === JSON.stringify(stableWindowsPathInspection(b)); }

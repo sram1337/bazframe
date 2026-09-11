@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { WindowsMembershipLinkInspection, WindowsObjectObservation, WindowsPathInspection, WindowsSecurityObservation, WindowsVolumeObservation } from '../../../src/core/win32-native.js';
+import type { WindowsMembershipLinkInspection, WindowsObjectObservation, WindowsPathInspection, WindowsVolumeObservation } from '../../../src/core/win32-native.js';
 import { stableWindowsMembershipLinkInspection, stableWindowsObjectObservation, stableWindowsPathInspection } from '../../../src/core/win32-stable-observation.js';
 import { windowsProvisioningFixture } from '../../helpers/windows-provisioning-fixture.js';
 
@@ -12,15 +12,11 @@ const objectKeys: Record<keyof WindowsObjectObservation, true> = {
 const volumeKeys: Record<keyof WindowsVolumeObservation, true> = {
   identity: true, filesystemName: true, driveType: true, canonicalVolumeGuidPath: true, remoteDevice: true
 };
-const securityKeys: Record<keyof WindowsSecurityObservation, true> = {
-  descriptorControl: true, daclPresent: true, daclNull: true, daclDefaulted: true, daclBytes: true,
-  ownerSid: true, ownerDefaulted: true, groupSid: true, groupDefaulted: true, currentUserSid: true
-};
 const pathKeys: Record<keyof WindowsPathInspection, true> = {
-  canonicalPath: true, kind: true, volume: true, object: true, security: true, ancestryReparseFree: true
+  canonicalPath: true, kind: true, volume: true, object: true, ancestryReparseFree: true
 };
 const membershipKeys: Record<keyof WindowsMembershipLinkInspection, true> = {
-  canonicalPath: true, volume: true, object: true, security: true, ancestryReparseFree: true,
+  canonicalPath: true, volume: true, object: true, ancestryReparseFree: true,
   normalizedTarget: true, targetVolumeIdentity: true, targetFileId: true
 };
 function fixture(kind: 'file' | 'directory' = 'directory') {
@@ -30,7 +26,7 @@ function fixture(kind: 'file' | 'directory' = 'directory') {
 }
 function membership(value: WindowsPathInspection): WindowsMembershipLinkInspection {
   return { canonicalPath: value.canonicalPath, volume: value.volume, object: value.object,
-    security: value.security, ancestryReparseFree: value.ancestryReparseFree,
+    ancestryReparseFree: value.ancestryReparseFree,
     normalizedTarget: 'C:\\target', targetVolumeIdentity: value.object.volumeIdentity, targetFileId: 'f'.repeat(32) };
 }
 function different(value: unknown): unknown {
@@ -41,16 +37,14 @@ function different(value: unknown): unknown {
 }
 
 describe('Windows explicitly typed unchanged-path stable projections', () => {
-  it.each(['file', 'directory'] as const)('exempts only access time for %s and preserves both raw inputs and buffers', (kind) => {
+  it.each(['file', 'directory'] as const)('exempts only access time for %s and preserves both raw inputs ', (kind) => {
     const before = fixture(kind);
-    const after = { ...before, object: { ...before.object, lastAccessTime: '0000000000000099' }, security: { ...before.security, daclBytes: Buffer.from(before.security.daclBytes) } };
+    const after = { ...before, object: { ...before.object, lastAccessTime: '0000000000000099' } };
     const rawBefore = JSON.stringify(before), rawAfter = JSON.stringify(after);
-    const bufferBefore = Buffer.from(before.security.daclBytes), bufferAfter = Buffer.from(after.security.daclBytes);
     expect(stableWindowsPathInspection(after)).toEqual(stableWindowsPathInspection(before));
     expect(stableWindowsObjectObservation(after.object)).toEqual(stableWindowsObjectObservation(before.object));
     expect(stableWindowsMembershipLinkInspection(membership(after))).toEqual(stableWindowsMembershipLinkInspection(membership(before)));
     expect(JSON.stringify(before)).toBe(rawBefore); expect(JSON.stringify(after)).toBe(rawAfter);
-    expect(before.security.daclBytes).toEqual(bufferBefore); expect(after.security.daclBytes).toEqual(bufferAfter);
     expect(after.object.lastAccessTime).not.toBe(before.object.lastAccessTime);
   });
   it('covers every DTO key with exactly the documented representation substitutions', () => {
@@ -60,12 +54,10 @@ describe('Windows explicitly typed unchanged-path stable projections', () => {
     expect(keys(raw.object)).toEqual(keys(objectKeys));
     expect(keys(projected.object)).toEqual(keys(objectKeys).filter((key) => key !== 'lastAccessTime'));
     expect(keys(raw.volume)).toEqual(keys(volumeKeys)); expect(keys(projected.volume)).toEqual(keys(volumeKeys));
-    expect(keys(raw.security)).toEqual(keys(securityKeys));
-    expect(keys(projected.security)).toEqual(keys(securityKeys).map((key) => key === 'daclBytes' ? 'daclBytesBase64' : key).sort());
     expect(keys(membership(raw))).toEqual(keys(membershipKeys));
     expect(keys(stableWindowsMembershipLinkInspection(membership(raw)))).toEqual(keys(membershipKeys));
   });
-  for (const [section, inventory] of [['object', objectKeys], ['volume', volumeKeys], ['security', securityKeys]] as const) {
+  for (const [section, inventory] of [['object', objectKeys], ['volume', volumeKeys]] as const) {
     it.each(Object.keys(inventory).filter((key) => key !== 'lastAccessTime'))(`retains ${section}.%s for path and membership`, (key) => {
       const before = fixture();
       const values = before[section] as unknown as Record<string, unknown>;

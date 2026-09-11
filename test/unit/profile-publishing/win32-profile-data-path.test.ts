@@ -11,7 +11,7 @@ import { windowsProvisioningFixture } from '../../helpers/windows-provisioning-f
 import { ensureWindowsPrivateDirectoryPath, createWindowsPrivateDirectory } from '../../../src/state/win32-private-directory.js';
 import { withWindowsProfileOperationLocksForInternalTesting, type OperationMutationAuthority } from '../../../src/profile-publishing/profile-operation-lock.js';
 import { materializeCapturedProfile, type CapturedBlobSource, type ProfileMaterializationOptions } from '../../../src/profile-publishing/profile-materialization.js';
-import { createWindowsProfileStorage } from '../../../src/profile-publishing/win32-profile-storage.js';
+import { createWindowsProfileStorage, writeWindowsProfileFile } from '../../../src/profile-publishing/win32-profile-storage.js';
 import { createWindowsProfileDataReads } from '../../../src/profile-publishing/win32-profile-data-reads.js';
 import { createWindowsOrdinaryProfileReads } from '../../../src/profile-publishing/win32-physical-profile-reads.js';
 import { captureCatalogResource, captureProfile } from '../../../src/profile-publishing/profile-capture.js';
@@ -428,7 +428,17 @@ describe('actual Windows shared resource data path (virtual native receipts, not
     } } })).rejects.toMatchObject({ code: 'PROFILE_CAPTURE_CHANGED' });
   });
 
-  it.each(['hard-link', 'reparse', 'alias', 'metadata', 'metadata-directory', 'metadata-alias', 'sidecar', 'tree', 'observation', 'provider', 'limit', 'bytes', 'path', 'depth'] as const)('refuses adverse %s state with no mutation', async (kind) => {
+  it('retains link-count isolation on a newly created owned file during writing', async () => {
+    const f = fixture();
+    const path = `${HOME}\\fresh-owned`;
+    await expect(writeWindowsProfileFile(f.backend, path, Buffer.from('new bytes'), { async writeExistingFile(name, bytes) {
+      await f.io.writeExistingFile(name, bytes);
+      f.nodes.get(name)!.numberOfLinks = 2;
+    } })).rejects.toThrow('fresh file changed during writing');
+    expect(f.nodes.get(path)!.bytes).toEqual(Buffer.from('new bytes'));
+  });
+
+  it.each(['hard-link', 'reparse', 'alias', 'metadata', 'metadata-directory', 'metadata-alias', 'sidecar', 'tree', 'observation', 'provider', 'limit', 'bytes', 'path', 'depth'] as const)('applies bounded physical capture policy to %s with no mutation', async (kind) => {
     const f = await liveFixture(); const root = `${HOME}\\profiles\\work`;
     if (kind === 'hard-link') f.nodes.get(`${root}\\skills\\local\\deep\\guide.md`)!.numberOfLinks = 2;
     if (kind === 'reparse') f.reparse(`${root}\\skills\\local\\deep\\link`);
@@ -441,7 +451,8 @@ describe('actual Windows shared resource data path (virtual native receipts, not
     if (kind === 'provider') { ensureWindowsPrivateDirectoryPath(f.backend, `${HOME}\\providers`); f.file(`${HOME}\\providers\\unknown`, 'occupied'); }
     const before = f.snapshot();
     const dependencies = { ...f.data.captureDependencies, ...(['limit', 'bytes', 'path', 'depth'].includes(kind) ? { limitPolicy: kind === 'limit' ? { maxEntries: 3 } : kind === 'bytes' ? { maxAggregateBytes: 1 } : kind === 'path' ? { maxPathBytes: 8 } : { maxDepth: 0 } } : {}) };
-    await expect(captureProfile({ bazframeHome: HOME, profileId: 'work' }, dependencies)).rejects.toThrow();
+    if (kind === 'hard-link') await expect(captureProfile({ bazframeHome: HOME, profileId: 'work' }, dependencies)).resolves.toHaveProperty('profile');
+    else await expect(captureProfile({ bazframeHome: HOME, profileId: 'work' }, dependencies)).rejects.toThrow();
     expect(f.snapshot()).toBe(before);
   });
 

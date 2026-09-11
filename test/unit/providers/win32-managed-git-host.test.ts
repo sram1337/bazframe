@@ -233,6 +233,8 @@ describe('actual shared provider with Windows effects and real host Git', () => 
     const home = 'C:\\boundary\\home';
     const added = await withWindowsManagedGitProvider(f.backend, home, f.options, (provider) => provider.addManagedGitLibrary({ bazframeHome: home }, source.url));
     expect(added.action).toBe('added'); expect(added.revision).toBe(source.revision);
+    // Existing source, provenance, roots and state need no owner/ACL template.
+    for (const [path, node] of f.nodes) node.security = { ...f.security(path), ownerSid: 'S-1-5-21-999', descriptorControl: 4 };
     const reader = createManagedGitProvider(createWindowsManagedGitServices(f.backend, home, f.options));
     const health = await reader.captureManagedGitExportHealth(home, 'library', 'library');
     expect(health.root.domain).toBe('windows');

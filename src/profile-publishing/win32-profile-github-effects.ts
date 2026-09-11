@@ -9,7 +9,7 @@ import { BazframeError } from '../core/errors.js';
 import type { BazframeWin32NativeBackend, BazframeWin32LockBackend } from '../core/win32-native.js';
 import { executableEnvironmentValue } from '../core/executable-resolution.js';
 import { sameResourceIdentity } from '../skill-collections/resource-identity.js';
-import { admitWindowsNamespaceDirectory, admitWindowsPrivateDirectory, createWindowsPrivateDirectory, ensureWindowsPrivateDirectoryPath, isValidWindowsPathComponent } from '../state/win32-private-directory.js';
+import { admitWindowsPhysicalDirectory, createWindowsPrivateDirectory, ensureWindowsPrivateDirectoryPath, isValidWindowsPathComponent } from '../state/win32-private-directory.js';
 import { createWindowsManagedGitRecordEffects, windowsResourceIdentity } from '../providers/managed-git-services.js';
 import { createWindowsGitInspectionEffects } from '../providers/win32-managed-git-services.js';
 import { createWindowsPhysicalReads } from './win32-physical-profile-reads.js';
@@ -22,27 +22,26 @@ import type { OwnedProfileGithubDirectory, ProfileGithubDirectoryProof, ProfileG
 export function createWindowsProfileGithubEffects(backend: BazframeWin32NativeBackend & BazframeWin32LockBackend, options: WindowsProfileLifecycleOptions = {}) {
   const owned = new Map<string, { assertHeld(): void }>();
   const temporaryParents = new Map<string, OwnedProfileGithubDirectory>();
-  function proof(path: string, namespace = false): Exclude<ProfileGithubDirectoryProof, { handle: unknown }> {
-    const admit = namespace ? admitWindowsNamespaceDirectory : admitWindowsPrivateDirectory;
-    const before = admit(backend, path); let closed = false;
+  function proof(path: string): Exclude<ProfileGithubDirectoryProof, { handle: unknown }> {
+    const before = admitWindowsPhysicalDirectory(backend, path); let closed = false;
     return { path, async assertIdentity() {
       if (closed) throw refused('expired owned directory');
-      const current = admit(backend, path);
-      if (!sameResourceIdentity(windowsResourceIdentity(before), windowsResourceIdentity(current)) || JSON.stringify(before.security) !== JSON.stringify(current.security) || before.object.attributes !== current.object.attributes) throw refused('retained directory identity changed');
+      const current = admitWindowsPhysicalDirectory(backend, path);
+      if (!sameResourceIdentity(windowsResourceIdentity(before), windowsResourceIdentity(current)) || before.object.attributes !== current.object.attributes) throw refused('retained directory identity changed');
     }, async close() { closed = true; } };
   }
   async function createOwnedDirectory(parentPath: string, prefix: string): Promise<OwnedProfileGithubDirectory> {
     if (!/^[a-z0-9-]+$/u.test(prefix)) throw refused('invalid workspace prefix');
-    const parent = proof(parentPath, true);
+    const parent = proof(parentPath);
     const name = `${prefix}${randomBytes(16).toString('hex')}`;
     if (!isValidWindowsPathComponent(name)) throw refused('invalid owned directory component');
     await parent.assertIdentity(); createWindowsPrivateDirectory(backend, parentPath, name);
     const path = win32.join(parentPath, name), directory = proof(path);
     let live = true, disposal: Promise<ProfileGithubDisposalResult> | undefined;
-    const original = admitWindowsPrivateDirectory(backend, path), originalParent = admitWindowsNamespaceDirectory(backend, parentPath);
+    const original = admitWindowsPhysicalDirectory(backend, path), originalParent = admitWindowsPhysicalDirectory(backend, parentPath);
     owned.set(path, { assertHeld() {
       if (!live) throw refused('expired workspace authority');
-      for (const [before, after] of [[original, admitWindowsPrivateDirectory(backend, path)], [originalParent, admitWindowsNamespaceDirectory(backend, parentPath)]] as const) if (!sameResourceIdentity(windowsResourceIdentity(before), windowsResourceIdentity(after)) || JSON.stringify(before.security) !== JSON.stringify(after.security) || before.object.attributes !== after.object.attributes) throw refused('owned workspace root or parent changed');
+      for (const [before, after] of [[original, admitWindowsPhysicalDirectory(backend, path)], [originalParent, admitWindowsPhysicalDirectory(backend, parentPath)]] as const) if (!sameResourceIdentity(windowsResourceIdentity(before), windowsResourceIdentity(after)) || before.object.attributes !== after.object.attributes) throw refused('owned workspace root or parent changed');
     } });
     await parent.assertIdentity(); await directory.assertIdentity();
     return { path, directory, parent, dispose() {
@@ -96,7 +95,7 @@ export function createWindowsProfileGithubEffects(backend: BazframeWin32NativeBa
     async ensureDirectory(home, path) { if (!within(home, path)) throw refused('remote materialization path outside home'); ensureWindowsPrivateDirectoryPath(backend, path); },
     writeFile: (path, text) => effects.writeFile(path, Buffer.from(text)),
     createOwnedDirectory,
-    async directoryIdentity(path) { return windowsResourceIdentity(admitWindowsPrivateDirectory(backend, path)); },
+    async directoryIdentity(path) { return windowsResourceIdentity(admitWindowsPhysicalDirectory(backend, path)); },
     captureDependencies: createWindowsProfileDataReads(backend, undefined, options.managedGit).captureDependencies,
     publishBlob: storage.publishBlob, publishTree: storage.publishTree,
     withProvider: (home, operation) => withWindowsManagedGitProvider(backend, home, { ...options, ...options.managedGit }, operation)

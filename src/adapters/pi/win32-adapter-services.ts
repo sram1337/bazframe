@@ -19,7 +19,7 @@ export function createWindowsPiAdapterServices(backend: BazframeWin32NativeBacke
 } = {}): PiAdapterServices {
   const piRoot = resolvePiAgentDirectory(environment, userHome, win32);
   const packageRoot = options.packageRoot ?? fileURLToPath(new URL('../../../', import.meta.url));
-  const read = async (path: string, max: number) => (await createWindowsPhysicalReads(backend, undefined, {}, true).readFile(path, max)).bytes;
+  const read = async (path: string, max: number) => (await createWindowsPhysicalReads(backend, undefined, {}).readFile(path, max)).bytes;
   const fileOptions = { ...options, lockComponent: 'adapter-pi.lock', retainedPrefix: 'pi' as const, authorizeDestination(home: string, file: string) {
     return file === win32.join(home, 'adapters', 'pi.json') || file === win32.join(piRoot, 'extensions', 'bazframe.ts') || file === win32.join(piRoot, 'bazframe', 'runtime.json');
   } };

@@ -2,7 +2,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { BazframeError, errorCode } from './errors.js';
 
-export const BAZFRAME_WIN32_NATIVE_CONTRACT_VERSION = 7;
+export const BAZFRAME_WIN32_NATIVE_CONTRACT_VERSION = 8;
 export const BAZFRAME_WIN32_NATIVE_TARGET = 'win32-x64-msvc';
 // Must remain equal to native/win32/src/lib.rs and the authoritative profile
 // portability production ceilings.
@@ -65,7 +65,6 @@ export interface WindowsPathInspection {
   kind: 'regular-file' | 'directory';
   volume: WindowsVolumeObservation;
   object: WindowsObjectObservation;
-  security: WindowsSecurityObservation;
   ancestryReparseFree: true;
 }
 
@@ -74,7 +73,6 @@ export interface WindowsEditorTargetInspection {
   parent: WindowsPathInspection;
   entryPath: string;
   entryObject: WindowsObjectObservation;
-  entrySecurity: WindowsSecurityObservation;
   target: WindowsPathInspection;
   targetPath: string;
 }
@@ -83,12 +81,14 @@ export interface BazframeWin32EditorBackend {
 }
 
 export interface WindowsPrivateDirectoryCreationReceipt {
+  creationSecurity: WindowsSecurityObservation;
   parentBefore: WindowsPathInspection;
   created: WindowsPathInspection;
   parentAfter: WindowsPathInspection;
 }
 
 export interface WindowsPrivateFileCreationReceipt {
+  creationSecurity: WindowsSecurityObservation;
   parentBefore: WindowsPathInspection;
   created: WindowsPathInspection;
   parentAfter: WindowsPathInspection;
@@ -98,7 +98,6 @@ export interface WindowsMembershipLinkInspection {
   canonicalPath: string;
   volume: WindowsVolumeObservation;
   object: WindowsObjectObservation;
-  security: WindowsSecurityObservation;
   ancestryReparseFree: true;
   normalizedTarget: string;
   targetVolumeIdentity: string;
@@ -106,6 +105,7 @@ export interface WindowsMembershipLinkInspection {
 }
 
 export interface WindowsPrivateJunctionCreationReceipt {
+  creationSecurity: WindowsSecurityObservation;
   parentBefore: WindowsPathInspection;
   created: WindowsMembershipLinkInspection;
   parentAfter: WindowsPathInspection;
@@ -337,7 +337,7 @@ export function loadBazframeWin32Native(
       let receipt: unknown;
       try { receipt = native.inspectWindowsZipSource(path); } catch (error) { throw nativeOperationFailure(error); }
       const value = objectObservation(receipt);
-      if (value.directory || value.deletePending || value.numberOfLinks !== '00000001' || (value.attributes & 0x50) !== 0
+      if (value.directory || value.deletePending || (value.attributes & 0x50) !== 0
         || (value.reparseTag === null) !== ((value.attributes & 0x400) === 0)
         || (value.reparseTag !== null && ((value.reparseTag & ~0xf000) >>> 0) !== 0x9000001a)) invalid();
       return value;
@@ -356,18 +356,17 @@ export function loadBazframeWin32Native(
       requirePath(root); requirePath(path);
       let receipt: unknown;
       try { receipt = native.inspectWindowsEditorTarget(root, path); } catch (error) { throw nativeOperationFailure(error); }
-      const value = exactRecord(receipt, ['root', 'parent', 'entryPath', 'entryObject', 'entrySecurity', 'target', 'targetPath'], 'editor target');
+      const value = exactRecord(receipt, ['root', 'parent', 'entryPath', 'entryObject', 'target', 'targetPath'], 'editor target');
       const inspectedRoot = pathInspection(value.root), parent = pathInspection(value.parent), target = pathInspection(value.target);
-      const entryObject = objectObservation(value.entryObject), entrySecurity = securityObservation(value.entrySecurity);
+      const entryObject = objectObservation(value.entryObject);
       const entryPath = canonicalVolumePath(value.entryPath);
       requirePath(value.targetPath as string);
       if (inspectedRoot.kind !== 'directory' || parent.kind !== 'directory' || target.kind !== 'regular-file'
-        || entryObject.directory || entryObject.deletePending || entryObject.numberOfLinks !== '00000001'
+        || entryObject.directory || entryObject.deletePending
         || (entryObject.reparseTag !== null && entryObject.reparseTag !== 0xa000000c)
         || (entryObject.reparseTag === null) !== ((entryObject.attributes & FILE_ATTRIBUTE_REPARSE_POINT) === 0)
-        || (entryObject.reparseTag !== null && entrySecurity.ownerSid !== entrySecurity.currentUserSid)
-        || entryObject.volumeIdentity !== parent.object.volumeIdentity || target.object.numberOfLinks !== '00000001') invalid();
-      return { root: inspectedRoot, parent, target, entryPath, entryObject, entrySecurity, targetPath: value.targetPath as string };
+        || entryObject.volumeIdentity !== parent.object.volumeIdentity) invalid();
+      return { root: inspectedRoot, parent, target, entryPath, entryObject, targetPath: value.targetPath as string };
     },
     inspectMembershipLink(path: string): WindowsMembershipLinkInspection {
       requirePath(path);
@@ -699,14 +698,13 @@ function nativeModule(value: unknown): RawNativeModule {
 function pathInspection(value: unknown): WindowsPathInspection {
   try {
     const record = exactRecord(value, [
-      'canonicalPath', 'kind', 'volume', 'object', 'security', 'ancestryReparseFree'
+      'canonicalPath', 'kind', 'volume', 'object', 'ancestryReparseFree'
     ], 'path inspection');
     if (typeof record.canonicalPath !== 'string' || record.canonicalPath.length === 0) invalid();
     if (record.kind !== 'regular-file' && record.kind !== 'directory') invalid();
     if (record.ancestryReparseFree !== true) invalid();
     const volume = volumeObservation(record.volume);
     const object = objectObservation(record.object);
-    const security = securityObservation(record.security);
     if (!record.canonicalPath.toLowerCase().startsWith(volume.canonicalVolumeGuidPath.toLowerCase())
       || object.volumeIdentity !== volume.identity || object.reparseTag !== null
       || object.deletePending || object.directory !== (record.kind === 'directory')) invalid();
@@ -715,7 +713,6 @@ function pathInspection(value: unknown): WindowsPathInspection {
       kind: record.kind,
       volume,
       object,
-      security,
       ancestryReparseFree: true
     };
   } catch (error) {
@@ -726,13 +723,12 @@ function pathInspection(value: unknown): WindowsPathInspection {
 function membershipLinkInspection(value: unknown): WindowsMembershipLinkInspection {
   try {
     const record = exactRecord(value, [
-      'canonicalPath', 'volume', 'object', 'security', 'ancestryReparseFree',
+      'canonicalPath', 'volume', 'object', 'ancestryReparseFree',
       'normalizedTarget', 'targetVolumeIdentity', 'targetFileId'
     ], 'membership link inspection');
     if (record.ancestryReparseFree !== true) invalid();
     const volume = volumeObservation(record.volume);
     const object = objectObservation(record.object);
-    const security = securityObservation(record.security);
     const canonicalPath = canonicalVolumePath(record.canonicalPath);
     const normalizedTarget = canonicalVolumePath(record.normalizedTarget);
     const targetVolumeIdentity = hex(record.targetVolumeIdentity, HEX_64);
@@ -746,7 +742,6 @@ function membershipLinkInspection(value: unknown): WindowsMembershipLinkInspecti
       canonicalPath,
       volume,
       object,
-      security,
       ancestryReparseFree: true,
       normalizedTarget,
       targetVolumeIdentity,
@@ -771,26 +766,25 @@ function privateJunctionCreationReceipt(
   finalComponent: string
 ): WindowsPrivateJunctionCreationReceipt {
   const record = exactRecord(value, [
-    'parentBefore', 'created', 'parentAfter'
+    'parentBefore', 'created', 'parentAfter', 'creationSecurity'
   ], 'private junction creation');
   const parentBefore = pathInspection(record.parentBefore);
   const created = membershipLinkInspection(record.created);
   const parentAfter = pathInspection(record.parentAfter);
   if (parentBefore.kind !== 'directory' || parentAfter.kind !== 'directory'
     || !sameDirectoryIdentity(parentBefore, parentAfter)
-    || !sameSecurityObservation(parentBefore.security, parentAfter.security)
     || parentBefore.volume.identity !== created.volume.identity
     || !isDirectCanonicalChild(parentBefore.canonicalPath, created.canonicalPath, finalComponent)) {
     invalid();
   }
-  return { parentBefore, created, parentAfter };
+  return { parentBefore, created, parentAfter, creationSecurity: securityObservation(record.creationSecurity) };
 }
 
 function privateDirectoryCreationReceipt(
   value: unknown,
   finalComponent: string
 ): WindowsPrivateDirectoryCreationReceipt {
-  const record = exactRecord(value, ['parentBefore', 'created', 'parentAfter'], 'private directory creation');
+  const record = exactRecord(value, ['parentBefore', 'created', 'parentAfter', 'creationSecurity'], 'private directory creation');
   const parentBefore = pathInspection(record.parentBefore);
   const created = pathInspection(record.created);
   const parentAfter = pathInspection(record.parentAfter);
@@ -801,14 +795,14 @@ function privateDirectoryCreationReceipt(
     || !isDirectCanonicalChild(parentBefore.canonicalPath, created.canonicalPath, finalComponent)) {
     invalid();
   }
-  return { parentBefore, created, parentAfter };
+  return { parentBefore, created, parentAfter, creationSecurity: securityObservation(record.creationSecurity) };
 }
 
 function privateFileCreationReceipt(
   value: unknown,
   finalComponent: string
 ): WindowsPrivateFileCreationReceipt {
-  const record = exactRecord(value, ['parentBefore', 'created', 'parentAfter'], 'private file creation');
+  const record = exactRecord(value, ['parentBefore', 'created', 'parentAfter', 'creationSecurity'], 'private file creation');
   const parentBefore = pathInspection(record.parentBefore);
   const created = pathInspection(record.created);
   const parentAfter = pathInspection(record.parentAfter);
@@ -821,7 +815,7 @@ function privateFileCreationReceipt(
     || !isDirectCanonicalChild(parentBefore.canonicalPath, created.canonicalPath, finalComponent)) {
     invalid();
   }
-  return { parentBefore, created, parentAfter };
+  return { parentBefore, created, parentAfter, creationSecurity: securityObservation(record.creationSecurity) };
 }
 
 function stableReadReceipt(value: unknown, maxBytes: number, range?: { offset: number; maxFileBytes: number }): WindowsStableReadReceipt {
@@ -877,8 +871,7 @@ function stableDirectoryEnumerationReceipt(
     const directoryAfter = pathInspection(record.directoryAfter);
     if (directoryBefore.kind !== 'directory' || directoryAfter.kind !== 'directory'
       || !sameDirectoryIdentity(directoryBefore, directoryAfter)
-      || !sameStableObservation(directoryBefore.object, directoryAfter.object)
-      || !sameSecurityObservation(directoryBefore.security, directoryAfter.security)) {
+      || !sameStableObservation(directoryBefore.object, directoryAfter.object)) {
       throw failure(
         'WINDOWS_NATIVE_DIRECTORY_CHANGED',
         'The native stable-directory receipt reports changed directory state.'
@@ -1019,8 +1012,7 @@ function sameLockGuard(a: WindowsPathInspection, b: WindowsPathInspection): bool
     && b.object.numberOfLinks === '00000001'
     && a.object.size === '0000000000000000'
     && b.object.size === '0000000000000000'
-    && sameStableObservation(a.object, b.object)
-    && sameSecurityObservation(a.security, b.security);
+    && sameStableObservation(a.object, b.object);
 }
 
 function sameDirectoryIdentity(a: WindowsPathInspection, b: WindowsPathInspection): boolean {
@@ -1032,22 +1024,6 @@ function sameDirectoryIdentity(a: WindowsPathInspection, b: WindowsPathInspectio
     && a.object.reparseTag === null && b.object.reparseTag === null
     && !a.object.deletePending && !b.object.deletePending
     && a.object.directory && b.object.directory;
-}
-
-function sameSecurityObservation(
-  a: WindowsSecurityObservation,
-  b: WindowsSecurityObservation
-): boolean {
-  return a.descriptorControl === b.descriptorControl
-    && a.daclPresent === b.daclPresent
-    && a.daclNull === b.daclNull
-    && a.daclDefaulted === b.daclDefaulted
-    && a.daclBytes.equals(b.daclBytes)
-    && a.ownerSid === b.ownerSid
-    && a.ownerDefaulted === b.ownerDefaulted
-    && a.groupSid === b.groupSid
-    && a.groupDefaulted === b.groupDefaulted
-    && a.currentUserSid === b.currentUserSid;
 }
 
 function isDirectCanonicalChild(parent: string, child: string, component: string): boolean {
@@ -1161,14 +1137,13 @@ function nativeCreationFailure(error: unknown): BazframeError {
 
 // Fixed error-only vocabulary; no native receipt or capability fields are added.
 const READ_CHANGE_OBJECT_FIELDS = ['object.volumeIdentity', 'object.fileId', 'object.size', 'object.allocationSize', 'object.numberOfLinks', 'object.creationTime', 'object.lastWriteTime', 'object.changeTime', 'object.attributes', 'object.reparseTag', 'object.deletePending', 'object.directory'];
-const READ_CHANGE_SECURITY_FIELDS = ['security.descriptorControl', 'security.daclPresent', 'security.daclNull', 'security.daclDefaulted', 'security.daclBytes', 'security.ownerSid', 'security.ownerDefaulted', 'security.groupSid', 'security.groupDefaulted', 'security.currentUserSid'];
 const READ_CHANGE_FIELDS = {
-  'inspect-opened-path': [...READ_CHANGE_OBJECT_FIELDS, ...READ_CHANGE_SECURITY_FIELDS],
+  'inspect-opened-path': [...READ_CHANGE_OBJECT_FIELDS],
   'rename-parent': ['canonicalPath', 'kindDirectory', 'volume.identity', 'object.volumeIdentity', 'object.fileId',
-    'reparseTagZero', 'notDeletePending', 'objectDirectory', ...READ_CHANGE_SECURITY_FIELDS],
+    'reparseTagZero', 'notDeletePending', 'objectDirectory'],
   'stable-read-growth': ['growthProbeNonzero'],
   'stable-read-final': [...READ_CHANGE_OBJECT_FIELDS, 'byteCountExpected', 'afterSizeByteCount'],
-  'reopened-prefix': [...READ_CHANGE_OBJECT_FIELDS, ...READ_CHANGE_SECURITY_FIELDS, 'canonicalPath'],
+  'reopened-prefix': [...READ_CHANGE_OBJECT_FIELDS, 'canonicalPath'],
   'stable-read-receipt': [...READ_CHANGE_OBJECT_FIELDS, 'beforeDirectory', 'afterDirectory', 'beforeReparseTag',
     'afterReparseTag', 'beforeDeletePending', 'afterDeletePending', 'beforeSizeByteCount', 'afterSizeByteCount']
 };

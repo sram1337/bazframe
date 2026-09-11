@@ -5,13 +5,12 @@ import type {
   WindowsMembershipLinkInspection,
   WindowsPathInspection,
   WindowsPrivateJunctionCreationReceipt,
-  WindowsSecurityObservation
 } from '../core/win32-native.js';
 import { BazframeError, errorCode } from '../core/errors.js';
 import { isSafeSkillId } from '../skills/skill-id.js';
 import {
-  admitWindowsPrivateDirectory,
-  assertWindowsOwnerPrivateSecurity,
+  admitWindowsPhysicalDirectory,
+  assertWindowsPrivateCreationSecurity,
   isValidWindowsPathComponent
 } from './win32-private-directory.js';
 
@@ -83,7 +82,7 @@ export async function createWindowsSkillMembership(
     return { action: 'current', proof: revalidateProof(options.backend, inputs, initial.proof) };
   }
 
-  const beforeParent = admitWindowsPrivateDirectory(options.backend, inputs.parentPath);
+  const beforeParent = admitWindowsPhysicalDirectory(options.backend, inputs.parentPath);
   const beforeTarget = inspectTarget(options.backend, inputs.targetPath);
   requireSameParent(inputs.parent, beforeParent);
   requireSameTarget(inputs.target, beforeTarget);
@@ -102,11 +101,12 @@ export async function createWindowsSkillMembership(
   }
 
   try {
-    const afterParent = admitWindowsPrivateDirectory(options.backend, inputs.parentPath);
+    const afterParent = admitWindowsPhysicalDirectory(options.backend, inputs.parentPath);
     const afterTarget = inspectTarget(options.backend, inputs.targetPath);
     requireSameParent(beforeParent, afterParent);
     requireSameTarget(beforeTarget, afterTarget);
     if (mutationReceipt !== undefined) {
+      assertWindowsPrivateCreationSecurity(mutationReceipt.creationSecurity);
       requireSameParent(beforeParent, mutationReceipt.parentBefore);
       requireSameParent(mutationReceipt.parentBefore, mutationReceipt.parentAfter);
       const receiptProof = prove({
@@ -123,6 +123,8 @@ export async function createWindowsSkillMembership(
       target: afterTarget
     });
     if (after.kind === 'present') {
+      // Physical presence proves the target, not successful private fresh creation.
+      if (mutationReceipt === undefined) throw new Error('fresh junction creation receipt is unavailable');
       const proof = revalidateProof(options.backend, inputs, after.proof);
       if (mutationReceipt !== undefined && !sameLink(mutationReceipt.created, proof.link)) {
         throw new Error('created membership differs from the native creation receipt');
@@ -167,7 +169,7 @@ export async function removeWindowsSkillMembership(
   }
 
   try {
-    const afterParent = admitWindowsPrivateDirectory(options.backend, inputs.parentPath);
+    const afterParent = admitWindowsPhysicalDirectory(options.backend, inputs.parentPath);
     const afterTarget = inspectTarget(options.backend, inputs.targetPath);
     requireSameParent(before.parent, afterParent);
     requireSameTarget(before.target, afterTarget);
@@ -219,7 +221,7 @@ function validateOptions(options: WindowsSkillMembershipOptions): ValidatedInput
       'The Windows Skill membership name is invalid or reserved.'
     );
   }
-  const parent = admitWindowsPrivateDirectory(options.backend, options.parentPath);
+  const parent = admitWindowsPhysicalDirectory(options.backend, options.parentPath);
   const target = inspectTarget(options.backend, options.targetPath);
   return {
     parentPath: options.parentPath,
@@ -251,18 +253,6 @@ function prove(
   link: WindowsMembershipLinkInspection
 ): WindowsSkillMembershipProof {
   const expectedPath = canonicalChild(inputs.parent.canonicalPath, inputs.skillId);
-  try {
-    assertWindowsOwnerPrivateSecurity(
-      link.security,
-      inputs.parent.security.currentUserSid
-    );
-  } catch (error) {
-    throw failure(
-      'WINDOWS_SKILL_MEMBERSHIP_LINK_SECURITY_INVALID',
-      'The Windows Skill membership link is not owner-private for the admitted parent user.',
-      error
-    );
-  }
   if (link.canonicalPath.toLowerCase() !== expectedPath.toLowerCase()
     || link.volume.identity !== inputs.parent.volume.identity
     || link.object.volumeIdentity !== inputs.parent.volume.identity
@@ -287,7 +277,7 @@ function revalidateProof(
   inputs: ValidatedInputs,
   expected: WindowsSkillMembershipProof
 ): WindowsSkillMembershipProof {
-  const parent = admitWindowsPrivateDirectory(backend, inputs.parentPath);
+  const parent = admitWindowsPhysicalDirectory(backend, inputs.parentPath);
   const target = inspectTarget(backend, inputs.targetPath);
   requireSameParent(expected.parent, parent);
   requireSameTarget(expected.target, target);
@@ -323,7 +313,7 @@ function requireSameParent(
   before: WindowsPathInspection,
   after: WindowsPathInspection
 ): void {
-  if (!sameDirectory(before, after) || !sameSecurity(before.security, after.security)) {
+  if (!sameDirectory(before, after)) {
     throw failure(
       'WINDOWS_SKILL_MEMBERSHIP_PARENT_CHANGED',
       'The Windows Skill membership parent changed during revalidation.'
@@ -372,26 +362,9 @@ function sameLink(
     && left.object.reparseTag === right.object.reparseTag
     && left.object.deletePending === right.object.deletePending
     && left.object.directory === right.object.directory
-    && sameSecurity(left.security, right.security)
     && left.normalizedTarget.toLowerCase() === right.normalizedTarget.toLowerCase()
     && left.targetVolumeIdentity === right.targetVolumeIdentity
     && left.targetFileId === right.targetFileId;
-}
-
-function sameSecurity(
-  left: WindowsSecurityObservation,
-  right: WindowsSecurityObservation
-): boolean {
-  return left.descriptorControl === right.descriptorControl
-    && left.daclPresent === right.daclPresent
-    && left.daclNull === right.daclNull
-    && left.daclDefaulted === right.daclDefaulted
-    && left.daclBytes.equals(right.daclBytes)
-    && left.ownerSid === right.ownerSid
-    && left.ownerDefaulted === right.ownerDefaulted
-    && left.groupSid === right.groupSid
-    && left.groupDefaulted === right.groupDefaulted
-    && left.currentUserSid === right.currentUserSid;
 }
 
 function canonicalChild(parent: string, component: string): string {

@@ -6,7 +6,13 @@ import { trackProvisioningChild } from './test-win32-profile-provisioning-child.
 
 /** Same harness function runs against source-built and installed dist modules. */
 export async function runWindowsProfileActivationEvidence(context) {
-  const { backend, load, home, testRoot, packageRoot, services, membershipOptions, target, children, mark } = context;
+  const { backend: nativeBackend, load, home, testRoot, packageRoot, services, membershipOptions, target, children, mark } = context;
+  const creations = new Map();
+  const backend = { ...nativeBackend, createPrivateFile(...args) {
+    const receipt = nativeBackend.createPrivateFile(...args);
+    creations.set(receipt.created.object.fileId, receipt.creationSecurity);
+    return receipt;
+  } };
   mark('activation-modules');
   const { PROFILE_PORTABILITY_PRODUCTION_LIMITS } = await load('dist/profile-portability/profile-portability-policy.js');
   const { MAX_ACTIVE_PROFILE_STATE_BYTES } = await load('dist/profiles/profile-store.js');
@@ -23,7 +29,7 @@ export async function runWindowsProfileActivationEvidence(context) {
   const make = (options = {}) => activationModule.createWindowsProfileActivationServicesForInternalTesting(backend, options);
   const read = (root = home) => selectionModule.readWindowsSelectionSnapshot(backend, root);
   const current = (root = home) => management.currentProfile(root, selectionReadServices);
-  const readCandidate = (path) => selectionModule.readWindowsPrivateFileSnapshot(backend, path, MAX_ACTIVE_PROFILE_STATE_BYTES);
+  const readCandidate = (path) => selectionModule.readWindowsPhysicalFileSnapshot(backend, path, MAX_ACTIVE_PROFILE_STATE_BYTES);
   const candidateNames = async (root) => (await backend.enumerateStableDirectory(root, PROFILE_PORTABILITY_PRODUCTION_LIMITS.stagingEntries)).entries.map((entry) => entry.name);
   const optionalCandidate = async (path) => {
     try { return await readCandidate(path); }
@@ -47,7 +53,8 @@ export async function runWindowsProfileActivationEvidence(context) {
   const activated = await use('focused', { hooks: {
     afterOperationLock(key) { order.push(key); }, afterStateLock() { order.push('state'); },
     async afterPrivateCreation(snapshot) {
-      firstVisibility = snapshot.bytes.length === 0 && (snapshot.inspection.security.descriptorControl & 0x1000) !== 0;
+      const security = creations.get(snapshot.inspection.object.fileId);
+      firstVisibility = snapshot.bytes.length === 0 && security !== undefined && security.ownerSid === security.currentUserSid && (security.descriptorControl & 0x1000) !== 0;
     }
   } });
   observations.selectionProtectedFirstVisibility = firstVisibility;
@@ -134,7 +141,7 @@ export async function runWindowsProfileActivationEvidence(context) {
   let old = await read(scenarioHome);
   let retainedCandidate;
   observations.selectionExactNoEffect = await code(() => use('focused', { selectionIo: { ...io, async rename(source) {
-    retainedCandidate = { path: source, snapshot: await selectionModule.readWindowsPrivateFileSnapshot(backend, source, MAX_ACTIVE_PROFILE_STATE_BYTES) };
+    retainedCandidate = { path: source, snapshot: await selectionModule.readWindowsPhysicalFileSnapshot(backend, source, MAX_ACTIVE_PROFILE_STATE_BYTES) };
     throw new Error('before effect');
   } } }, scenarioHome), 'WINDOWS_SELECTION_NO_EFFECT')
     && same(old, await read(scenarioHome)) && retainedCandidate.snapshot.bytes.equals(Buffer.from('focused\n'))
@@ -228,7 +235,7 @@ export async function observeActivationUse(deps, name, options, root, mark = () 
     async afterPrivateCreation() {
       created = await observeNewCandidate(deps, root, previousNames, (operation) => mark(`created-${operation}`));
       mark('created-check');
-      requireCondition(created.snapshot.bytes.length === 0 && (created.snapshot.inspection.security.descriptorControl & 0x1000) !== 0);
+      requireCondition(created.snapshot.bytes.length === 0);
       mark('created-hook');
       await activationOptions.hooks?.afterPrivateCreation?.(created.snapshot);
       mark('lifecycle'); // Restore only after a successful hook, never in finally.
@@ -305,8 +312,7 @@ export function sameSelectionCandidateObject(left, right) {
   const a = left.inspection, b = right.inspection;
   return a.kind === 'regular-file' && b.kind === 'regular-file'
     && ['volumeIdentity', 'fileId', 'creationTime', 'numberOfLinks', 'attributes', 'directory', 'reparseTag', 'deletePending']
-      .every((field) => a.object[field] !== undefined && a.object[field] === b.object[field])
-    && a.security !== undefined && b.security !== undefined && JSON.stringify(a.security) === JSON.stringify(b.security);
+      .every((field) => a.object[field] !== undefined && a.object[field] === b.object[field]);
 }
 export function selectionCandidateCommitted(candidate, destination, temporary) {
   return temporary === undefined && sameSelectionCandidateObject(candidate, destination)

@@ -41,9 +41,10 @@ const OBSERVATION_BOOLEANS = Object.freeze([
   'junctionTargetPreserved',
   'membershipJunctionDirectTarget',
   'membershipJunctionNoReplace',
+  'membershipCreationReceiptLossRetained',
   'membershipJunctionExactInspection',
   'membershipJunctionImmediateRevalidation',
-  'membershipLinkSecurityAdmitted',
+  'membershipExistingAclAdmitted',
   'membershipForeignReparseRefused',
   'membershipLinkOnlyRemoval',
   'membershipRemovalReconciled',
@@ -67,8 +68,8 @@ const OBSERVATION_BOOLEANS = Object.freeze([
   'directoryReparseObservedAsLeaf',
   'boundedDirectoryClosure',
   'directoryClosureLimitsRefused',
-  'directoryClosureHardLinkRefused',
-  'directoryClosureForeignFileAclRefused',
+  'directoryClosureStableHardLinkAdmitted',
+  'directoryClosureExistingFileAclAdmitted',
   'directoryClosureDriftRefused',
   'directoryClosureReparseRefusedTargetPreserved',
   'directoryPublicationFreshNoReplace',
@@ -81,7 +82,7 @@ const OBSERVATION_BOOLEANS = Object.freeze([
   'directoryPublicationDependentDriftRetained',
   'directoryPublicationCorruptJournalRefused',
   'directoryPublicationRestartRecovery',
-  'operationLockPrivatePersistentNamespace',
+  'operationLockFreshPrivatePersistentNamespace',
   'operationLockAuthorityExpires',
   'operationLockAuthorizesPublication',
   'operationLockContentionAnnounced',
@@ -335,7 +336,7 @@ function validateAggregateEvidence({ aggregate, releaseCommit, binarySha256, sou
     'node', 'rust', 'msvcToolsVersion', 'msvc', 'binarySha256', 'sourceConformance',
     'installedConformance', 'releaseAdmission', 'windowsSupportClaim'
   ], 'aggregate evidence');
-  equal(aggregate.schemaVersion, 6, 'aggregate schemaVersion');
+  equal(aggregate.schemaVersion, 7, 'aggregate schemaVersion');
   equal(aggregate.purpose, AGGREGATE_PURPOSE, 'aggregate purpose');
   equal(aggregate.completion, 'passed', 'aggregate completion');
   equal(aggregate.sourceCommit, releaseCommit, 'aggregate source commit');
@@ -366,7 +367,7 @@ function validateConformanceReceipt(receipt, expectedKind, packageVersion, binar
     'schemaVersion', 'purpose', 'environment', 'packageRootKind', 'completion',
     'releaseAdmission', 'windowsSupportClaim', 'observations', 'failures'
   ], `${expectedKind} receipt`);
-  equal(receipt.schemaVersion, 6, `${expectedKind} schemaVersion`);
+  equal(receipt.schemaVersion, 7, `${expectedKind} schemaVersion`);
   equal(receipt.purpose, FOUNDATION_PURPOSE, `${expectedKind} purpose`);
   exactObject(receipt.environment, ['platform', 'arch', 'node'], `${expectedKind} environment`);
   equal(receipt.environment.platform, 'win32', `${expectedKind} platform`);

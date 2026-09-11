@@ -11,7 +11,7 @@ const args = process.argv.slice(2);
 const packageRoot = resolve(argument('--package-root') ?? fileURLToPath(new URL('..', import.meta.url)));
 const outputPath = resolve(argument('--output') ?? join(packageRoot, 'win32-added-skill-evidence.json'));
 const report = {
-  schemaVersion: 3,
+  schemaVersion: 4,
   purpose: 'Internal managed profile activation, current selection, onboarding and healthy local added-Skill Windows product-slice evidence only.',
   packageRootKind: packageRoot.includes('node_modules') ? 'packed-install' : 'source-tree',
   completion: 'failed',
@@ -55,7 +55,22 @@ try {
   markStep('favoritesModule');
   const favoritesModule = await load('dist/profiles/profile-favorites.js');
   markStep('backend');
-  const backend = nativeModule.loadBazframeWin32Native();
+  const nativeBackend = nativeModule.loadBazframeWin32Native();
+  const creations = new Map();
+  const objectKey = (value) => `${value.object.volumeIdentity}:${value.object.fileId}`;
+  const backend = { ...nativeBackend };
+  for (const operation of ['createPrivateDirectory', 'createPrivateFile', 'createPrivateJunction']) {
+    backend[operation] = (...args) => {
+      const receipt = nativeBackend[operation](...args);
+      creations.set(objectKey(receipt.created), receipt.creationSecurity);
+      return receipt;
+    };
+  }
+  const freshPrivate = (value) => {
+    const security = creations.get(objectKey(value));
+    return security !== undefined && security.ownerSid === security.currentUserSid
+      && security.daclPresent && !security.daclNull && (security.descriptorControl & 0x1000) !== 0;
+  };
   markStep('binary-digest');
   const binarySha256 = createHash('sha256')
     .update(await readFile(join(packageRoot, 'artifacts/native/win32-x64-msvc/bazframe-win32.node')))
@@ -72,14 +87,11 @@ try {
   markStep('boundary-acl');
   execFileSync('icacls.exe', [testRoot, '/grant', '*S-1-5-32-545:(RX)'], { stdio: 'pipe' });
   markStep('ordinaryBoundary');
-  const ordinaryBoundary = await expectCode(
-    () => privateDirectoryModule.admitWindowsPrivateDirectory(backend, testRoot),
-    'WINDOWS_PRIVATE_DIRECTORY_PRIVACY_UNPROVED'
-  );
+  const ordinaryBoundary = privateDirectoryModule.admitWindowsPhysicalDirectory(backend, testRoot).kind === 'directory';
 
   const createDirectory = (parent, component) => {
     backend.createPrivateDirectory(parent, component);
-    privateDirectoryModule.admitWindowsPrivateDirectory(backend, join(parent, component));
+    privateDirectoryModule.admitWindowsPhysicalDirectory(backend, join(parent, component));
     return join(parent, component);
   };
   const createTextFile = async (parent, component, contents) => {
@@ -125,9 +137,9 @@ try {
   markStep('listedProfiles');
   const listedProfiles = await managementModule.listProfiles(home, provisioningOptions);
   markStep('bootstrapPrivate');
-  const bootstrapPrivate = privateDirectoryModule.admitWindowsPrivateDirectory(backend, home);
+  const bootstrapPrivate = privateDirectoryModule.admitWindowsPhysicalDirectory(backend, home);
   markStep('intermediatePrivate');
-  const intermediatePrivate = privateDirectoryModule.admitWindowsPrivateDirectory(backend, join(testRoot, 'missing-intermediate'));
+  const intermediatePrivate = privateDirectoryModule.admitWindowsPhysicalDirectory(backend, join(testRoot, 'missing-intermediate'));
   const selectionAndFavoritesAbsent = await expectCode(() => backend.inspectPath(join(home, 'active-profile')), 'WINDOWS_NATIVE_PATH_NOT_FOUND')
     && await expectCode(() => backend.inspectPath(join(home, 'profile-favorites.json')), 'WINDOWS_NATIVE_PATH_NOT_FOUND');
   await writeFile(join(profile, 'AGENTS.md'), profileBytes);
@@ -447,7 +459,7 @@ try {
   markStep('favoritesPath');
   const favoritesPath = await createTextFile(preservedHome, 'profile-favorites.json', favoritesBytes);
   const instructionsPath = join(preservedHome, 'profiles', 'focused', 'AGENTS.md');
-  privateDirectoryModule.admitWindowsPrivateFile(backend, instructionsPath);
+  privateDirectoryModule.admitWindowsPhysicalFile(backend, instructionsPath);
   markStep('edit-instructions');
   await writeFile(instructionsPath, editedBytes, { flag: 'r+' });
   const preservedFiles = [[activePath, activeBytes], [favoritesPath, favoritesBytes], [instructionsPath, editedBytes]];
@@ -486,10 +498,10 @@ try {
     && samePrivateFile(before, afterCurrent[index]) && samePrivateFile(before, afterNew[index]));
 
   async function privateFileSnapshot(path, expectedBytes) {
-    const before = privateDirectoryModule.admitWindowsPrivateFile(backend, path);
+    const before = privateDirectoryModule.admitWindowsPhysicalFile(backend, path);
     // Exact fixture length is a derived read bound, not a new production cap.
     const receipt = await backend.readStableFile(path, expectedBytes.byteLength);
-    const after = privateDirectoryModule.admitWindowsPrivateFile(backend, path);
+    const after = privateDirectoryModule.admitWindowsPhysicalFile(backend, path);
     const identity = (object) => `${object.volumeIdentity}:${object.fileId}`;
     requireCondition(identity(before.object) === identity(receipt.before)
       && identity(receipt.before) === identity(receipt.after)
@@ -507,8 +519,8 @@ try {
   report.observations = {
     binarySha256,
     absentHomeReadOnly,
-    privateBootstrap: ordinaryBoundary && bootstrapPrivate.kind === 'directory' && (bootstrapPrivate.security.descriptorControl & 0x1000) !== 0,
-    missingIntermediateBootstrap: intermediatePrivate.kind === 'directory' && (intermediatePrivate.security.descriptorControl & 0x1000) !== 0,
+    privateBootstrap: ordinaryBoundary && bootstrapPrivate.kind === 'directory' && freshPrivate(bootstrapPrivate),
+    missingIntermediateBootstrap: intermediatePrivate.kind === 'directory' && freshPrivate(intermediatePrivate),
     emptyInactiveProfileAdded: firstAdd.action === 'added' && emptyGenerated,
     profileAddIdempotent: repeatedAdd.action === 'current',
     profileAddAfterMembershipCurrent: afterMembershipAdd.action === 'current' && directTargets,

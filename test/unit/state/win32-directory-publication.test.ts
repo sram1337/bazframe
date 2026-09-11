@@ -5,7 +5,7 @@ import type {
   BazframeWin32NativeBackend,
   WindowsDirectoryEntryObservation,
   WindowsObjectObservation,
-  WindowsPathInspection,
+  WindowsPathInspection as PhysicalPathInspection,
   WindowsSecurityObservation
 } from '../../../src/core/win32-native.js';
 import { BazframeError } from '../../../src/core/errors.js';
@@ -19,6 +19,9 @@ import {
   type WindowsDirectoryPublicationIo,
   type WindowsDirectoryPublicationPhase
 } from '../../../src/state/win32-directory-publication.js';
+
+// Synthetic fixture metadata is not part of ordinary native physical receipts.
+type WindowsPathInspection = PhysicalPathInspection & { security: WindowsSecurityObservation };
 
 const VOLUME = '0020000000000001';
 const USER = 'S-1-5-21-1';
@@ -630,7 +633,7 @@ function harness(options: { destination?: TestNode; oldFile?: string } = {}) {
       const parentBefore = inspection(parentPath, parent);
       const created = dir(nextId++);
       nodes.set(path, created);
-      return { parentBefore, created: inspection(path, created), parentAfter: inspection(parentPath, parent) };
+      return { parentBefore, created: inspection(path, created), parentAfter: inspection(parentPath, parent), creationSecurity: created.security ?? security() };
     },
     createPrivateFile(parentPath, finalComponent) {
       const parent = required(nodes, parentPath);
@@ -639,7 +642,7 @@ function harness(options: { destination?: TestNode; oldFile?: string } = {}) {
       const parentBefore = inspection(parentPath, parent);
       const created = file(nextId++, '');
       nodes.set(path, created);
-      return { parentBefore, created: inspection(path, created), parentAfter: inspection(parentPath, parent) };
+      return { parentBefore, created: inspection(path, created), parentAfter: inspection(parentPath, parent), creationSecurity: created.security ?? security() };
     },
     inspectZipSource() { throw new Error('unused ZIP source'); },
     async readStableFileRange() { throw new Error('range read unused'); },

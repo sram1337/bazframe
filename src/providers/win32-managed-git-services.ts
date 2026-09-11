@@ -1,8 +1,8 @@
 import { win32 } from 'node:path';
 import { BazframeError, errorCode } from '../core/errors.js';
 import type { BazframeWin32NativeBackend, WindowsPathInspection } from '../core/win32-native.js';
-import { enumerateWindowsPrivateDirectory } from '../skills/added-skill-platform-services.js';
-import { admitWindowsPrivateDirectory, isValidWindowsPathComponent } from '../state/win32-private-directory.js';
+import { enumerateWindowsPhysicalDirectory } from '../skills/added-skill-platform-services.js';
+import { admitWindowsPhysicalDirectory, isValidWindowsPathComponent } from '../state/win32-private-directory.js';
 import { PROFILE_PORTABILITY_PRODUCTION_LIMITS } from '../profile-portability/profile-portability-policy.js';
 import { sameResourceIdentity, type ResourceIdentity } from '../skill-collections/resource-identity.js';
 
@@ -20,7 +20,7 @@ export async function moveWindowsManagedGitDirectory(options: {
   const sourceName = win32.basename(source), destinationName = win32.basename(destination);
   if (!isValidWindowsPathComponent(sourceName) || !isValidWindowsPathComponent(destinationName)
     || source.toLowerCase() === destination.toLowerCase()) throw refused('invalid move paths');
-  const parents = [admitWindowsPrivateDirectory(backend, sourceParent), admitWindowsPrivateDirectory(backend, destinationParent)];
+  const parents = [admitWindowsPhysicalDirectory(backend, sourceParent), admitWindowsPhysicalDirectory(backend, destinationParent)];
   if (parents[0]!.volume.identity !== parents[1]!.volume.identity) throw refused('cross-volume directory move');
   const before = await observe(sourceParent, sourceName);
   if (before === undefined || !sameResourceIdentity(identity(before), expected)) throw refused('source identity changed');
@@ -31,7 +31,7 @@ export async function moveWindowsManagedGitDirectory(options: {
   catch (error) { operationError = error; }
   // A syscall return is never the outcome proof, including move-then-error.
   authority.assertHeld();
-  const currentParents = [admitWindowsPrivateDirectory(backend, sourceParent), admitWindowsPrivateDirectory(backend, destinationParent)];
+  const currentParents = [admitWindowsPhysicalDirectory(backend, sourceParent), admitWindowsPhysicalDirectory(backend, destinationParent)];
   if (!parents.every((parent, index) => sameDirectory(parent, currentParents[index]!))) throw refused('move parent changed; retain ambiguity', operationError);
   const remaining = await observe(sourceParent, sourceName), moved = await observe(destinationParent, destinationName);
   authority.assertHeld();
@@ -42,18 +42,18 @@ export async function moveWindowsManagedGitDirectory(options: {
   throw refused('move outcome ambiguous; retain both namespaces', operationError);
 
   async function observe(parent: string, name: string): Promise<WindowsPathInspection | undefined> {
-    const namespace = await enumerateWindowsPrivateDirectory(backend, parent, PROFILE_PORTABILITY_PRODUCTION_LIMITS.stagingEntries);
+    const namespace = await enumerateWindowsPhysicalDirectory(backend, parent, PROFILE_PORTABILITY_PRODUCTION_LIMITS.stagingEntries);
     authority.assertHeld();
     const key = (value: string) => value.normalize('NFC').toLowerCase().toUpperCase().toLowerCase();
     const matches = namespace.names.filter((entry) => key(entry) === key(name));
     if (matches.length === 0) return undefined;
     if (matches.length !== 1 || matches[0] !== name) throw refused('aliased move namespace');
-    return admitWindowsPrivateDirectory(backend, win32.join(parent, name));
+    return admitWindowsPhysicalDirectory(backend, win32.join(parent, name));
   }
 }
 function identity(value: WindowsPathInspection): ResourceIdentity { return { domain: 'windows', volumeIdentity: value.object.volumeIdentity, fileId: value.object.fileId, creationTime: value.object.creationTime }; }
 function sameDirectory(left: WindowsPathInspection, right: WindowsPathInspection): boolean {
-  return sameResourceIdentity(identity(left), identity(right)) && left.object.attributes === right.object.attributes && JSON.stringify(left.security) === JSON.stringify(right.security);
+  return sameResourceIdentity(identity(left), identity(right)) && left.object.attributes === right.object.attributes;
 }
 function refused(detail: string, cause?: unknown): BazframeError { return new BazframeError('WINDOWS_MANAGED_GIT_MOVE_UNPROVEN', `Managed Git directory move refused: ${detail}.`, { cause }); }
 
@@ -61,7 +61,7 @@ import { randomBytes } from 'node:crypto';
 import { resolveControlledExecutable, executableEnvironmentValue, type resolvePackageExecutable, type ExecutableResolutionOptions } from '../core/executable-resolution.js';
 import { stableWindowsPathInspection } from '../core/win32-stable-observation.js';
 import type { BazframeWin32LockBackend } from '../core/win32-native.js';
-import { assertWindowsOwnerPrivateSecurity, createWindowsPrivateDirectory, ensureWindowsPrivateDirectoryPath } from '../state/win32-private-directory.js';
+import { createWindowsPrivateDirectory, ensureWindowsPrivateDirectoryPath } from '../state/win32-private-directory.js';
 import { requireDirectChild } from '../state/win32-directory-closure.js';
 import { createWindowsManagedGitRecordEffects, windowsManagedGitPaths, windowsManagedGitPathPolicy, windowsResourceIdentity } from './managed-git-services.js';
 import { createManagedGitProvider, type ManagedGitServices, type ImportOccupancy } from './managed-git.js';
@@ -102,10 +102,9 @@ export function createWindowsGitInspectionEffects(backend: BazframeWin32NativeBa
   }
   function inspectPresent(path: string): WindowsPathInspection {
     const value = backend.inspectPath(path);
-    if (value.kind === 'directory') return admitWindowsPrivateDirectory(backend, path);
-    const parent = admitWindowsPrivateDirectory(backend, win32.dirname(path));
+    if (value.kind === 'directory') return admitWindowsPhysicalDirectory(backend, path);
+    const parent = admitWindowsPhysicalDirectory(backend, win32.dirname(path));
     requireDirectChild(parent, value, win32.basename(path));
-    assertWindowsOwnerPrivateSecurity(value.security, parent.security.currentUserSid);
     if (!value.ancestryReparseFree || value.object.reparseTag !== null || value.object.deletePending || value.kind !== 'regular-file') throw refused('nonphysical Git storage');
     return value;
   }
@@ -119,7 +118,7 @@ export function createWindowsGitInspectionEffects(backend: BazframeWin32NativeBa
       return { async stat() { if (closed) throw refused('expired inspection handle'); const current = inspect(path); if (!sameResourceIdentity(windowsResourceIdentity(before), windowsResourceIdentity(current))) throw refused('Git inspection identity changed'); return stat(path); }, async close() { closed = true; } };
     },
     async opendir(path, maxEntries = PROFILE_PORTABILITY_PRODUCTION_LIMITS.stagingEntries) {
-      const namespace = await enumerateWindowsPrivateDirectory(backend, path, maxEntries).catch((error: unknown) => { throw inspectionError(error); });
+      const namespace = await enumerateWindowsPhysicalDirectory(backend, path, maxEntries).catch((error: unknown) => { throw inspectionError(error); });
       let index = 0, closed = false;
       return { async read() { if (closed) throw refused('expired enumeration'); const name = namespace.names[index++]; return name === undefined ? null : { name }; }, async close() { closed = true; } };
     },
@@ -183,12 +182,12 @@ export function createWindowsManagedGitServices(backend: BazframeWin32NativeBack
   const isolation = win32.join(home, 'providers', 'git', 'isolation');
   function isolatedPath(name: string) {
     const path = win32.join(isolation, name);
-    admitWindowsPrivateDirectory(backend, path);
+    admitWindowsPhysicalDirectory(backend, path);
     return path;
   }
   const services: ManagedGitServices = {
     ...windowsManagedGitPaths, ...inspector,
-    platform: 'win32', recordTreeEvidence(root, evidence) { const current = windowsResourceIdentity(admitWindowsPrivateDirectory(backend, root)); const prior = sourceEvidence.get(root); if (prior !== undefined && sameResourceIdentity(evidenceIdentity.get(root)!, current) && prior.sha256 !== evidence.sha256) throw refused('Git modes changed in the provider operation'); sourceEvidence.set(root, evidence); evidenceIdentity.set(root, current); }, assertAuthority, catalogServices: catalog, collectionDependencies: { services: ready, packageProcessRunner: options.packageProcessRunner ?? spawnBoundedPackageProcess },
+    platform: 'win32', recordTreeEvidence(root, evidence) { const current = windowsResourceIdentity(admitWindowsPhysicalDirectory(backend, root)); const prior = sourceEvidence.get(root); if (prior !== undefined && sameResourceIdentity(evidenceIdentity.get(root)!, current) && prior.sha256 !== evidence.sha256) throw refused('Git modes changed in the provider operation'); sourceEvidence.set(root, evidence); evidenceIdentity.set(root, current); }, assertAuthority, catalogServices: catalog, collectionDependencies: { services: ready, packageProcessRunner: options.packageProcessRunner ?? spawnBoundedPackageProcess },
     runProcess(executable, args, cwd, environment, limits, hooks) { sourceEnvironments.set(cwd, { ...environment, BAZFRAME_GIT_COMMAND: executable }); return (options.process ?? runManagedGitProcess)(executable, args, cwd, environment, limits, hooks); },
     async writeProviderFile(path, text, expected) {
       assertAuthority(); if (!within(home, path)) throw refused('provider file outside scope');
@@ -217,9 +216,9 @@ export function createWindowsManagedGitServices(backend: BazframeWin32NativeBack
     async holdReadOnlyPathAnchor(path) {
       let ancestor = path;
       while (await records.absent(ancestor)) { const parent = win32.dirname(ancestor); if (parent === ancestor) throw refused('absent volume'); ancestor = parent; }
-      const before = admitWindowsPrivateDirectory(backend, ancestor);
+      const before = admitWindowsPhysicalDirectory(backend, ancestor);
       const initialAbsent = ancestor !== path; let closed = false;
-      const assertStable = async () => { if (closed || JSON.stringify(stableWindowsPathInspection(before)) !== JSON.stringify(stableWindowsPathInspection(admitWindowsPrivateDirectory(backend, ancestor))) || initialAbsent !== await records.absent(path)) throw refused('read-only anchor changed'); };
+      const assertStable = async () => { if (closed || JSON.stringify(stableWindowsPathInspection(before)) !== JSON.stringify(stableWindowsPathInspection(admitWindowsPhysicalDirectory(backend, ancestor))) || initialAbsent !== await records.absent(path)) throw refused('read-only anchor changed'); };
       return { path, assertStable, async close() { await assertStable(); closed = true; } };
     },
     async canonicalManagedGitRoot(record) { await services.physicalDirectory(record.root); return record.root; },
@@ -238,7 +237,7 @@ export function createWindowsManagedGitServices(backend: BazframeWin32NativeBack
         for (const current of components) {
           if (await records.absent(current)) { result.set(current, 'absent'); result.set(leaf, 'absent'); break; }
           const value = backend.inspectPath(current);
-          if (current !== leaf) admitWindowsPrivateDirectory(backend, current);
+          if (current !== leaf) admitWindowsPhysicalDirectory(backend, current);
           result.set(current, { ...windowsResourceIdentity(value), type: value.kind, mtimeNs: value.object.lastWriteTime, ctimeNs: value.object.changeTime });
         }
       }
@@ -248,7 +247,7 @@ export function createWindowsManagedGitServices(backend: BazframeWin32NativeBack
     async assertManagedGitResourceRecoveryAbsent(root, kind, id) { if (!await records.absent(windowsManagedGitPaths.managedGitJournalPath(root, kind, id))) throw refused('resource recovery requires inspection'); },
     resolveManagedGitCommand: async (environment, excludedRoot) => {
       if ((await records.snapshot(win32.join(isolation, 'empty'))).bytes.length !== 0) throw refused('private Git isolation config changed');
-      for (const name of ['hooks', 'home', 'xdg']) if ((await enumerateWindowsPrivateDirectory(backend, win32.join(isolation, name), 0)).names.length !== 0) throw refused('private Git isolation acquired content');
+      for (const name of ['hooks', 'home', 'xdg']) if ((await enumerateWindowsPhysicalDirectory(backend, win32.join(isolation, name), 0)).names.length !== 0) throw refused('private Git isolation acquired content');
       return (options.resolveExecutable ?? resolveControlledExecutable)(executableEnvironmentValue(environment, 'BAZFRAME_GIT_COMMAND', true) || 'git', { platform: 'win32', cwd: options.cwd ?? process.cwd(), environment, excludedRoots: [excludedRoot] });
     },
     async resolveManagedGithubCommand(environment, excludedRoot) { try { return await (options.resolveExecutable ?? resolveControlledExecutable)(executableEnvironmentValue(environment, 'BAZFRAME_GH_COMMAND', true) || 'gh', { platform: 'win32', cwd: options.cwd ?? process.cwd(), environment, excludedRoots: [excludedRoot] }); } catch (error) { if (error instanceof BazframeError && error.code === 'EXECUTABLE_NOT_FOUND') return undefined; throw error; } },
@@ -271,8 +270,8 @@ export function createWindowsManagedGitServices(backend: BazframeWin32NativeBack
       }
       return result;
     },
-    async physicalDirectory(path) { admitWindowsPrivateDirectory(backend, path); },
-    async directoryIdentity(path) { return windowsResourceIdentity(admitWindowsPrivateDirectory(backend, path)); },
+    async physicalDirectory(path) { admitWindowsPhysicalDirectory(backend, path); },
+    async directoryIdentity(path) { return windowsResourceIdentity(admitWindowsPhysicalDirectory(backend, path)); },
     async holdDirectoryIdentity(path) { const value = await services.directoryIdentity(path); return { identity: value, handle: { async close() { if (!sameResourceIdentity(value, await services.directoryIdentity(path))) throw refused('retained directory identity changed'); } } }; },
     moveDirectory: (source, destination, expected) => moveWindowsManagedGitDirectory({ backend, source, destination, expected, authority: { assertHeld: assertAuthority } }),
     async removeOwnedTree(path, expected) {

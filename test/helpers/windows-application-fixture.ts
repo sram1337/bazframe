@@ -19,7 +19,7 @@ export function windowsApplicationFixture() {
   file(win32.join(PACKAGE, 'artifacts', 'native', 'win32-x64-msvc', 'bazframe-win32.node'), 'native integrity fixture, never executed');
   const editor: BazframeWin32EditorBackend = { inspectEditorTarget(root, targetPath) {
     const entry = f.backend.inspectPath(targetPath);
-    return { root: f.backend.inspectPath(root), parent: f.backend.inspectPath(root), entryPath: entry.canonicalPath, entryObject: entry.object, entrySecurity: entry.security, target: entry, targetPath };
+    return { root: f.backend.inspectPath(root), parent: f.backend.inspectPath(root), entryPath: entry.canonicalPath, entryObject: entry.object, target: entry, targetPath };
   } };
   const backend = Object.assign(f.backend, editor);
   const environment = { BAZFRAME_HOME: HOME, PI_CODING_AGENT_DIR: PI, USERPROFILE: 'C:\\boundary', VISUAL: 'editor.exe', PATH: 'C:\\tools' };

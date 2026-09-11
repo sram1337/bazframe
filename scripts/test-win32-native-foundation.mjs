@@ -22,7 +22,7 @@ const args = process.argv.slice(2);
 const packageRoot = resolve(argument('--package-root') ?? fileURLToPath(new URL('..', import.meta.url)));
 const outputPath = resolve(argument('--output') ?? join(packageRoot, 'win32-native-evidence.json'));
 const report = {
-  schemaVersion: 6,
+  schemaVersion: 7,
   purpose: 'Bazframe-owned native Windows foundation evidence only; not a Windows support claim.',
   environment: {
     platform: process.platform,
@@ -61,7 +61,22 @@ try {
   const membershipModule = await import(
     pathToFileURL(join(packageRoot, 'dist/state/win32-skill-membership.js')).href
   );
-  const backend = nativeModule.loadBazframeWin32Native();
+  const nativeBackend = nativeModule.loadBazframeWin32Native();
+  const creations = new Map();
+  const objectKey = (value) => `${value.object.volumeIdentity}:${value.object.fileId}`;
+  const backend = { ...nativeBackend };
+  for (const operation of ['createPrivateDirectory', 'createPrivateFile', 'createPrivateJunction']) {
+    backend[operation] = (...args) => {
+      const receipt = nativeBackend[operation](...args);
+      creations.set(objectKey(receipt.created), receipt.creationSecurity);
+      return receipt;
+    };
+  }
+  const freshPrivate = (value) => {
+    const security = creations.get(objectKey(value));
+    return security !== undefined && security.ownerSid === security.currentUserSid
+      && security.daclPresent && !security.daclNull && (security.descriptorControl & 0x1000) !== 0;
+  };
   const nativePath = join(
     packageRoot,
     'artifacts/native/win32-x64-msvc/bazframe-win32.node'
@@ -72,7 +87,8 @@ try {
   const testRootComponent = `bazframe-native-foundation-${randomUUID()}`;
   testRoot = join(temporaryParent, testRootComponent);
   const bootstrapReceipt = backend.createPrivateDirectory(temporaryParent, testRootComponent);
-  const rootInspection = privateDirectoryModule.admitWindowsPrivateDirectory(backend, testRoot);
+  privateDirectoryModule.assertWindowsPrivateCreationSecurity(bootstrapReceipt.creationSecurity);
+  const rootInspection = privateDirectoryModule.admitWindowsPhysicalDirectory(backend, testRoot);
   const privateComponent = 'private-数据';
   privateRoot = join(testRoot, privateComponent);
   const privateInspection = privateDirectoryModule.createWindowsPrivateDirectory(
@@ -84,19 +100,20 @@ try {
   const privateFileComponent = 'private-file.txt';
   const privateFilePath = join(privateRoot, privateFileComponent);
   const privateFileReceipt = backend.createPrivateFile(privateRoot, privateFileComponent);
-  const privateFileBefore = privateDirectoryModule.admitWindowsPrivateFile(backend, privateFilePath);
+  privateDirectoryModule.assertWindowsPrivateCreationSecurity(privateFileReceipt.creationSecurity);
+  const privateFileBefore = privateDirectoryModule.admitWindowsPhysicalFile(backend, privateFilePath);
   await expectCode(
     () => backend.createPrivateFile(privateRoot, privateFileComponent),
     'WINDOWS_NATIVE_DIRECTORY_OCCUPIED'
   );
-  const privateFileAfter = privateDirectoryModule.admitWindowsPrivateFile(backend, privateFilePath);
+  const privateFileAfter = privateDirectoryModule.admitWindowsPhysicalFile(backend, privateFilePath);
   const occupiedBefore = backend.inspectPath(privateRoot);
   await expectCode(
     () => privateDirectoryModule.createWindowsPrivateDirectory(backend, testRoot, privateComponent),
     'WINDOWS_PRIVATE_DIRECTORY_OCCUPIED'
   );
   const occupiedAfter = backend.inspectPath(privateRoot);
-  const occupiedChildUnchanged = sameDirectoryIdentityVolumeAndSecurity(
+  const occupiedChildUnchanged = sameDirectoryPhysicalIdentity(
     occupiedBefore,
     occupiedAfter
   );
@@ -225,12 +242,7 @@ try {
       if (++driftReads < 2) return result;
       return {
         ...result,
-        security: {
-          ...result.security,
-          groupSid: result.security.groupSid === 'S-1-5-18'
-            ? 'S-1-5-32-544'
-            : 'S-1-5-18'
-        }
+        object: { ...result.object, fileId: 'f'.repeat(32) }
       };
     }
   };
@@ -243,13 +255,6 @@ try {
   );
   const membershipJunctionImmediateRevalidation = repeatedMembershipStable
     && membershipDriftRefused;
-  const membershipLinkSecurityBasics = membershipProof.link.security.daclPresent
-    && !membershipProof.link.security.daclNull
-    && (membershipProof.link.security.descriptorControl & 0x1000) !== 0
-    && membershipProof.link.security.daclBytes.byteLength > 0
-    && membershipProof.link.security.ownerSid === membershipProof.link.security.currentUserSid
-    && membershipProof.link.security.currentUserSid
-      === membershipProof.parent.security.currentUserSid;
 
   const occupiedMembershipFile = join(membershipParent, 'occupied-file');
   await writeFile(occupiedMembershipFile, 'occupied\n');
@@ -305,18 +310,18 @@ try {
     ),
     'WINDOWS_SKILL_MEMBERSHIP_CREATE_FAILED'
   );
-  const afterCreateResult = await membershipModule.createWindowsSkillMembership(
+  const afterCreateReceiptLossAmbiguous = await expectCode(() => membershipModule.createWindowsSkillMembership(
     membershipOptions('after-create-error', membershipTarget, {
       async createJunction(selectedBackend, parentPath, skillId, targetPath) {
         selectedBackend.createPrivateJunction(parentPath, skillId, targetPath);
         throw new Error('injected after-effect creation failure');
       }
     })
-  );
+  ), 'WINDOWS_SKILL_MEMBERSHIP_CREATE_AMBIGUOUS');
   const membershipJunctionNoReplace = exactExisting.action === 'current'
     && racedCreationRefused
     && beforeCreateRefused
-    && afterCreateResult.action === 'added'
+    && afterCreateReceiptLossAmbiguous
     && await readFile(occupiedMembershipFile, 'utf8') === 'occupied\n'
     && (await lstat(occupiedMembershipDirectory)).isDirectory()
     && await readFile(caseEquivalentMembership, 'utf8') === 'case occupant\n'
@@ -358,23 +363,14 @@ try {
     '/grant:r',
     '*S-1-1-0:(F)'
   ], { stdio: 'pipe' });
-  const foreignAclRefused = await expectCode(
-    () => membershipModule.inspectWindowsSkillMembership(
-      membershipOptions('foreign-acl-skill')
-    ),
-    'WINDOWS_SKILL_MEMBERSHIP_LINK_SECURITY_INVALID'
-  );
+  const foreignAclProof = membershipModule.inspectWindowsSkillMembership(membershipOptions('foreign-acl-skill'));
   const membershipTargetAfterForeignAcl = backend.inspectPath(membershipTarget);
   const membershipForeignReparseRefused = chainedMembershipRefused
     && directorySymlinkRefused
     && danglingMembershipRefused
     && await readFile(membershipMarker, 'utf8') === 'membership target\n';
-  const membershipLinkSecurityAdmitted = membershipLinkSecurityBasics
-    && foreignAclRefused
+  const membershipExistingAclAdmitted = foreignAclProof.link.normalizedTarget === membershipProof.link.normalizedTarget
     && membershipTargetAfterForeignAcl.object.fileId === membershipTargetBefore.object.fileId
-    && membershipTargetAfterForeignAcl.security.daclBytes.equals(
-      membershipTargetBefore.security.daclBytes
-    )
     && await readFile(membershipMarker, 'utf8') === 'membership target\n';
 
   const normalRemoval = await membershipModule.removeWindowsSkillMembership(
@@ -416,7 +412,7 @@ try {
   ];
   for (const [path, bytes] of closureFiles) {
     await writeFile(path, bytes);
-    makePrivateTestFile(path, rootInspection.security.currentUserSid);
+    makePrivateTestFile(path, bootstrapReceipt.creationSecurity.currentUserSid);
   }
 
   const enumeration = await backend.enumerateStableDirectory(closureRoot, 4);
@@ -504,10 +500,9 @@ try {
 
   const hardLinkAlias = join(outside, 'closure-hard-link');
   await link(join(closureRoot, 'alpha.txt'), hardLinkAlias);
-  await expectCode(
-    () => directoryClosureModule.captureWindowsDirectoryClosure(backend, closureRoot),
-    'WINDOWS_DIRECTORY_CLOSURE_INVALID'
-  );
+  const hardlinkedClosure = await directoryClosureModule.captureWindowsDirectoryClosure(backend, closureRoot);
+  const directoryClosureStableHardLinkAdmitted = hardlinkedClosure.closureSha256 === closure.closureSha256;
+  requireCondition(directoryClosureStableHardLinkAdmitted, 'stable hardlinked closure input admitted');
   await unlink(hardLinkAlias);
 
   const broadAclComponent = 'broad-file-acl';
@@ -515,12 +510,11 @@ try {
   privateDirectoryModule.createWindowsPrivateDirectory(backend, privateRoot, broadAclComponent);
   const broadAclFile = join(broadAclRoot, 'secret.txt');
   await writeFile(broadAclFile, 'secret\n');
-  makePrivateTestFile(broadAclFile, rootInspection.security.currentUserSid);
+  makePrivateTestFile(broadAclFile, bootstrapReceipt.creationSecurity.currentUserSid);
   execFileSync('icacls.exe', [broadAclFile, '/grant', '*S-1-1-0:(R)'], { stdio: 'pipe' });
-  await expectCode(
-    () => directoryClosureModule.captureWindowsDirectoryClosure(backend, broadAclRoot),
-    'WINDOWS_DIRECTORY_CLOSURE_INVALID'
-  );
+  const broadAclClosure = await directoryClosureModule.captureWindowsDirectoryClosure(backend, broadAclRoot);
+  const directoryClosureExistingFileAclAdmitted = broadAclClosure.closure.entries.some((entry) => entry.path === 'secret.txt' && entry.kind === 'file' && entry.bytes === 7);
+  requireCondition(directoryClosureExistingFileAclAdmitted, 'existing readable ACL closure admitted');
 
   const closureJunction = join(closureRoot, 'outside-junction');
   await symlink(outside, closureJunction, 'junction');
@@ -945,11 +939,11 @@ try {
     'WINDOWS_OPERATION_LOCK_AUTHORITY_INVALID'
   );
   const lockDirectory = join(lockRoot, 'state.lock');
-  const lockGuard = privateDirectoryModule.admitWindowsPrivateFile(
+  const lockGuard = privateDirectoryModule.admitWindowsPhysicalFile(
     backend,
     join(lockDirectory, 'guard')
   );
-  const lockOwner = privateDirectoryModule.admitWindowsPrivateFile(
+  const lockOwner = privateDirectoryModule.admitWindowsPhysicalFile(
     backend,
     join(lockDirectory, 'owner')
   );
@@ -1083,25 +1077,25 @@ try {
     junctionTargetPreserved: true,
     membershipJunctionDirectTarget,
     membershipJunctionNoReplace,
+    membershipCreationReceiptLossRetained: afterCreateReceiptLossAmbiguous,
     membershipJunctionExactInspection,
     membershipJunctionImmediateRevalidation,
-    membershipLinkSecurityAdmitted,
+    membershipExistingAclAdmitted,
     membershipForeignReparseRefused,
     membershipLinkOnlyRemoval,
     membershipRemovalReconciled,
     privateDirectoryFirstVisibilityPrivate: bootstrapReceipt.created.object.fileId
       === rootInspection.object.fileId
-      && bootstrapReceipt.created.security.ownerSid
-        === bootstrapReceipt.created.security.currentUserSid
-      && bootstrapReceipt.created.security.daclPresent
-      && !bootstrapReceipt.created.security.daclNull
-      && (bootstrapReceipt.created.security.descriptorControl & 0x1000) !== 0
-      && bootstrapReceipt.created.security.daclBytes.equals(rootInspection.security.daclBytes),
-    privateDirectoryOwnerCurrentUser: rootInspection.security.ownerSid
-      === rootInspection.security.currentUserSid,
-    privateDirectoryDaclPresentNonNullProtected: rootInspection.security.daclPresent
-      && !rootInspection.security.daclNull
-      && (rootInspection.security.descriptorControl & 0x1000) !== 0,
+      && bootstrapReceipt.creationSecurity.ownerSid
+        === bootstrapReceipt.creationSecurity.currentUserSid
+      && bootstrapReceipt.creationSecurity.daclPresent
+      && !bootstrapReceipt.creationSecurity.daclNull
+      && (bootstrapReceipt.creationSecurity.descriptorControl & 0x1000) !== 0,
+    privateDirectoryOwnerCurrentUser: bootstrapReceipt.creationSecurity.ownerSid
+      === bootstrapReceipt.creationSecurity.currentUserSid,
+    privateDirectoryDaclPresentNonNullProtected: bootstrapReceipt.creationSecurity.daclPresent
+      && !bootstrapReceipt.creationSecurity.daclNull
+      && (bootstrapReceipt.creationSecurity.descriptorControl & 0x1000) !== 0,
     privateDirectoryTrustedFullControl: true,
     privateDirectoryNoReplace: occupiedChildUnchanged,
     privateDirectoryParentStable: bootstrapReceipt.parentBefore.object.fileId
@@ -1109,8 +1103,7 @@ try {
       && bootstrapReceipt.parentBefore.volume.identity
         === bootstrapReceipt.parentAfter.volume.identity
       && rootInspection.object.fileId === parentAfterPrivateCreation.object.fileId
-      && rootInspection.volume.identity === parentAfterPrivateCreation.volume.identity
-      && rootInspection.security.daclBytes.equals(parentAfterPrivateCreation.security.daclBytes),
+      && rootInspection.volume.identity === parentAfterPrivateCreation.volume.identity ,
     privateDirectoryUnicodeName: privateInspection.canonicalPath.toLowerCase()
       === `${rootInspection.canonicalPath}\\${privateComponent}`.toLowerCase(),
     privateDirectoryInvalidNameRefusedBeforeMutation: !invalidCreationInvoked,
@@ -1118,17 +1111,17 @@ try {
     privateDirectoryDirectChildLocalNtfs: privateInspection.volume.identity
       === rootInspection.volume.identity
       && privateInspection.volume.filesystemName === 'NTFS',
-    privateFileFirstVisibilityPrivate: sameRegularFileIdentityVolumeAndSecurity(
+    privateFileFirstVisibilityPrivate: sameRegularFilePhysicalIdentity(
       privateFileReceipt.created,
       privateFileBefore
     )
-      && privateFileReceipt.created.security.ownerSid
-        === privateFileReceipt.created.security.currentUserSid
-      && privateFileReceipt.created.security.daclPresent
-      && !privateFileReceipt.created.security.daclNull
-      && (privateFileReceipt.created.security.descriptorControl & 0x1000) !== 0
+      && privateFileReceipt.creationSecurity.ownerSid
+        === privateFileReceipt.creationSecurity.currentUserSid
+      && privateFileReceipt.creationSecurity.daclPresent
+      && !privateFileReceipt.creationSecurity.daclNull
+      && (privateFileReceipt.creationSecurity.descriptorControl & 0x1000) !== 0
       && privateFileReceipt.created.object.size === '0000000000000000',
-    privateFileNoReplace: sameRegularFileIdentityVolumeAndSecurity(
+    privateFileNoReplace: sameRegularFilePhysicalIdentity(
       privateFileBefore,
       privateFileAfter
     ),
@@ -1147,8 +1140,8 @@ try {
       && /^[0-9a-f]{64}$/u.test(closure.closureSha256)
       && JSON.stringify(closure) === JSON.stringify(repeatedClosure),
     directoryClosureLimitsRefused: true,
-    directoryClosureHardLinkRefused: true,
-    directoryClosureForeignFileAclRefused: true,
+    directoryClosureStableHardLinkAdmitted,
+    directoryClosureExistingFileAclAdmitted,
     directoryClosureDriftRefused: true,
     directoryClosureReparseRefusedTargetPreserved: true,
     directoryPublicationFreshNoReplace: freshResult.action === 'committed'
@@ -1164,11 +1157,10 @@ try {
     directoryPublicationDependentDriftRetained: dependentResult.action === 'ambiguous',
     directoryPublicationCorruptJournalRefused: !renameAfterJournalDrift,
     directoryPublicationRestartRecovery: restartRecoveryPassed,
-    operationLockPrivatePersistentNamespace: firstLockRecovery === 'none'
+    operationLockFreshPrivatePersistentNamespace: firstLockRecovery === 'none'
       && lockGuard.object.size === '0000000000000000'
       && lockOwner.object.numberOfLinks === '00000001'
-      && lockGuard.security.ownerSid === lockGuard.security.currentUserSid
-      && lockOwner.security.ownerSid === lockOwner.security.currentUserSid,
+      && freshPrivate(lockGuard) && freshPrivate(lockOwner),
     operationLockAuthorityExpires: true,
     operationLockAuthorizesPublication: lockedPublication.action === 'committed'
       && await readFile(join(lockedPublicationFixture.destination, 'new.txt'), 'utf8') === 'new\n',
@@ -1364,7 +1356,7 @@ function requireCondition(condition, name) {
   if (!condition) throw new Error(`Native conformance failed: ${name}`);
 }
 
-function sameRegularFileIdentityVolumeAndSecurity(before, after) {
+function sameRegularFilePhysicalIdentity(before, after) {
   return before.canonicalPath.toLowerCase() === after.canonicalPath.toLowerCase()
     && before.kind === 'regular-file'
     && after.kind === 'regular-file'
@@ -1390,20 +1382,10 @@ function sameRegularFileIdentityVolumeAndSecurity(before, after) {
     && before.object.deletePending === false
     && after.object.deletePending === false
     && before.object.directory === false
-    && after.object.directory === false
-    && before.security.descriptorControl === after.security.descriptorControl
-    && before.security.daclPresent === after.security.daclPresent
-    && before.security.daclNull === after.security.daclNull
-    && before.security.daclDefaulted === after.security.daclDefaulted
-    && before.security.daclBytes.equals(after.security.daclBytes)
-    && before.security.ownerSid === after.security.ownerSid
-    && before.security.ownerDefaulted === after.security.ownerDefaulted
-    && before.security.groupSid === after.security.groupSid
-    && before.security.groupDefaulted === after.security.groupDefaulted
-    && before.security.currentUserSid === after.security.currentUserSid;
+    && after.object.directory === false;
 }
 
-function sameDirectoryIdentityVolumeAndSecurity(before, after) {
+function sameDirectoryPhysicalIdentity(before, after) {
   return before.canonicalPath.toLowerCase() === after.canonicalPath.toLowerCase()
     && before.kind === 'directory'
     && after.kind === 'directory'
@@ -1422,17 +1404,7 @@ function sameDirectoryIdentityVolumeAndSecurity(before, after) {
     && before.object.deletePending === false
     && after.object.deletePending === false
     && before.object.directory === true
-    && after.object.directory === true
-    && before.security.descriptorControl === after.security.descriptorControl
-    && before.security.daclPresent === after.security.daclPresent
-    && before.security.daclNull === after.security.daclNull
-    && before.security.daclDefaulted === after.security.daclDefaulted
-    && before.security.daclBytes.equals(after.security.daclBytes)
-    && before.security.ownerSid === after.security.ownerSid
-    && before.security.ownerDefaulted === after.security.ownerDefaulted
-    && before.security.groupSid === after.security.groupSid
-    && before.security.groupDefaulted === after.security.groupDefaulted
-    && before.security.currentUserSid === after.security.currentUserSid;
+    && after.object.directory === true;
 }
 
 function replaceCaseInsensitive(value, search, replacement) {

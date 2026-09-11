@@ -24,7 +24,7 @@ async function fixture() {
   const source = receipt('source-tree'), installed = receipt('packed-install');
   const rust = 'rustc 1.88.0 (test)\r\nhost: x86_64-pc-windows-msvc\r\n';
   const msvc = 'Path=C:\\VS\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\cl.exe\r\n';
-  const aggregate = { schemaVersion: 6, purpose: 'Bazframe-owned native foundation evidence only; not release admission or a Windows support claim.',
+  const aggregate = { schemaVersion: 7, purpose: 'Bazframe-owned native foundation evidence only; not release admission or a Windows support claim.',
     completion: 'passed', sourceCommit: commit, runnerImage: 'win22', runnerImageVersion: 'test-image', node: 'v22.19.0', rust,
     msvcToolsVersion: '14.44.35207', msvc, binarySha256, sourceConformance: source, installedConformance: installed,
     releaseAdmission: 'not-authorized', windowsSupportClaim: false };
@@ -127,7 +127,7 @@ describe('qualification-only transfer and promotion', () => {
 
   it('requires every foundation boolean literally true before input transport', async () => {
     const f = await fixture();
-    const names = Object.keys(f.source.observations).slice(3); expect(names).toHaveLength(62);
+    const names = Object.keys(f.source.observations).slice(3); expect(names).toHaveLength(63);
     for (const name of names) for (const value of [false, undefined, 'true']) {
       const changed = structuredClone(f.source);
       (changed.observations as Record<string, unknown>)[name] = value;
@@ -235,7 +235,7 @@ describe('whole-tarball reconstruction', () => {
 
 function receipt(kind: 'source-tree' | 'packed-install') {
   return {
-    schemaVersion: 6,
+    schemaVersion: 7,
     purpose: 'Bazframe-owned native Windows foundation evidence only; not a Windows support claim.',
     environment: { platform: 'win32', arch: 'x64', node: '22.19.0' },
     packageRootKind: kind,
@@ -258,9 +258,10 @@ function receipt(kind: 'source-tree' | 'packed-install') {
       junctionTargetPreserved: true,
       membershipJunctionDirectTarget: true,
       membershipJunctionNoReplace: true,
+      membershipCreationReceiptLossRetained: true,
       membershipJunctionExactInspection: true,
       membershipJunctionImmediateRevalidation: true,
-      membershipLinkSecurityAdmitted: true,
+      membershipExistingAclAdmitted: true,
       membershipForeignReparseRefused: true,
       membershipLinkOnlyRemoval: true,
       membershipRemovalReconciled: true,
@@ -284,8 +285,8 @@ function receipt(kind: 'source-tree' | 'packed-install') {
       directoryReparseObservedAsLeaf: true,
       boundedDirectoryClosure: true,
       directoryClosureLimitsRefused: true,
-      directoryClosureHardLinkRefused: true,
-      directoryClosureForeignFileAclRefused: true,
+      directoryClosureStableHardLinkAdmitted: true,
+      directoryClosureExistingFileAclAdmitted: true,
       directoryClosureDriftRefused: true,
       directoryClosureReparseRefusedTargetPreserved: true,
       directoryPublicationFreshNoReplace: true,
@@ -298,7 +299,7 @@ function receipt(kind: 'source-tree' | 'packed-install') {
       directoryPublicationDependentDriftRetained: true,
       directoryPublicationCorruptJournalRefused: true,
       directoryPublicationRestartRecovery: true,
-      operationLockPrivatePersistentNamespace: true,
+      operationLockFreshPrivatePersistentNamespace: true,
       operationLockAuthorityExpires: true,
       operationLockAuthorizesPublication: true,
       operationLockContentionAnnounced: true,
@@ -315,7 +316,7 @@ function receipt(kind: 'source-tree' | 'packed-install') {
 
 function productReceipt(packageRootKind: 'source-tree' | 'packed-install') {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     purpose: 'Internal managed profile activation, current selection, onboarding and healthy local added-Skill Windows product-slice evidence only.',
     packageRootKind,
     completion: 'passed',

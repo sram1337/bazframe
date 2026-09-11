@@ -14,19 +14,7 @@ export function stableWindowsPathInspection(value: WindowsPathInspection) {
       canonicalVolumeGuidPath: value.volume.canonicalVolumeGuidPath,
       remoteDevice: value.volume.remoteDevice
     },
-    object: stableWindowsObjectObservation(value.object),
-    security: {
-      descriptorControl: value.security.descriptorControl,
-      daclPresent: value.security.daclPresent,
-      daclNull: value.security.daclNull,
-      daclDefaulted: value.security.daclDefaulted,
-      daclBytesBase64: value.security.daclBytes.toString('base64'),
-      ownerSid: value.security.ownerSid,
-      ownerDefaulted: value.security.ownerDefaulted,
-      groupSid: value.security.groupSid,
-      groupDefaulted: value.security.groupDefaulted,
-      currentUserSid: value.security.currentUserSid
-    }
+    object: stableWindowsObjectObservation(value.object)
   };
 }
 
@@ -59,18 +47,6 @@ export function stableWindowsMembershipLinkInspection(value: WindowsMembershipLi
       remoteDevice: value.volume.remoteDevice
     },
     object: stableWindowsObjectObservation(value.object),
-    security: {
-      descriptorControl: value.security.descriptorControl,
-      daclPresent: value.security.daclPresent,
-      daclNull: value.security.daclNull,
-      daclDefaulted: value.security.daclDefaulted,
-      daclBytesBase64: value.security.daclBytes.toString('base64'),
-      ownerSid: value.security.ownerSid,
-      ownerDefaulted: value.security.ownerDefaulted,
-      groupSid: value.security.groupSid,
-      groupDefaulted: value.security.groupDefaulted,
-      currentUserSid: value.security.currentUserSid
-    },
     normalizedTarget: value.normalizedTarget,
     targetVolumeIdentity: value.targetVolumeIdentity,
     targetFileId: value.targetFileId

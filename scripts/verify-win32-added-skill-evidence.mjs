@@ -27,7 +27,7 @@ export function verifyProductReceipt(value, packageRootKind, binarySha256) {
     'observations',
     'failures'
   ]);
-  if (value.schemaVersion !== 3
+  if (value.schemaVersion !== 4
     || value.purpose !== 'Internal managed profile activation, current selection, onboarding and healthy local added-Skill Windows product-slice evidence only.'
     || value.packageRootKind !== packageRootKind
     || value.completion !== 'passed'

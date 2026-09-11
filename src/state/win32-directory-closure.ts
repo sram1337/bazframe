@@ -5,14 +5,13 @@ import type {
   WindowsDirectoryEntryObservation,
   WindowsObjectObservation,
   WindowsPathInspection,
-  WindowsSecurityObservation,
   WindowsStableDirectoryEnumerationReceipt
 } from '../core/win32-native.js';
 import { BazframeError, errorCode } from '../core/errors.js';
 import { PROFILE_PORTABILITY_PRODUCTION_LIMITS } from '../profile-portability/profile-portability-policy.js';
 import {
-  admitWindowsPrivateDirectory,
-  admitWindowsPrivateFile,
+  admitWindowsPhysicalDirectory,
+  admitWindowsPhysicalFile,
   isValidWindowsPathComponent
 } from './win32-private-directory.js';
 
@@ -83,16 +82,16 @@ export async function captureWindowsDirectoryClosure(
   hooks: WindowsDirectoryClosureHooks = {}
 ): Promise<WindowsDirectoryClosureExpectation> {
   const policy = windowsDirectoryClosurePolicy(lowerLimits);
-  const initialRoot = admitWindowsPrivateDirectory(backend, rootPath);
+  const initialRoot = admitWindowsPhysicalDirectory(backend, rootPath);
   const first = await capturePass(backend, rootPath, initialRoot, policy);
   await hooks.beforeSecondPass?.();
   const second = await capturePass(backend, rootPath, initialRoot, policy);
   if (first.canonical !== second.canonical) {
     throw changed('directory contents changed between closure passes');
   }
-  const finalRoot = admitWindowsPrivateDirectory(backend, rootPath);
+  const finalRoot = admitWindowsPhysicalDirectory(backend, rootPath);
   if (!sameDirectoryInspection(initialRoot, finalRoot)) {
-    throw changed('directory root or private ancestry changed while capturing its closure',
+    throw changed('directory root or physical ancestry changed while capturing its closure',
       comparisonDiagnostic('initial-vs-final-root', 'directory', directoryDifferences(initialRoot, finalRoot)));
   }
   const rootIdentity = identity(initialRoot.object);
@@ -207,10 +206,10 @@ async function walkDirectory(
     if (entry.directory) {
       let child: WindowsPathInspection;
       try {
-        child = admitWindowsPrivateDirectory(backend, childPath);
+        child = admitWindowsPhysicalDirectory(backend, childPath);
       } catch (error) {
-        if (errorCode(error) === 'WINDOWS_PRIVATE_DIRECTORY_PRIVACY_UNPROVED') {
-          throw invalid('listed directory is not owner-private', error);
+        if (errorCode(error) === 'WINDOWS_DIRECTORY_PROOF_INVALID') {
+          throw invalid('listed directory is not physical', error);
         }
         throw changed('listed directory could not be admitted after enumeration', error);
       }
@@ -236,10 +235,10 @@ async function walkDirectory(
 
     let inspected: WindowsPathInspection;
     try {
-      inspected = admitWindowsPrivateFile(backend, childPath);
+      inspected = admitWindowsPhysicalFile(backend, childPath);
     } catch (error) {
-      if (errorCode(error) === 'WINDOWS_PRIVATE_FILE_PRIVACY_UNPROVED') {
-        throw invalid('listed file is not an owner-private single-link regular file', error);
+      if (errorCode(error) === 'WINDOWS_FILE_PROOF_INVALID') {
+        throw invalid('listed file is not a physical regular file', error);
       }
       throw changed('listed file could not be admitted after enumeration', error);
     }
@@ -264,15 +263,14 @@ async function walkDirectory(
     }
     let afterRead: WindowsPathInspection;
     try {
-      afterRead = admitWindowsPrivateFile(backend, childPath);
+      afterRead = admitWindowsPhysicalFile(backend, childPath);
     } catch (error) {
-      throw changed('directory closure file privacy or identity changed while reading', error);
+      throw changed('directory closure file physical state or identity changed while reading', error);
     }
     requireDirectChild(receipt.directoryBefore, afterRead, entry.name);
     requireEntryMatchesObject(entry, afterRead.object, 'entry-vs-file-final-open');
-    if (!sameObject(stable.after, afterRead.object)
-      || !sameSecurity(inspected.security, afterRead.security)) {
-      throw changed('directory closure file security changed while reading');
+    if (!sameObject(stable.after, afterRead.object)) {
+      throw changed('directory closure file identity changed while reading');
     }
     traversal.aggregateBytes += stable.bytes.byteLength;
     traversal.entries.push({
@@ -308,8 +306,7 @@ function sameDirectoryInspection(a: WindowsPathInspection, b: WindowsPathInspect
   return a.canonicalPath.toLowerCase() === b.canonicalPath.toLowerCase()
     && a.kind === 'directory' && b.kind === 'directory'
     && a.volume.identity === b.volume.identity
-    && sameObject(a.object, b.object)
-    && sameSecurity(a.security, b.security);
+    && sameObject(a.object, b.object);
 }
 
 export function requireDirectChild(
@@ -378,19 +375,6 @@ function sameObject(a: WindowsObjectObservation, b: WindowsObjectObservation): b
     && a.directory === b.directory;
 }
 
-function sameSecurity(a: WindowsSecurityObservation, b: WindowsSecurityObservation): boolean {
-  return a.descriptorControl === b.descriptorControl
-    && a.daclPresent === b.daclPresent
-    && a.daclNull === b.daclNull
-    && a.daclDefaulted === b.daclDefaulted
-    && a.daclBytes.equals(b.daclBytes)
-    && a.ownerSid === b.ownerSid
-    && a.ownerDefaulted === b.ownerDefaulted
-    && a.groupSid === b.groupSid
-    && a.groupDefaulted === b.groupDefaulted
-    && a.currentUserSid === b.currentUserSid;
-}
-
 // Diagnostics run only after the unchanged authorization comparisons fail.
 // Enumerate static field names; never include observed values or entry names.
 const ENTRY_OBJECT_FIELDS = [
@@ -399,10 +383,6 @@ const ENTRY_OBJECT_FIELDS = [
 ] as const;
 const OBJECT_FIELDS = [
   'volumeIdentity', ...ENTRY_OBJECT_FIELDS, 'numberOfLinks', 'deletePending'
-] as const;
-const SECURITY_FIELDS = [
-  'descriptorControl', 'daclPresent', 'daclNull', 'daclDefaulted', 'ownerSid',
-  'ownerDefaulted', 'groupSid', 'groupDefaulted', 'currentUserSid'
 ] as const;
 type ClosureComparison =
   | 'initial-vs-final-root' | 'expected-vs-enumeration-before' | 'enumeration-before-vs-after'
@@ -421,8 +401,6 @@ function directoryDifferences(a: WindowsPathInspection, b: WindowsPathInspection
     ...(a.kind !== 'directory' || b.kind !== 'directory' ? ['kind'] : []),
     ...(a.volume.identity !== b.volume.identity ? ['volume.identity'] : []),
     ...OBJECT_FIELDS.filter((field) => a.object[field] !== b.object[field]).map((field) => `object.${field}`),
-    ...SECURITY_FIELDS.filter((field) => a.security[field] !== b.security[field]).map((field) => `security.${field}`),
-    ...(!a.security.daclBytes.equals(b.security.daclBytes) ? ['security.daclBytes'] : [])
   ];
 }
 

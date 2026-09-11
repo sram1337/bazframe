@@ -1,0 +1,645 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A source-linked walkthrough of Bazframe's callers, runtime consumers, modules, storage, utilities, and engineering conventions.">
+  <title>Bazframe — Architecture walkthrough</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #f7f8fa; --surface: #fff; --ink: #1c2637; --muted: #536175;
+      --line: #dce2e9; --blue: #354bc0; --teal: #08685c; --amber: #82501b;
+      --sidebar: #172132; --side-ink: #dce4f2; --radius: 14px;
+      --mono: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; scroll-padding-top: 24px; }
+    body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.65 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    a { color: var(--blue); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+    a:hover { text-decoration-thickness: 2px; }
+    :focus-visible { outline: 3px solid #bf6708; outline-offset: 4px; }
+    button, input { font: inherit; }
+    button { cursor: pointer; }
+    [hidden] { display: none !important; }
+    .skip { position: fixed; top: -100px; left: 20px; z-index: 10; padding: 12px 20px; background: white; }
+    .skip:focus { top: 12px; }
+    .sidebar { position: fixed; inset: 0 auto 0 0; width: 254px; overflow-y: auto; padding: 34px 24px; background: var(--sidebar); color: var(--side-ink); display: flex; flex-direction: column; }
+    .brand { color: white; font-size: 23px; font-weight: 760; letter-spacing: -.8px; text-decoration: none; }
+    .brand-mark { display: inline-grid; place-items: center; width: 31px; height: 31px; margin-right: 9px; background: #bfd2ff; color: #172132; border-radius: 8px; font: 750 20px var(--mono); }
+    .sidebar .subtitle { color: #a8b6cd; font-size: 13px; margin: 8px 0 32px; }
+    .nav-label { color: #99abc7; font: 600 11px var(--mono); text-transform: uppercase; letter-spacing: 1.5px; margin: 0 10px 12px; }
+    nav { display: grid; gap: 4px; }
+    nav a { display: flex; gap: 13px; align-items: baseline; padding: 9px 10px; border-radius: 7px; color: #c1cce0; text-decoration: none; font-size: 14px; }
+    nav a span { font: 11px var(--mono); color: #99abc7; }
+    nav a:hover, nav a[aria-current="location"] { background: #2a3750; color: white; }
+    .side-bottom { margin-top: auto; padding-top: 38px; font-size: 12px; color: #a8b6cd; }
+    .side-bottom a { color: #d2def8; }
+    .side-bottom code { background: transparent; color: inherit; padding: 0; }
+    main { max-width: 1480px; margin-left: 254px; padding: 55px clamp(26px, 5vw, 84px) 45px; }
+    .eyebrow { font: 650 11px var(--mono); text-transform: uppercase; letter-spacing: 1.8px; color: var(--teal); margin: 0 0 18px; }
+    h1 { font-size: clamp(36px, 4.1vw, 60px); line-height: 1.08; letter-spacing: -2.3px; margin: 0 0 24px; max-width: 850px; }
+    h1 span { color: var(--blue); }
+    .lead { font-size: 19px; line-height: 1.65; color: var(--muted); max-width: 820px; margin: 0 0 25px; }
+    .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; margin-bottom: 28px; }
+    .pill { font: 550 11px/1.5 var(--mono); padding: 5px 10px; border: 1px solid var(--line); border-radius: 99px; background: white; color: var(--muted); }
+    .pill.green { background: #eaf5f0; color: var(--teal); border-color: #c6e4d9; }
+    .button { border: 1px solid var(--line); border-radius: 7px; background: white; color: var(--ink); padding: 7px 13px; font-size: 12px; font-weight: 650; }
+    .button:hover { background: #edf0f7; }
+    section { margin-top: 65px; scroll-margin-top: 24px; }
+    .section-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 13px; }
+    .section-head .number { font: 600 12px var(--mono); color: var(--blue); }
+    h2 { font-size: 28px; line-height: 1.25; letter-spacing: -.8px; margin: 0; }
+    h3 { font-size: 18px; line-height: 1.4; letter-spacing: -.25px; margin: 0 0 10px; }
+    h4 { font-size: 15px; margin: 18px 0 6px; }
+    p { margin: 0 0 15px; }
+    .intro { color: var(--muted); max-width: 850px; margin-bottom: 24px; }
+    .small { font-size: 13px; color: var(--muted); }
+    code { font: .85em/1.55 var(--mono); padding: 2px 5px; border-radius: 4px; background: #edf0f5; overflow-wrap: anywhere; }
+    a code { color: inherit; }
+    pre { font: 12px/1.8 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+    pre code { font: inherit; padding: 0; background: transparent; }
+    ul, ol { padding-left: 21px; margin: 10px 0 0; }
+    li + li { margin-top: 8px; }
+    .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+    .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 23px; min-width: 0; }
+    .card p:last-child { margin-bottom: 0; }
+    .card .label { font: 650 10px var(--mono); text-transform: uppercase; letter-spacing: 1.3px; color: var(--teal); margin-bottom: 14px; }
+    .callout { padding: 18px 22px; border-left: 3px solid var(--blue); background: #edf0fd; border-radius: 0 8px 8px 0; margin: 23px 0; font-size: 14px; }
+    .callout.warn { border-color: #a26925; background: #fcf3e6; }
+    .callout p:last-child { margin-bottom: 0; }
+    .map { padding: 28px; border: 1px solid var(--line); background: white; border-radius: var(--radius); }
+    .map-row { display: grid; grid-template-columns: 105px minmax(0, 1fr); gap: 16px; align-items: center; }
+    .map-label { color: var(--muted); font: 550 10px/1.6 var(--mono); text-transform: uppercase; letter-spacing: 1px; }
+    .map-nodes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .node { padding: 16px; border: 1px solid #d7deec; border-radius: 9px; background: #f6f8fc; color: var(--ink); text-decoration: none; line-height: 1.45; }
+    .node strong { display: block; font-size: 14px; margin-bottom: 5px; }
+    .node small { display: block; color: var(--muted); font-size: 11px; }
+    .node:hover { border-color: var(--blue); background: #eef1ff; }
+    .node.domain { background: #edf6f3; border-color: #d0e4dd; }
+    .node.effect { background: #faf4e9; border-color: #eadfcb; }
+    .map-arrow { margin: 9px 0 9px 121px; color: var(--muted); font-size: 11px; }
+    .map-arrow b { color: var(--blue); margin-right: 8px; }
+    .map-caption { margin: 19px 0 0; color: var(--muted); font-size: 12px; }
+    .flow-line { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; margin: 15px 0; font-size: 12px; color: var(--muted); }
+    .flow-line code { color: var(--ink); }
+    .comparison { margin-top: 18px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--line); }
+    .comparison > div { padding: 20px; background: white; min-width: 0; }
+    .comparison strong { display: block; font-size: 15px; margin-bottom: 7px; }
+    .comparison p { font-size: 13px; margin: 0; }
+    .section-tools { display: flex; justify-content: space-between; align-items: center; gap: 15px; margin-bottom: 15px; }
+    details { border: 1px solid var(--line); border-radius: 10px; background: white; margin-bottom: 12px; }
+    summary { cursor: pointer; padding: 20px 23px; font-weight: 650; font-size: 15px; }
+    summary::marker { color: var(--blue); }
+    summary .tag { float: right; font: 10px/2 var(--mono); color: var(--teal); margin-left: 12px; }
+    details[open] summary { border-bottom: 1px solid var(--line); }
+    .detail-body { padding: 22px 26px; }
+    .steps { list-style: none; counter-reset: steps; padding: 0; margin: 0; }
+    .steps li { counter-increment: steps; position: relative; padding: 0 0 18px 39px; margin: 0; font-size: 14px; }
+    .steps li:last-child { padding-bottom: 0; }
+    .steps li::before { content: counter(steps); position: absolute; left: 0; top: 0; width: 25px; height: 25px; display: grid; place-items: center; color: var(--blue); background: #eef0fc; border-radius: 50%; font: 600 11px var(--mono); }
+    .steps strong { display: block; margin-bottom: 4px; }
+    .steps p { margin: 0; }
+    .outcome { margin-top: 18px; padding-top: 15px; border-top: 1px dashed var(--line); font-size: 13px; color: var(--teal); }
+    .search { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+    .search label { font-size: 13px; font-weight: 650; }
+    .search input { min-width: 0; flex: 1; padding: 10px 13px; background: white; border: 1px solid #b9c3d3; border-radius: 7px; color: var(--ink); font-size: 14px; }
+    .search output { min-width: 86px; font: 11px var(--mono); color: var(--muted); }
+    .module { padding: 23px 25px; background: white; border: 1px solid var(--line); border-radius: 10px; margin-bottom: 12px; }
+    .module h3 { font-family: var(--mono); font-size: 15px; color: var(--blue); }
+    .module p { font-size: 14px; margin-bottom: 12px; }
+    .module-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; font-size: 12px; padding-top: 12px; border-top: 1px solid #edf0f4; color: var(--muted); }
+    .module-meta b { color: var(--ink); }
+    .files { display: flex; gap: 6px 12px; flex-wrap: wrap; margin-bottom: 14px; }
+    .files a { font: 11px/1.75 var(--mono); overflow-wrap: anywhere; }
+    .storage { background: #1c283a; color: #dfe8f8; border-radius: var(--radius); padding: 27px; }
+    .storage .comment { color: #9fb6d4; }
+    .storage .highlight { color: #a2dfc8; }
+    .table-wrap { overflow-x: auto; background: white; border: 1px solid var(--line); border-radius: 10px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; text-align: left; }
+    th { background: #edf0f5; color: var(--muted); font-size: 11px; letter-spacing: .7px; text-transform: uppercase; }
+    th, td { padding: 16px 19px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    tr:last-child td { border-bottom: 0; }
+    td:first-child { width: 30%; }
+    td p { margin: 6px 0 0; }
+    .rules { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; counter-reset: rules; }
+    .rule { counter-increment: rules; padding: 22px; border-top: 2px solid #cbd4e9; background: white; }
+    .rule h3 { font-size: 16px; }
+    .rule h3::before { content: counter(rules, decimal-leading-zero) " / "; color: var(--blue); font: 11px var(--mono); }
+    .rule p { font-size: 13px; margin: 0; }
+    .reading { padding: 0; list-style: none; counter-reset: reading; }
+    .reading li { counter-increment: reading; padding: 16px 0 16px 39px; position: relative; border-bottom: 1px solid var(--line); margin: 0; font-size: 14px; }
+    .reading li::before { content: counter(reading); position: absolute; left: 0; color: var(--teal); font: 600 13px/2 var(--mono); }
+    .reading p { margin: 5px 0 0; color: var(--muted); font-size: 13px; }
+    footer { border-top: 1px solid var(--line); margin-top: 55px; padding-top: 22px; color: var(--muted); font-size: 12px; }
+    @media (min-width: 1750px) { main { margin-left: max(254px, calc((100vw - 1226px) / 2)); } }
+    @media (max-width: 1150px) {
+      .sidebar { width: 218px; padding: 28px 17px; }
+      main { margin-left: 218px; padding: 40px 28px; }
+      .grid { grid-template-columns: 1fr; }
+      .map { padding: 20px; }
+      .map-row { grid-template-columns: 1fr; gap: 9px; }
+      .map-arrow { margin-left: 0; }
+    }
+    @media (max-width: 760px) {
+      .sidebar { position: static; width: auto; padding: 22px; }
+      .sidebar .subtitle { margin-bottom: 18px; }
+      .nav-label, .side-bottom { display: none; }
+      nav { display: flex; overflow-x: auto; gap: 5px; padding-bottom: 7px; }
+      nav a { flex-shrink: 0; font-size: 12px; padding: 7px 9px; }
+      main { margin-left: 0; padding: 33px 20px; }
+      h1 { letter-spacing: -1.4px; }
+      h2 { font-size: 24px; }
+      .lead { font-size: 17px; }
+      section { margin-top: 45px; }
+      .grid.two, .comparison, .rules, .module-meta { grid-template-columns: 1fr; }
+      .map-nodes { grid-template-columns: 1fr; }
+      .node { padding: 13px 16px; }
+      .map-caption { font-size: 11px; }
+      summary { padding: 17px; }
+      summary .tag { float: none; display: block; margin: 5px 0 0; }
+      .detail-body { padding: 19px 17px; }
+      .module { padding: 20px; }
+      .storage { padding: 20px; }
+      .search label { width: 100%; }
+      th, td { padding: 13px; }
+    }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+    @media print {
+      :root { --paper: white; --ink: black; --muted: #333; --line: #bbb; }
+      body { font-size: 10pt; }
+      .sidebar, .skip, .js-tool { display: none !important; }
+      main { margin: 0; padding: 0; max-width: none; }
+      h1 { font-size: 30pt; }
+      h2 { font-size: 19pt; }
+      section { margin-top: 28px; }
+      a { color: #243b87; }
+      .card, .module, .rule, .map, tr { break-inside: avoid; }
+      .storage { background: #f3f3f3; color: black; }
+      .storage .comment, .storage .highlight { color: #333; }
+      .map-row { grid-template-columns: 100px minmax(0, 1fr); }
+      .map-nodes { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .module[hidden] { display: block !important; }
+      .grid.two, .rules { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to walkthrough</a>
+  <aside class="sidebar" aria-label="Walkthrough navigation">
+    <a class="brand" href="#overview"><span class="brand-mark" aria-hidden="true">b</span>bazframe</a>
+    <p class="subtitle">Architecture walkthrough</p>
+    <p class="nav-label">Contents</p>
+    <nav aria-label="Sections">
+      <a href="#overview" aria-current="location"><span>01</span>Overview</a>
+      <a href="#callers"><span>02</span>Callers &amp; consumers</a>
+      <a href="#objects"><span>03</span>The object model</a>
+      <a href="#journeys"><span>04</span>Trace an operation</a>
+      <a href="#modules"><span>05</span>Module index</a>
+      <a href="#storage"><span>06</span>State &amp; ownership</a>
+      <a href="#utilities"><span>07</span>Shared utilities</a>
+      <a href="#conventions"><span>08</span>Code conventions</a>
+      <a href="#platform"><span>09</span>Platform boundary</a>
+      <a href="#reading"><span>10</span>Where to start</a>
+    </nav>
+    <div class="side-bottom">
+      <p>Implementation reference.</p>
+      <p>Authority: <a href="design.md">docs/design.md</a><br>Source baseline: <code>8adaf2c</code></p>
+    </div>
+  </aside>
+
+  <main id="main">
+    <header>
+      <p class="eyebrow">Engineering / Bazframe 2</p>
+      <h1>Bazframe<br><span>architecture</span></h1>
+      <p class="lead">Bazframe composes standard Skills and personal instructions into profiles, then projects the selected profile into a coding agent. This guide describes the code that acquires, stores, selects, and applies those resources.</p>
+      <div class="meta">
+        <span class="pill">Source snapshot · 8adaf2c</span>
+        <span class="pill">0.1.0-beta.3</span>
+        <span class="pill green">Public support · macOS / Linux</span>
+        <button class="button js-tool" id="print-page" type="button" hidden>Print / save PDF</button>
+      </div>
+      <p class="small">Self-contained page; no external assets. Source links open files relative to this repository checkout. <a href="design.md">Product design</a> remains authoritative as the implementation changes.</p>
+    </header>
+
+    <section id="overview" aria-labelledby="overview-title">
+      <div class="section-head"><span class="number">01</span><h2 id="overview-title">Overview</h2></div>
+      <p class="intro">Bazframe is a local, filesystem-backed application with CLI, TUI, and Pi extension entry points. CLI and TUI operations manage state. The installed Pi extension consumes that state at startup and reload.</p>
+      <div class="map" aria-label="Logical architecture: callers, product decisions, effects, and consumers">
+        <div class="map-row">
+          <div class="map-label">Callers</div>
+          <div class="map-nodes">
+            <a class="node" href="#caller-cli"><strong>bazframe / bzf</strong><small>argv → command dispatch → text or JSON</small></a>
+            <a class="node" href="#caller-tui"><strong>Terminal UI</strong><small>keyboard → typed service methods</small></a>
+            <a class="node" href="#caller-pi"><strong>Pi extension hooks</strong><small>resource discovery + prompt composition</small></a>
+          </div>
+        </div>
+        <div class="map-arrow"><b>↓</b> intent, explicit targets, environment, injected services</div>
+        <div class="map-row">
+          <div class="map-label">Product decisions</div>
+          <div class="map-nodes">
+            <a class="node domain" href="#module-profiles"><strong>Profiles &amp; policy</strong><small>membership, lifecycle, selection, overrides</small></a>
+            <a class="node domain" href="#module-collections"><strong>Resources</strong><small>added Skills, preparation, snapshots, resolution</small></a>
+            <a class="node domain" href="#module-publishing"><strong>Sharing &amp; identity</strong><small>capture, import, publication, recovery</small></a>
+          </div>
+        </div>
+        <div class="map-arrow"><b>↓</b> domain functions use default effects or explicit service interfaces</div>
+        <div class="map-row">
+          <div class="map-label">Effects &amp; storage</div>
+          <div class="map-nodes">
+            <a class="node effect" href="#storage"><strong>Managed filesystem</strong><small>records, links, immutable bytes, locks, journals</small></a>
+            <a class="node effect" href="#module-providers"><strong>External processes</strong><small>Git / gh, authorized builds, editors</small></a>
+            <a class="node effect" href="#platform"><strong>Platform implementations</strong><small>Node/POSIX defaults; internal Windows backend</small></a>
+          </div>
+        </div>
+        <div class="map-arrow"><b>↑</b> validated data returns to callers and runtime consumers</div>
+        <div class="map-row">
+          <div class="map-label">Consumers</div>
+          <div class="map-nodes">
+            <a class="node" href="#module-status"><strong>People &amp; scripts</strong><small>status, dashboards, result documents</small></a>
+            <a class="node" href="#journey-runtime"><strong>Pi runtime</strong><small>Skill paths + instruction sections</small></a>
+            <a class="node" href="#journey-sharing"><strong>Another installation</strong><small>deterministic ZIP / exact Git revision</small></a>
+          </div>
+        </div>
+        <p class="map-caption">Logical responsibilities, not a strict import-layer diagram. The CLI calls domain functions directly. The shipped Pi artifact contains its own supported-platform readers; it does not simply call the CLI or TUI service.</p>
+      </div>
+      <div class="callout"><strong>Separate operations:</strong> acquisition changes which resources are available; membership changes what a profile includes; selection changes which profile is active; projection determines which resources and instructions a runtime receives.</div>
+    </section>
+
+    <section id="callers" aria-labelledby="callers-title">
+      <div class="section-head"><span class="number">02</span><h2 id="callers-title">Callers &amp; consumers</h2></div>
+      <p class="intro">Start with the entry point for the operation. The CLI, TUI, and Pi extension have distinct dispatch paths rather than a single shared controller.</p>
+      <div class="grid">
+        <article class="card" id="caller-cli">
+          <div class="label">Management / scripting</div><h3>The CLI is the dispatcher</h3>
+          <p><a href="../src/cli.ts"><code>src/cli.ts</code></a> passes argv to <a href="../src/cli/run-cli.ts"><code>runCli()</code></a> and sets the process exit code. <a href="../src/cli/parse-argv.ts"><code>parseArgv()</code></a> produces typed commands, help, version, or usage errors.</p>
+          <p>Dispatch applies the platform check, composes application effects, arranges applicable lifecycle recovery, then calls the domain operation. Presentation turns results into human text or one JSON document.</p>
+          <p class="small"><strong>Consumers:</strong> interactive users, shell automation, integration tests. Both installed executable names target <code>dist/cli.js</code>.</p>
+        </article>
+        <article class="card" id="caller-tui">
+          <div class="label">Interactive management</div><h3>The TUI uses typed methods</h3>
+          <p><a href="../src/tui/run-tui.tsx"><code>runTui()</code></a> constructs <a href="../src/application/tui-service.ts"><code>BazframeTuiService</code></a> and renders <a href="../src/tui/app.tsx"><code>TuiApp</code></a>. Ink and React load only after CLI dispatch to <code>tui</code>.</p>
+          <p>The service returns <code>DashboardSnapshot</code> data and calls shared profile/resource functions. <a href="../src/tui/state.ts"><code>state.ts</code></a> owns navigation, selection, layout, and display helpers—not filesystem transactions.</p>
+          <p class="small"><strong>Boundary:</strong> no CLI subprocesses. Profile actions, individual membership, editors, and consent-bound library addition form the current writable UI surface; Settings and Adapters are read-only.</p>
+        </article>
+        <article class="card" id="caller-pi">
+          <div class="label">Runtime integration</div><h3>Pi loads an owned artifact</h3>
+          <p><a href="../src/adapters/pi/installer.ts"><code>installPiAdapter()</code></a> installs <a href="../artifacts/pi/bazframe.ts"><code>artifacts/pi/bazframe.ts</code></a> into Pi's global extension directory. Users then launch <code>pi</code> directly.</p>
+          <p>The extension resolves policy and the active profile, contributes <code>skillPaths</code>, appends instructions, and implements <code>/bazframe info</code> and <code>/bazframe reload</code>.</p>
+          <p class="small"><strong>Boundary:</strong> Pi owns tools, models, trust, native resources, and execution. The deprecated <code>bazframe pi</code> launcher is a separate path, not the primary adapter architecture.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="objects" aria-labelledby="objects-title">
+      <div class="section-head"><span class="number">03</span><h2 id="objects-title">The object model</h2></div>
+      <p class="intro">All Skills use the Agent Skills format. Bazframe manages their ownership, membership, snapshots, and runtime selection.</p>
+      <div class="comparison">
+        <div><strong>Added Skill → live bytes</strong><p>The <code>(default)</code> catalog registers one canonical source directory. Profile memberships point directly to the same target, rather than through the catalog link. Local source owners retain the bytes; remote Git sources use Bazframe-managed checkouts.</p></div>
+        <div><strong>Library → prepared snapshot</strong><p>An already-prepared directory, with no build declaration. Its entire root becomes an immutable snapshot. A profile references the whole library; runtime reads use the activated snapshot, not mutable source input.</p></div>
+        <div><strong>Package → built snapshot</strong><p>A source project with an exact <code>bazframe-package.json</code>. Explicit build intent produces an artifact. Bazframe snapshots the entire artifact root and discovers Skills under its declared Skills root.</p></div>
+      </div>
+      <div class="grid two" style="margin-top: 16px">
+        <article class="card"><h3>Stored profile</h3><p><code>AGENTS.md</code> + individual Skills + typed whole-library/package references. Managed sharing adds a local identity/publication sidecar. Rename preserves identity; duplicate creates a new profile identity and clears publication linkage.</p><p class="small">Ordinary collection references follow a global record's activated digest. Imported resources have stable identities and may use qualified display selectors only when collisions require them.</p></article>
+        <article class="card"><h3>Effective harness</h3><p>A resolved runtime view, not another profile to persist. Project overrides take precedence over global policy; absent global policy means enabled. When enabled, Pi's native layers and the selected personal profile contribute to the session.</p><p class="small">Instruction contents remain opaque. Bazframe preserves their text and supplier provenance; it does not reconcile contradictory prose or promise semantic precedence.</p></article>
+      </div>
+      <div class="callout"><strong>Collision handling.</strong> Inside profile composition, duplicate names reject activation or withhold whole conflicting collections; stored resources are not renamed. At Pi's existing Skill-command boundary, Bazframe can project one deterministic <code>-x-bazframe</code> alias into its runtime cache. An occupied alias is a visible projection failure.</div>
+    </section>
+
+    <section id="journeys" aria-labelledby="journeys-title">
+      <div class="section-head"><span class="number">04</span><h2 id="journeys-title">Trace an operation</h2></div>
+      <div class="section-tools"><p class="small" style="margin: 0">Concrete call paths, with the point at which state changes.</p><button class="button js-tool" id="toggle-journeys" type="button" hidden>Expand all</button></div>
+      <details id="journey-membership" open>
+        <summary>Attach an added Skill to a profile <span class="tag">MEMBERSHIP WRITE</span></summary>
+        <div class="detail-body">
+          <div class="flow-line"><code>profile skill add --profile personal review</code><span>→</span><code>addProfileSkill()</code><span>→</span><code>profiles/personal/skills/review</code></div>
+          <ol class="steps">
+            <li><strong>Parse the command and select the target.</strong><p><a href="../src/cli/run-cli.ts">CLI dispatch</a> distinguishes explicit <code>--profile</code> from active-profile shorthand. The TUI calls <code>addMembership(profileId, skill)</code> with an explicit target.</p></li>
+            <li><strong>Choose ordinary membership or imported identity.</strong><p>Ordinary added Skills use <a href="../src/profiles/profile-skill-membership.ts"><code>addProfileSkill()</code></a> and <a href="../src/skills/default-skill-catalog.ts"><code>readDefaultSkillRegistration()</code></a>. Imported selectors resolve through <a href="../src/profile-publishing/profile-resource-membership.ts"><code>mutateImportedProfileResourceMembership()</code></a>, using stable resource identities instead of catalog links.</p></li>
+            <li><strong>Validate and publish only the membership.</strong><p>The ordinary path takes the global state lock before the profile membership lock, verifies the expected registration and source, and publishes the parallel link. Existing foreign or mismatched entries are refused rather than replaced.</p></li>
+            <li><strong>Consume at the next runtime discovery.</strong><p>Pi loads the profile's Skill directories at startup/reload. Full Skill validation belongs at the runtime loader boundary; adding membership does not execute the Skill.</p></li>
+          </ol>
+          <div class="outcome">Changed: the target profile's membership. Unchanged: source content, global active selection, and every other profile.</div>
+        </div>
+      </details>
+      <details id="journey-activation">
+        <summary>Activate a library update or package build <span class="tag">SNAPSHOT + RECORD WRITE</span></summary>
+        <div class="detail-body">
+          <div class="flow-line"><code>updateLibrary() / buildPackage()</code><span>→</span><code>prepare*</code><span>→</span><code>validate dependents</code><span>→</span><code>activate digest</code></div>
+          <ol class="steps">
+            <li><strong>Enter the shared collection lifecycle under the global lock.</strong><p><a href="../src/skill-collections/skill-collection-lifecycle.ts">Collection lifecycle</a> validates the record and canonical source identity. Remote updates first enter <a href="../src/providers/managed-git.ts">managed Git orchestration</a>, which composes the collection engine with checkout/provenance changes.</p></li>
+            <li><strong>Prepare immutable input.</strong><p><a href="../src/skill-collections/skill-collection-preparation.ts"><code>prepareLibrary()</code></a> copies prepared bytes without executing code. <code>preparePackage()</code> validates the manifest and authorized build, runs literal argv, then snapshots the declared artifact through <a href="../src/skill-collections/skill-snapshot.ts"><code>publishSkillSnapshot()</code></a>.</p></li>
+            <li><strong>Validate the candidate and every referencing profile.</strong><p><a href="../src/skill-collections/skill-collection-resolver.ts"><code>validateProspectiveSkillCollection()</code></a> checks composition against the <a href="../src/profiles/profile-skill-collection-reference.ts">reference index</a>. Duplicate Skill names, invalid definitions, or an uncertain reference index block activation.</p></li>
+            <li><strong>Revalidate, then replace the descriptor.</strong><p>Recheck the source, declaration, previous descriptor, and reference index immediately before publication. The new immutable snapshot exists before the global record changes to its digest.</p></li>
+          </ol>
+          <div class="outcome">Consumers read the snapshot identified by the activated record. Failed activation preserves the previous digest; it does not roll back arbitrary source changes made by an unsandboxed build.</div>
+        </div>
+      </details>
+      <details id="journey-runtime">
+        <summary>Start Pi with the active profile <span class="tag">READ + RUNTIME PROJECTION</span></summary>
+        <div class="detail-body">
+          <div class="flow-line"><code>pi</code><span>→</span><code>installed extension</code><span>→</span><code>resolveState()</code><span>→</span><code>skillPaths + systemPrompt</code></div>
+          <ol class="steps">
+            <li><strong>Pi calls the installed extension's handlers.</strong><p><a href="../artifacts/pi/bazframe.ts"><code>session_start</code> and <code>resources_discover</code></a> resolve state for their current cwd. The supported default path uses readers authored in this artifact; it does not spawn Bazframe commands.</p></li>
+            <li><strong>Resolve policy before loading the active profile.</strong><p>Global policy applies everywhere; a canonical Git worktree may supply an override. Effective disable retains native Pi behavior and bypasses profile loading. Enabled sessions read selection, instructions, direct Skills, imported resources, and referenced snapshots.</p></li>
+            <li><strong>Validate composition and project command collisions.</strong><p><code>prepareProfileSkillPaths()</code> checks existing Pi Skill commands. A free original name is retained; a collision may create a wrapper under <code>adapter-cache/pi/skill-aliases/</code>. <code>resources_discover</code> returns the resulting Skill paths.</p></li>
+            <li><strong>Append instruction sections before the agent starts.</strong><p><code>before_agent_start</code> uses <code>systemPromptOptions.contextFiles</code>. Nonempty means append the profile only. Empty means restore available global Pi context, then append the profile. The incoming prompt and instruction bodies are preserved.</p></li>
+          </ol>
+          <div class="outcome">Pi consumes projected resources; authored profiles are unchanged. Alias wrappers are runtime cache writes. <code>/bazframe reload</code> awaits Pi's reload; it is not a background file watcher.</div>
+        </div>
+      </details>
+      <details id="journey-sharing">
+        <summary>Move a profile to another installation <span class="tag">CAPTURE / TRANSPORT / MATERIALIZE</span></summary>
+        <div class="detail-body">
+          <div class="flow-line"><code>captureProfile()</code><span>→</span><code>ZIP or GitHub</code><span>→</span><code>materializeCapturedProfile()</code><span>→</span><code>candidate swap</code></div>
+          <ol class="steps">
+            <li><strong>Capture a portable, bounded resource closure.</strong><p><a href="../src/profile-publishing/profile-capture.ts"><code>captureProfile()</code></a> produces canonical manifest bytes, content-addressed blobs, and an exact preview. It captures ready artifacts without builds. Remote resources remain exact references unless bundled; machine-local identities, paths, and publication linkage are not transport identity.</p></li>
+            <li><strong>Write a ZIP or publish exact Git history.</strong><p><a href="../src/profile-publishing/profile-lifecycle.ts"><code>exportManagedProfile()</code></a> uses <a href="../src/profile-publishing/profile-zip.ts">ZIP I/O</a>. <a href="../src/profile-publishing/profile-publication.ts"><code>publishManagedProfile()</code></a> uses the GitHub transport with expected-old leases and durable publication intent. On macOS/Linux, <code>publishSidecarCandidate()</code> preserves authored content by copying the profile into a candidate, updating its sidecar, and swapping directories through publication's own journaled sequence. The internal Windows effect updates only the sidecar while retaining the profile root.</p></li>
+            <li><strong>Inspect, authorize, and materialize at the destination.</strong><p><code>inspectProfileImport()</code> performs no Bazframe-home mutation. Real import resolves collisions and explicit overwrite consent, then <a href="../src/profile-publishing/profile-materialization.ts">materializes</a> Skills, libraries, and package artifacts. Uncached remote packages may require a report and build consent; exact healthy cached resources can be reused offline.</p></li>
+            <li><strong>Activate the imported candidate through the shared transaction engine.</strong><p><a href="../src/profile-publishing/profile-transaction.ts"><code>executeProfileCandidateSwap()</code></a>, the <a href="../src/profile-publishing/transaction-journal.ts">journal</a>, and <a href="../src/profile-publishing/profile-recovery.ts">recovery</a> reconcile old/candidate/final state. When ownership cannot be proved, the operation retains the affected state and reports the ambiguity.</p></li>
+          </ol>
+          <div class="outcome">ZIP imports are independent; Git imports retain a canonical origin for update/version operations. New imports do not become active automatically. Dry-run may use private retained OS-temp Git workspaces, but never builds, logs in, or recovers/mutates Bazframe home.</div>
+        </div>
+      </details>
+    </section>
+
+    <section id="modules" aria-labelledby="modules-title">
+      <div class="section-head"><span class="number">05</span><h2 id="modules-title">Module index</h2></div>
+      <p class="intro">Directories organize responsibilities, not separately versioned packages. File lists below are reading entry points, not a complete inventory. “Callers” names representative call sites; a runtime-equivalent reader is not necessarily a direct import.</p>
+      <div class="search js-tool" hidden>
+        <label for="module-search">Find a module</label><input id="module-search" type="search" placeholder="Try: snapshots, policy, JSON, editor…" aria-controls="module-list"><output id="module-count" for="module-search" aria-live="polite"></output>
+      </div>
+      <div id="module-list">
+        <article class="module" id="module-cli">
+          <h3>src/cli/</h3><p>Command grammar, orchestration, prompts, output, and error/exit mapping. <code>run-cli.ts</code> dispatches commands; immutable storage and membership rules belong in their domain modules.</p>
+          <div class="files"><a href="../src/cli/run-cli.ts">run-cli.ts</a><a href="../src/cli/parse-argv.ts">parse-argv.ts</a><a href="../src/cli/command-results.ts">command-results.ts</a><a href="../src/cli/json-protocol.ts">json-protocol.ts</a><a href="../src/cli/help.ts">help.ts</a><a href="../src/cli/color.ts">color.ts</a></div>
+          <div class="module-meta"><span><b>Callers:</b> <code>src/cli.ts</code>, direct CLI tests.</span><span><b>Calls / emits:</b> domain operations, application effects, text or schema-v1/v2 JSON.</span></div>
+        </article>
+        <article class="module" id="module-application">
+          <h3>src/application/ + src/tui/</h3><p><code>ApplicationServices</code> selects effect implementations. <code>BazframeTuiService</code> translates domain reads into dashboard DTOs and exposes targeted mutations. React/Ink components handle terminal interaction and rendering.</p>
+          <div class="files"><a href="../src/application/application-services.ts">application-services.ts</a><a href="../src/application/tui-service.ts">tui-service.ts</a><a href="../src/application/win32-application-services.ts">win32-application-services.ts</a><a href="../src/tui/app.tsx">app.tsx</a><a href="../src/tui/state.ts">state.ts</a><a href="../src/tui/run-tui.tsx">run-tui.tsx</a></div>
+          <div class="module-meta"><span><b>Callers:</b> CLI composition, TUI bootstrap, internal Windows runtime composition.</span><span><b>Boundary:</b> reusable product functions own decisions; UI state does not confer write authority.</span></div>
+        </article>
+        <article class="module" id="module-profiles">
+          <h3>src/profiles/</h3><p>Profile IDs, physical profile loading, active selection, provisioning, favorites, direct Skill membership, and typed collection references. Reference indexes prove dependencies before destructive mutations or collection activation.</p>
+          <div class="files"><a href="../src/profiles/profile-store.ts">profile-store.ts</a><a href="../src/profiles/profile-management.ts">profile-management.ts</a><a href="../src/profiles/profile-skill-membership.ts">profile-skill-membership.ts</a><a href="../src/profiles/profile-skill-reference-index.ts">profile-skill-reference-index.ts</a><a href="../src/profiles/profile-skill-collection-reference.ts">profile-skill-collection-reference.ts</a><a href="../src/profiles/profile-skill-collection-reference-lifecycle.ts">profile-skill-collection-reference-lifecycle.ts</a><a href="../src/profiles/profile-favorites.ts">profile-favorites.ts</a></div>
+          <div class="module-meta"><span><b>Callers:</b> CLI, TUI service, status, policy setup validation, sharing engines.</span><span><b>Important split:</b> current duplicate/rename/use/removal orchestration is also implemented in <code>profile-publishing/profile-managed-lifecycle.ts</code>.</span></div>
+        </article>
+        <article class="module" id="module-skills">
+          <h3>src/skills/</h3><p>The live added-Skill catalog: structural validation, canonical source registration, dependency-checked removal, and external-source editor targeting. This is distinct from the repository-root <code>skills/</code> directory of shipped documentation Skills.</p>
+          <div class="files"><a href="../src/skills/default-skill-catalog.ts">default-skill-catalog.ts</a><a href="../src/skills/skill-id.ts">skill-id.ts</a><a href="../src/skills/skill-metadata.ts">skill-metadata.ts</a><a href="../src/skills/added-skill-platform-services.ts">added-skill-platform-services.ts</a><a href="../src/skills/skill-definition-editor.ts">skill-definition-editor.ts</a></div>
+          <div class="module-meta"><span><b>Callers:</b> CLI, profile membership, TUI/status readers, managed Git.</span><span><b>Owns:</b> registration, not arbitrary edits to external Skill content.</span></div>
+        </article>
+        <article class="module" id="module-collections">
+          <h3>src/skill-collections/ + src/packages/</h3><p>Whole-object library/package preparation, immutable snapshots, descriptor activation, bounded discovery, and collision withholding. The package module decodes the exact build declaration; the collection engine owns build/preparation lifecycle.</p>
+          <div class="files"><a href="../src/skill-collections/skill-collection-lifecycle.ts">skill-collection-lifecycle.ts</a><a href="../src/skill-collections/skill-collection-preparation.ts">skill-collection-preparation.ts</a><a href="../src/skill-collections/skill-collection-resolver.ts">skill-collection-resolver.ts</a><a href="../src/skill-collections/skill-collection-store.ts">skill-collection-store.ts</a><a href="../src/skill-collections/skill-snapshot.ts">skill-snapshot.ts</a><a href="../src/packages/package-manifest.ts">package-manifest.ts</a></div>
+          <div class="module-meta"><span><b>Callers:</b> CLI, managed Git, membership/reference validation, TUI/status, capture/materialization.</span><span><b>Consumers:</b> snapshot-based resource views; Pi's default artifact implements equivalent runtime resolution.</span></div>
+        </article>
+        <article class="module" id="module-providers">
+          <h3>src/providers/</h3><p>Explicit remote Git acquisition, update, build, health, and removal for all three resource kinds. A shared provider orchestrates stable checkouts, provenance records, recovery, and the same catalog/collection engines used by local resources.</p>
+          <div class="files"><a href="../src/providers/managed-git.ts">managed-git.ts</a><a href="../src/providers/managed-git-services.ts">managed-git-services.ts</a><a href="../src/providers/managed-git-source.ts">managed-git-source.ts</a><a href="../src/providers/managed-git-record.ts">managed-git-record.ts</a><a href="../src/providers/managed-git-process.ts">managed-git-process.ts</a><a href="../src/providers/managed-git-tree.ts">managed-git-tree.ts</a></div>
+          <div class="module-meta"><span><b>Callers:</b> resource CLI commands, TUI library add, sharing's remote materializer.</span><span><b>Boundary:</b> internal “provider” naming; public terminology is “local source” or “remote Git source.”</span></div>
+        </article>
+        <article class="module" id="module-publishing">
+          <h3>src/profile-publishing/ · capture &amp; transport</h3><p>The current sharing engine: canonical captures and stable resource identity, ZIP interchange, linked Git imports, versions, and GitHub publication. This directory also implements managed local profile lifecycle.</p>
+          <div class="files"><a href="../src/profile-publishing/captured-profile.ts">captured-profile.ts</a><a href="../src/profile-publishing/profile-capture.ts">profile-capture.ts</a><a href="../src/profile-publishing/profile-lifecycle.ts">profile-lifecycle.ts</a><a href="../src/profile-publishing/profile-zip.ts">profile-zip.ts</a><a href="../src/profile-publishing/profile-publication.ts">profile-publication.ts</a><a href="../src/profile-publishing/profile-runtime.ts">profile-runtime.ts</a><a href="../src/profile-publishing/profile-github-transport.ts">profile-github-transport.ts</a><a href="../src/profile-publishing/profile-remote-materializer.ts">profile-remote-materializer.ts</a></div>
+          <div class="module-meta"><span><b>Callers:</b> sharing CLI commands, managed lifecycle capture, remote-resource materialization.</span><span><b>Boundary:</b> transport identity excludes local instance identity; GitHub workspaces/processes are explicitly isolated.</span></div>
+        </article>
+        <article class="module" id="module-transactions">
+          <h3>src/profile-publishing/ · transactions &amp; views</h3><p>Blob/tree stores, physical closure proofs, materialization, candidate swaps, journals, and recovery. Read models join ordinary and imported resources; application/runtime projections expose them without treating display aliases as stored identities.</p>
+          <div class="files"><a href="../src/profile-publishing/profile-managed-lifecycle.ts">profile-managed-lifecycle.ts</a><a href="../src/profile-publishing/profile-materialization.ts">profile-materialization.ts</a><a href="../src/profile-publishing/profile-transaction.ts">profile-transaction.ts</a><a href="../src/profile-publishing/profile-recovery.ts">profile-recovery.ts</a><a href="../src/profile-publishing/transaction-journal.ts">transaction-journal.ts</a><a href="../src/profile-publishing/blob-store.ts">blob-store.ts</a><a href="../src/profile-publishing/artifact-tree.ts">artifact-tree.ts</a><a href="../src/profile-publishing/profile-view.ts">profile-view.ts</a><a href="../src/profile-publishing/profile-runtime-projection.ts">profile-runtime-projection.ts</a><a href="../src/profile-publishing/profile-application-projection.ts">profile-application-projection.ts</a></div>
+          <div class="module-meta"><span><b>Callers:</b> CLI, TUI, status, sharing lifecycle, injected runtime services.</span><span><b>Boundary:</b> narrow fresh read/write authority, retained ambiguity, no generic “delete and retry” recovery.</span></div>
+        </article>
+        <article class="module" id="module-policy">
+          <h3>src/policy/ + src/project/</h3><p>Global enabled/disabled policy, canonical Git-worktree discovery, externally stored project overrides, and effective-policy precedence. Repository instructions remain repository-owned runtime input; a project does not choose a personal profile.</p>
+          <div class="files"><a href="../src/policy/effective-policy.ts">effective-policy.ts</a><a href="../src/policy/global-policy.ts">global-policy.ts</a><a href="../src/policy/policy-services.ts">policy-services.ts</a><a href="../src/project/git-root.ts">git-root.ts</a><a href="../src/project/registration.ts">registration.ts</a><a href="../src/project/registration-store.ts">registration-store.ts</a></div>
+          <div class="module-meta"><span><b>Callers:</b> CLI policy commands, status/TUI setup, injected Pi runtime services.</span><span><b>Consumers:</b> effective enabled state and diagnostics; the installed default Pi artifact has equivalent policy readers.</span></div>
+        </article>
+        <article class="module" id="module-adapter">
+          <h3>src/adapters/pi/ + artifacts/pi/</h3><p>Installer ownership and runtime integration are different concerns. The installer hashes the desired/installed artifact and verifies its manifest. The tracked TypeScript artifact is the actual extension Pi loads; it is not generated from <code>src/adapters/pi/</code>.</p>
+          <div class="files"><a href="../src/adapters/pi/installer.ts">installer.ts</a><a href="../src/adapters/pi/ownership.ts">ownership.ts</a><a href="../src/adapters/pi/manifest.ts">manifest.ts</a><a href="../src/adapters/pi/runtime-services.ts">runtime-services.ts</a><a href="../src/adapters/pi/runtime-binding.ts">runtime-binding.ts</a><a href="../artifacts/pi/bazframe.ts">artifacts/pi/bazframe.ts</a></div>
+          <div class="module-meta"><span><b>Callers:</b> CLI install/uninstall and setup inspection; Pi invokes the artifact.</span><span><b>Boundary:</b> supported default artifact readers are self-contained at runtime; internal Windows binding connects shared compiled services after integrity checks.</span></div>
+        </article>
+        <article class="module" id="module-status">
+          <h3>src/status/</h3><p>Read-only inspection and reporting of adapter ownership/drift, project/global policy, selected profile, resource availability, snapshots, and retained recovery state. It reports corrective commands without executing them.</p>
+          <div class="files"><a href="../src/status/status.ts">status.ts</a><a href="../src/cli/command-results.ts">CLI status projection</a><a href="../src/application/tui-service.ts">dashboard setup projection</a></div>
+          <div class="module-meta"><span><b>Callers:</b> <code>bazframe status</code>, TUI setup/adapter views.</span><span><b>Boundary:</b> cached alias counts are not live Pi command mappings; live mappings belong to <code>/bazframe info</code>.</span></div>
+        </article>
+        <article class="module" id="module-foundation">
+          <h3>src/core/ + src/state/</h3><p>Low-level content, error, process, path, stable-read, atomic-write, and lock mechanisms. Windows-specific implementations add native identity/privacy proofs. Domain-specific capture and transaction code remains in its owning module.</p>
+          <div class="files"><a href="../src/core/content.ts">content.ts</a><a href="../src/core/child-process.ts">child-process.ts</a><a href="../src/core/safe-text.ts">safe-text.ts</a><a href="../src/state/paths.ts">paths.ts</a><a href="../src/state/atomic-file.ts">atomic-file.ts</a><a href="../src/state/lock.ts">lock.ts</a><a href="../src/core/win32-native.ts">win32-native.ts</a></div>
+          <div class="module-meta"><span><b>Callers:</b> stores, lifecycles, providers, editors, CLI/TUI presentation.</span><span><b>Boundary:</b> a path or matching hash alone is not mutation authority; use the owning operation's proof and lock contract.</span></div>
+        </article>
+        <article class="module" id="module-launcher">
+          <h3>src/harness/ + src/agents/</h3><p>The deprecated <code>bazframe pi</code> launcher composes instructions, creates a temporary instruction file outside the repository, builds Pi argv, and spawns the child. This path remains separate from the normal installed extension.</p>
+          <div class="files"><a href="../src/harness/compose-instructions.ts">compose-instructions.ts</a><a href="../src/harness/temporary-instructions.ts">temporary-instructions.ts</a><a href="../src/agents/pi-args.ts">pi-args.ts</a><a href="../src/agents/spawn-pi.ts">spawn-pi.ts</a><a href="../src/project/repository-instructions.ts">repository-instructions.ts</a></div>
+          <div class="module-meta"><span><b>Caller:</b> the deprecated launcher branch in <code>run-cli.ts</code>.</span><span><b>Consumer:</b> a Pi child process; not the main runtime resource-discovery path.</span></div>
+        </article>
+        <article class="module" id="module-portability">
+          <h3>src/profile-portability/ · historical + reused</h3><p>The historical directory-artifact implementation remains in the tree, but the current CLI uses the ZIP/GitHub lifecycle under <code>profile-publishing/</code>. Some bounded-input policies, artifact utilities, and package-build authorization types are still imported by current code.</p>
+          <div class="files"><a href="../src/profile-portability/profile-portability-policy.ts">profile-portability-policy.ts</a><a href="../src/profile-portability/profile-artifact-io.ts">profile-artifact-io.ts</a><a href="../src/profile-portability/profile-import-package-build.ts">profile-import-package-build.ts</a><a href="profile-portability-design.md">historical design</a></div>
+          <div class="module-meta"><span><b>Callers:</b> current engines reuse selected contracts; older files have their own tests.</span><span><b>Boundary:</b> existing implementation is not approval to restore historical public behavior. Check call sites before changing or removing it.</span></div>
+        </article>
+      </div>
+      <p id="module-empty" class="callout" hidden>No modules match. Try a file name or responsibility such as “snapshot” or “policy”.</p>
+    </section>
+
+    <section id="storage" aria-labelledby="storage-title">
+      <div class="section-head"><span class="number">06</span><h2 id="storage-title">State &amp; ownership</h2></div>
+      <p class="intro">The managed home is resolved from absolute <code>BAZFRAME_HOME</code>, otherwise <code>~/.bazframe</code>. Project overrides are also stored here, outside the worktree. This is a representative layout; transaction staging/retained siblings vary by operation and platform.</p>
+      <div class="storage"><pre aria-label="Representative Bazframe home layout"><code><span class="highlight">&lt;BAZFRAME_HOME&gt;/</span>
+├── active-profile                       <span class="comment"># selected profile ID, not JSON</span>
+├── global.json                          <span class="comment"># optional disabled policy</span>
+├── profile-favorites.json                <span class="comment"># TUI preferences, separate from selection</span>
+├── projects/&lt;hash&gt;.json                  <span class="comment"># canonical Git-worktree policy</span>
+├── profiles/&lt;id&gt;/
+│   ├── AGENTS.md                         <span class="comment"># personal instruction text</span>
+│   ├── skills/&lt;skill&gt;                    <span class="comment"># physical Skill or managed membership link</span>
+│   ├── libraries/&lt;id&gt;.json              <span class="comment"># whole-library reference</span>
+│   ├── packages/&lt;id&gt;.json               <span class="comment"># whole-package reference</span>
+│   └── .bazframe-profile-state.json      <span class="comment"># optional local identity/import/publication state</span>
+├── skills/&lt;skill&gt;                        <span class="comment"># (default) live-source registration</span>
+├── libraries/&lt;id&gt;.json                  <span class="comment"># canonical source root + activated digest</span>
+├── packages/&lt;id&gt;.json                   <span class="comment"># also artifactRoot and skillsRoot</span>
+├── skill-snapshots/sha256/&lt;digest&gt;/
+│   ├── manifest.json
+│   └── artifact/                        <span class="comment"># immutable prepared collection bytes</span>
+├── providers/git/
+│   ├── checkouts/&lt;kind&gt;/&lt;id&gt;/           <span class="comment"># stable managed source paths</span>
+│   ├── records/&lt;kind&gt;/&lt;id&gt;.json         <span class="comment"># exact remote/revision provenance</span>
+│   └── staging/ + recovery/
+├── profile-publishing/
+│   ├── blobs/ + trees/                  <span class="comment"># captured/imported content-addressed store</span>
+│   ├── transactions/ + operation-locks/
+│   └── staging/ + github-workspaces/    <span class="comment"># private operation state</span>
+├── adapters/pi.json                     <span class="comment"># ownership manifest, not the extension</span>
+├── adapter-cache/pi/skill-aliases/       <span class="comment"># runtime-generated wrappers</span>
+└── locks/                               <span class="comment"># cooperating-writer coordination</span></code></pre></div>
+      <div class="grid two" style="margin-top: 16px">
+        <article class="card"><h3>Three different byte locations</h3><p><strong>Source:</strong> live Skill content or library/package input.<br><strong>Collection snapshot:</strong> an activated prepared artifact under <code>skill-snapshots</code>.<br><strong>Sharing store:</strong> imported/captured blobs and trees under <code>profile-publishing</code>.</p><p class="small">Do not treat those stores as interchangeable or require a mutable source to exist before consuming a healthy immutable artifact.</p></article>
+        <article class="card"><h3>Adapter installation location</h3><p><code>&lt;PI_CODING_AGENT_DIR&gt;/extensions/bazframe.ts</code> is the installed extension. Default agent directory: <code>~/.pi/agent</code>. Bazframe's home stores ownership metadata and runtime cache, not Pi settings or repository instructions.</p><p class="small">Internal Windows installation additionally binds runtime code through <code>bazframe/runtime.json</code> in the Pi agent directory. The runtime binding is checked before shared services are imported.</p></article>
+      </div>
+      <div class="callout warn"><strong>Retained state.</strong> Managed profile removal detaches the named non-active profile and retains private state. Ambiguous transactions and process-exposed workspaces may also remain. Snapshot GC and a general workspace-reclamation subsystem are deferred; do not infer “unused” means safe to recursively delete.</div>
+    </section>
+
+    <section id="utilities" aria-labelledby="utilities-title">
+      <div class="section-head"><span class="number">07</span><h2 id="utilities-title">Shared utilities</h2></div>
+      <p class="intro">Reuse the mechanism that matches the operation. Separate filesystem and process helpers implement the different authority and recovery contracts for state files, captured trees, builds, Git, and editors.</p>
+      <div class="table-wrap" role="region" aria-label="Shared utility responsibilities" tabindex="0">
+        <table>
+          <thead><tr><th scope="col">Utility / important files</th><th scope="col">Responsibility and callers</th><th scope="col">Boundary to preserve</th></tr></thead>
+          <tbody>
+            <tr><td><a href="../src/state/paths.ts"><code>state/paths.ts</code></a></td><td>Home resolution, Pi agent directory, publishing roots. Used by CLI, stores, installer, and application/runtime composition.</td><td>Configured roots must be absolute. State is external to repository content.</td></tr>
+            <tr><td><a href="../src/core/content.ts"><code>core/content.ts</code></a><br><a href="../src/state/bounded-file-read.ts"><code>bounded-file-read.ts</code></a></td><td>Bounded reads, fatal UTF-8 instruction decoding, physical instruction snapshots. <code>readAtMostOneBeyond()</code> detects overflow without unbounded reads.</td><td>Do not replace safe reads with an unchecked <code>readFile()</code> or interpret instruction prose as configuration.</td></tr>
+            <tr><td><a href="../src/state/atomic-file.ts"><code>atomic-file.ts</code></a><br><a href="../src/state/lock.ts"><code>lock.ts</code></a><br><a href="../src/state/file-identity.ts"><code>file-identity.ts</code></a></td><td>Managed directory checks, atomic state replacement, cooperating-writer locks, and byte identities. Used by records, selection, policy, and adapter ownership.</td><td>A byte digest proves content, not filesystem ownership. Follow the higher-level operation's lock order and expected-state checks.</td></tr>
+            <tr><td><a href="../src/profile-publishing/profile-filesystem.ts"><code>profile-filesystem.ts</code></a><br><a href="../src/profile-publishing/physical-profile-closure.ts"><code>physical-profile-closure.ts</code></a><br><a href="../src/profile-publishing/profile-operation-lock.ts"><code>profile-operation-lock.ts</code></a></td><td>Stable physical directory/file reads, logical closure checks, and operation-scoped mutation authority for sharing and managed profile transactions.</td><td>Keep capture-local observation separate from persisted identity. Revalidate authority across asynchronous effects; fail closed on substitution.</td></tr>
+            <tr><td><a href="../src/core/child-process.ts"><code>child-process.ts</code></a><br><a href="../src/core/executable-resolution.ts"><code>executable-resolution.ts</code></a></td><td>Inherited child execution, bounded package processes, exit mapping, and controlled executable resolution. Used by package preparation, launchers, and editors as applicable.</td><td>Literal executable/argv, no shell. Build authorization does not imply sandboxing. Uncertain child settlement is a distinct failure.</td></tr>
+            <tr><td><a href="../src/providers/managed-git-process.ts"><code>managed-git-process.ts</code></a><br><a href="../src/profile-publishing/profile-github-process.ts"><code>profile-github-process.ts</code></a></td><td>Domain-specific Git/gh process isolation, safe environment/argv, bounded output, and transport failure classification.</td><td>Git acquisition is not a generic inherited-environment package build. Credentials stay out of persisted provenance and diagnostic output.</td></tr>
+            <tr><td><a href="../src/core/external-editor.ts"><code>external-editor.ts</code></a><br><a href="../src/profiles/profile-instruction-editor.ts"><code>profile-instruction-editor.ts</code></a><br><a href="../src/skills/skill-definition-editor.ts"><code>skill-definition-editor.ts</code></a></td><td>Target-specific validation followed by <code>launchExternalEditor()</code>. Shared by CLI edits and TUI editor handoff.</td><td><code>VISUAL</code>, then <code>EDITOR</code>, names one executable. No flags or shell parsing; final file may contain invalid bytes that need repair. Editing is a direct user-owned write outside state locks.</td></tr>
+            <tr><td><a href="../src/core/errors.ts"><code>errors.ts</code></a><br><a href="../src/core/exit-status.ts"><code>exit-status.ts</code></a><br><a href="../src/core/safe-text.ts"><code>safe-text.ts</code></a></td><td><code>BazframeError</code> codes, exit status constants, terminal-control escaping, and bounded display strings. Result projectors keep domain facts separate from formatting.</td><td>Sanitizing display text is not validating storage or authorization. JSON must not leak raw stacks, credentials, or private operation paths.</td></tr>
+            <tr><td><a href="../src/skill-collections/portable-relative-path.ts"><code>portable-relative-path.ts</code></a><br><a href="../src/skill-collections/resource-identity.ts"><code>resource-identity.ts</code></a><br><a href="../src/state/read-only-path-anchor.ts"><code>read-only-path-anchor.ts</code></a></td><td>Portable path validation, tagged resource identity comparison, and stable read-only path anchoring for discovery/preparation.</td><td>Use component-aware containment and physical identity checks; string prefixes are not a containment proof.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="conventions" aria-labelledby="conventions-title">
+      <div class="section-head"><span class="number">08</span><h2 id="conventions-title">Code conventions</h2></div>
+      <p class="intro">The implementation uses these patterns and product rules.</p>
+      <div class="rules">
+        <article class="rule"><h3>TypeScript ESM, explicit dependencies</h3><p><a href="../package.json">package.json</a> declares ESM; relative TypeScript imports use emitted <code>.js</code> paths. Options/dependencies carry filesystem, process, clock/test hooks, and platform services as needed. Missing optional effects commonly select Node/POSIX defaults.</p></article>
+        <article class="rule"><h3>Keep decisions in shared engines</h3><p><code>*Services</code> and <code>*Effects</code> describe operation-specific interfaces. <code>win32-*</code> supplies concrete effects while common lifecycle/resolver code retains product semantics. Construction or a UI selection is not proof that a later write is authorized.</p></article>
+        <article class="rule"><h3>Exact schemas and identities</h3><p>Records have explicit schema versions and exact fields. IDs are validated, not silently normalized. A library and package may share a name because identity includes kind. Imported display qualification is derived; stable membership identity is stored separately.</p></article>
+        <article class="rule"><h3>Separate inspection from mutation</h3><p>Resolvers and status readers do not acquire sources, update libraries, or build packages. Remote work and build execution require explicit lifecycle intent. Adding a catalog object does not add a profile reference; explicit profile targeting does not change selection.</p></article>
+        <article class="rule"><h3>Publish only after validation</h3><p>Use the applicable lock, expected identity, bounded stable reads, candidate preparation, and revalidation before effects. Single state files use atomic replacement; multi-step profile operations use journals/candidate reconciliation. Preserve ambiguous or malformed state instead of guessing a repair.</p></article>
+        <article class="rule"><h3>Consent is operation-specific</h3><p><code>--yes</code> accepts routine confirmations and safe suffix choices, never overwrite/discard. Package build reports bind authorization to exact inputs and literal argv. <code>--force</code> has narrowly defined meanings for profile removal and owned adapter repair.</p></article>
+        <article class="rule"><h3>Presentation is a boundary</h3><p>Use singular noun-verb commands. Sharing commands emit schema-v2 success/refusal/error results with mutation effects; unrelated JSON remains v1. Human color is separate. <code>status</code> attention is successful JSON with exit 3, not a mutation failure.</p></article>
+        <article class="rule"><h3>Preserve Agent Skills compatibility</h3><p>Pi's public loader is authoritative on the supported runtime path; internal Windows physical reads preserve the loader contract. No inter-Skill dependency schema is inferred from prose or metadata. Packs, child subsets, and snapshot GC require separate product decisions.</p></article>
+      </div>
+    </section>
+
+    <section id="platform" aria-labelledby="platform-title">
+      <div class="section-head"><span class="number">09</span><h2 id="platform-title">Platform boundary: shared decisions, distinct effects</h2></div>
+      <p class="intro">Windows implementations compose the same product engines with native filesystem effects.</p>
+      <div class="grid two">
+        <article class="card"><div class="label">Node implementation</div><h3>Node / macOS / Linux</h3><p><a href="../src/application/application-services.ts"><code>defaultApplicationServices</code></a> supplies Node path behavior; optional domain service dependencies fall back to their supported-platform effects. Managed added-Skill memberships use absolute symlinks.</p><p>Portable Node operations still have disclosed final-pathname races against non-cooperating writers. Locks coordinate Bazframe processes; they do not make arbitrary external writes impossible.</p></article>
+        <article class="card"><div class="label">Windows implementation</div><h3>Windows x64 / local NTFS</h3><p><a href="../src/application/win32-application-services.ts"><code>createWindowsApplicationServices()</code></a> lazily shares one native backend identity across policy, profiles, resources, Git, adapter, and editor services. Each mutation acquires fresh authority; the backend object is not a cached permission token.</p><p><a href="../src/core/win32-native.ts"><code>core/win32-native.ts</code></a> validates the native contract. <a href="../native/win32/src/lib.rs"><code>native/win32/src/</code></a> implements identity, privacy, stable reads, locks, junctions, and publication primitives through the packaged N-API addon.</p></article>
+      </div>
+      <div class="flow-line"><code>shared lifecycle function</code><span>→</span><code>operation Services / Effects</code><span>→</span><code>win32 implementation</code><span>→</span><code>native backend</code></div>
+      <div class="callout warn"><p><strong>Entrypoint routing.</strong> <a href="../src/core/platform-support.ts"><code>assertBazframePlatformSupported()</code></a> currently refuses Windows command effects; help/version remain available. The default <a href="../artifacts/pi/bazframe.ts">Pi entry point</a> gates before binding I/O, package import, native initialization, or state reads. Internal test entry points exercise composition separately from default dispatch.</p><p>Host/source tests and foundation/product CI receipts cover narrower workloads than the full installed-product matrix required before npm publication. See the <a href="win32-filesystem-backend-requirements.md">Windows requirements</a>. Windows Terminal, representative SSH, ambiguous-width rendering, and manual assistive-technology evidence also remain separate <a href="tui-design.md">TUI gates</a>.</p></div>
+    </section>
+
+    <section id="reading" aria-labelledby="reading-title">
+      <div class="section-head"><span class="number">10</span><h2 id="reading-title">Where to start a change</h2></div>
+      <p class="intro">Start with the requirement, caller, and domain function for the behavior you want to change. Then check its effect implementations and consumers.</p>
+      <ol class="reading">
+        <li><strong>Establish the contract.</strong> Start with <a href="design.md">docs/design.md</a>; follow <a href="profile-publishing-design.md">sharing</a>, <a href="pi-adaptive-context-adapter.md">Pi context</a>, or <a href="tui-design.md">TUI design</a> for the relevant operation.<p>For transaction implementation detail, use <a href="profile-publishing-engineering.md">profile-publishing-engineering.md</a>. Historical designs do not override the current product contract.</p></li>
+        <li><strong>Find the caller and its result shape.</strong> Read <a href="../src/cli/parse-argv.ts">parse-argv.ts</a> → the matching <a href="../src/cli/run-cli.ts">run-cli.ts</a> branch, or <a href="../src/application/tui-service.ts">BazframeTuiService</a> → the relevant domain function.<p>For runtime behavior, start at the handlers in <a href="../artifacts/pi/bazframe.ts">the actual Pi artifact</a>, not at the deprecated launcher.</p></li>
+        <li><strong>Check effect implementations and their consumers.</strong> Inspect the operation's <code>Services</code>/<code>Effects</code>, default implementation, and Windows implementation if affected.<p>A resource-composition change may affect CLI listings, status, TUI, imported-resource projection, and the installed Pi reader. Shared names alone do not prove behavioral parity.</p></li>
+        <li><strong>Run tests for the affected behavior.</strong> <a href="../test/unit/">test/unit/</a> is organized by source domain; <a href="../test/integration/">test/integration/</a> checks connected CLI operations and state changes.<p><a href="../test/unit/adapters/pi-artifact.test.ts">pi-artifact.test.ts</a> exercises the shipped extension. <a href="../test/integration/tui-cli-state-agreement.test.ts">tui-cli-state-agreement.test.ts</a> checks shared state behavior. <a href="../scripts/test-real-pi.mjs">test-real-pi.mjs</a>, <a href="../scripts/test-pack.mjs">test-pack.mjs</a>, and terminal scripts test distinct installed/runtime boundaries.</p></li>
+        <li><strong>Edit authored inputs, not build output.</strong> <a href="../scripts/build.mjs">scripts/build.mjs</a> compiles <code>src/</code> to <code>dist/</code> and copies <a href="../skills/bazframe/SKILL.md">skills/bazframe/</a> and <a href="../skills/bazify/SKILL.md">skills/bazify/</a> to <code>dist/skills/</code>.<p><code>artifacts/pi/bazframe.ts</code> is authored source despite its directory name. Native release artifacts have a separate admission path. No install-time acquisition or membership mutation is part of the build.</p></li>
+      </ol>
+      <div class="card" style="margin-top: 24px">
+        <h3>Validation should match the change</h3>
+        <pre><code>npm run check:quick
+npm run test:unit -- test/unit/&lt;affected-domain&gt;/&lt;test&gt;.test.ts
+npm run build
+npm run test:integration -- test/integration/&lt;affected-journey&gt;.test.ts</code></pre>
+        <p class="small" style="margin-top: 14px">Use disposable Bazframe/Pi homes, never the user's live <code>~/.bazframe</code>. Preserve original failures and run focused affected checks. Native qualification and commit, push, tag, or npm publication require authorization. See <a href="../CONTRIBUTING.md">CONTRIBUTING.md</a> and <a href="releasing.md">docs/releasing.md</a>.</p>
+      </div>
+    </section>
+
+    <footer><strong>Bazframe architecture walkthrough.</strong> Based on source at <code>8adaf2c</code>. Product requirements and support status remain defined by the product design. <a href="#overview">Back to the map ↑</a></footer>
+  </main>
+  <script>
+    (() => {
+      const modules = Array.from(document.querySelectorAll('.module'));
+      const search = document.querySelector('#module-search');
+      const count = document.querySelector('#module-count');
+      const empty = document.querySelector('#module-empty');
+      const journeys = Array.from(document.querySelectorAll('#journeys details'));
+      const toggle = document.querySelector('#toggle-journeys');
+      const navigation = Array.from(document.querySelectorAll('nav a'));
+      const sections = Array.from(document.querySelectorAll('main > section'));
+      const moduleText = new Map(modules.map(module => [module, module.textContent.toLocaleLowerCase()]));
+
+      const filterModules = () => {
+        const query = search.value.trim().toLocaleLowerCase();
+        let visible = 0;
+        for (const module of modules) {
+          module.hidden = !moduleText.get(module).includes(query);
+          if (!module.hidden) visible += 1;
+        }
+        count.textContent = `${visible} / ${modules.length} shown`;
+        empty.hidden = visible !== 0;
+      };
+      const updateToggle = () => {
+        toggle.textContent = journeys.every(journey => journey.open) ? 'Collapse all' : 'Expand all';
+      };
+      search.addEventListener('input', filterModules);
+      toggle.addEventListener('click', () => {
+        const open = !journeys.every(journey => journey.open);
+        journeys.forEach(journey => { journey.open = open; });
+        updateToggle();
+      });
+      journeys.forEach(journey => journey.addEventListener('toggle', updateToggle));
+
+      // Deep links should work even when a previous search hid their target.
+      const revealTarget = hash => {
+        const target = document.getElementById(hash.slice(1));
+        if (!target) return;
+        const module = target.closest('.module');
+        if (module?.hidden) { search.value = ''; filterModules(); }
+        const journey = target.closest('details');
+        if (journey) journey.open = true;
+      };
+      // Reveal before native anchor scrolling, including repeat clicks on the same hash.
+      document.addEventListener('click', event => {
+        const link = event.target.closest('a[href^="#"]');
+        if (link) revealTarget(link.hash);
+      });
+      addEventListener('hashchange', () => {
+        revealTarget(location.hash);
+        document.getElementById(location.hash.slice(1))?.scrollIntoView();
+      });
+
+      let pendingFrame = false;
+      const updateNavigation = () => {
+        const line = innerHeight * 0.25;
+        let current = sections[0];
+        for (const section of sections) {
+          if (section.getBoundingClientRect().top <= line) current = section;
+        }
+        for (const link of navigation) {
+          if (link.hash === `#${current.id}`) link.setAttribute('aria-current', 'location');
+          else link.removeAttribute('aria-current');
+        }
+        pendingFrame = false;
+      };
+      addEventListener('scroll', () => {
+        if (!pendingFrame) { pendingFrame = true; requestAnimationFrame(updateNavigation); }
+      }, { passive: true });
+      addEventListener('resize', updateNavigation);
+
+      // Print all journeys while preserving the reader's disclosure state afterward.
+      let beforePrint;
+      addEventListener('beforeprint', () => {
+        beforePrint ??= journeys.map(journey => journey.open);
+        journeys.forEach(journey => { journey.open = true; });
+      });
+      addEventListener('afterprint', () => {
+        if (beforePrint) journeys.forEach((journey, index) => { journey.open = beforePrint[index]; });
+        beforePrint = undefined;
+        updateToggle();
+      });
+      document.querySelector('#print-page').addEventListener('click', () => window.print());
+      document.querySelectorAll('.js-tool').forEach(tool => { tool.hidden = false; });
+      filterModules();
+      revealTarget(location.hash);
+      updateToggle();
+      updateNavigation();
+    })();
+  </script>
+</body>
+</html>

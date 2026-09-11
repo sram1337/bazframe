@@ -21,6 +21,28 @@ function fixture(options: WindowsProfileProvisioningTestOptions = {}) {
 }
 
 describe('internal Windows inactive profile provisioning', () => {
+  it.each(['selection-reparse', 'selection-malformed', 'selection-oversized', 'selection-unreadable', 'existing-owner', 'hardlinked-input'])('admits ordinary list input independently of %s', async (variant) => {
+    const f = fixture();
+    await addProfile(HOME, 'focused', f);
+    if (variant === 'selection-reparse') f.reparse(`${HOME}\\active-profile`);
+    if (variant === 'existing-owner') {
+      for (const [path, node] of f.nodes) node.security = { ...f.security(path), ownerSid: 'S-1-5-21-999' };
+    }
+    if (variant === 'hardlinked-input') f.nodes.get(`${HOME}\\profiles\\focused\\AGENTS.md`)!.numberOfLinks = 2;
+    if (variant === 'selection-malformed') f.file(`${HOME}\\active-profile`, '../invalid');
+    if (variant === 'selection-oversized') f.file(`${HOME}\\active-profile`, 'x'.repeat(1025));
+    let selectionAccesses = 0;
+    const inspect = f.backend.inspectPath;
+    f.backend.inspectPath = (path) => {
+      if (path === `${HOME}\\active-profile`) { selectionAccesses++; throw new Error('selection is unreadable'); }
+      return inspect(path);
+    };
+    const before = f.snapshot();
+    expect(await listProfiles(HOME, f)).toEqual({ profileIds: ['focused'], diagnostics: [] });
+    expect(selectionAccesses).toBe(0);
+    expect(f.snapshot()).toBe(before);
+  });
+
   it('runs actual firstAdd/current/list with fresh access-only receipt drift, without prewarming home', async () => {
     const f = fixture(), enumerate = f.backend.enumerateStableDirectory, read = f.backend.readStableFile, inspect = f.backend.inspectPath;
     let clock = 10, enumerations = 0;
@@ -117,7 +139,7 @@ describe('internal Windows inactive profile provisioning', () => {
         f.reparse(`${HOME}\\adapter-cache\\pi\\skill-aliases\\focused`);
       }
       else f.file(`${HOME}\\active-profile`, 'focused\n');
-      await expect(addProfile(HOME, 'focused', f)).rejects.toMatchObject({ code: cache ? 'WINDOWS_PRIVATE_DIRECTORY_PRIVACY_UNPROVED' : 'WINDOWS_PROFILE_PROVISIONING_REFUSED' });
+      await expect(addProfile(HOME, 'focused', f)).rejects.toMatchObject({ code: cache ? 'WINDOWS_DIRECTORY_PROOF_INVALID' : 'WINDOWS_PROFILE_PROVISIONING_REFUSED' });
       expect(f.nodes.has(`${HOME}\\profiles\\focused`)).toBe(false);
     }
   });
@@ -143,7 +165,7 @@ describe('internal Windows inactive profile provisioning', () => {
     await expect(addProfile(HOME, 'focused', f)).rejects.toMatchObject({ code: 'WINDOWS_PROFILE_PROVISIONING_REFUSED' });
     f.file(`${HOME}\\profiles\\occupied`, 'keep');
     await expect(addProfile(HOME, 'occupied', f)).rejects.toMatchObject({
-      code: 'PROFILE_READ_FAILED', cause: { code: 'WINDOWS_PRIVATE_DIRECTORY_PRIVACY_UNPROVED' }
+      code: 'PROFILE_READ_FAILED', cause: { code: 'WINDOWS_DIRECTORY_PROOF_INVALID' }
     });
     expect(f.nodes.get(`${HOME}\\profiles\\occupied`)?.bytes?.toString()).toBe('keep');
   });
@@ -185,7 +207,7 @@ describe('internal Windows inactive profile provisioning', () => {
         else {
           f.directory(destination);
           f.file(`${destination}\\AGENTS.md`, 'retain authored bytes\n');
-          if (kind === 'foreign-owner') f.nodes.get(destination)!.security = { ...f.backend.inspectPath(destination).security, ownerSid: 'S-1-5-18' };
+          if (kind === 'foreign-owner') f.nodes.get(destination)!.security = { ...f.security(destination), ownerSid: 'S-1-5-18' };
           else f.nodes.get(`${destination}\\AGENTS.md`)!.numberOfLinks = 2;
         }
         // Presence must not admit or detach this unsafe cache, either.
@@ -316,22 +338,15 @@ describe('internal Windows inactive profile provisioning', () => {
     expect(f.nodes.has(`${HOME}\\profiles\\focused`)).toBe(false);
   });
 
-  it('requires owner-private single-link active state and retains unsafe bytes unchanged', async () => {
-    for (const mode of ['owner', 'hardlink', 'reparse']) {
-      const f = fixture();
-      ensureWindowsPrivateDirectoryPath(f.backend, HOME);
-      const path = `${HOME}\\active-profile`;
-      if (mode === 'reparse') f.reparse(path);
-      else {
-        f.file(path, 'other\n');
-        if (mode === 'hardlink') f.nodes.get(path)!.numberOfLinks = 2;
-        else f.nodes.get(path)!.security = { ...f.backend.inspectPath(path).security, ownerSid: 'S-1-5-18' };
-      }
-      const state = JSON.stringify(f.nodes.get(path));
-      await expect(addProfile(HOME, 'focused', f)).rejects.toThrow();
-      expect(JSON.stringify(f.nodes.get(path))).toBe(state);
-      expect(f.nodes.has(`${HOME}\\profiles\\focused`)).toBe(false);
-    }
+  it('still requires physical active state for a mutation that depends on it', async () => {
+    const f = fixture();
+    ensureWindowsPrivateDirectoryPath(f.backend, HOME);
+    const path = `${HOME}\\active-profile`;
+    f.reparse(path);
+    const before = JSON.stringify(f.nodes.get(path));
+    await expect(addProfile(HOME, 'focused', f)).rejects.toThrow();
+    expect(JSON.stringify(f.nodes.get(path))).toBe(before);
+    expect(f.nodes.has(`${HOME}\\profiles\\focused`)).toBe(false);
   });
 
   it('re-admits cooperative bootstrap occupancy, but never reuses an ambiguous creation receipt', () => {

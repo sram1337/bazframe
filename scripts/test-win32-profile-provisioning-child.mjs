@@ -4,6 +4,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 // Failure receipts admit only fixed codes/reasons/field names. They never copy
 // raw messages, stacks, paths, observed values, or arbitrary IPC properties.
 const FAILURE_CODES = new Set([
+  'WINDOWS_DIRECTORY_PROOF_INVALID', 'WINDOWS_FILE_PROOF_INVALID',
   'WINDOWS_ADDED_SKILL_NAMESPACE_CHANGED',
   'NO_ACTIVE_PROFILE', 'INVALID_PROFILE_ID', 'INVALID_ACTIVE_PROFILE_STATE',
   'WINDOWS_PROFILE_ACTIVATION_CHANGED', 'WINDOWS_PROFILE_ACTIVATION_UNSUPPORTED_STATE',
@@ -39,21 +40,20 @@ const FAILURE_CODES = new Set([
   ].map((suffix) => `WINDOWS_OPERATION_LOCK_${suffix}`),
   ...[
     'CREATE_AMBIGUOUS', 'NAME_INVALID', 'OCCUPIED', 'PATH_INVALID',
-    'PRIVACY_UNPROVED',
   ].map((suffix) => `WINDOWS_PRIVATE_DIRECTORY_${suffix}`),
   ...[
-    'CREATE_AMBIGUOUS', 'NAME_INVALID', 'OCCUPIED', 'PRIVACY_UNPROVED',
+    'CREATE_AMBIGUOUS', 'NAME_INVALID', 'OCCUPIED',
   ].map((suffix) => `WINDOWS_PRIVATE_FILE_${suffix}`),
 ]);
 const CLOSURE_REASONS = new Map([
   ['WINDOWS_DIRECTORY_CLOSURE_CHANGED|Windows directory closure changed: directory contents changed between closure passes.', 'directory-contents-changed-between-closure-passes'],
-  ['WINDOWS_DIRECTORY_CLOSURE_CHANGED|Windows directory closure changed: directory root or private ancestry changed while capturing its closure.', 'directory-root-or-private-ancestry-changed-while-capturing-its-closure'],
+  ['WINDOWS_DIRECTORY_CLOSURE_CHANGED|Windows directory closure changed: directory root or physical ancestry changed while capturing its closure.', 'directory-root-or-physical-ancestry-changed-while-capturing-its-closure'],
   ['WINDOWS_DIRECTORY_CLOSURE_CHANGED|Windows directory closure changed: listed directory could not be admitted after enumeration.', 'listed-directory-could-not-be-admitted-after-enumeration'],
   ['WINDOWS_DIRECTORY_CLOSURE_CHANGED|Windows directory closure changed: listed file could not be admitted after enumeration.', 'listed-file-could-not-be-admitted-after-enumeration'],
   ['WINDOWS_DIRECTORY_CLOSURE_CHANGED|Windows directory closure changed: directory closure file could not be read with its listed state.', 'directory-closure-file-could-not-be-read-with-its-listed-state'],
   ['WINDOWS_DIRECTORY_CLOSURE_CHANGED|Windows directory closure changed: directory closure file identity or size changed while reading.', 'directory-closure-file-identity-or-size-changed-while-reading'],
   ['WINDOWS_DIRECTORY_CLOSURE_CHANGED|Windows directory closure changed: directory closure file privacy or identity changed while reading.', 'directory-closure-file-privacy-or-identity-changed-while-reading'],
-  ['WINDOWS_DIRECTORY_CLOSURE_CHANGED|Windows directory closure changed: directory closure file security changed while reading.', 'directory-closure-file-security-changed-while-reading'],
+  ['WINDOWS_DIRECTORY_CLOSURE_CHANGED|Windows directory closure changed: directory closure file identity changed while reading.', 'directory-closure-file-identity-changed-while-reading'],
   ['WINDOWS_DIRECTORY_CLOSURE_CHANGED|Windows directory closure changed: directory entries changed after their closure was read.', 'directory-entries-changed-after-their-closure-was-read'],
   ['WINDOWS_DIRECTORY_CLOSURE_CHANGED|Windows directory closure changed: directory identity or metadata changed.', 'directory-identity-or-metadata-changed'],
   ['WINDOWS_DIRECTORY_CLOSURE_CHANGED|Windows directory closure changed: listed child no longer resolves to the enumerated direct child.', 'listed-child-no-longer-resolves-to-the-enumerated-direct-child'],
@@ -63,8 +63,8 @@ const CLOSURE_REASONS = new Map([
   ['WINDOWS_DIRECTORY_CLOSURE_INVALID|Invalid Windows directory closure: directory closure contains a Windows or portable path collision.', 'directory-closure-contains-a-Windows-or-portable-path-collision'],
   ['WINDOWS_DIRECTORY_CLOSURE_INVALID|Invalid Windows directory closure: directory closure contains an unsupported reparse entry.', 'directory-closure-contains-an-unsupported-reparse-entry'],
   ['WINDOWS_DIRECTORY_CLOSURE_INVALID|Invalid Windows directory closure: directory closure contains an unsupported special or offline entry.', 'directory-closure-contains-an-unsupported-special-or-offline-entry'],
-  ['WINDOWS_DIRECTORY_CLOSURE_INVALID|Invalid Windows directory closure: listed directory is not owner-private.', 'listed-directory-is-not-owner-private'],
-  ['WINDOWS_DIRECTORY_CLOSURE_INVALID|Invalid Windows directory closure: listed file is not an owner-private single-link regular file.', 'listed-file-is-not-an-owner-private-single-link-regular-file'],
+  ['WINDOWS_DIRECTORY_CLOSURE_INVALID|Invalid Windows directory closure: listed directory is not physical.', 'listed-directory-is-not-physical'],
+  ['WINDOWS_DIRECTORY_CLOSURE_INVALID|Invalid Windows directory closure: listed file is not a physical regular file.', 'listed-file-is-not-a-physical-regular-file'],
   ['WINDOWS_DIRECTORY_CLOSURE_INVALID|Invalid Windows directory closure: directory could not be enumerated with admissible stable evidence.', 'directory-could-not-be-enumerated-with-admissible-stable-evidence'],
   ['WINDOWS_DIRECTORY_CLOSURE_LIMIT_EXCEEDED|Windows directory closure limit exceeded: directory closure exceeds its depth limit.', 'directory-closure-exceeds-its-depth-limit'],
   ['WINDOWS_DIRECTORY_CLOSURE_LIMIT_EXCEEDED|Windows directory closure limit exceeded: directory closure exceeds its entry limit.', 'directory-closure-exceeds-its-entry-limit'],
@@ -82,8 +82,6 @@ const ENTRY_FIELDS = ['fileId', 'size', 'allocationSize', 'creationTime', 'lastW
 const DIRECTORY_FIELDS = [
   'canonicalPath', 'kind', 'volume.identity',
   ...['volumeIdentity', ...ENTRY_FIELDS, 'numberOfLinks', 'deletePending'].map((field) => `object.${field}`),
-  ...['descriptorControl', 'daclPresent', 'daclNull', 'daclDefaulted', 'ownerSid', 'ownerDefaulted',
-    'groupSid', 'groupDefaulted', 'currentUserSid', 'daclBytes'].map((field) => `security.${field}`)
 ];
 const DIFFERING_FIELDS = [
   ...ENTRY_FIELDS, 'deletePending', ...DIRECTORY_FIELDS,
@@ -94,14 +92,13 @@ const DIFFERING_FIELDS = [
 
 // Fixed error-only vocabulary; no native receipt or capability fields are added.
 const READ_CHANGE_OBJECT_FIELDS = ['object.volumeIdentity', 'object.fileId', 'object.size', 'object.allocationSize', 'object.numberOfLinks', 'object.creationTime', 'object.lastWriteTime', 'object.changeTime', 'object.attributes', 'object.reparseTag', 'object.deletePending', 'object.directory'];
-const READ_CHANGE_SECURITY_FIELDS = ['security.descriptorControl', 'security.daclPresent', 'security.daclNull', 'security.daclDefaulted', 'security.daclBytes', 'security.ownerSid', 'security.ownerDefaulted', 'security.groupSid', 'security.groupDefaulted', 'security.currentUserSid'];
 const READ_CHANGE_FIELDS = {
-  'inspect-opened-path': [...READ_CHANGE_OBJECT_FIELDS, ...READ_CHANGE_SECURITY_FIELDS],
+  'inspect-opened-path': [...READ_CHANGE_OBJECT_FIELDS],
   'rename-parent': ['canonicalPath', 'kindDirectory', 'volume.identity', 'object.volumeIdentity', 'object.fileId',
-    'reparseTagZero', 'notDeletePending', 'objectDirectory', ...READ_CHANGE_SECURITY_FIELDS],
+    'reparseTagZero', 'notDeletePending', 'objectDirectory'],
   'stable-read-growth': ['growthProbeNonzero'],
   'stable-read-final': [...READ_CHANGE_OBJECT_FIELDS, 'byteCountExpected', 'afterSizeByteCount'],
-  'reopened-prefix': [...READ_CHANGE_OBJECT_FIELDS, ...READ_CHANGE_SECURITY_FIELDS, 'canonicalPath'],
+  'reopened-prefix': [...READ_CHANGE_OBJECT_FIELDS, 'canonicalPath'],
   'stable-read-receipt': [...READ_CHANGE_OBJECT_FIELDS, 'beforeDirectory', 'afterDirectory', 'beforeReparseTag',
     'afterReparseTag', 'beforeDeletePending', 'afterDeletePending', 'beforeSizeByteCount', 'afterSizeByteCount']
 };

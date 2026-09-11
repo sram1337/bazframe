@@ -84,6 +84,19 @@ describe('Bazframe-owned Windows native loader', () => {
     expect(() => load(module(overrides))).toThrow(expect.objectContaining({ code: expectedCode }));
   });
 
+  it('rejects old contract 7 and admits only descriptor-free ordinary receipts with explicit creation evidence', () => {
+    expect(() => load(module({ info: { contractVersion: 7 } }))).toThrow(expect.objectContaining({ code: 'WINDOWS_NATIVE_CONTRACT_MISMATCH' }));
+    const backend = load(module());
+    expect(backend.inspectPath('C:\\state')).not.toHaveProperty('security');
+    expect(backend.inspectMembershipLink('C:\\state\\membership')).not.toHaveProperty('security');
+    for (const creationSecurity of [undefined, { ...security(), daclBytes: 'not bytes' }, { ...security(), ownerSid: 'not-a-sid' }]) {
+      const raw = { ...creation(), creationSecurity };
+      expect(() => load(module({ creation: raw })).createPrivateDirectory('C:\\state', 'child')).toThrow(expect.objectContaining({ code: 'WINDOWS_NATIVE_CREATE_AMBIGUOUS' }));
+    }
+    expect(backend.createPrivateDirectory('C:\\state', 'child')).toHaveProperty('creationSecurity');
+    expect(load(module({ inspectWindowsZipSource: () => observation({ numberOfLinks: '00000002' }) })).inspectZipSource('C:\\input.zip').numberOfLinks).toBe('00000002');
+  });
+
   it('accepts exact identities beyond JavaScript safe integer range without numeric conversion', async () => {
     const backend = load(module());
     const inspection = backend.inspectPath('C:\\state');
@@ -108,7 +121,7 @@ describe('Bazframe-owned Windows native loader', () => {
     ['kind mismatch', { kind: 'directory', object: { directory: false } }],
     ['canonical volume mismatch', { canonicalPath: '\\\\?\\Volume{aaaaaaaa-1234-1234-1234-123456789abc}\\state' }],
     ['malformed volume GUID', { volume: { canonicalVolumeGuidPath: '\\\\?\\Volume{123456781234-1234-1234-123456789abc}\\' } }],
-    ['missing security', { security: undefined }],
+    ['obsolete ordinary security field', { security: undefined }],
     ['noncanonical owner SID', { security: { ownerSid: 'S-1-05-18' } }],
     ['numeric current user SID', { security: { currentUserSid: 5 } }],
     ['oversized descriptor control', { security: { descriptorControl: 0x1_0000 } }],
@@ -164,7 +177,7 @@ describe('Bazframe-owned Windows native loader', () => {
     expect(inspect).not.toHaveBeenCalled();
   });
   it.each([
-    { directory: true }, { numberOfLinks: '00000002' }, { deletePending: true },
+    { directory: true }, { deletePending: true },
     { attributes: 0x420, reparseTag: 0xa0000003 }, { attributes: 0x420, reparseTag: 0xa000000c },
     { attributes: 0x20, reparseTag: 0x9000001a }, { attributes: 0x420, reparseTag: 0 }, { attributes: 0x60 }
   ])('refuses special, generic-reparse and inconsistent ZIP source receipts', (change) => {
@@ -521,7 +534,7 @@ function load(
 
 function module(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   const info = {
-    contractVersion: 7,
+    contractVersion: 8,
     packageVersion: VERSION,
     target: 'win32-x64-msvc',
     maxStableReadBytes: BAZFRAME_WIN32_NATIVE_MAX_STABLE_READ_BYTES,
@@ -566,11 +579,8 @@ function inspection(overrides: Record<string, unknown> = {}): Record<string, unk
       ...record(overrides.volume)
     },
     object: observation(record(overrides.object)),
-    security: Object.hasOwn(overrides, 'security') && overrides.security === undefined
-      ? undefined
-      : security(record(overrides.security)),
     ancestryReparseFree: true,
-    ...without(overrides, ['volume', 'object', 'security'])
+    ...without(overrides, ['volume', 'object'])
   };
 }
 
@@ -591,17 +601,17 @@ function membershipInspection(overrides: Record<string, unknown> = {}): Record<s
       reparseTag: 0xa0000003,
       ...record(overrides.object)
     }),
-    security: security(record(overrides.security)),
     ancestryReparseFree: true,
     normalizedTarget: '\\\\?\\Volume{12345678-1234-1234-1234-123456789abc}\\target',
     targetVolumeIdentity: VOLUME,
     targetFileId: FILE_ID,
-    ...without(overrides, ['volume', 'object', 'security'])
+    ...without(overrides, ['volume', 'object'])
   };
 }
 
 function junctionCreation(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
+    creationSecurity: security(),
     parentBefore: directoryInspection('state'),
     created: membershipInspection(),
     parentAfter: directoryInspection('state'),
@@ -611,6 +621,7 @@ function junctionCreation(overrides: Record<string, unknown> = {}): Record<strin
 
 function creation(): Record<string, unknown> {
   return {
+    creationSecurity: security(),
     parentBefore: directoryInspection('state'),
     created: directoryInspection('state\\child', '00000000000000002000000000000002'),
     parentAfter: directoryInspection('state')
@@ -619,6 +630,7 @@ function creation(): Record<string, unknown> {
 
 function privateFileCreation(): Record<string, unknown> {
   return {
+    creationSecurity: security(),
     parentBefore: directoryInspection('state'),
     created: inspection({
       canonicalPath: '\\\\?\\Volume{12345678-1234-1234-1234-123456789abc}\\state\\journal.json',
@@ -749,31 +761,16 @@ describe('error-only native read-change diagnosis', async () => {
     expect(sanitizeProductError(JSON.parse(JSON.stringify(sanitized)))).toEqual(sanitized);
     expect(JSON.stringify(sanitized)).not.toContain('PRIVATE');
   });
-  it.each(['drive-root', 'ancestor', 'final'])('transports every exact directory security field through native decode and IPC: %s', async (prefixRole) => {
-    const differingFields = ['security.descriptorControl', 'security.daclPresent', 'security.daclNull',
-      'security.daclDefaulted', 'security.daclBytes', 'security.ownerSid', 'security.ownerDefaulted',
-      'security.groupSid', 'security.groupDefaulted', 'security.currentUserSid'];
-    for (const field of differingFields) {
-      const original = coded('ERR_WIN32_READ_CHANGED', `read-change|reopened-prefix|directory|${prefixRole}|${field}`);
-      const backend = load(module({ inspectWindowsPath() { throw original; } }));
-      let error: unknown;
-      try { backend.inspectPath('C:\\private'); } catch (caught) { error = caught; }
-      expect((error as Error).cause).toBe(original);
-      const sanitized = sanitizeProductError(error);
-      expect(sanitized.nativeReadChange).toEqual({ site: 'reopened-prefix', objectKind: 'directory', prefixRole, differingFields: [field] });
-      expect(sanitizeProductError(JSON.parse(JSON.stringify(sanitized)))).toEqual(sanitized);
-    }
-  });
   const maximalFields = [
     'object.volumeIdentity', 'object.fileId', 'object.size', 'object.allocationSize', 'object.numberOfLinks',
     'object.creationTime', 'object.lastWriteTime', 'object.changeTime', 'object.attributes', 'object.reparseTag',
-    'object.deletePending', 'object.directory', 'security.descriptorControl', 'security.daclPresent', 'security.daclNull',
-    'security.daclDefaulted', 'security.daclBytes', 'security.ownerSid', 'security.ownerDefaulted', 'security.groupSid',
-    'security.groupDefaulted', 'security.currentUserSid', 'canonicalPath'
+    'object.deletePending', 'object.directory',
+
+    'canonicalPath'
   ];
   const maximalReason = ['read-change', 'reopened-prefix', 'regular-file', 'drive-root', maximalFields.join(',')].join('|');
   it.each(['sync', 'async'])('accepts the maximal supported %s diagnostic with its original cause', async (mode) => {
-    expect(maximalReason.length).toBe(505); // Fixture length, not a production limit.
+    expect(maximalReason.length).toBe(289); // Fixture length, not a production limit.
     const original = coded(mode === 'sync' ? 'ERR_WIN32_READ_CHANGED' : 'GenericFailure',
       mode === 'sync' ? maximalReason : `ERR_WIN32_READ_CHANGED: ${maximalReason}`);
     const backend = load(module({ inspectWindowsPath() { throw original; }, readWindowsFileStable: () => Promise.reject(original) }));
@@ -785,7 +782,7 @@ describe('error-only native read-change diagnosis', async () => {
     expect(sanitizeProductError(error).nativeReadChange.differingFields).toEqual(maximalFields);
   });
   it.each(['sync', 'async'])('rejects oversized %s text before splitting, retaining code/cause', (mode) => {
-    const oversized = `${maximalReason}X`;
+    const oversized = `${maximalReason}${"X".repeat(100)}`;
     const original = coded(mode === 'sync' ? 'ERR_WIN32_READ_CHANGED' : 'GenericFailure',
       mode === 'sync' ? oversized : `ERR_WIN32_READ_CHANGED: ${oversized}`);
     const backend = load(module({ inspectWindowsPath() { throw original; } }));
@@ -835,7 +832,7 @@ describe('error-only native read-change diagnosis', async () => {
     }
   );
   it.each([
-    ['inspect-opened-path', 'regular-file', 'none', 'security.daclBytes'],
+    ['inspect-opened-path', 'regular-file', 'none', 'object.fileId'],
     ['rename-parent', 'directory', 'none', 'kindDirectory,reparseTagZero,notDeletePending,objectDirectory'],
     ['stable-read-growth', 'regular-file', 'none', 'growthProbeNonzero'],
     ['stable-read-final', 'regular-file', 'none', 'byteCountExpected,afterSizeByteCount,object.size'],

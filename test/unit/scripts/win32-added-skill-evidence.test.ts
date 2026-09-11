@@ -133,7 +133,7 @@ function run(source: string, installed: string) {
 
 function receipt(packageRootKind: 'source-tree' | 'packed-install') {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     purpose: 'Internal managed profile activation, current selection, onboarding and healthy local added-Skill Windows product-slice evidence only.',
     packageRootKind,
     completion: 'passed',
@@ -219,7 +219,6 @@ function receipt(packageRootKind: 'source-tree' | 'packed-install') {
   };
 }
 
-
 describe('Windows product child IPC settlement', () => {
   it.each(['early-exit', 'spawn-error'] as const)('settles an actual child %s before readiness', async (mode) => {
     const root = await mkdtemp(join(tmpdir(), 'bazframe-win-product-child-'));
@@ -291,7 +290,6 @@ describe('Windows product child IPC settlement', () => {
   });
 });
 
-
 describe('Windows failed-product diagnostic privacy', () => {
   it('persists fixed failure context without synthesizing passing observations', async () => {
     const root = await mkdtemp(join(tmpdir(), 'bazframe-win-product-diagnostic-'));
@@ -302,7 +300,7 @@ describe('Windows failed-product diagnostic privacy', () => {
     ], { encoding: 'utf8' });
     expect(result.status).toBe(1);
     const receipt = JSON.parse(await readFile(output, 'utf8'));
-    expect(receipt).toMatchObject({ schemaVersion: 3, completion: 'failed', observations: {}, windowsSupportClaim: false });
+    expect(receipt).toMatchObject({ schemaVersion: 4, completion: 'failed', observations: {}, windowsSupportClaim: false });
     expect(receipt.failures).toHaveLength(1);
     expect(receipt.failures[0]).toMatchObject({ scenario: 'startup', substep: process.platform === 'win32' ? 'nativeModule' : 'start' });
     expect(JSON.stringify(receipt)).not.toContain(root);
@@ -414,7 +412,6 @@ describe('Windows failed-product diagnostic privacy', () => {
   });
 });
 
-
 describe('independent activation candidate tuple evidence', () => {
   function snapshot() {
     const fixture = windowsProvisioningFixture();
@@ -441,13 +438,12 @@ describe('independent activation candidate tuple evidence', () => {
     expect(selectionCandidateRetained(candidate, destination)).toBe(false);
   });
 
-  it.each(['identity', 'volume', 'security', 'bytes', 'retained-temp', 'missing-candidate', 'missing-destination'] as const)(
+  it.each(['identity', 'volume', 'bytes', 'retained-temp', 'missing-candidate', 'missing-destination'] as const)(
     'rejects a falsely claimed commit with %s mismatch', (kind) => {
       const candidate = snapshot();
       const destination = snapshot();
       if (kind === 'identity') destination.inspection.object.fileId = 'f'.repeat(32);
       if (kind === 'volume') destination.inspection.object.volumeIdentity = 'f'.repeat(16);
-      if (kind === 'security') destination.inspection.security.daclBytes = Buffer.from('different');
       if (kind === 'bytes') destination.bytes = Buffer.from('other\n');
       expect(selectionCandidateCommitted(kind === 'missing-candidate' ? undefined : candidate,
         kind === 'missing-destination' ? undefined : destination,
@@ -455,11 +451,10 @@ describe('independent activation candidate tuple evidence', () => {
     }
   );
 
-  it.each(['missing', 'identity', 'security', 'bytes', 'metadata'] as const)('rejects %s retained-candidate mismatch after sharing denial or interruption', (kind) => {
+  it.each(['missing', 'identity', 'bytes', 'metadata'] as const)('rejects %s retained-candidate mismatch after sharing denial or interruption', (kind) => {
     const candidate = snapshot();
     const retained = snapshot();
     if (kind === 'identity') retained.inspection.object.fileId = 'f'.repeat(32);
-    if (kind === 'security') retained.inspection.security.ownerSid = 'different';
     if (kind === 'bytes') retained.bytes = Buffer.from('other\n');
     if (kind === 'metadata') retained.inspection.object.changeTime = '0000000000000002';
     expect(selectionCandidateRetained(candidate, kind === 'missing' ? undefined : retained)).toBe(false);
@@ -518,9 +513,7 @@ describe('independent activation candidate tuple evidence', () => {
     ['object', 'numberOfLinks'], ['object', 'creationTime'], ['object', 'lastWriteTime'], ['object', 'changeTime'],
     ['object', 'attributes'], ['object', 'reparseTag'], ['object', 'deletePending'], ['object', 'directory'],
     ['volume', 'identity'], ['volume', 'filesystemName'], ['volume', 'driveType'], ['volume', 'canonicalVolumeGuidPath'], ['volume', 'remoteDevice'],
-    ['security', 'descriptorControl'], ['security', 'daclPresent'], ['security', 'daclNull'], ['security', 'daclDefaulted'],
-    ['security', 'daclBytes'], ['security', 'ownerSid'], ['security', 'ownerDefaulted'], ['security', 'groupSid'],
-    ['security', 'groupDefaulted'], ['security', 'currentUserSid'],
+
     ['inspection', 'kind'], ['inspection', 'canonicalPath'], ['inspection', 'ancestryReparseFree']
   ] as const;
   it.each(retainedFields)('still rejects %s.%s drift with access-time difference present and preserves raw evidence', (layer, field) => {
@@ -550,8 +543,8 @@ describe('independent activation candidate tuple evidence', () => {
   );
 
   it.each([
-    ['inspection', 'extension'], ['object', 'extension'], ['volume', 'extension'], ['security', 'extension'],
-    ['inspection', 'lastAccessTime'], ['volume', 'lastAccessTime'], ['security', 'lastAccessTime']
+    ['inspection', 'extension'], ['object', 'extension'], ['volume', 'extension'],
+    ['inspection', 'lastAccessTime'], ['volume', 'lastAccessTime'],
   ] as const)('compares extra %s.%s keys including unrelated access-time names', (layer, key) => {
     const { candidate, retained } = accessPair();
     const left = (layer === 'inspection' ? candidate.inspection : candidate.inspection[layer]) as unknown as Record<string, unknown>;
@@ -561,14 +554,14 @@ describe('independent activation candidate tuple evidence', () => {
     preservedCall(candidate, retained, false);
   });
 
-  it.each(['inspection', 'object', 'volume', 'security'] as const)('compares extra %s key presence rather than allowlisting known fields', (layer) => {
+  it.each(['inspection', 'object', 'volume'] as const)('compares extra %s key presence rather than allowlisting known fields', (layer) => {
     const { candidate, retained } = accessPair();
     const target = (layer === 'inspection' ? retained.inspection : retained.inspection[layer]) as unknown as Record<string, unknown>;
     target.extension = 'extra';
     preservedCall(candidate, retained, false);
   });
 
-  it.each(['inspection', 'object', 'volume', 'security'] as const)('preserves and compares remaining %s key order', (layer) => {
+  it.each(['inspection', 'object', 'volume'] as const)('preserves and compares remaining %s key order', (layer) => {
     const { candidate, retained } = accessPair();
     const target = (layer === 'inspection' ? retained.inspection : retained.inspection[layer]) as unknown as Record<string, unknown>;
     const key = Object.keys(target)[0]!, value = target[key];
@@ -577,7 +570,7 @@ describe('independent activation candidate tuple evidence', () => {
     preservedCall(candidate, retained, false);
   });
 
-  it.each(['missing-candidate', 'missing-temporary', 'kind', 'identity', 'security', 'candidate-buffer', 'temporary-buffer', 'bytes'])(
+  it.each(['missing-candidate', 'missing-temporary', 'kind', 'identity', 'candidate-buffer', 'temporary-buffer', 'bytes'])(
     'keeps earlier %s guard ahead of bytes and raw projection', (mode) => {
       const { candidate, retained } = accessPair();
       const suppressed = () => { throw new Error('later evidence must not be evaluated'); };
@@ -585,8 +578,7 @@ describe('independent activation candidate tuple evidence', () => {
       Object.defineProperty(retained.inspection, 'canonicalPath', { enumerable: true, get: suppressed });
       if (mode === 'kind') retained.inspection.kind = 'directory';
       if (mode === 'identity') retained.inspection.object.fileId = 'f'.repeat(32);
-      if (mode === 'security') retained.inspection.security.ownerSid = 'different';
-      if (['missing-candidate', 'missing-temporary', 'kind', 'identity', 'security'].includes(mode)) {
+      if (['missing-candidate', 'missing-temporary', 'kind', 'identity'].includes(mode)) {
         Object.defineProperty(candidate, 'bytes', { get: suppressed });
         Object.defineProperty(retained, 'bytes', { get: suppressed });
       } else if (mode === 'candidate-buffer') {
@@ -647,7 +639,6 @@ describe('independent activation candidate tuple evidence', () => {
     await child.exited;
   });
 });
-
 
 describe('activation first-refusal diagnostics', () => {
   const physicalCode = 'WINDOWS_PROFILE_ACTIVATION_CHANGED';
@@ -929,7 +920,7 @@ describe('native read-change receipt sanitization and IPC', () => {
     }
   );
   it('also ignores a private-yielding field iterator at the actual refusal IPC sanitizer', async () => {
-    const fields = ['security.daclBytes'];
+    const fields = ['object.fileId'];
     Object.defineProperty(fields, Symbol.iterator, { value: function* () { yield 'PRIVATE'; } });
     const process = new EventEmitter();
     const child = trackProvisioningChild(process);
@@ -938,7 +929,7 @@ describe('native read-change receipt sanitization and IPC', () => {
     const first = await waiting;
     process.emit('close', 1, null);
     const sanitized = sanitizeProductError(first);
-    expect(sanitized.cause.nativeReadChange.differingFields).toEqual(['security.daclBytes']);
+    expect(sanitized.cause.nativeReadChange.differingFields).toEqual(['object.fileId']);
     expect(JSON.stringify(sanitized)).not.toContain('PRIVATE');
     expect(sanitizeProductError(sanitized)).toEqual(sanitized);
     expect(await child.next('paused').catch((error: unknown) => error)).toBe(first);
@@ -962,7 +953,6 @@ describe('native read-change receipt sanitization and IPC', () => {
     await child.exited;
   });
 });
-
 
 describe('measured added-Skill namespace refusal privacy', () => {
   it('admits only the measured category directly and in nested causes, not neighboring codes or private fields', () => {

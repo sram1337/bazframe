@@ -3,7 +3,7 @@ import type {
   BazframeWin32NativeBackend,
   WindowsDirectoryEntryObservation,
   WindowsObjectObservation,
-  WindowsPathInspection,
+  WindowsPathInspection as PhysicalPathInspection,
   WindowsSecurityObservation,
   WindowsStableReadReceipt
 } from '../../../src/core/win32-native.js';
@@ -13,6 +13,9 @@ import {
   WINDOWS_DIRECTORY_CLOSURE_PRODUCTION_POLICY,
   windowsDirectoryClosurePolicy
 } from '../../../src/state/win32-directory-closure.js';
+
+// Synthetic fixture metadata is not part of ordinary native physical receipts.
+type WindowsPathInspection = PhysicalPathInspection & { security: WindowsSecurityObservation };
 
 const VOLUME = '0020000000000001';
 const USER = 'S-1-5-21-1';
@@ -296,33 +299,27 @@ describe('Windows directory closure composition', () => {
     }
   );
 
-  it('rejects multiply-linked or non-private files and non-private child directories', async () => {
+  it('admits stable hardlinked input and existing files/directories without private ACLs', async () => {
     const linked = tree({
       'C:\\state': dir(1),
       'C:\\state\\linked': { ...file(2, 'x'), numberOfLinks: 2 }
     });
-    await expect(captureWindowsDirectoryClosure(linked, 'C:\\state')).rejects.toMatchObject({
-      code: 'WINDOWS_DIRECTORY_CLOSURE_INVALID'
-    });
+    await expect(captureWindowsDirectoryClosure(linked, 'C:\\state')).resolves.toHaveProperty('closureSha256');
 
     const broadFile = tree({
       'C:\\state': dir(1),
       'C:\\state\\broad': { ...file(2, 'x'), security: foreignSecurity() }
     });
-    await expect(captureWindowsDirectoryClosure(broadFile, 'C:\\state')).rejects.toMatchObject({
-      code: 'WINDOWS_DIRECTORY_CLOSURE_INVALID'
-    });
+    await expect(captureWindowsDirectoryClosure(broadFile, 'C:\\state')).resolves.toHaveProperty('closureSha256');
 
     const broadDirectory = tree({
       'C:\\state': dir(1),
       'C:\\state\\broad': { ...dir(2), security: foreignSecurity() }
     });
-    await expect(captureWindowsDirectoryClosure(broadDirectory, 'C:\\state')).rejects.toMatchObject({
-      code: 'WINDOWS_DIRECTORY_CLOSURE_INVALID'
-    });
+    await expect(captureWindowsDirectoryClosure(broadDirectory, 'C:\\state')).resolves.toHaveProperty('closureSha256');
   });
 
-  it('maps post-enumeration read, replacement, and file-security races to closure drift', async () => {
+  it('maps post-enumeration read/replacement races while admitting security-only fixture changes to closure drift', async () => {
     const growth = tree({
       'C:\\state': dir(1),
       'C:\\state\\file': file(2, 'x')
@@ -356,9 +353,7 @@ describe('Windows directory closure composition', () => {
       securityDrift.nodes.get(path)!.security = foreignSecurity();
       return receipt;
     };
-    await expect(captureWindowsDirectoryClosure(securityDrift, 'C:\\state')).rejects.toMatchObject({
-      code: 'WINDOWS_DIRECTORY_CLOSURE_CHANGED'
-    });
+    await expect(captureWindowsDirectoryClosure(securityDrift, 'C:\\state')).resolves.toHaveProperty('closureSha256');
   });
 
   it('binds listed identities to child inspection and stable reads', async () => {

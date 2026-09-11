@@ -8,14 +8,7 @@ import { BazframeError, errorCode } from '../core/errors.js';
 
 const LOCAL_SYSTEM_SID = 'S-1-5-18';
 const BUILTIN_ADMINISTRATORS_SID = 'S-1-5-32-544';
-const TRUSTED_INSTALLER_SID = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464';
 const FILE_ALL_ACCESS = 0x001f01ff;
-const DELETE = 0x0001_0000;
-const FILE_DELETE_CHILD = 0x0000_0040;
-const WRITE_DAC = 0x0004_0000;
-const WRITE_OWNER = 0x0008_0000;
-const GENERIC_ALL = 0x1000_0000;
-const NAMESPACE_TAKEOVER_ACCESS = DELETE | FILE_DELETE_CHILD | WRITE_DAC | WRITE_OWNER | GENERIC_ALL;
 const SE_OWNER_DEFAULTED = 0x0001;
 const SE_GROUP_DEFAULTED = 0x0002;
 const SE_DACL_PRESENT = 0x0004;
@@ -35,42 +28,22 @@ const WINDOWS_RESERVED_COMPONENT = /^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9
 type ChainEntry = {
   path: string;
   inspection: WindowsPathInspection;
-  proof: 'private' | 'namespace';
 };
 type ParsedAce = { type: 'allow' | 'deny'; flags: number; mask: number; sid: string };
 
 /** Internal composition seam. It does not bypass the public Windows gate. */
-export function admitWindowsPrivateDirectory(
+export function admitWindowsPhysicalDirectory(
   backend: BazframeWin32NativeBackend,
   path: string
 ): WindowsPathInspection {
-  const chain = inspectPrivateChain(backend, path);
+  const chain = inspectPhysicalChain(backend, path);
   return revalidateChain(backend, chain)[0]!.inspection;
 }
 
-/** External ZIP roots need namespace integrity/locality, not managed-tree read privacy. */
-export function admitWindowsNamespaceDirectory(backend: BazframeWin32NativeBackend, path: string): WindowsPathInspection {
-  const chain = inspectPrivateChain(backend, path, false);
-  assertExactSpelling(backend, path);
-  return revalidateChain(backend, chain)[0]!.inspection;
-}
-
-/** Reuses the effective owner-private directory ACL policy for a no-follow child object. */
-export function assertWindowsOwnerPrivateSecurity(
-  security: WindowsSecurityObservation,
-  expectedCurrentUserSid: string
-): void {
-  assertPrivateSecurity(security);
-  if (security.currentUserSid !== expectedCurrentUserSid) {
-    invalid('current-user security identity changed');
-  }
-}
-
-/** Admits one owner-private, single-link regular file beneath a private directory chain. */
-export function admitWindowsPrivateFile(
+/** Admits a stable physical regular file beneath physical directory ancestry. */
+export function admitWindowsPhysicalFile(
   backend: BazframeWin32NativeBackend,
-  path: string,
-  options: { parentPolicy?: 'namespace' } = {}
+  path: string
 ): WindowsPathInspection {
   requireDriveAbsolutePath(path);
   const parentPath = win32.dirname(path);
@@ -78,22 +51,18 @@ export function admitWindowsPrivateFile(
   if (parentPath.toLowerCase() === path.toLowerCase() || !isValidWindowsPathComponent(component)) {
     throw fileInvalid('path does not name one valid child file');
   }
-  const chain = inspectPrivateChain(backend, parentPath, options.parentPolicy !== 'namespace');
+  const chain = inspectPhysicalChain(backend, parentPath);
   const admittedParent = revalidateChain(backend, chain)[0]!.inspection;
   const before = backend.inspectPath(path);
-  assertPrivateFile(before);
-  requireDirectPrivateChild(admittedParent, before, component);
-  requireSameCurrentUser(admittedParent, before);
+  assertPhysicalFile(before);
+  requireDirectFileChild(admittedParent, before, component);
 
   const afterChain = revalidateChain(backend, chain);
   requireSameDirectory(admittedParent, afterChain[0]!.inspection);
-  requireSameSecurity(admittedParent.security, afterChain[0]!.inspection.security);
   const after = backend.inspectPath(path);
-  assertPrivateFile(after);
+  assertPhysicalFile(after);
   requireSameRegularFile(before, after);
-  requireSameSecurity(before.security, after.security);
-  requireDirectPrivateChild(afterChain[0]!.inspection, after, component);
-  requireSameCurrentUser(afterChain[0]!.inspection, after);
+  requireDirectFileChild(afterChain[0]!.inspection, after, component);
   return after;
 }
 
@@ -101,11 +70,10 @@ export function admitWindowsPrivateFile(
 export function createWindowsPrivateDirectory(
   backend: BazframeWin32NativeBackend,
   parentPath: string,
-  finalComponent: string,
-  options: { parentPolicy?: 'namespace' } = {}
+  finalComponent: string
 ): WindowsPathInspection {
   validateFinalComponent(finalComponent);
-  return createPrivateDirectoryUnderChain(backend, parentPath, finalComponent, inspectPrivateChain(backend, parentPath, options.parentPolicy !== 'namespace'));
+  return createPrivateDirectoryUnderChain(backend, parentPath, finalComponent, inspectPhysicalChain(backend, parentPath));
 }
 
 function createPrivateDirectoryUnderChain(
@@ -129,33 +97,26 @@ function createPrivateDirectoryUnderChain(
 
   try {
     requireSameDirectory(admittedParent, receipt.parentBefore);
-    requireSameSecurity(admittedParent.security, receipt.parentBefore.security);
     requireSameDirectory(receipt.parentBefore, receipt.parentAfter);
-    requireSameSecurity(receipt.parentBefore.security, receipt.parentAfter.security);
     requireDirectChild(receipt.parentBefore, receipt.created, finalComponent);
-    requireSameCurrentUser(receipt.parentBefore, receipt.created);
-    assertPrivateDirectory(receipt.created);
-    if (!isProtected(receipt.created.security)) invalid('created directory DACL is not protected');
+    assertPhysicalDirectory(receipt.created);
+    assertWindowsPrivateCreationSecurity(receipt.creationSecurity);
 
     const afterChain = revalidateChain(backend, admittedChain);
     requireSameDirectory(receipt.parentAfter, afterChain[0]!.inspection);
-    requireSameSecurity(receipt.parentAfter.security, afterChain[0]!.inspection.security);
     const child = backend.inspectPath(win32.join(parentPath, finalComponent));
-    assertPrivateDirectory(child);
-    if (!isProtected(child.security)) invalid('created directory DACL is not protected');
+    assertPhysicalDirectory(child);
     requireSameDirectory(receipt.created, child);
-    requireSameSecurity(receipt.created.security, child.security);
     requireDirectChild(afterChain[0]!.inspection, child, finalComponent);
-    requireSameCurrentUser(afterChain[0]!.inspection, child);
     return child;
   } catch (error) {
     throw ambiguous(error);
   }
 }
 
-/** Bootstrap only: existing ancestors need namespace safety, never ACL repair.
+/** Bootstrap only: existing ancestors need physical admission, never ACL repair.
  * Every missing component is protected from first visibility. Occupancy requires
- * fresh private admission and exact spelling, not an ownership assumption.
+ * fresh physical admission and exact spelling, not an ownership assumption.
  */
 export function ensureWindowsPrivateDirectoryPath(
   backend: BazframeWin32NativeBackend,
@@ -181,7 +142,7 @@ export function ensureWindowsPrivateDirectoryPath(
     }
   }
   if (missing.length === 0) {
-    const admitted = admitWindowsPrivateDirectory(backend, path);
+    const admitted = admitWindowsPhysicalDirectory(backend, path);
     assertExactSpelling(backend, path);
     return admitted;
   }
@@ -189,8 +150,8 @@ export function ensureWindowsPrivateDirectoryPath(
   let ancestor = current;
   while (true) {
     const inspection = backend.inspectPath(ancestor);
-    assertNamespaceDirectory(inspection);
-    chain.push({ path: ancestor, inspection, proof: 'namespace' });
+    assertPhysicalDirectory(inspection);
+    chain.push({ path: ancestor, inspection });
     const parent = win32.dirname(ancestor);
     if (parent === ancestor) break;
     ancestor = parent;
@@ -205,13 +166,13 @@ export function ensureWindowsPrivateDirectoryPath(
     } catch (error) {
       if (errorCode(error) !== 'WINDOWS_PRIVATE_DIRECTORY_OCCUPIED') throw error;
       revalidateChain(backend, proof);
-      admitWindowsPrivateDirectory(backend, child);
+      admitWindowsPhysicalDirectory(backend, child);
     }
     assertExactSpelling(backend, child);
     current = child;
-    proof = inspectPrivateChain(backend, current);
+    proof = inspectPhysicalChain(backend, current);
   }
-  return admitWindowsPrivateDirectory(backend, path);
+  return admitWindowsPhysicalDirectory(backend, path);
 }
 
 function assertExactSpelling(backend: BazframeWin32NativeBackend, path: string): void {
@@ -228,8 +189,7 @@ function assertExactSpelling(backend: BazframeWin32NativeBackend, path: string):
 export function createWindowsPrivateFile(
   backend: BazframeWin32NativeBackend,
   parentPath: string,
-  finalComponent: string,
-  options: { parentPolicy?: 'namespace' } = {}
+  finalComponent: string
 ): WindowsPathInspection {
   if (!isValidWindowsPathComponent(finalComponent)) {
     throw failure(
@@ -237,7 +197,7 @@ export function createWindowsPrivateFile(
       'The Windows private-file name is invalid or reserved.'
     );
   }
-  const chain = inspectPrivateChain(backend, parentPath, options.parentPolicy !== 'namespace');
+  const chain = inspectPhysicalChain(backend, parentPath);
   const admittedChain = revalidateChain(backend, chain);
   const admittedParent = admittedChain[0]!.inspection;
   let receipt;
@@ -253,56 +213,39 @@ export function createWindowsPrivateFile(
 
   try {
     requireSameDirectory(admittedParent, receipt.parentBefore);
-    requireSameSecurity(admittedParent.security, receipt.parentBefore.security);
     requireSameDirectory(receipt.parentBefore, receipt.parentAfter);
-    requireSameSecurity(receipt.parentBefore.security, receipt.parentAfter.security);
-    requireDirectPrivateChild(receipt.parentBefore, receipt.created, finalComponent);
-    requireSameCurrentUser(receipt.parentBefore, receipt.created);
-    assertPrivateFile(receipt.created);
+    requireDirectFileChild(receipt.parentBefore, receipt.created, finalComponent);
+    assertPhysicalFile(receipt.created);
+    assertPrivateFileSecurity(receipt.creationSecurity);
+    if (receipt.created.object.numberOfLinks !== '00000001') throw fileInvalid('new file is multiply linked');
     if (receipt.created.object.size !== '0000000000000000') {
       throw fileInvalid('created file is not empty');
     }
-    if (!isProtected(receipt.created.security)) throw fileInvalid('created file DACL is not protected');
+    if (!isProtected(receipt.creationSecurity)) throw fileInvalid('created file DACL is not protected');
 
     const afterChain = revalidateChain(backend, admittedChain);
     requireSameDirectory(receipt.parentAfter, afterChain[0]!.inspection);
-    requireSameSecurity(receipt.parentAfter.security, afterChain[0]!.inspection.security);
     const child = backend.inspectPath(win32.join(parentPath, finalComponent));
-    assertPrivateFile(child);
+    assertPhysicalFile(child);
     if (child.object.size !== '0000000000000000') throw fileInvalid('created file is not empty');
-    if (!isProtected(child.security)) throw fileInvalid('created file DACL is not protected');
     requireSameRegularFile(receipt.created, child);
-    requireSameSecurity(receipt.created.security, child.security);
-    requireDirectPrivateChild(afterChain[0]!.inspection, child, finalComponent);
-    requireSameCurrentUser(afterChain[0]!.inspection, child);
+    requireDirectFileChild(afterChain[0]!.inspection, child, finalComponent);
     return child;
   } catch (error) {
     throw fileCreateAmbiguous(error);
   }
 }
 
-function inspectPrivateChain(backend: BazframeWin32NativeBackend, path: string, requiresPrivateProof = true): ChainEntry[] {
+function inspectPhysicalChain(backend: BazframeWin32NativeBackend, path: string): ChainEntry[] {
   requireDriveAbsolutePath(path);
   const chain: ChainEntry[] = [];
   let current = path;
   while (true) {
     const inspection = backend.inspectPath(current);
-    if (requiresPrivateProof) assertPrivateDirectory(inspection);
-    else assertNamespaceDirectory(inspection);
-    chain.push({
-      path: current,
-      inspection,
-      proof: requiresPrivateProof ? 'private' : 'namespace'
-    });
-    if (requiresPrivateProof && isProtected(inspection.security)) requiresPrivateProof = false;
+    assertPhysicalDirectory(inspection);
+    chain.push({ path: current, inspection });
     const parent = win32.dirname(current);
     if (parent.toLowerCase() === current.toLowerCase()) {
-      if (requiresPrivateProof) {
-        throw failure(
-          'WINDOWS_PRIVATE_DIRECTORY_PRIVACY_UNPROVED',
-          'The directory does not have a protected owner-private ancestry anchor.'
-        );
-      }
       requireChainRelationships(chain);
       return chain;
     }
@@ -318,34 +261,20 @@ function revalidateChain(
   for (let index = chain.length - 1; index >= 0; index -= 1) {
     const entry = chain[index]!;
     const inspection = backend.inspectPath(entry.path);
-    if (entry.proof === 'private') assertPrivateDirectory(inspection);
-    else assertNamespaceDirectory(inspection);
+    assertPhysicalDirectory(inspection);
     requireSameDirectory(entry.inspection, inspection);
-    requireSameSecurity(entry.inspection.security, inspection.security);
-    result[index] = { path: entry.path, inspection, proof: entry.proof };
+    result[index] = { path: entry.path, inspection };
   }
   return result;
 }
 
-function assertPrivateDirectory(inspection: WindowsPathInspection): void {
-  assertPhysicalDirectory(inspection);
-  assertPrivateSecurity(inspection.security);
-}
-
-function assertNamespaceDirectory(inspection: WindowsPathInspection): void {
-  assertPhysicalDirectory(inspection);
-  assertNamespaceSecurity(inspection.security);
-}
-
-function assertPrivateFile(inspection: WindowsPathInspection): void {
+function assertPhysicalFile(inspection: WindowsPathInspection): void {
   if (inspection.kind !== 'regular-file' || inspection.object.directory
     || inspection.object.reparseTag !== null || inspection.object.deletePending
     || inspection.object.volumeIdentity !== inspection.volume.identity
-    || inspection.object.numberOfLinks !== '00000001'
     || inspection.ancestryReparseFree !== true) {
-    throw fileInvalid('path is not an admitted single-link physical regular file');
+    throw fileInvalid('path is not an admitted physical regular file');
   }
-  assertPrivateFileSecurity(inspection.security);
 }
 
 function assertPhysicalDirectory(inspection: WindowsPathInspection): void {
@@ -357,7 +286,9 @@ function assertPhysicalDirectory(inspection: WindowsPathInspection): void {
   }
 }
 
-function assertPrivateSecurity(security: WindowsSecurityObservation): void {
+/** Verifies our fresh protected creation recipe, never existing-object admission. */
+export function assertWindowsPrivateCreationSecurity(security: WindowsSecurityObservation): void {
+  if (!isProtected(security)) invalid('created directory DACL is not protected');
   assertSecurityDescriptor(security);
   if (security.ownerSid !== security.currentUserSid) {
     invalid('directory ownership is not private');
@@ -409,26 +340,6 @@ function assertPrivateFileSecurity(security: WindowsSecurityObservation): void {
   }
   if (required.size !== 0) {
     throw fileInvalid('trusted principals do not have effective full control');
-  }
-}
-
-function assertNamespaceSecurity(security: WindowsSecurityObservation): void {
-  assertSecurityDescriptor(security);
-  const trusted = new Set([
-    security.currentUserSid,
-    LOCAL_SYSTEM_SID,
-    BUILTIN_ADMINISTRATORS_SID,
-    TRUSTED_INSTALLER_SID
-  ]);
-  if (!trusted.has(security.ownerSid)) {
-    invalid('namespace ancestor owner could rewrite its protection');
-  }
-  for (const ace of parseAcl(security.daclBytes)) {
-    const effective = (ace.flags & INHERIT_ONLY_ACE) === 0;
-    if (ace.type === 'allow' && effective && !trusted.has(ace.sid)
-      && (ace.mask & NAMESPACE_TAKEOVER_ACCESS) !== 0) {
-      invalid('namespace ancestor grants foreign deletion or protection-rewrite access');
-    }
   }
 }
 
@@ -533,35 +444,18 @@ function requireSameRegularFile(a: WindowsPathInspection, b: WindowsPathInspecti
   }
 }
 
-function requireSameSecurity(a: WindowsSecurityObservation, b: WindowsSecurityObservation): void {
-  if (a.descriptorControl !== b.descriptorControl || a.daclPresent !== b.daclPresent
-    || a.daclNull !== b.daclNull || a.daclDefaulted !== b.daclDefaulted
-    || !a.daclBytes.equals(b.daclBytes) || a.ownerSid !== b.ownerSid
-    || a.ownerDefaulted !== b.ownerDefaulted || a.groupSid !== b.groupSid
-    || a.groupDefaulted !== b.groupDefaulted || a.currentUserSid !== b.currentUserSid) {
-    invalid('directory security changed');
-  }
-}
-
 function requireChainRelationships(chain: readonly ChainEntry[]): void {
   for (let index = 0; index + 1 < chain.length; index += 1) {
     const child = chain[index]!.inspection;
     const parent = chain[index + 1]!.inspection;
     if (child.volume.identity !== parent.volume.identity
-      || win32.dirname(child.canonicalPath).toLowerCase() !== parent.canonicalPath.toLowerCase()
-      || child.security.currentUserSid !== parent.security.currentUserSid) {
-      invalid('private ancestry chain is inconsistent');
+      || win32.dirname(child.canonicalPath).toLowerCase() !== parent.canonicalPath.toLowerCase()) {
+      invalid('physical ancestry chain is inconsistent');
     }
   }
 }
 
-function requireSameCurrentUser(a: WindowsPathInspection, b: WindowsPathInspection): void {
-  if (a.security.currentUserSid !== b.security.currentUserSid) {
-    invalid('current-user security identity changed');
-  }
-}
-
-function requireDirectPrivateChild(
+function requireDirectFileChild(
   parent: WindowsPathInspection,
   child: WindowsPathInspection,
   component: string
@@ -626,15 +520,15 @@ function validateFinalComponent(value: string): void {
 
 function invalid(reason: string): never {
   throw failure(
-    'WINDOWS_PRIVATE_DIRECTORY_PRIVACY_UNPROVED',
-    `The directory cannot be proved owner-private: ${reason}.`
+    'WINDOWS_DIRECTORY_PROOF_INVALID',
+    `Windows directory proof failed: ${reason}.`
   );
 }
 
 function fileInvalid(reason: string, cause?: unknown): BazframeError {
   return failure(
-    'WINDOWS_PRIVATE_FILE_PRIVACY_UNPROVED',
-    `The file cannot be proved owner-private: ${reason}.`,
+    'WINDOWS_FILE_PROOF_INVALID',
+    `Windows file proof failed: ${reason}.`,
     cause
   );
 }

@@ -11,11 +11,11 @@ import { PROFILE_PORTABILITY_PRODUCTION_LIMITS } from '../profile-portability/pr
 import { encodeProfileFavorites, MAX_PROFILE_FAVORITES_BYTES, PROFILE_FAVORITES_FILE, type ProfileFavoriteServices } from '../profiles/profile-favorites.js';
 import { loadProfile } from '../profiles/profile-store.js';
 import { isSafeProfileId } from '../profiles/profile-id.js';
-import { readWindowsPrivateFileSnapshot, readWindowsSelectionSnapshot } from '../profiles/win32-profile-selection.js';
-import { createWindowsAddedSkillPlatformServicesForInternalTesting, enumerateWindowsPrivateDirectory } from '../skills/added-skill-platform-services.js';
+import { readWindowsPhysicalFileSnapshot, readWindowsSelectionSnapshot } from '../profiles/win32-profile-selection.js';
+import { createWindowsAddedSkillPlatformServicesForInternalTesting, enumerateWindowsPhysicalDirectory } from '../skills/added-skill-platform-services.js';
 import { publishWindowsPrivateStateFile, publishWindowsSelection, type WindowsSelectionPublicationIo } from '../state/win32-atomic-file.js';
 import { withWindowsOperationLock, type WindowsOperationLockIo } from '../state/win32-operation-lock.js';
-import { admitWindowsPrivateDirectory, ensureWindowsPrivateDirectoryPath, createWindowsPrivateDirectory, isValidWindowsPathComponent } from '../state/win32-private-directory.js';
+import { admitWindowsPhysicalDirectory, ensureWindowsPrivateDirectoryPath, createWindowsPrivateDirectory, isValidWindowsPathComponent } from '../state/win32-private-directory.js';
 import { samePhysicalProfileExpectation, serializeWindowsPhysicalProfileProof } from './physical-profile-closure.js';
 import { lifecycleFavoritesFromBytes, type ProfileLifecycleServices } from './profile-lifecycle-services.js';
 import { assertWindowsOperationMutationAuthority, operationAuthorityTransactionId, type OperationMutationAuthority, withWindowsProfileOperationLocksForInternalTesting } from './profile-operation-lock.js';
@@ -40,7 +40,7 @@ export interface WindowsProfileLifecycleOptions {
 /** Internal effects composition only. All lifecycle phase decisions run in the shared functions. */
 export function createWindowsProfileLifecycleServicesForInternalTesting(backend: BazframeWin32NativeBackend & BazframeWin32LockBackend, options: WindowsProfileLifecycleOptions = {}): ProfileLifecycleServices & ProfileFavoriteServices {
   const reads = createWindowsOrdinaryProfileReads(backend);
-  const enumerate = (path: string) => enumerateWindowsPrivateDirectory(backend, path, PROFILE_PORTABILITY_PRODUCTION_LIMITS.stagingEntries);
+  const enumerate = (path: string) => enumerateWindowsPhysicalDirectory(backend, path, PROFILE_PORTABILITY_PRODUCTION_LIMITS.stagingEntries);
   async function favoritesSnapshot(home: string) {
     let before;
     try { before = await enumerate(home); }
@@ -48,7 +48,7 @@ export function createWindowsProfileLifecycleServicesForInternalTesting(backend:
     const names = before.names.filter((name) => key(name) === key(PROFILE_FAVORITES_FILE));
     if (names.length === 0) return { digest: 'absent', bytes: undefined, inspection: undefined };
     if (names.length !== 1 || names[0] !== PROFILE_FAVORITES_FILE) throw refused('favorites alias');
-    const file = await readWindowsPrivateFileSnapshot(backend, win32.join(home, PROFILE_FAVORITES_FILE), MAX_PROFILE_FAVORITES_BYTES);
+    const file = await readWindowsPhysicalFileSnapshot(backend, win32.join(home, PROFILE_FAVORITES_FILE), MAX_PROFILE_FAVORITES_BYTES);
     if ((await enumerate(home)).identity !== before.identity) throw refused('favorites namespace changed');
     return { ...file, digest: sha(Buffer.concat([Buffer.from(JSON.stringify(stableWindowsPathInspection(file.inspection))), file.bytes])) };
   }
@@ -56,7 +56,7 @@ export function createWindowsProfileLifecycleServicesForInternalTesting(backend:
     async profileIdentity(home, name) {
       if (!isSafeProfileId(name) || !isValidWindowsPathComponent(name)) throw refused('invalid favorite profile');
       let inspection;
-      try { inspection = admitWindowsPrivateDirectory(backend, win32.join(home, 'profiles', name)); }
+      try { inspection = admitWindowsPhysicalDirectory(backend, win32.join(home, 'profiles', name)); }
       catch (error) { if (errorCode(error) === 'WINDOWS_NATIVE_PATH_NOT_FOUND') throw new BazframeError('PROFILE_NOT_FOUND', `Profile not found: ${name}`); throw error; }
       const object = inspection.object;
       return JSON.stringify(['windows', object.volumeIdentity, object.fileId, object.creationTime]);
@@ -91,7 +91,7 @@ export function createWindowsProfileLifecycleServicesForInternalTesting(backend:
       const keys = [logicalName, '@store', ...(isSafeProfileId(destination) ? [destination] : [])];
       const assertHeld = () => assertWindowsOperationMutationAuthority(authority, backend, home, keys, id);
       assertHeld();
-      const parent = admitWindowsPrivateDirectory(backend, win32.join(home, 'profiles'));
+      const parent = admitWindowsPhysicalDirectory(backend, win32.join(home, 'profiles'));
       const current = await reads.captureSibling(home, logicalName, source);
       if (current === undefined || !samePhysicalProfileExpectation(current, expected)) throw refused('source changed');
       await services.assertAbsent(home, destination);
@@ -100,8 +100,8 @@ export function createWindowsProfileLifecycleServicesForInternalTesting(backend:
       try { await backend.renameDirectoryNoReplace(win32.join(home, 'profiles'), source, destination); }
       catch { rejected = true; }
       assertHeld();
-      const afterParent = admitWindowsPrivateDirectory(backend, win32.join(home, 'profiles'));
-      if (parent.canonicalPath !== afterParent.canonicalPath || parent.object.fileId !== afterParent.object.fileId || parent.object.volumeIdentity !== afterParent.object.volumeIdentity || JSON.stringify(parent.security) !== JSON.stringify(afterParent.security)) throw refused('move parent changed');
+      const afterParent = admitWindowsPhysicalDirectory(backend, win32.join(home, 'profiles'));
+      if (parent.canonicalPath !== afterParent.canonicalPath || parent.object.fileId !== afterParent.object.fileId || parent.object.volumeIdentity !== afterParent.object.volumeIdentity) throw refused('move parent changed');
       const old = await reads.captureSibling(home, logicalName, source);
       const moved = await reads.captureSibling(home, logicalName, destination);
       if (old === undefined && moved !== undefined && samePhysicalProfileExpectation(moved, expected)) return;
@@ -178,7 +178,7 @@ export function createWindowsProfileZipLifecycleDependencies(backend: BazframeWi
   const services = createWindowsProfileLifecycleServicesForInternalTesting(backend, options);
   const data = createWindowsProfileDataReads(backend, undefined, options.managedGit), storage = createWindowsProfileStorage(backend, options.storageIo);
   async function homeExists(home: string) {
-    try { admitWindowsPrivateDirectory(backend, home); return true; }
+    try { admitWindowsPhysicalDirectory(backend, home); return true; }
     catch (error) { if (errorCode(error) === 'WINDOWS_NATIVE_PATH_NOT_FOUND') return false; throw error; }
   }
   return {
@@ -198,7 +198,7 @@ export function createWindowsProfileZipLifecycleDependencies(backend: BazframeWi
       if (!isSafeProfileId(name) || !isValidWindowsPathComponent(name)) throw refused('invalid destination profile name');
       if (!await homeExists(home)) return false;
       const root = win32.join(home, 'profiles');
-      const names = (await enumerateWindowsPrivateDirectory(backend, root, PROFILE_PORTABILITY_PRODUCTION_LIMITS.profileNamespaceEntries)).names;
+      const names = (await enumerateWindowsPhysicalDirectory(backend, root, PROFILE_PORTABILITY_PRODUCTION_LIMITS.profileNamespaceEntries)).names;
       const matches = names.filter((entry) => key(entry) === key(name));
       if (matches.length === 0) return false;
       if (matches.length !== 1 || matches[0] !== name) throw refused('destination profile alias');

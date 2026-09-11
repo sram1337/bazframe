@@ -1,9 +1,9 @@
 // Error-only diagnosis from observations already obtained by the authoritative caller.
 // These helpers never decide admission and never format observed values.
-use crate::{
-    NativeResult, WindowsObjectObservation, WindowsPathInspection, WindowsSecurityObservation,
-    native_error,
-};
+#[cfg(test)]
+use crate::WindowsSecurityObservation;
+
+use crate::{NativeResult, WindowsObjectObservation, WindowsPathInspection, native_error};
 
 pub(crate) fn read_changed<T>(
     site: &'static str,
@@ -108,6 +108,7 @@ pub(crate) fn stable_read_fields(
     fields
 }
 
+#[cfg(test)]
 pub(crate) fn security_fields(
     a: &WindowsSecurityObservation,
     b: &WindowsSecurityObservation,
@@ -175,7 +176,6 @@ pub(crate) fn directory_fields(
     if !a.object.directory || !b.object.directory {
         fields.push("objectDirectory");
     }
-    fields.extend(security_fields(&a.security, &b.security));
     fields
 }
 
@@ -227,7 +227,6 @@ pub(crate) mod tests {
                 remote_device: false,
             },
             object: object(),
-            security: security(),
             ancestry_reparse_free: true,
         }
     }
@@ -342,7 +341,6 @@ pub(crate) mod tests {
         b.volume.identity = "OTHER".into();
         b.object.volume_identity = "OTHER".into();
         b.object.file_id = "OTHER".into();
-        b.security.owner_sid = "OTHER".into();
         assert_eq!(
             directory_fields(&inspection(), &b),
             vec![
@@ -350,7 +348,6 @@ pub(crate) mod tests {
                 "volume.identity",
                 "object.volumeIdentity",
                 "object.fileId",
-                "security.ownerSid"
             ]
         );
         let mut b = inspection();

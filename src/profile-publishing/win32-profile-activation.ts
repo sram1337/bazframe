@@ -4,7 +4,7 @@ import type { BazframeWin32NativeBackend, BazframeWin32LockBackend } from '../co
 import { BazframeError } from '../core/errors.js';
 import { PROFILE_PORTABILITY_PRODUCTION_LIMITS } from '../profile-portability/profile-portability-policy.js';
 import { readWindowsSelectionSnapshot } from '../profiles/win32-profile-selection.js';
-import { enumerateWindowsPrivateDirectory } from '../skills/added-skill-platform-services.js';
+import { enumerateWindowsPhysicalDirectory } from '../skills/added-skill-platform-services.js';
 import { publishWindowsSelection, type WindowsSelectionPublicationIo, type WindowsSelectionPublicationHooks } from '../state/win32-atomic-file.js';
 import { withWindowsOperationLock, type WindowsOperationLockIo } from '../state/win32-operation-lock.js';
 import { ensureWindowsPrivateDirectoryPath } from '../state/win32-private-directory.js';
@@ -29,7 +29,7 @@ export function createWindowsProfileActivationServicesForInternalTesting(
   backend: BazframeWin32NativeBackend & BazframeWin32LockBackend,
   options: WindowsProfileActivationTestOptions = {}
 ): ManagedProfileActivationServices {
-  const enumerate = (path: string, max: number = PROFILE_PORTABILITY_PRODUCTION_LIMITS.stagingEntries) => enumerateWindowsPrivateDirectory(backend, path, max);
+  const enumerate = (path: string, max: number = PROFILE_PORTABILITY_PRODUCTION_LIMITS.stagingEntries) => enumerateWindowsPhysicalDirectory(backend, path, max);
   const { viewReads } = createWindowsProfileDataReads(backend);
   const { captureExpectation: capture, assertExpectation } = viewReads;
   return {

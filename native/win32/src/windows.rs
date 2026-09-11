@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use crate::read_change::{
-    admission_fields, directory_fields, prefix_role, read_changed, security_fields, stable_fields,
+    admission_fields, directory_fields, prefix_role, read_changed, stable_fields,
     stable_read_fields,
 };
 use napi::Error;
@@ -19,8 +19,8 @@ use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS,
     ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER, ERROR_LOCK_VIOLATION,
     ERROR_NO_MORE_FILES, ERROR_PATH_NOT_FOUND, ERROR_SHARING_VIOLATION, ERROR_SUCCESS, FILETIME,
-    GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
-    WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree, WAIT_FAILED,
+    WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
@@ -39,12 +39,13 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_BEGIN,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_SEQUENTIAL_SCAN,
     FILE_ID_EXTD_DIR_INFO, FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO,
-    FileAttributeTagInfo, FileBasicInfo, FileIdExtdDirectoryInfo, FileIdExtdDirectoryRestartInfo,
-    FileIdInfo, FileStandardInfo, GetDriveTypeW, GetFileInformationByHandleEx,
-    GetFinalPathNameByHandleW, GetFullPathNameW, GetVolumeInformationByHandleW,
-    LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx, MoveFileExW, OPEN_EXISTING,
-    QueryDosDeviceW, READ_CONTROL, ReadFile, SetFilePointerEx, UnlockFileEx, VOLUME_NAME_GUID,
+    FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FILE_STANDARD_INFO, FILE_WRITE_DATA, FileAttributeTagInfo, FileBasicInfo,
+    FileIdExtdDirectoryInfo, FileIdExtdDirectoryRestartInfo, FileIdInfo, FileStandardInfo,
+    GetDriveTypeW, GetFileInformationByHandleEx, GetFinalPathNameByHandleW, GetFullPathNameW,
+    GetVolumeInformationByHandleW, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
+    MoveFileExW, OPEN_EXISTING, QueryDosDeviceW, READ_CONTROL, ReadFile, SetFilePointerEx,
+    UnlockFileEx, VOLUME_NAME_GUID,
 };
 use windows_sys::Win32::System::IO::{DeviceIoControl, IO_STATUS_BLOCK, OVERLAPPED};
 use windows_sys::Win32::System::Ioctl::{FSCTL_GET_REPARSE_POINT, FSCTL_SET_REPARSE_POINT};
@@ -130,13 +131,12 @@ struct PrefixObservation {
     object: WindowsObjectObservation,
 }
 
-// Admission alone binds direct security to each directory's metadata-bearing handle.
+// Admission binds physical metadata to each retained no-follow handle.
 // Membership ancestry retains its separate, full-stability PrefixObservation proof.
 struct AdmissionPrefixObservation {
     path: String,
     canonical_path: String,
     object: WindowsObjectObservation,
-    directory_security: Option<WindowsSecurityObservation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -154,7 +154,7 @@ struct RawDirectoryEntry {
 }
 
 pub(crate) fn inspect_windows_path(path: &str) -> NativeResult<WindowsPathInspection> {
-    let opened = open_admitted_path(path, FILE_READ_ATTRIBUTES | READ_CONTROL)?;
+    let opened = open_admitted_path(path, FILE_READ_ATTRIBUTES)?;
     inspect_opened_path(&opened)
 }
 
@@ -182,7 +182,7 @@ pub(crate) fn create_windows_private_junction(
     final_component: &str,
     target_path: &str,
 ) -> NativeResult<WindowsPrivateJunctionCreationReceipt> {
-    let parent = open_admitted_path(parent_path, FILE_READ_ATTRIBUTES | READ_CONTROL)?;
+    let parent = open_admitted_path(parent_path, FILE_READ_ATTRIBUTES)?;
     let parent_before = inspect_opened_path(&parent)?;
     if parent_before.kind != "directory" {
         return Err(native_error(
@@ -207,7 +207,7 @@ pub(crate) fn create_windows_private_junction(
 
     let junction_path = join_direct_child(parent_path, final_component);
     let junction_extended = extended_drive_path(&junction_path)?;
-    let descriptor = private_security_descriptor(&parent_before.security.current_user_sid)?;
+    let descriptor = private_security_descriptor(&current_user_sid()?)?;
     let mut attributes = SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: descriptor.0,
@@ -247,6 +247,8 @@ pub(crate) fn create_windows_private_junction(
         if set == 0 {
             return Err(last_win_error("set protected Windows junction data"));
         }
+        let creation_security = inspect_creation_security(created_handle.0)?;
+        let created_object = snapshot_membership_link(created_handle.0)?;
         drop(created_handle);
 
         let parent_after = inspect_opened_path(&parent)?;
@@ -261,7 +263,7 @@ pub(crate) fn create_windows_private_junction(
             parent_before.canonical_path, separator, final_component
         );
         if !same_directory_identity(&parent_before, &parent_after)
-            || !same_security_observation(&parent_before.security, &parent_after.security)
+            || !same_stable_observation(&created_object, &created.object)
             || created.canonical_path != expected_child
             || created.volume.identity != parent_before.volume.identity
             || created.object.volume_identity != parent_before.object.volume_identity
@@ -275,6 +277,7 @@ pub(crate) fn create_windows_private_junction(
             ));
         }
         Ok(WindowsPrivateJunctionCreationReceipt {
+            creation_security,
             parent_before,
             created,
             parent_after,
@@ -292,7 +295,7 @@ pub(crate) fn create_windows_private_directory(
     parent_path: &str,
     final_component: &str,
 ) -> NativeResult<WindowsPrivateDirectoryCreationReceipt> {
-    let parent = open_admitted_path(parent_path, FILE_READ_ATTRIBUTES | READ_CONTROL)?;
+    let parent = open_admitted_path(parent_path, FILE_READ_ATTRIBUTES)?;
     let parent_before = inspect_opened_path(&parent)?;
     if parent_before.kind != "directory" {
         return Err(native_error(
@@ -303,7 +306,7 @@ pub(crate) fn create_windows_private_directory(
 
     let target_path = join_direct_child(parent_path, final_component);
     let target_extended = extended_drive_path(&target_path)?;
-    let descriptor = private_security_descriptor(&parent_before.security.current_user_sid)?;
+    let descriptor = private_security_descriptor(&current_user_sid()?)?;
     let mut attributes = SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: descriptor.0,
@@ -331,7 +334,7 @@ pub(crate) fn create_windows_private_file(
     parent_path: &str,
     final_component: &str,
 ) -> NativeResult<WindowsPrivateFileCreationReceipt> {
-    let parent = open_admitted_path(parent_path, FILE_READ_ATTRIBUTES | READ_CONTROL)?;
+    let parent = open_admitted_path(parent_path, FILE_READ_ATTRIBUTES)?;
     let parent_before = inspect_opened_path(&parent)?;
     if parent_before.kind != "directory" {
         return Err(native_error(
@@ -342,7 +345,7 @@ pub(crate) fn create_windows_private_file(
 
     let target_path = join_direct_child(parent_path, final_component);
     let target_extended = extended_drive_path(&target_path)?;
-    let descriptor = private_security_descriptor(&parent_before.security.current_user_sid)?;
+    let descriptor = private_security_descriptor(&current_user_sid()?)?;
     let mut attributes = SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: descriptor.0,
@@ -366,6 +369,18 @@ pub(crate) fn create_windows_private_file(
         return Err(last_win_error("create protected Windows file"));
     }
     let _created_handle = OwnedHandle(created_handle);
+    let creation_security = inspect_creation_security(created_handle).map_err(|_| {
+        native_error(
+            "ERR_WIN32_CREATE_AMBIGUOUS",
+            "created file security evidence unavailable",
+        )
+    })?;
+    let created_object = snapshot(created_handle).map_err(|_| {
+        native_error(
+            "ERR_WIN32_CREATE_AMBIGUOUS",
+            "created file physical evidence unavailable",
+        )
+    })?;
 
     let parent_after = inspect_opened_path(&parent).map_err(|_| {
         native_error(
@@ -389,7 +404,7 @@ pub(crate) fn create_windows_private_file(
         parent_before.canonical_path, separator, final_component
     );
     if !same_directory_identity(&parent_before, &parent_after)
-        || !same_security_observation(&parent_before.security, &parent_after.security)
+        || !same_stable_observation(&created_object, &created.object)
         || created.kind != "regular-file"
         || created.object.number_of_links != "00000001"
         || created.object.size != "0000000000000000"
@@ -403,6 +418,7 @@ pub(crate) fn create_windows_private_file(
         ));
     }
     Ok(WindowsPrivateFileCreationReceipt {
+        creation_security,
         parent_before,
         created,
         parent_after,
@@ -415,7 +431,7 @@ pub(crate) fn acquire_windows_file_lock(
 ) -> NativeResult<WindowsFileLockAcquisitionReceipt> {
     let opened = open_admitted_path_with_final_share(
         guard_path,
-        GENERIC_READ | GENERIC_WRITE | FILE_READ_ATTRIBUTES | READ_CONTROL,
+        FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
     )?;
     let guard_before = inspect_opened_path(&opened)?;
@@ -617,7 +633,6 @@ fn require_same_lock_guard(
     if before.canonical_path != after.canonical_path
         || before.volume.identity != after.volume.identity
         || !same_stable_observation(&before.object, &after.object)
-        || !same_security_observation(&before.security, &after.security)
     {
         return Err(native_error(
             "ERR_WIN32_LOCK_GUARD_CHANGED",
@@ -687,17 +702,12 @@ fn parse_fixed_hex_u64(value: &str, label: &str) -> NativeResult<u64> {
 
 fn inspect_opened_path(opened: &OpenedPath) -> NativeResult<WindowsPathInspection> {
     let before = snapshot(opened.handle.0)?;
-    let security_before = inspect_security(opened.handle.0)?;
     let volume = inspect_volume(opened.handle.0, &opened.canonical_path, &before)?;
     #[cfg(test)]
     prefix_reopen_tests::during_opened_inspection();
-    let security_after = inspect_security(opened.handle.0)?;
     let after = snapshot(opened.handle.0)?;
-    if !same_admission_observation(&before, &after)
-        || !same_security_observation(&security_before, &security_after)
-    {
-        let mut fields = admission_fields(&before, &after);
-        fields.extend(security_fields(&security_before, &security_after));
+    if !same_admission_observation(&before, &after) {
+        let fields = admission_fields(&before, &after);
         return read_changed("inspect-opened-path", before.directory, "none", fields);
     }
     Ok(WindowsPathInspection {
@@ -709,7 +719,6 @@ fn inspect_opened_path(opened: &OpenedPath) -> NativeResult<WindowsPathInspectio
         },
         volume,
         object: after,
-        security: security_after,
         ancestry_reparse_free: opened.ancestry_reparse_free,
     })
 }
@@ -721,7 +730,9 @@ fn finish_private_directory_creation(
     final_component: &str,
 ) -> NativeResult<WindowsPrivateDirectoryCreationReceipt> {
     let parent_after = inspect_opened_path(&parent)?;
-    let created = inspect_windows_path(target_path)?;
+    let opened_created = open_admitted_path(target_path, FILE_READ_ATTRIBUTES | READ_CONTROL)?;
+    let creation_security = inspect_creation_security(opened_created.handle.0)?;
+    let created = inspect_opened_path(&opened_created)?;
     let separator = if parent_before.canonical_path.ends_with('\\') {
         ""
     } else {
@@ -732,7 +743,6 @@ fn finish_private_directory_creation(
         parent_before.canonical_path, separator, final_component
     );
     if !same_directory_identity(&parent_before, &parent_after)
-        || !same_security_observation(&parent_before.security, &parent_after.security)
         || created.kind != "directory"
         || created.volume.identity != parent_before.volume.identity
         || created.object.volume_identity != parent_before.object.volume_identity
@@ -744,6 +754,7 @@ fn finish_private_directory_creation(
         ));
     }
     Ok(WindowsPrivateDirectoryCreationReceipt {
+        creation_security,
         parent_before,
         created,
         parent_after,
@@ -800,7 +811,7 @@ fn rename_windows_between_parents_no_replace(
     destination_component: &str,
     regular_file: bool,
 ) -> NativeResult<()> {
-    let parent = open_admitted_path(parent_path, FILE_READ_ATTRIBUTES | READ_CONTROL)?;
+    let parent = open_admitted_path(parent_path, FILE_READ_ATTRIBUTES)?;
     let parent_before = inspect_opened_path(&parent)?;
     if parent_before.kind != "directory" {
         return Err(native_error(
@@ -809,8 +820,7 @@ fn rename_windows_between_parents_no_replace(
         ));
     }
 
-    let destination_parent =
-        open_admitted_path(destination_parent_path, FILE_READ_ATTRIBUTES | READ_CONTROL)?;
+    let destination_parent = open_admitted_path(destination_parent_path, FILE_READ_ATTRIBUTES)?;
     let destination_before = inspect_opened_path(&destination_parent)?;
     if destination_before.kind != "directory"
         || destination_before.volume.identity != parent_before.volume.identity
@@ -821,15 +831,12 @@ fn rename_windows_between_parents_no_replace(
         ));
     }
     let source_path = join_direct_child(parent_path, source_component);
-    let source = open_admitted_path(&source_path, FILE_READ_ATTRIBUTES | READ_CONTROL)?;
+    let source = open_admitted_path(&source_path, FILE_READ_ATTRIBUTES)?;
     let source_inspection = inspect_opened_path(&source)?;
-    if regular_file
-        && (source_inspection.kind != "regular-file"
-            || source_inspection.object.number_of_links != "00000001")
-    {
+    if regular_file && (source_inspection.kind != "regular-file") {
         return Err(native_error(
             "ERR_WIN32_NOT_REGULAR_FILE",
-            "no-replace file rename requires a single-link regular file",
+            "no-replace file rename requires a physical regular file",
         ));
     }
     if !regular_file && source_inspection.kind != "directory" {
@@ -846,9 +853,7 @@ fn rename_windows_between_parents_no_replace(
     }
 
     let parent_after = inspect_opened_path(&parent)?;
-    if !same_directory_identity(&parent_before, &parent_after)
-        || !same_security_observation(&parent_before.security, &parent_after.security)
-    {
+    if !same_directory_identity(&parent_before, &parent_after) {
         return read_changed(
             "rename-parent",
             parent_before.object.directory,
@@ -858,9 +863,7 @@ fn rename_windows_between_parents_no_replace(
     }
 
     let destination_after = inspect_opened_path(&destination_parent)?;
-    if !same_directory_identity(&destination_before, &destination_after)
-        || !same_security_observation(&destination_before.security, &destination_after.security)
-    {
+    if !same_directory_identity(&destination_before, &destination_after) {
         return read_changed(
             "rename-destination-parent",
             destination_before.object.directory,
@@ -902,7 +905,7 @@ fn read_windows_file_bytes(
     max_bytes: u32,
     range: Option<(u32, u32)>,
 ) -> NativeResult<StableReadData> {
-    let opened = open_admitted_path(path, GENERIC_READ | FILE_READ_ATTRIBUTES)?;
+    let opened = open_admitted_path(path, FILE_READ_DATA | FILE_READ_ATTRIBUTES)?;
     let before = snapshot(opened.handle.0)?;
     if before.directory {
         return Err(native_error(
@@ -1032,10 +1035,7 @@ pub(crate) fn enumerate_windows_directory_stable(
     path: &str,
     max_entries: u32,
 ) -> NativeResult<DirectoryEnumerationData> {
-    let opened = open_admitted_path(
-        path,
-        FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | READ_CONTROL,
-    )?;
+    let opened = open_admitted_path(path, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES)?;
     let directory_before = inspect_opened_path(&opened)?;
     if directory_before.kind != "directory" {
         return Err(native_error(
@@ -1064,7 +1064,7 @@ pub(crate) fn enumerate_windows_directory_stable(
     {
         return Err(native_error(
             "ERR_WIN32_ENUMERATION_CHANGED",
-            "directory identity, metadata, security, or ancestry changed during enumeration",
+            "directory identity, metadata, or ancestry changed during enumeration",
         ));
     }
 
@@ -1286,7 +1286,6 @@ fn same_path_inspection(a: &WindowsPathInspection, b: &WindowsPathInspection) ->
         && a.volume.canonical_volume_guid_path == b.volume.canonical_volume_guid_path
         && a.volume.remote_device == b.volume.remote_device
         && same_stable_observation(&a.object, &b.object)
-        && same_security_observation(&a.security, &b.security)
 }
 
 fn inspect_membership_link_once(path: &str) -> NativeResult<WindowsMembershipLinkInspection> {
@@ -1327,7 +1326,7 @@ fn inspect_membership_link_once(path: &str) -> NativeResult<WindowsMembershipLin
     let link_path = prefixes
         .last()
         .expect("nonempty prefix list has a final membership path");
-    let link = match open_existing(link_path, FILE_READ_ATTRIBUTES | READ_CONTROL) {
+    let link = match open_existing(link_path, FILE_READ_ATTRIBUTES) {
         Ok(link) => link,
         Err(error) if error.status == "ERR_WIN32_PATH_NOT_FOUND" => {
             revalidate_membership_ancestors(&ancestors)?;
@@ -1348,15 +1347,13 @@ fn inspect_membership_link_once(path: &str) -> NativeResult<WindowsMembershipLin
     let canonical_path = final_path(link.0)?;
     let object = snapshot_membership_link(link.0)?;
     let volume = inspect_volume(link.0, &canonical_path, &object)?;
-    let security = inspect_security(link.0)?;
     let target_path = read_junction_target(link.0)?;
-    let target =
-        open_admitted_path(&target_path, FILE_READ_ATTRIBUTES | READ_CONTROL).map_err(|_| {
-            native_error(
-                "ERR_WIN32_MEMBERSHIP_TARGET_INVALID",
-                "Windows membership junction target is not an admitted physical directory",
-            )
-        })?;
+    let target = open_admitted_path(&target_path, FILE_READ_ATTRIBUTES).map_err(|_| {
+        native_error(
+            "ERR_WIN32_MEMBERSHIP_TARGET_INVALID",
+            "Windows membership junction target is not an admitted physical directory",
+        )
+    })?;
     let target_inspection = inspect_opened_path(&target).map_err(|_| {
         native_error(
             "ERR_WIN32_MEMBERSHIP_TARGET_INVALID",
@@ -1371,18 +1368,16 @@ fn inspect_membership_link_once(path: &str) -> NativeResult<WindowsMembershipLin
     }
 
     revalidate_membership_ancestors(&ancestors)?;
-    let reopened_link =
-        open_existing(link_path, FILE_READ_ATTRIBUTES | READ_CONTROL).map_err(|_| {
-            native_error(
-                "ERR_WIN32_MEMBERSHIP_CHANGED",
-                "Windows membership junction changed while it was inspected",
-            )
-        })?;
+    let reopened_link = open_existing(link_path, FILE_READ_ATTRIBUTES).map_err(|_| {
+        native_error(
+            "ERR_WIN32_MEMBERSHIP_CHANGED",
+            "Windows membership junction changed while it was inspected",
+        )
+    })?;
     let reopened_link_state = (|| -> NativeResult<_> {
         Ok((
             final_path(reopened_link.0)?,
             snapshot_membership_link(reopened_link.0)?,
-            inspect_security(reopened_link.0)?,
             read_junction_target(reopened_link.0)?,
         ))
     })()
@@ -1394,15 +1389,14 @@ fn inspect_membership_link_once(path: &str) -> NativeResult<WindowsMembershipLin
     })?;
     if reopened_link_state.0 != canonical_path
         || !same_stable_observation(&reopened_link_state.1, &object)
-        || !same_security_observation(&reopened_link_state.2, &security)
-        || reopened_link_state.3 != target_path
+        || reopened_link_state.2 != target_path
     {
         return Err(native_error(
             "ERR_WIN32_MEMBERSHIP_CHANGED",
             "Windows membership junction changed while it was inspected",
         ));
     }
-    let reopened_target = open_admitted_path(&target_path, FILE_READ_ATTRIBUTES | READ_CONTROL)
+    let reopened_target = open_admitted_path(&target_path, FILE_READ_ATTRIBUTES)
         .and_then(|opened| inspect_opened_path(&opened))
         .map_err(|_| {
             native_error(
@@ -1421,7 +1415,6 @@ fn inspect_membership_link_once(path: &str) -> NativeResult<WindowsMembershipLin
         canonical_path,
         volume,
         object,
-        security,
         ancestry_reparse_free: true,
         normalized_target: target_inspection.canonical_path,
         target_volume_identity: target_inspection.object.volume_identity,
@@ -1681,7 +1674,6 @@ fn same_membership_link_inspection(
         && a.volume.canonical_volume_guid_path == b.volume.canonical_volume_guid_path
         && a.volume.remote_device == b.volume.remote_device
         && same_stable_observation(&a.object, &b.object)
-        && same_security_observation(&a.security, &b.security)
         && a.normalized_target == b.normalized_target
         && a.target_volume_identity == b.target_volume_identity
         && a.target_file_id == b.target_file_id
@@ -1786,8 +1778,7 @@ pub fn inspect_windows_zip_source(path: &str) -> NativeResult<WindowsObjectObser
         }
         let object = snapshot_with_tag(handle.0, tag.ReparseTag)?;
         if (index + 1 < prefixes.len() && !object.directory)
-            || (index + 1 == prefixes.len()
-                && (object.directory || object.number_of_links != "00000001"))
+            || (index + 1 == prefixes.len() && (object.directory))
         {
             return Err(native_error(
                 "ERR_WIN32_UNSUPPORTED_TARGET",
@@ -1880,9 +1871,9 @@ fn open_admitted_path_with_final_share(
     let mut observations = Vec::with_capacity(prefixes.len());
     for (index, prefix) in prefixes.iter().enumerate() {
         let access = if index == last {
-            final_access | READ_CONTROL
+            final_access
         } else {
-            FILE_READ_ATTRIBUTES | READ_CONTROL
+            FILE_READ_ATTRIBUTES
         };
         let handle = if index == last {
             open_existing_with_share(prefix, access, final_share)?
@@ -1904,16 +1895,10 @@ fn open_admitted_path_with_final_share(
         }
         let canonical_path = final_path(handle.0)?;
         let object = snapshot(handle.0)?;
-        let directory_security = if object.directory {
-            Some(inspect_security(handle.0)?)
-        } else {
-            None
-        };
         observations.push(AdmissionPrefixObservation {
             path: prefix.clone(),
             canonical_path,
             object,
-            directory_security,
         });
         if index == last {
             final_handle = Some(handle);
@@ -1923,43 +1908,16 @@ fn open_admitted_path_with_final_share(
     #[cfg(test)]
     prefix_reopen_tests::after_initial_observations(&observations);
     for (index, expected) in observations.iter().enumerate() {
-        let access = FILE_READ_ATTRIBUTES
-            | if expected.object.directory {
-                READ_CONTROL
-            } else {
-                0
-            };
+        let access = FILE_READ_ATTRIBUTES;
         let reopened = open_existing(&expected.path, access)?;
         let canonical_path = final_path(reopened.0)?;
         let object = snapshot(reopened.0)?;
-        // Query on this reopened handle; an unreadable descriptor is a refusal, not
-        // permission to use a timestamp-only or metadata-only fallback.
-        let security = if expected.object.directory && object.directory {
-            Some(inspect_security(reopened.0)?)
-        } else {
-            None
-        };
-        let security_matches = match (&expected.directory_security, &security) {
-            (Some(before), Some(after)) => same_security_observation(before, after),
-            (None, None) => !expected.object.directory && !object.directory,
-            _ => false,
-        };
         #[cfg(test)]
-        prefix_reopen_tests::at_reopened_observation(
-            index,
-            expected,
-            &canonical_path,
-            &object,
-            security.as_ref(),
-        );
+        prefix_reopen_tests::at_reopened_observation(index, expected, &canonical_path, &object);
         if canonical_path != expected.canonical_path
             || !same_admission_observation(&expected.object, &object)
-            || !security_matches
         {
             let mut fields = admission_fields(&expected.object, &object);
-            if let (Some(before), Some(after)) = (&expected.directory_security, &security) {
-                fields.extend(security_fields(before, after));
-            }
             if canonical_path != expected.canonical_path {
                 fields.push("canonicalPath");
             }
@@ -2140,7 +2098,7 @@ fn open_existing_with_share(path: &str, access: u32, share: u32) -> NativeResult
             FILE_ATTRIBUTE_NORMAL
                 | FILE_FLAG_BACKUP_SEMANTICS
                 | FILE_FLAG_OPEN_REPARSE_POINT
-                | if access & GENERIC_READ != 0 {
+                | if access & FILE_READ_DATA != 0 {
                     FILE_FLAG_SEQUENTIAL_SCAN
                 } else {
                     0
@@ -2534,6 +2492,18 @@ fn same_directory_identity(a: &WindowsPathInspection, b: &WindowsPathInspection)
         && b.object.directory
 }
 
+fn inspect_creation_security(handle: HANDLE) -> NativeResult<WindowsSecurityObservation> {
+    let before = inspect_security(handle)?;
+    let after = inspect_security(handle)?;
+    if !same_security_observation(&before, &after) {
+        return Err(native_error(
+            "ERR_WIN32_CREATE_AMBIGUOUS",
+            "created object security changed",
+        ));
+    }
+    Ok(after)
+}
+
 fn same_security_observation(
     a: &WindowsSecurityObservation,
     b: &WindowsSecurityObservation,
@@ -2672,7 +2642,7 @@ fn final_path_with_volume(handle: HANDLE, volume: u32) -> NativeResult<String> {
 }
 
 // Directory admission is not a content-stability receipt. Its callers must also
-// compare exact security; only these two directory namespace timestamps are exempt.
+// preserve physical evidence; only these two directory namespace timestamps are exempt.
 // Files/mixed kinds and every content consumer retain the full stable predicate.
 fn same_admission_observation(
     before: &WindowsObjectObservation,
@@ -2795,7 +2765,6 @@ mod tests {
             after.object.last_write_time = "OTHER".into();
             after.object.change_time = "OTHER".into();
             assert!(same_admission_observation(&before.object, &after.object));
-            assert!(same_security_observation(&before.security, &after.security));
             // Enumeration and membership targets still consume the full predicate.
             assert!(!same_path_inspection(&before, &after));
             assert!(!same_stable_observation(&before.object, &after.object));
@@ -2805,6 +2774,7 @@ mod tests {
 
     #[test]
     fn read_change_diagnostics_match_authoritative_comparisons() {
+        use crate::read_change::security_fields;
         use crate::read_change::tests::{inspection, object, security};
         let a = object();
         macro_rules! object_change {
@@ -2871,8 +2841,7 @@ mod tests {
                     same_security_observation(&a, &b),
                     security_fields(&a, &b).is_empty()
                 );
-                // Both production admission seams require this exact security proof,
-                // independently of otherwise-admissible directory timestamp drift.
+                // Fresh creation security comparison is independent of physical admission.
                 let before = object();
                 let mut after = object();
                 after.change_time = "OTHER".into();
@@ -2897,7 +2866,7 @@ mod tests {
             ($($field:ident).+, $value:expr) => {{
                 let mut b = inspection(); b.$($field).+ = $value;
                 for (left, right) in [(&a, &b), (&b, &a), (&b, &b)] {
-                    assert_eq!(same_directory_identity(left, right) && same_security_observation(&left.security, &right.security), directory_fields(left, right).is_empty());
+                    assert_eq!(same_directory_identity(left, right), directory_fields(left, right).is_empty());
                 }
             }};
         }
@@ -2910,7 +2879,6 @@ mod tests {
         directory_change!(object.delete_pending, true);
         directory_change!(object.directory, false);
         directory_change!(object.size, "OTHER".into());
-        directory_change!(security.owner_sid, "OTHER".into());
     }
 
     #[test]
@@ -3108,7 +3076,6 @@ pub(crate) fn inspect_windows_editor_target(
         || before.entry_path != after.entry_path
         || before.target_path != after.target_path
         || !same_stable_observation(&before.entry_object, &after.entry_object)
-        || !same_security_observation(&before.entry_security, &after.entry_security)
     {
         return Err(editor_invalid());
     }
@@ -3137,7 +3104,7 @@ fn inspect_editor_once(
     if root_inspection.kind != "directory" || parent.kind != "directory" {
         return Err(editor_invalid());
     }
-    let entry = open_existing(&full, FILE_READ_ATTRIBUTES | READ_CONTROL)?;
+    let entry = open_existing(&full, FILE_READ_ATTRIBUTES)?;
     let tag = attribute_tag(entry.0)?;
     if tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
         return Err(editor_invalid());
@@ -3147,16 +3114,12 @@ fn inspect_editor_once(
         return Err(editor_invalid());
     }
     let entry_object = snapshot_with_tag(entry.0, if symlink { tag.ReparseTag } else { 0 })?;
-    if entry_object.directory || entry_object.number_of_links != "00000001" {
+    if entry_object.directory {
         return Err(editor_invalid());
     }
     let entry_path = final_path(entry.0)?;
     inspect_volume(entry.0, &entry_path, &entry_object)?;
-    let entry_security = inspect_security(entry.0)?;
     let target_path = if symlink {
-        if entry_security.owner_sid != entry_security.current_user_sid {
-            return Err(editor_invalid());
-        }
         let (target, relative) = read_editor_symlink(entry.0)?;
         if relative {
             if Path::new(&target).is_absolute() || target.contains(':') || target.starts_with('\\')
@@ -3173,7 +3136,7 @@ fn inspect_editor_once(
         full.clone()
     };
     let target = inspect_windows_path(&target_path)?;
-    if target.kind != "regular-file" || target.object.number_of_links != "00000001" {
+    if target.kind != "regular-file" {
         return Err(editor_invalid());
     }
     let prefix = format!(
@@ -3194,7 +3157,6 @@ fn inspect_editor_once(
         parent,
         entry_path,
         entry_object,
-        entry_security,
         target,
         target_path,
     })

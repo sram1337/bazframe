@@ -8,11 +8,11 @@ import { BazframeError, errorCode } from '../core/errors.js';
 import type { BazframeWin32NativeBackend, BazframeWin32LockBackend } from '../core/win32-native.js';
 import { stableWindowsMembershipLinkInspection } from '../core/win32-stable-observation.js';
 import { PROFILE_PORTABILITY_PRODUCTION_LIMITS } from '../profile-portability/profile-portability-policy.js';
-import { readWindowsPrivateFileSnapshot } from '../profiles/win32-profile-selection.js';
+import { readWindowsPhysicalFileSnapshot } from '../profiles/win32-profile-selection.js';
 import { isSafeProfileId } from '../profiles/profile-id.js';
 import { isSafeSkillId } from '../skills/skill-id.js';
-import { isValidWindowsPathComponent, admitWindowsPrivateFile, admitWindowsPrivateDirectory } from '../state/win32-private-directory.js';
-import { createWindowsAddedSkillPlatformServicesForInternalTesting, enumerateWindowsPrivateDirectory } from '../skills/added-skill-platform-services.js';
+import { isValidWindowsPathComponent, admitWindowsPhysicalFile, admitWindowsPhysicalDirectory } from '../state/win32-private-directory.js';
+import { createWindowsAddedSkillPlatformServicesForInternalTesting, enumerateWindowsPhysicalDirectory } from '../skills/added-skill-platform-services.js';
 import { inspectDefaultSkillCatalog, readDefaultSkillRegistration } from '../skills/default-skill-catalog.js';
 import { decodeLibrary, decodePackage, type SkillCollectionNamespace, type SkillCollectionKey, type CollectionRootPathPolicy } from '../skill-collections/skill-collection-store.js';
 import { SKILL_SNAPSHOT_LIMITS, verifySkillSnapshot, type SkillSnapshotLimitPolicy } from '../skill-collections/skill-snapshot.js';
@@ -39,7 +39,7 @@ export function createWindowsProfileDataReads(backend: BazframeWin32NativeBacken
   const profiles = createWindowsOrdinaryProfileReads(backend);
   const storage = createWindowsProfileStorage(backend);
   const platform = createWindowsAddedSkillPlatformServicesForInternalTesting(backend);
-  const enumerate = (path: string, max = PROFILE_PORTABILITY_PRODUCTION_LIMITS.stagingEntries) => enumerateWindowsPrivateDirectory(backend, path, max);
+  const enumerate = (path: string, max = PROFILE_PORTABILITY_PRODUCTION_LIMITS.stagingEntries) => enumerateWindowsPhysicalDirectory(backend, path, max);
   async function optionalChild(parent: string, name: string) {
     const names = (await enumerate(parent)).names; const matches = names.filter((entry) => portable(entry) === portable(name));
     if (matches.length === 0) return false;
@@ -58,7 +58,7 @@ export function createWindowsProfileDataReads(backend: BazframeWin32NativeBacken
     const record = key.kind === 'library' ? decodeLibrary(value, key.id, pathPolicy) : decodePackage(value, key.id, pathPolicy);
     // Ready consumers use the immutable snapshot, not mutable preparation input.
     // Source NTFS/physical admission belongs to add/update/build, not offline use.
-    const repeated = await readWindowsPrivateFileSnapshot(backend, path, max);
+    const repeated = await readWindowsPhysicalFileSnapshot(backend, path, max);
     if (!repeated.bytes.equals(bytes)) throw unsupported();
     const object = repeated.inspection.object;
     return { record, identity: `${object.volumeIdentity}:${object.fileId}:${object.creationTime}:${createHash('sha256').update(bytes).digest('hex')}` };
@@ -71,7 +71,7 @@ export function createWindowsProfileDataReads(backend: BazframeWin32NativeBacken
       if (!await optionalChild(home, namespace)) continue;
       const root = win32.join(home, namespace);
       for (const name of (await enumerate(root)).names) {
-        if (isRetainedResourceFile(name)) { admitWindowsPrivateFile(backend, win32.join(root, name)); continue; }
+        if (isRetainedResourceFile(name)) { admitWindowsPhysicalFile(backend, win32.join(root, name)); continue; }
         const id = name.endsWith('.json') ? name.slice(0, -5) : '';
         if (!isSafeSkillId(id)) throw unsupported();
         const descriptor = await readCollection(home, { kind, id }, capturedProfileLimitPolicy().maxManifestBytes);
@@ -83,12 +83,12 @@ export function createWindowsProfileDataReads(backend: BazframeWin32NativeBacken
       const root = win32.join(home, 'profile-publishing');
       for (const name of (await enumerate(root)).names) {
         if (name === 'operation-locks') continue;
-        if (['git-workspaces', 'github-workspaces', 'remote-materialization', 'git-isolation'].includes(name)) { admitWindowsPrivateDirectory(backend, win32.join(root, name)); continue; }
+        if (['git-workspaces', 'github-workspaces', 'remote-materialization', 'git-isolation'].includes(name)) { admitWindowsPhysicalDirectory(backend, win32.join(root, name)); continue; }
         if (name === 'publication-state') {
           const retained = win32.join(root, name);
           for (const id of (await enumerate(retained)).names) {
             if (!/^[a-f0-9]{32}$/u.test(id)) throw unsupported();
-            admitWindowsPrivateDirectory(backend, win32.join(retained, id));
+            admitWindowsPhysicalDirectory(backend, win32.join(retained, id));
           }
           continue;
         }
@@ -125,7 +125,7 @@ export function createWindowsProfileDataReads(backend: BazframeWin32NativeBacken
     createReads(home, profile, policy): ProfileCaptureReadServices {
       const profileRoot = win32.join(home, 'profiles', profile);
       const privateReads = createWindowsPhysicalReads(backend, profileRoot, policy);
-      const externalReads = createWindowsPhysicalReads(backend, undefined, policy, true);
+      const externalReads = createWindowsPhysicalReads(backend, undefined, policy);
       const modes = new Map<string, boolean>();
       const forPath = (path: string) => within(home, path) ? privateReads : externalReads;
       const physical: PhysicalProfileReadServices = {
@@ -172,7 +172,7 @@ export function createWindowsProfileDataReads(backend: BazframeWin32NativeBacken
     }
   };
   return { viewReads, captureDependencies, readCollection, scanCollections, async assertReadyProviderState(home: string) {
-    try { admitWindowsPrivateDirectory(backend, home); }
+    try { admitWindowsPhysicalDirectory(backend, home); }
     catch (error) { if (errorCode(error) === 'WINDOWS_NATIVE_PATH_NOT_FOUND') return; throw error; }
     await providerRecords.assertReadyProviderState(home);
   } };

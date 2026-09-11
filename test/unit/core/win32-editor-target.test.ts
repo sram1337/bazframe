@@ -25,7 +25,7 @@ describe('Windows read-only editor proof and real editor launch paths', () => {
       childRunner: async () => { spawned = true; return { exitCode: 0, signal: null }; } })).rejects.toThrow(/changed|contained/);
     expect(spawned).toBe(false);
   });
-  it.each(['escape', 'chain', 'junction', 'hardlink', 'foreign-link', 'ancestor', 'directory', 'pending'])('refuses an adverse %s receipt', (change) => {
+  it.each(['escape', 'chain', 'junction', 'ancestor', 'directory', 'pending'])('refuses an adverse %s receipt', (change) => {
     const f = windowsApplicationFixture(), root = HOME + '\\profiles\\work'; f.file(root + '\\AGENTS.md', 'repair');
     const inspect = f.backend.inspectEditorTarget;
     f.backend.inspectEditorTarget = (...args) => {
@@ -33,18 +33,17 @@ describe('Windows read-only editor proof and real editor launch paths', () => {
       if (change === 'escape') value.target.canonicalPath = value.root.volume.canonicalVolumeGuidPath + 'elsewhere\\AGENTS.md';
       if (change === 'chain') value.target.object.reparseTag = 0xa000000c;
       if (change === 'junction') value.entryObject.reparseTag = 0xa0000003;
-      if (change === 'hardlink') value.target.object.numberOfLinks = '00000002';
-      if (change === 'foreign-link') { value.entryObject.reparseTag = 0xa000000c; value.entrySecurity.ownerSid = 'S-1-5-18'; }
       if (change === 'ancestor') value.parent.canonicalPath += '\\elsewhere';
       if (change === 'directory') value.entryObject.directory = true;
       if (change === 'pending') value.entryObject.deletePending = true;
       return value;
     };
-    expect(() => proveWindowsEditorTarget(f.backend, root, 'AGENTS.md', true)).toThrow();
+    expect(() => proveWindowsEditorTarget(f.backend, root, 'AGENTS.md')).toThrow();
   });
-  it('admits a contained user-owned final file link and launches its physical target', async () => {
+  it('admits a contained product-authorized final file link with different OS ownership and launches its physical target', async () => {
     const f = windowsApplicationFixture(), root = 'C:\\boundary\\source\\demo', targetPath = root + '\\repair.md';
     f.file(root + '\\SKILL.md', 'entry'); f.file(targetPath, 'malformed repair');
+    f.nodes.get(root + '\\SKILL.md')!.security = { ...f.security(root + '\\SKILL.md'), ownerSid: 'S-1-5-21-999' };
     f.directories(HOME + '\\skills'); f.junction(HOME + '\\skills\\demo', root);
     const inspect = f.backend.inspectEditorTarget;
     f.backend.inspectEditorTarget = (...args): WindowsEditorTargetInspection => { const value = inspect(...args); return { ...value, entryObject: { ...value.entryObject, reparseTag: 0xa000000c }, targetPath, target: f.backend.inspectPath(targetPath) }; };
@@ -52,14 +51,21 @@ describe('Windows read-only editor proof and real editor launch paths', () => {
     await editSkillDefinition({ bazframeHome: HOME, skillId: 'demo', environment: f.environment, ...f.application.skillEditor, childRunner: async (_exe, args) => { target = args; return { exitCode: 0, signal: null }; } });
     expect(target).toEqual([targetPath]);
   });
-  it.each(['foreign-owner', 'alias', 'replaced-parent'])('refuses a nested external target with %s', async (change) => {
+  it.each(['alias', 'replaced-parent'])('refuses a nested external target with %s', async (change) => {
     const f = windowsApplicationFixture(), root = 'C:\\boundary\\source\\demo', targetPath = root + '\\nested\\repair.md';
     f.file(root + '\\SKILL.md', 'link'); f.file(targetPath, 'repair');
     const inspect = f.backend.inspectEditorTarget;
     f.backend.inspectEditorTarget = (...args) => { const value = inspect(...args); return { ...value, entryObject: { ...value.entryObject, reparseTag: 0xa000000c }, targetPath: change === 'alias' ? root + '\\NESTED\\repair.md' : targetPath, target: f.backend.inspectPath(targetPath) }; };
-    if (change === 'foreign-owner') f.nodes.get(root + '\\nested')!.security = { ...f.backend.inspectPath(root + '\\nested').security, ownerSid: 'S-1-5-21-999' };
-    if (change === 'replaced-parent') { const proof = proveWindowsEditorTarget(f.backend, root, 'SKILL.md', false); f.directory(root + '\\nested'); await expect(proof.revalidate()).rejects.toThrow(); }
-    else expect(() => proveWindowsEditorTarget(f.backend, root, 'SKILL.md', false)).toThrow();
+    if (change === 'replaced-parent') { const proof = proveWindowsEditorTarget(f.backend, root, 'SKILL.md'); f.directory(root + '\\nested'); await expect(proof.revalidate()).rejects.toThrow(); }
+    else expect(() => proveWindowsEditorTarget(f.backend, root, 'SKILL.md')).toThrow();
+  });
+  it('admits hardlinked editor input under differently owned existing ancestors without reading bytes', async () => {
+    const f = windowsApplicationFixture(), root = HOME + '\\profiles\\work';
+    f.file(root + '\\AGENTS.md', 'repair');
+    f.nodes.get(root + '\\AGENTS.md')!.numberOfLinks = 2;
+    for (const [path, node] of f.nodes) node.security = { ...f.security(path), ownerSid: 'S-1-5-21-999' };
+    f.backend.readStableFile = async () => { throw new Error('no content reads'); };
+    await expect(proveWindowsEditorTarget(f.backend, root, 'AGENTS.md').revalidate()).resolves.toBeUndefined();
   });
   it.each(['Visual', 'blank-visual', 'conflict'])('applies Windows editor environment policy for %s without changing the inherited environment', async (variant) => {
     const f = windowsApplicationFixture(), root = HOME + '\\profiles\\work'; f.file(root + '\\AGENTS.md', 'repair');

@@ -55,7 +55,7 @@ describe('internal Windows V2 journal storage', () => {
     await f.run(async (authority) => {
       expect(await write(f, authority, journal, { hooks: { afterPrivateCreation() {
         expect(f.nodes.get(PATH)?.bytes).toEqual(Buffer.alloc(0));
-        expect(f.backend.inspectPath(PATH).security.descriptorControl & 0x1000).toBe(0x1000);
+        expect(f.security(PATH).descriptorControl & 0x1000).toBe(0x1000);
         expect(f.io.rename).not.toHaveBeenCalled();
       } } })).toEqual(journal);
       const oldId = f.nodes.get(PATH)!.id;
@@ -83,7 +83,7 @@ describe('internal Windows V2 journal storage', () => {
     await expect(read(f)).rejects.toMatchObject({ code: 'WINDOWS_TRANSACTION_JOURNAL_REFUSED' });
     expect(f.writes).toEqual([]);
   });
-  it.each(['publishing', 'transactions', 'final', 'directory', 'reparse', 'hardlink', 'private'] as const)('refuses occupied %s namespace without reading through or repairing it', async (kind) => {
+  it.each(['publishing', 'transactions', 'final', 'directory', 'reparse', 'hardlink', 'private'] as const)('admits only relevant physical journal state for %s without repair', async (kind) => {
     const f = fixture(); f.namespace();
     if (kind === 'publishing') { f.nodes.delete(PUBLISHING); f.directory(`${HOME}\\Profile-Publishing`); }
     if (kind === 'transactions') { f.nodes.delete(ROOT); f.directory(`${PUBLISHING}\\Transactions`); }
@@ -91,9 +91,11 @@ describe('internal Windows V2 journal storage', () => {
     if (kind === 'directory') f.directory(PATH);
     if (kind === 'reparse') f.reparse(PATH);
     if (kind === 'hardlink') { f.file(PATH, wire(candidate)); f.nodes.get(PATH)!.numberOfLinks = 2; }
-    if (kind === 'private') { f.file(PATH, wire(candidate)); const security = f.backend.inspectPath(PATH).security; f.nodes.get(PATH)!.security = { ...security, ownerSid: 'S-1-5-18' }; }
+    if (kind === 'private') { f.file(PATH, wire(candidate)); const security = f.security(PATH); f.nodes.get(PATH)!.security = { ...security, ownerSid: 'S-1-5-18' }; }
     const before = f.snapshot();
-    await expect(read(f)).rejects.toThrow(); expect(f.snapshot()).toBe(before);
+    if (kind === 'hardlink' || kind === 'private') await expect(read(f)).resolves.toEqual(candidate);
+    else await expect(read(f)).rejects.toThrow();
+    expect(f.snapshot()).toBe(before);
   });
   it.each(['directory', 'file', 'substitution'] as const)('listed %s disappearance or drift is never absence', async (kind) => {
     const f = fixture(); f.namespace(); f.file(PATH, wire(candidate));
@@ -187,7 +189,7 @@ describe('internal Windows V2 journal storage', () => {
       expect(f.temps()).toHaveLength(1);
     });
   });
-  it.each(['old-proof', 'old-bytes', 'old-identity', 'temp-identity', 'temp-bytes', 'root-security', 'root-identity'] as const)('refuses fresh %s drift before rename, retaining state', async (kind) => {
+  it.each(['old-proof', 'old-bytes', 'old-identity', 'temp-identity', 'temp-bytes', 'root-identity'] as const)('refuses fresh %s drift before rename, retaining state', async (kind) => {
     const f = fixture(); f.namespace(); f.file(PATH, wire(candidate));
     await f.run(async (authority) => {
       await expect(write(f, authority, updated, { hooks: { beforeReplacement() {
@@ -197,7 +199,6 @@ describe('internal Windows V2 journal storage', () => {
         if (kind === 'temp-identity') f.file(f.temps()[0]!, wire(updated));
         if (kind === 'temp-bytes') f.nodes.get(f.temps()[0]!)!.bytes = Buffer.from(wire(candidate));
         if (kind === 'root-identity') f.directory(ROOT);
-        if (kind === 'root-security') f.nodes.get(ROOT)!.security = { ...f.backend.inspectPath(ROOT).security, groupSid: 'S-1-5-18' };
       } } })).rejects.toMatchObject(beforeCode);
       expect(f.io.rename).not.toHaveBeenCalled(); expect(f.temps()).toHaveLength(1);
     });
@@ -249,12 +250,11 @@ function observationDrift(f: Fixture, target: (path: string) => boolean, transfo
 }
 
 describe('unchanged-path observations, own namespace effects and drained I/O', () => {
-  it.each(['old', 'temp'].flatMap((target) => ['creationTime', 'lastWriteTime', 'changeTime', 'allocationSize', 'attributes', 'security'].map((field) => ({ target, field }))))('retains and refuses $target $field drift', async ({ target, field }) => {
+  it.each(['old', 'temp'].flatMap((target) => ['creationTime', 'lastWriteTime', 'changeTime', 'allocationSize', 'attributes'].map((field) => ({ target, field }))))('retains and refuses $target $field drift', async ({ target, field }) => {
     const f = fixture(); f.namespace(); f.file(PATH, wire(candidate));
     await f.run(async (authority) => {
       await expect(write(f, authority, updated, { hooks: { beforeReplacement() {
-        observationDrift(f, (path) => target === 'old' ? path === PATH : f.temps().includes(path), (value) => field === 'security' ? { ...value, security: { ...value.security, groupSid: 'S-1-5-18' } }
-          : { ...value, object: { ...value.object, [field]: field === 'attributes' ? 0x22 : '0000000000000002' } });
+        observationDrift(f, (path) => target === 'old' ? path === PATH : f.temps().includes(path), (value) => ({ ...value, object: { ...value.object, [field]: field === 'attributes' ? 0x22 : '0000000000000002' } }));
       } } })).rejects.toMatchObject(beforeCode);
       expect(f.io.rename).not.toHaveBeenCalled(); expect(f.temps()).toHaveLength(1);
     });
@@ -363,7 +363,6 @@ describe('unchanged-path observations, own namespace effects and drained I/O', (
 const inspectionChanges: { field: string; change(value: WindowsPathInspection): WindowsPathInspection }[] = [
   ...['volumeIdentity', 'fileId', 'size', 'allocationSize', 'numberOfLinks', 'creationTime', 'lastWriteTime', 'changeTime', 'attributes', 'reparseTag', 'deletePending', 'directory'].map((field) => ({ field: `object.${field}`, change: (value: WindowsPathInspection) => ({ ...value, object: { ...value.object, [field]: field === 'fileId' ? 'f'.repeat(32) : field === 'numberOfLinks' ? '00000002' : field === 'attributes' ? 0x22 : field === 'reparseTag' ? 0xa0000003 : field === 'deletePending' || field === 'directory' ? true : '0000000000000002' } }) })),
   ...['identity', 'filesystemName', 'driveType', 'canonicalVolumeGuidPath', 'remoteDevice'].map((field) => ({ field: `volume.${field}`, change: (value: WindowsPathInspection) => ({ ...value, volume: { ...value.volume, [field]: field === 'remoteDevice' ? true : 'changed' } }) })),
-  ...['descriptorControl', 'daclPresent', 'daclNull', 'daclDefaulted', 'daclBytes', 'ownerSid', 'ownerDefaulted', 'groupSid', 'groupDefaulted', 'currentUserSid'].map((field) => ({ field: `security.${field}`, change: (value: WindowsPathInspection) => ({ ...value, security: { ...value.security, [field]: field === 'descriptorControl' ? 0x1404 : field === 'daclBytes' ? Buffer.alloc(8) : field.endsWith('Sid') ? 'S-1-5-18' : field === 'daclPresent' ? false : true } }) })),
   { field: 'canonicalPath', change: (value) => ({ ...value, canonicalPath: `${value.canonicalPath}-other` }) },
   { field: 'kind', change: (value) => ({ ...value, kind: 'directory' }) },
   { field: 'ancestryReparseFree', change: (value) => ({ ...value, ancestryReparseFree: false }) as unknown as WindowsPathInspection }
@@ -378,12 +377,12 @@ describe('complete same-path evidence and creation boundaries', () => {
       expect(f.io.rename).not.toHaveBeenCalled(); expect(f.temps()).toHaveLength(1);
     });
   });
-  it.each(['allocationSize', 'lastWriteTime', 'creationTime', 'numberOfLinks', 'attributes', 'security', 'bytes', 'changeTime', 'lastAccessTime'] as const)('uses movement-specific final %s rule, never full same-path equality across rename', async (field) => {
+  it.each(['allocationSize', 'lastWriteTime', 'creationTime', 'numberOfLinks', 'attributes', 'bytes', 'changeTime', 'lastAccessTime'] as const)('uses movement-specific final %s rule, never full same-path equality across rename', async (field) => {
     const f = fixture(); f.namespace(); f.file(PATH, wire(candidate));
     await f.run(async (authority) => {
       const operation = write(f, authority, updated, { hooks: { afterReplacement() {
         if (field === 'bytes') f.nodes.get(PATH)!.bytes = Buffer.from(wire(candidate));
-        else observationDrift(f, (path) => path === PATH, (value) => field === 'security' ? { ...value, security: { ...value.security, groupSid: 'S-1-5-18' } } : { ...value, object: { ...value.object, [field]: field === 'numberOfLinks' ? '00000002' : field === 'attributes' ? 0x22 : '0000000000000002' } });
+        else observationDrift(f, (path) => path === PATH, (value) => ({ ...value, object: { ...value.object, [field]: field === 'numberOfLinks' ? '00000002' : field === 'attributes' ? 0x22 : '0000000000000002' } }));
       } } });
       if (field === 'changeTime' || field === 'lastAccessTime') expect(await operation).toEqual(updated);
       else await expect(operation).rejects.toMatchObject({ code: 'WINDOWS_TRANSACTION_JOURNAL_AMBIGUOUS' });
@@ -427,12 +426,12 @@ describe('complete same-path evidence and creation boundaries', () => {
       expect(attempts).toBe(1); expect(f.nodes.has(PATH)).toBe(true); expect(f.io.rename).not.toHaveBeenCalled();
     });
   });
-  it('preserves previous raw security snapshot even if an injected observation buffer is later mutated', async () => {
+  it('permits expected-old atomic replacement despite security-only fixture changes', async () => {
     const f = fixture(); f.namespace(); f.file(PATH, wire(candidate));
-    f.nodes.get(PATH)!.security = f.backend.inspectPath(PATH).security;
+    f.nodes.get(PATH)!.security = f.security(PATH);
     await f.run(async (authority) => {
-      await expect(write(f, authority, updated, { hooks: { beforeReplacement() { f.nodes.get(PATH)!.security!.groupSid = 'S-1-5-18'; } } })).rejects.toMatchObject(beforeCode);
-      expect(f.io.rename).not.toHaveBeenCalled();
+      await expect(write(f, authority, updated, { hooks: { beforeReplacement() { f.nodes.get(PATH)!.security!.groupSid = 'S-1-5-18'; } } })).resolves.toEqual(updated);
+      expect(f.io.rename).toHaveBeenCalledOnce();
     });
   });
   it('tolerates namespace timestamp mutation while a requested payload is read', async () => {
@@ -464,15 +463,15 @@ describe('complete same-path evidence and creation boundaries', () => {
 });
 
 describe('requested-entry and directory anchor admission', () => {
-  it.each([HOME, PUBLISHING, ROOT])('refuses changed private %s anchor during requested read', async (target) => {
+  it.each([HOME, PUBLISHING, ROOT])('ignores descriptor-only changes on existing %s ancestry during requested read', async (target) => {
     const f = fixture(); f.namespace(); f.file(PATH, wire(candidate));
     const nativeRead = f.backend.readStableFile;
     f.backend.readStableFile = async (...args) => {
       const value = await nativeRead(...args);
-      if (args[0] === PATH) f.nodes.get(target)!.security = { ...f.backend.inspectPath(target).security, groupSid: 'S-1-5-18' };
+      if (args[0] === PATH) f.nodes.get(target)!.security = { ...f.security(target), groupSid: 'S-1-5-18' };
       return value;
     };
-    await expect(read(f)).rejects.toMatchObject({ code: 'WINDOWS_TRANSACTION_JOURNAL_REFUSED' });
+    await expect(read(f)).resolves.toEqual(candidate);
     expect(f.nodes.get(PATH)!.bytes).toEqual(Buffer.from(wire(candidate)));
   });
   it.each(['read', 'initial', 'update', 'reconcile'] as const)('ignores unrequested entries during %s but counts their capacity', async (stage) => {
@@ -496,7 +495,7 @@ describe('requested-entry and directory anchor admission', () => {
 });
 
 describe('last pre-write authority and root admission', () => {
-  it.each(['authority', 'root-security'] as const)('refuses %s change during created-empty read before any payload write', async (kind) => {
+  it.each(['authority', 'root-identity'] as const)('refuses %s change during created-empty read before any payload write', async (kind) => {
     const f = fixture(); let valid = true;
     const acquire = f.backend.acquireFileLock;
     f.backend.acquireFileLock = (path) => {
@@ -509,7 +508,7 @@ describe('last pre-write authority and root admission', () => {
         const value = await nativeRead(...args);
         if (args[0] === PATH && value.bytes.length === 0) {
           if (kind === 'authority') valid = false;
-          else f.nodes.get(ROOT)!.security = { ...f.backend.inspectPath(ROOT).security, groupSid: 'S-1-5-18' };
+          else f.directory(ROOT);
         }
         return value;
       };

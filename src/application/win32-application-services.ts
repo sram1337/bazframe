@@ -1,5 +1,5 @@
-import { admitWindowsPrivateFile } from '../state/win32-private-directory.js';
-import { enumerateWindowsPrivateDirectory } from '../skills/added-skill-platform-services.js';
+import { admitWindowsPhysicalFile } from '../state/win32-private-directory.js';
+import { enumerateWindowsPhysicalDirectory } from '../skills/added-skill-platform-services.js';
 import { createPiRuntimeServices } from '../adapters/pi/runtime-services.js';
 import { createWindowsOwnedFileServices } from '../policy/win32-policy-services.js';
 import { decodeUtf8Instructions, MAX_EFFECTIVE_INSTRUCTION_BYTES } from '../core/content.js';
@@ -64,8 +64,8 @@ export function createWindowsApplicationServices(options: WindowsApplicationOpti
     get reads() {
       const native = backend(), resolver = createWindowsReadyResourceServices(native, options).resolver;
       return { stat: resolver.stat, async canonical(path: string) { await resolver.stat(path); return resolver.canonical(path); },
-        async entries(path: string, external = false) { const directory = await createWindowsPhysicalReads(native, undefined, {}, external).openDirectory(path, path); try { const names = await directory.enumerate(4096); await directory.assertStable(); return names.map((name) => ({ name })); } finally { await directory.close(); } },
-        async instructions(path: string, label: string) { return decodeUtf8Instructions((await createWindowsPhysicalReads(native, undefined, {}, true).readFile(path, MAX_EFFECTIVE_INSTRUCTION_BYTES)).bytes, label, path); }
+        async entries(path: string) { const directory = await createWindowsPhysicalReads(native, undefined, {}).openDirectory(path, path); try { const names = await directory.enumerate(4096); await directory.assertStable(); return names.map((name) => ({ name })); } finally { await directory.close(); } },
+        async instructions(path: string, label: string) { return decodeUtf8Instructions((await createWindowsPhysicalReads(native, undefined, {}).readFile(path, MAX_EFFECTIVE_INSTRUCTION_BYTES)).bytes, label, path); }
       };
     },
     parseFrontmatter: options.parse ?? parseFrontmatter,
@@ -84,23 +84,23 @@ export function createWindowsApplicationServices(options: WindowsApplicationOpti
     get view() { return createWindowsProfileDataReads(backend(), undefined, options).viewReads; },
     get projection() {
       const native = backend(), resolver = createWindowsReadyResourceServices(native, options).resolver;
-      resolver.definitionLoader = createPhysicalSkillDefinitionLoader(async (path, max) => (await createWindowsPhysicalReads(native, undefined, {}, true).readFile(path, max)).bytes, win32.basename, options.parse ?? parseFrontmatter);
+      resolver.definitionLoader = createPhysicalSkillDefinitionLoader(async (path, max) => (await createWindowsPhysicalReads(native, undefined, {}).readFile(path, max)).bytes, win32.basename, options.parse ?? parseFrontmatter);
       return { view: createWindowsProfileDataReads(native, undefined, options).viewReads, readTree: createWindowsProfileStorage(native, options.storageIo).readTree, resolver };
     },
     get providerRecords() {
       const native = backend(), records = createWindowsManagedGitRecordEffects(native);
-      return { join: win32.join, recordsRoot: (home: string) => win32.join(home, 'providers', 'git', 'records'), recoveryRoot: records.managedGitRecoveryRoot, entries: async (path: string) => [...(await enumerateWindowsPrivateDirectory(native, path, 4096)).names], readRecord: records.readManagedGitRecord, readJournal: records.readManagedGitJournal };
+      return { join: win32.join, recordsRoot: (home: string) => win32.join(home, 'providers', 'git', 'records'), recoveryRoot: records.managedGitRecoveryRoot, entries: async (path: string) => [...(await enumerateWindowsPhysicalDirectory(native, path, 4096)).names], readRecord: records.readManagedGitRecord, readJournal: records.readManagedGitJournal };
     },
     async countAliasCache(home) {
       const native = backend(), root = win32.join(home, 'adapter-cache', 'pi', 'skill-aliases'); let count = 0, entries = 0;
       const observations = new Map<string, string>();
-      const names = async (path: string) => { const result = await enumerateWindowsPrivateDirectory(native, path, 4096); observations.set(path, result.identity); entries += result.names.length; if (entries > 10000) throw new BazframeError('PI_ALIAS_CACHE_INVALID', 'Alias cache exceeds its read bound.'); return result.names.filter((name) => !name.endsWith('.retained')); };
+      const names = async (path: string) => { const result = await enumerateWindowsPhysicalDirectory(native, path, 4096); observations.set(path, result.identity); entries += result.names.length; if (entries > 10000) throw new BazframeError('PI_ALIAS_CACHE_INVALID', 'Alias cache exceeds its read bound.'); return result.names.filter((name) => !name.endsWith('.retained')); };
       try {
         for (const profile of await names(root)) for (const alias of await names(win32.join(root, profile))) {
           const directory = win32.join(root, profile, alias);
-          for (const name of await names(directory)) if (name === 'SKILL.md') { admitWindowsPrivateFile(native, win32.join(directory, name)); count += 1; }
+          for (const name of await names(directory)) if (name === 'SKILL.md') { admitWindowsPhysicalFile(native, win32.join(directory, name)); count += 1; }
         }
-        for (const [path, identity] of observations) if ((await enumerateWindowsPrivateDirectory(native, path, 4096)).identity !== identity) throw new BazframeError('PI_ALIAS_CACHE_INVALID', 'Alias cache changed while counted.');
+        for (const [path, identity] of observations) if ((await enumerateWindowsPhysicalDirectory(native, path, 4096)).identity !== identity) throw new BazframeError('PI_ALIAS_CACHE_INVALID', 'Alias cache changed while counted.');
         return count;
       } catch (error) { if (observations.size === 0 && errorCode(error) === 'WINDOWS_NATIVE_PATH_NOT_FOUND') return 0; throw error; }
     },
@@ -126,7 +126,7 @@ export function createWindowsApplicationServices(options: WindowsApplicationOpti
     },
     adapter: (context) => createWindowsPiAdapterServices(backend(), context.environment, context.userHome ?? homedir(), options),
     get runtimeOptions() { return { process: options.profileProcess, filesystem: createWindowsProfileGithubEffects(backend(), lifecycleOptions).runtimeFilesystem, recoveryServices: lifecycle() }; },
-    profileEditor: { platform: 'win32', resolveExecutable, async targetProof(home, id) { return proveWindowsEditorTarget(backend(), win32.join(home, 'profiles', id), 'AGENTS.md', true); } },
+    profileEditor: { platform: 'win32', resolveExecutable, async targetProof(home, id) { return proveWindowsEditorTarget(backend(), win32.join(home, 'profiles', id), 'AGENTS.md'); } },
     skillEditor: { platform: 'win32', resolveExecutable, async targetProof(home, id) {
       const native = backend(), skills = platform(), records = createWindowsManagedGitRecordEffects(native), root = win32.join(home, 'skills');
       const assertLocal = async () => { if (await records.optionalManagedGitRecord(home, 'skill', id) !== undefined) throw new BazframeError('MANAGED_GIT_SKILL_EDIT_REFUSED', `Skill ${id} is a remote Git source; edit upstream then run bazframe skill update ${id}.`); };
@@ -135,7 +135,7 @@ export function createWindowsApplicationServices(options: WindowsApplicationOpti
       if (before.kind !== 'current' || win32.basename(before.targetPath) !== id) throw new BazframeError('SKILL_EDITOR_TARGET_CHANGED', 'Added Skill registration is unavailable.');
       const relative = win32.relative(home, before.targetPath);
       if (relative === '' || relative !== '..' && !relative.startsWith('..\\') && !win32.isAbsolute(relative)) throw new BazframeError('SKILL_EDITOR_SOURCE_READ_ONLY', 'Managed Skill artifacts cannot be edited.');
-      const proof = proveWindowsEditorTarget(native, before.targetPath, 'SKILL.md', false);
+      const proof = proveWindowsEditorTarget(native, before.targetPath, 'SKILL.md');
       return { ...proof, async revalidate() { await assertLocal(); const after = await skills.readSkillLink(root, id); if (JSON.stringify(after) !== JSON.stringify(before)) throw new BazframeError('SKILL_EDITOR_TARGET_CHANGED', 'Added Skill registration changed before launch.'); await proof.revalidate(); } };
     } }
   };
@@ -150,7 +150,7 @@ export function createBoundPiRuntimeServices(options: WindowsApplicationOptions 
   } });
   return createPiRuntimeServices(application, options.environment, {
     async readContext(path) {
-      try { return decodeUtf8Instructions((await createWindowsPhysicalReads(native, undefined, {}, true).readFile(path, MAX_EFFECTIVE_INSTRUCTION_BYTES)).bytes, 'Global Pi context', path); }
+      try { return decodeUtf8Instructions((await createWindowsPhysicalReads(native, undefined, {}).readFile(path, MAX_EFFECTIVE_INSTRUCTION_BYTES)).bytes, 'Global Pi context', path); }
       catch (error) { if (errorCode(error) === 'WINDOWS_NATIVE_PATH_NOT_FOUND') return undefined; throw error; }
     },
     async writeAlias(path, contents, home) {

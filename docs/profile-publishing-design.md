@@ -2,7 +2,7 @@
 
 > **Status: Shipped replacement lifecycle on macOS and Linux**
 >
-> The profile publish, ZIP/Git import/export, update, version, managed lifecycle, projection, documentation, and packed surfaces are exposed coherently in the unreleased working tree. `docs/design.md` records the consolidated product behavior.
+> The profile publish, ZIP/Git import/export, update, version, managed lifecycle, projection, documentation, and packed surfaces are implemented together in the development tree. `docs/design.md` records the consolidated product behavior.
 
 ## Purpose and authority
 
@@ -19,7 +19,7 @@ The replacement is now the public CLI authority for this lifecycle. Its archive,
 - `publish`, `export`, `update`, and neutral `profile version` operations accept `--profile <name>` for an inactive profile; without it they target the active profile.
 - A newly imported profile remains inactive. Activation remains the explicit `profile use` operation.
 - Bazframe continues to manage profile instructions and Skill resources. Pi, model, provider, and runtime settings; credentials; adapter installation; and global/project policy remain machine-local and outside this redesign.
-- The supported portability boundary remains macOS and Linux. [`win32-filesystem-backend-requirements.md`](win32-filesystem-backend-requirements.md) defines an approved, partially implemented outcome-parity native-Windows x64/local-NTFS path. Windows remains unsupported until ZIP overwrite, Git import/export/publish/update/versioning, the complete current CLI/runtime/resource/adapter/editor lifecycle, shared private retention of detached profiles/backups, and the existing TUI all pass one installed-package acceptance gate through both entrypoints where applicable. Network-backed Bazframe home/staging and full-portability acceptance remain open; bounded ZIP copy and Git transport into proved private local staging are allowed.
+- The macOS/Linux portability contract and the native-Windows x64/local-NTFS path share product outcomes. [`win32-filesystem-backend-requirements.md`](win32-filesystem-backend-requirements.md) records Windows implementation evidence and the remaining installed CLI/runtime/resource/adapter/editor/TUI acceptance matrix. Network-backed Bazframe home/staging is outside that Windows boundary; bounded ZIP copy and Git transport into proved private local staging are allowed. Broader full-portability acceptance remains open.
 
 ### GitHub publication
 
@@ -210,7 +210,7 @@ These implications do not select storage layout, archive entries, manifests, rep
 
 ## Implementation guardrails
 
-- Implement and validate changes as coherent parser/dispatch, lifecycle, projection, documentation, generated-Skill, and packed-acceptance slices. Release readiness requires the complete public family to agree.
+- Implement and validate changes as coherent parser/dispatch, lifecycle, projection, documentation, generated-Skill, and packed-acceptance slices. Before npm publication, the complete command family must agree.
 - Do not invent archive trees, entry names, manifest fields, repository schemas, branch/ref layouts, signing schemes, storage models, or size/resource limits.
 - Keep `docs/design.md`, this product contract, the engineering contract, help, and generated Skill synchronized with each implemented public slice.
 - Do not leave completed snapshots with partial commands, DTOs, or service surfaces.

@@ -5,7 +5,7 @@ import type {
   WindowsDirectoryEntryObservation,
   WindowsFileLockAcquisition,
   WindowsObjectObservation,
-  WindowsPathInspection,
+  WindowsPathInspection as PhysicalPathInspection,
   WindowsPrivateDirectoryCreationReceipt,
   WindowsPrivateFileCreationReceipt,
   WindowsSecurityObservation
@@ -14,6 +14,9 @@ import {
   withWindowsOperationLock,
   type WindowsOperationLockAuthority
 } from '../../../src/state/win32-operation-lock.js';
+
+// Synthetic fixture metadata is not part of ordinary native physical receipts.
+type WindowsPathInspection = PhysicalPathInspection & { security: WindowsSecurityObservation };
 
 const VOLUME = '0020000000000001';
 const USER = 'S-1-5-21-1000';
@@ -44,6 +47,19 @@ describe('Windows operation-lock composition', () => {
     ]);
     expect(JSON.parse(fixture.files.get('C:\\locks\\state.lock\\owner')!.toString('utf8')))
       .toMatchObject({ status: 'released' });
+  });
+
+  it.each(['guard', 'owner'])('retains single-link isolation for the %s lock object', async (component) => {
+    const fixture = createFixture();
+    await withLock(fixture, async () => undefined);
+    const inspect = fixture.backend.inspectPath;
+    fixture.backend.inspectPath = (path) => {
+      const value = inspect(path);
+      return path === `C:\\locks\\state.lock\\${component}` ? { ...value, object: { ...value.object, numberOfLinks: '00000002' } } : value;
+    };
+    const operation = vi.fn(async () => undefined);
+    await expect(withLock(fixture, operation)).rejects.toThrow();
+    expect(operation).not.toHaveBeenCalled();
   });
 
   it('reports coherent cross-process contention without mutation authority', async () => {
@@ -350,7 +366,7 @@ function createFixture() {
       }
       const parent = inspection(parentPath);
       directories.add(path);
-      return { parentBefore: parent, created: inspection(path), parentAfter: parent };
+      return { parentBefore: parent, created: inspection(path), parentAfter: parent, creationSecurity: privateSecurity() };
     },
     createPrivateFile(parentPath, finalComponent): WindowsPrivateFileCreationReceipt {
       const path = `${parentPath}\\${finalComponent}`;
@@ -359,7 +375,7 @@ function createFixture() {
       }
       const parent = inspection(parentPath);
       files.set(path, Buffer.alloc(0));
-      return { parentBefore: parent, created: inspection(path), parentAfter: parent };
+      return { parentBefore: parent, created: inspection(path), parentAfter: parent, creationSecurity: privateSecurity() };
     },
     acquireFileLock,
     inspectProcessInstance,

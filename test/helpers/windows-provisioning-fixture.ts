@@ -37,7 +37,7 @@ export function windowsProvisioningFixture() {
     if (nodes.has(lookup(path))) throw new BazframeError('WINDOWS_NATIVE_DIRECTORY_OCCUPIED', 'occupied');
     nodes.set(path, kind === 'directory' ? dir(nextId++) : file(nextId++, ''));
     writes.push(path);
-    return { parentBefore, created: inspect(path), parentAfter: inspect(parent) };
+    return { parentBefore, created: inspect(path), parentAfter: inspect(parent), creationSecurity: security() };
   }
   const backend: BazframeWin32NativeBackend & BazframeWin32LockBackend = {
     inspectZipSource(path) {
@@ -46,7 +46,7 @@ export function windowsProvisioningFixture() {
       while (true) {
         const object = inspect(current).object;
         if (object.reparseTag !== null && ((object.reparseTag & ~0xf000) >>> 0) !== 0x9000001a) throw new Error('unexpected reparse');
-        if (current === path && (object.directory || object.numberOfLinks !== '00000001')) throw new Error('unsafe ZIP file');
+        if (current === path && (object.directory)) throw new Error('unsafe ZIP file');
         const parent = win32.dirname(current); if (parent === current) break; current = parent;
       }
       return inspect(path).object;
@@ -62,7 +62,7 @@ export function windowsProvisioningFixture() {
       const parentBefore = inspect(parent); const path = win32.join(parent, component);
       if (nodes.has(lookup(path))) throw new BazframeError('WINDOWS_NATIVE_DIRECTORY_OCCUPIED', 'occupied');
       nodes.set(path, reparse(nextId++)); junctions.set(path, target); writes.push(path);
-      return { parentBefore, created: backend.inspectMembershipLink(path), parentAfter: inspect(parent) };
+      return { parentBefore, created: backend.inspectMembershipLink(path), parentAfter: inspect(parent), creationSecurity: security() };
     },
     createPrivateDirectory(parent, component) { return create(parent, component, 'directory'); },
     createPrivateFile(parent, component) { return create(parent, component, 'file'); },
@@ -126,6 +126,7 @@ export function windowsProvisioningFixture() {
     }
   };
   return { nodes, backend, io, writes,
+    security(path: string) { return required(nodes, lookup(path)).security ?? security(); },
     directory(path: string) { nodes.set(path, dir(nextId++)); },
     file(path: string, contents: string) { nodes.set(path, file(nextId++, contents)); },
     junction(path: string, target: string) { nodes.set(path, reparse(nextId++)); junctions.set(path, target); },
@@ -179,7 +180,6 @@ function inspection(path: string, node: TestNode): WindowsPathInspection {
       remoteDevice: false
     },
     object,
-    security: node.security ?? security(),
     ancestryReparseFree: true
   };
 }

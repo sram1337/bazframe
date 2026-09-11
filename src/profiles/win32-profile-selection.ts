@@ -4,8 +4,8 @@ import { win32 } from 'node:path';
 import type { BazframeWin32NativeBackend, WindowsPathInspection } from '../core/win32-native.js';
 import { BazframeError, errorCode } from '../core/errors.js';
 import { PROFILE_PORTABILITY_PRODUCTION_LIMITS } from '../profile-portability/profile-portability-policy.js';
-import { enumerateWindowsPrivateDirectory } from '../skills/added-skill-platform-services.js';
-import { admitWindowsPrivateDirectory, admitWindowsPrivateFile } from '../state/win32-private-directory.js';
+import { enumerateWindowsPhysicalDirectory } from '../skills/added-skill-platform-services.js';
+import { admitWindowsPhysicalDirectory, admitWindowsPhysicalFile } from '../state/win32-private-directory.js';
 import { decodeActiveProfileState, MAX_ACTIVE_PROFILE_STATE_BYTES, type ActiveProfileReadServices } from './profile-store.js';
 
 export interface WindowsSelectionSnapshot {
@@ -18,27 +18,27 @@ export interface WindowsSelectionSnapshot {
 
 /** Read-only selected-ID proof. Never bootstraps, locks, recovers, or loads a profile. */
 export async function readWindowsSelectionSnapshot(backend: BazframeWin32NativeBackend, home: string): Promise<WindowsSelectionSnapshot> {
-  try { admitWindowsPrivateDirectory(backend, home); }
+  try { admitWindowsPhysicalDirectory(backend, home); }
   catch (error) {
     if (errorCode(error) === 'WINDOWS_NATIVE_PATH_NOT_FOUND') return { digest: digest('absent') };
     throw error;
   }
-  const namespace = await enumerateWindowsPrivateDirectory(backend, home, PROFILE_PORTABILITY_PRODUCTION_LIMITS.stagingEntries);
+  const namespace = await enumerateWindowsPhysicalDirectory(backend, home, PROFILE_PORTABILITY_PRODUCTION_LIMITS.stagingEntries);
   const names = namespace.names.filter((name) => key(name) === key('active-profile'));
   if (names.length === 0) return { digest: digest('absent') };
   if (names.length !== 1 || names[0] !== 'active-profile') throw invalid('Active selection uses an alias spelling.');
   const path = win32.join(home, 'active-profile');
-  const { bytes, inspection } = await readWindowsPrivateFileSnapshot(backend, path, MAX_ACTIVE_PROFILE_STATE_BYTES);
-  const after = await enumerateWindowsPrivateDirectory(backend, home, PROFILE_PORTABILITY_PRODUCTION_LIMITS.stagingEntries);
+  const { bytes, inspection } = await readWindowsPhysicalFileSnapshot(backend, path, MAX_ACTIVE_PROFILE_STATE_BYTES);
+  const after = await enumerateWindowsPhysicalDirectory(backend, home, PROFILE_PORTABILITY_PRODUCTION_LIMITS.stagingEntries);
   if (after.identity !== namespace.identity) throw invalid('Active selection namespace changed during its read.');
   return { profileId: decodeActiveProfileState(bytes, path), bytes, inspection, digest: digest(JSON.stringify(stableWindowsPathInspection(inspection)), bytes) };
 }
 
 /** Lossless private opened-file observation, also used for candidate reconciliation. */
-export async function readWindowsPrivateFileSnapshot(backend: BazframeWin32NativeBackend, path: string, maxBytes: number): Promise<{ bytes: Buffer; inspection: WindowsPathInspection }> {
-  const before = admitWindowsPrivateFile(backend, path);
+export async function readWindowsPhysicalFileSnapshot(backend: BazframeWin32NativeBackend, path: string, maxBytes: number): Promise<{ bytes: Buffer; inspection: WindowsPathInspection }> {
+  const before = admitWindowsPhysicalFile(backend, path);
   const receipt = await backend.readStableFile(path, maxBytes);
-  const after = admitWindowsPrivateFile(backend, path);
+  const after = admitWindowsPhysicalFile(backend, path);
   if (JSON.stringify(stableWindowsPathInspection(before)) !== JSON.stringify(stableWindowsPathInspection(after))
     || JSON.stringify(stableWindowsObjectObservation(before.object)) !== JSON.stringify(stableWindowsObjectObservation(receipt.before))
     || JSON.stringify(stableWindowsObjectObservation(receipt.before)) !== JSON.stringify(stableWindowsObjectObservation(receipt.after))

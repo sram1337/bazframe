@@ -1,19 +1,22 @@
 import { describe, expect, it, vi } from 'vitest';
 import type {
   BazframeWin32NativeBackend,
-  WindowsPathInspection,
+  WindowsPathInspection as PhysicalPathInspection,
   WindowsPrivateDirectoryCreationReceipt,
   WindowsPrivateFileCreationReceipt,
   WindowsSecurityObservation
 } from '../../../src/core/win32-native.js';
 import {
-  admitWindowsPrivateDirectory,
-  admitWindowsPrivateFile,
+  admitWindowsPhysicalDirectory,
+  admitWindowsPhysicalFile,
   createWindowsPrivateDirectory,
   createWindowsPrivateFile,
   ensureWindowsPrivateDirectoryPath
 } from '../../../src/state/win32-private-directory.js';
 import { BazframeError } from '../../../src/core/errors.js';
+
+// Synthetic fixture metadata is not part of ordinary native physical receipts.
+type WindowsPathInspection = PhysicalPathInspection & { security: WindowsSecurityObservation };
 
 const USER = 'S-1-5-21-1000';
 const SYSTEM = 'S-1-5-18';
@@ -46,7 +49,7 @@ describe('Windows private-directory composition', () => {
     expect(ensureWindowsPrivateDirectoryPath(backend, 'C:\\ordinary\\missing\\home').kind).toBe('directory');
     expect(create.mock.calls).toEqual([['C:\\ordinary', 'missing'], ['C:\\ordinary\\missing', 'home']]);
     expect(nodes.get('C:\\ordinary')!.security.ownerSid).toBe(SYSTEM);
-    expect(() => ensureWindowsPrivateDirectoryPath(backend, 'C:\\ordinary')).toThrow();
+    expect(() => ensureWindowsPrivateDirectoryPath(backend, 'C:\\ordinary')).not.toThrow();
   });
 
   it.each(['C:\\ordinary\\..\\home', 'C:\\ordinary\\CON\\home', 'C:\\ordinary\\bad.\\home']) (
@@ -57,20 +60,20 @@ describe('Windows private-directory composition', () => {
     }
   );
 
-  it('refuses namespace-takeover ancestry before missing-directory creation', () => {
+  it('reaches private creation beneath existing writable ancestry without imposing an ACL template', () => {
     const create = vi.fn();
     const backend = fakeBackend((path) => {
       if (path.endsWith('home')) throw new BazframeError('WINDOWS_NATIVE_PATH_NOT_FOUND', 'absent');
       return directory(path, { security: security({ daclBytes: privateAcl([ace(0, FOREIGN, FILE_DELETE_CHILD, 0)]) }) });
     }, create);
     expect(() => ensureWindowsPrivateDirectoryPath(backend, 'C:\\ordinary\\home')).toThrow();
-    expect(create).not.toHaveBeenCalled();
+    expect(create).toHaveBeenCalled();
   });
 
   it('admits and revalidates a protected owner-private directory', () => {
     const inspectPath = vi.fn(() => directory('C:\\state'));
     const backend = fakeBackend(inspectPath);
-    expect(admitWindowsPrivateDirectory(backend, 'C:\\state').canonicalPath).toContain('state');
+    expect(admitWindowsPhysicalDirectory(backend, 'C:\\state').canonicalPath).toContain('state');
     expect(inspectPath).toHaveBeenCalledTimes(4);
   });
 
@@ -84,32 +87,26 @@ describe('Windows private-directory composition', () => {
     ['insufficient access', { daclBytes: privateAcl([], FULL & ~1, USER) }],
     ['non-propagating access', { daclBytes: privateAcl([], FULL, USER, 7) }],
     ['deny access', { daclBytes: privateAcl([ace(1, USER)]) }]
-  ])('fails closed for %s', (_label, securityOverrides) => {
+  ])('admits existing physical directories independently of %s', (_label, securityOverrides) => {
     const backend = fakeBackend(() => directory('C:\\state', { security: security(securityOverrides) }));
-    expect(() => admitWindowsPrivateDirectory(backend, 'C:\\state')).toThrow(
-      expect.objectContaining({ code: 'WINDOWS_PRIVATE_DIRECTORY_PRIVACY_UNPROVED' })
-    );
+    expect(() => admitWindowsPhysicalDirectory(backend, 'C:\\state')).not.toThrow();
   });
 
-  it('admits only owner-private, single-link files and revalidates their security', () => {
+  it('admits stable hardlinked files independently of existing security metadata', () => {
     const accepted = fakeBackend((path) => path.endsWith('file.txt')
       ? regularFile(path)
       : directory(path));
-    expect(admitWindowsPrivateFile(accepted, 'C:\\state\\file.txt').kind).toBe('regular-file');
+    expect(admitWindowsPhysicalFile(accepted, 'C:\\state\\file.txt').kind).toBe('regular-file');
 
     const linked = fakeBackend((path) => path.endsWith('file.txt')
       ? regularFile(path, { numberOfLinks: '00000002' })
       : directory(path));
-    expect(() => admitWindowsPrivateFile(linked, 'C:\\state\\file.txt')).toThrow(
-      expect.objectContaining({ code: 'WINDOWS_PRIVATE_FILE_PRIVACY_UNPROVED' })
-    );
+    expect(() => admitWindowsPhysicalFile(linked, 'C:\\state\\file.txt')).not.toThrow();
 
     const broad = fakeBackend((path) => path.endsWith('file.txt')
       ? regularFile(path, { security: security({ daclBytes: privateAcl([ace(0, FOREIGN)]) }) })
       : directory(path));
-    expect(() => admitWindowsPrivateFile(broad, 'C:\\state\\file.txt')).toThrow(
-      expect.objectContaining({ code: 'WINDOWS_PRIVATE_FILE_PRIVACY_UNPROVED' })
-    );
+    expect(() => admitWindowsPhysicalFile(broad, 'C:\\state\\file.txt')).not.toThrow();
 
     let fileInspections = 0;
     const drift = fakeBackend((path) => {
@@ -119,9 +116,7 @@ describe('Windows private-directory composition', () => {
         security: security({ daclBytes: privateAcl([ace(0, FOREIGN)]) })
       });
     });
-    expect(() => admitWindowsPrivateFile(drift, 'C:\\state\\file.txt')).toThrow(
-      expect.objectContaining({ code: 'WINDOWS_PRIVATE_FILE_PRIVACY_UNPROVED' })
-    );
+    expect(() => admitWindowsPhysicalFile(drift, 'C:\\state\\file.txt')).not.toThrow();
   });
 
   it('creates an empty protected owner-private file without replacement and revalidates it', () => {
@@ -166,13 +161,13 @@ describe('Windows private-directory composition', () => {
     );
   });
 
-  it('accepts an unprotected private chain only when it reaches and revalidates a protected anchor', () => {
+  it('revalidates physical ancestry regardless of protection flags', () => {
     const paths: string[] = [];
     const backend = fakeBackend((path) => {
       paths.push(path);
       return directory(path, { security: security({ descriptorControl: path === 'C:\\' ? 0x1004 : 4 }) });
     });
-    expect(admitWindowsPrivateDirectory(backend, 'C:\\state\\child').kind).toBe('directory');
+    expect(admitWindowsPhysicalDirectory(backend, 'C:\\state\\child').kind).toBe('directory');
     expect(paths).toEqual([
       'C:\\state\\child', 'C:\\state', 'C:\\',
       'C:\\', 'C:\\state', 'C:\\state\\child'
@@ -180,7 +175,7 @@ describe('Windows private-directory composition', () => {
   });
 
   it.each(['C:\\', 'C:\\state', 'C:\\state\\child'])(
-    'inspects each chain member as a final path and permits only identity/security-preserving directory time drift: %s', (changedPath) => {
+    'inspects each chain member as a final path and permits only identity-preserving directory time and security-only fixture drift: %s', (changedPath) => {
       for (const drift of ['timestamps', 'identity', 'security']) {
         const calls: string[] = [];
         const backend = fakeBackend((path) => {
@@ -197,12 +192,10 @@ describe('Windows private-directory composition', () => {
           }
           return observation;
         });
-        if (drift === 'timestamps') {
-          expect(admitWindowsPrivateDirectory(backend, 'C:\\state\\child').kind).toBe('directory');
+        if (drift !== 'identity') {
+          expect(admitWindowsPhysicalDirectory(backend, 'C:\\state\\child').kind).toBe('directory');
           expect(calls).toEqual(['C:\\state\\child', 'C:\\state', 'C:\\', 'C:\\', 'C:\\state', 'C:\\state\\child']);
-        } else expect(() => admitWindowsPrivateDirectory(backend, 'C:\\state\\child')).toThrow(
-          expect.objectContaining({ code: 'WINDOWS_PRIVATE_DIRECTORY_PRIVACY_UNPROVED' })
-        );
+        } else expect(() => admitWindowsPhysicalDirectory(backend, 'C:\\state\\child')).toThrow();
       }
     }
   );
@@ -216,33 +209,29 @@ describe('Windows private-directory composition', () => {
         if (++reads > 1) observation.object[field] = 'f'.repeat(field === 'fileId' ? 32 : 16);
         return observation;
       });
-      expect(() => admitWindowsPrivateFile(backend, 'C:\\state\\file.txt')).toThrow();
+      expect(() => admitWindowsPhysicalFile(backend, 'C:\\state\\file.txt')).toThrow();
     }
   );
 
-  it('refuses an unprotected chain with no protected anchor', () => {
+  it('admits an unprotected physical chain without a private anchor', () => {
     const backend = fakeBackend((path) => directory(path, { security: security({ descriptorControl: 4 }) }));
-    expect(() => admitWindowsPrivateDirectory(backend, 'C:\\state')).toThrow(
-      expect.objectContaining({ code: 'WINDOWS_PRIVATE_DIRECTORY_PRIVACY_UNPROVED' })
-    );
+    expect(() => admitWindowsPhysicalDirectory(backend, 'C:\\state')).not.toThrow();
   });
 
-  it('refuses a protected child when an outer parent grants foreign delete-child access', () => {
+  it('admits existing outer ancestry without a namespace ACL recipe', () => {
     const backend = fakeBackend((path) => directory(path, {
       security: path === 'C:\\outer'
         ? security({ daclBytes: privateAcl([ace(0, FOREIGN, FILE_DELETE_CHILD, 0)]) })
         : security()
     }));
-    expect(() => admitWindowsPrivateDirectory(backend, 'C:\\outer\\state')).toThrow(
-      expect.objectContaining({ code: 'WINDOWS_PRIVATE_DIRECTORY_PRIVACY_UNPROVED' })
-    );
+    expect(() => admitWindowsPhysicalDirectory(backend, 'C:\\outer\\state')).not.toThrow();
   });
 
   it('accepts the Windows servicing principal as an administrative namespace owner', () => {
     const backend = fakeBackend((path) => directory(path, {
       security: path === 'C:\\' ? security({ ownerSid: TRUSTED_INSTALLER }) : security()
     }));
-    expect(admitWindowsPrivateDirectory(backend, 'C:\\state').kind).toBe('directory');
+    expect(admitWindowsPhysicalDirectory(backend, 'C:\\state').kind).toBe('directory');
   });
 
   it('accepts harmless foreign read and traverse access on an outer namespace ancestor', () => {
@@ -251,10 +240,10 @@ describe('Windows private-directory composition', () => {
         ? security({ daclBytes: privateAcl([ace(0, FOREIGN, FILE_GENERIC_READ, 0)]) })
         : security()
     }));
-    expect(admitWindowsPrivateDirectory(backend, 'C:\\outer\\state').kind).toBe('directory');
+    expect(admitWindowsPhysicalDirectory(backend, 'C:\\outer\\state').kind).toBe('directory');
   });
 
-  it('refuses outer namespace security drift during outer-to-inner revalidation', () => {
+  it('ignores security-only fixture drift during outer-to-inner revalidation', () => {
     let outerInspections = 0;
     const backend = fakeBackend((path) => {
       if (path !== 'C:\\outer') return directory(path);
@@ -267,9 +256,7 @@ describe('Windows private-directory composition', () => {
         })
       });
     });
-    expect(() => admitWindowsPrivateDirectory(backend, 'C:\\outer\\state')).toThrow(
-      expect.objectContaining({ code: 'WINDOWS_PRIVATE_DIRECTORY_PRIVACY_UNPROVED' })
-    );
+    expect(() => admitWindowsPhysicalDirectory(backend, 'C:\\outer\\state')).not.toThrow();
   });
 
   it.each(['', '.', '..', 'child\\other', 'child/other', 'stream:name', 'NUL', 'con.txt', 'name.', 'name ', '\u0001bad', '\ud800']) (
@@ -289,24 +276,20 @@ describe('Windows private-directory composition', () => {
   it('refuses an unproved parent before invoking the mutating backend', () => {
     const create = vi.fn();
     const backend = fakeBackend(
-      () => directory('C:\\state', { security: security({ ownerSid: SYSTEM }) }),
+      () => ({ ...directory('C:\\state'), ancestryReparseFree: false }) as unknown as WindowsPathInspection,
       create
     );
     expect(() => createWindowsPrivateDirectory(backend, 'C:\\state', 'child')).toThrow(
-      expect.objectContaining({ code: 'WINDOWS_PRIVATE_DIRECTORY_PRIVACY_UNPROVED' })
+      expect.objectContaining({ code: 'WINDOWS_DIRECTORY_PROOF_INVALID' })
     );
     expect(create).not.toHaveBeenCalled();
   });
 
   it('refuses unsafe namespace ancestry before invoking the mutating backend', () => {
     const create = vi.fn();
-    const backend = fakeBackend((path) => directory(path, {
-      security: path === 'C:\\outer'
-        ? security({ daclBytes: privateAcl([ace(0, FOREIGN, FILE_DELETE_CHILD, 0)]) })
-        : security()
-    }), create);
+    const backend = fakeBackend((path) => ({ ...directory(path), kind: 'regular-file' }), create);
     expect(() => createWindowsPrivateDirectory(backend, 'C:\\outer\\state', 'child')).toThrow(
-      expect.objectContaining({ code: 'WINDOWS_PRIVATE_DIRECTORY_PRIVACY_UNPROVED' })
+      expect.objectContaining({ code: 'WINDOWS_DIRECTORY_PROOF_INVALID' })
     );
     expect(create).not.toHaveBeenCalled();
   });
@@ -357,7 +340,7 @@ describe('Windows private-directory composition', () => {
   it.each([
     ['malformed mutation receipt', (receipt: WindowsPrivateDirectoryCreationReceipt) => ({ ...receipt, created: directory('C:\\state\\other') })],
     ['parent identity drift', (receipt: WindowsPrivateDirectoryCreationReceipt) => ({ ...receipt, parentAfter: directory('C:\\state', { fileId: '00000000000000002000000000000009' }) })],
-    ['created security drift', (receipt: WindowsPrivateDirectoryCreationReceipt) => ({ ...receipt, created: directory('C:\\state\\child', { fileId: '00000000000000002000000000000002', security: security({ ownerSid: SYSTEM }) }) })]
+    ['invalid creation recipe', (receipt: WindowsPrivateDirectoryCreationReceipt) => ({ ...receipt, creationSecurity: security({ ownerSid: SYSTEM }) })]
   ])('maps post-success %s to retained ambiguity', (_label, mutate) => {
     const parent = directory('C:\\state');
     const child = directory('C:\\state\\child', { fileId: '00000000000000002000000000000002' });
@@ -378,7 +361,7 @@ describe('Windows private-directory composition', () => {
       if (path.endsWith('child')) return child;
       if (path === 'C:\\') return directory(path);
       parentCalls += 1;
-      return parentCalls < 3 ? parent : directory('C:\\state', { security: security({ daclDefaulted: true, descriptorControl: 0x100c }) });
+      return parentCalls < 3 ? parent : directory('C:\\state', { fileId: 'f'.repeat(32) });
     }, () => creation(parent, child));
     expect(() => createWindowsPrivateDirectory(backend, 'C:\\state', 'child')).toThrow(
       expect.objectContaining({ code: 'WINDOWS_PRIVATE_DIRECTORY_CREATE_AMBIGUOUS' })
@@ -422,7 +405,7 @@ function creation(
   created: WindowsPathInspection,
   parentAfter = parentBefore
 ): WindowsPrivateDirectoryCreationReceipt {
-  return { parentBefore, created, parentAfter };
+  return { parentBefore, created, parentAfter, creationSecurity: created.security };
 }
 
 function fileCreation(
@@ -430,7 +413,7 @@ function fileCreation(
   created: WindowsPathInspection,
   parentAfter = parentBefore
 ): WindowsPrivateFileCreationReceipt {
-  return { parentBefore, created, parentAfter };
+  return { parentBefore, created, parentAfter, creationSecurity: created.security };
 }
 
 function directory(

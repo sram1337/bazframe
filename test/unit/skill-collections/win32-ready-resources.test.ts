@@ -202,7 +202,7 @@ describe('Windows ready resources through shared collection engines (host receip
     await expect(removeProfileLibraryReference(f.references, 'work', 'library')).rejects.toThrow();
     expect(f.nodes.get(reference)!.bytes).toEqual(before);
   });
-  it.each(['reparse', 'non-private'])('favorite publication retains expected-old CAS and refuses a %s target root', async (adverse) => {
+  it.each(['reparse', 'non-private'])('favorite publication preserves CAS and applies physical admission to a %s root', async (adverse) => {
     const f = fixture(); const services = createWindowsProfileLifecycleServicesForInternalTesting(f.backend, f.options);
     await toggleProfileFavorite(HOME, 'work', { services });
     const path = win32.join(HOME, 'profile-favorites.json');
@@ -211,9 +211,14 @@ describe('Windows ready resources through shared collection engines (host receip
     expect(f.nodes.get(path)!.bytes).toEqual(changed);
     const root = win32.join(HOME, 'profiles', 'work');
     if (adverse === 'reparse') f.reparse(root);
-    else f.nodes.get(root)!.security = { ...f.backend.inspectPath(root).security, ownerSid: 'S-1-5-21-999' };
-    await expect(toggleProfileFavorite(HOME, 'work', { services })).rejects.toThrow();
-    expect(f.nodes.get(path)!.bytes).toEqual(changed);
+    else f.nodes.get(root)!.security = { ...f.security(root), ownerSid: 'S-1-5-21-999' };
+    if (adverse === 'non-private') {
+      f.file(path, '{"schemaVersion":1,"favorites":[]}\n');
+      await expect(toggleProfileFavorite(HOME, 'work', { services })).resolves.toMatchObject({ action: 'favorited' });
+    } else {
+      await expect(toggleProfileFavorite(HOME, 'work', { services })).rejects.toThrow();
+      expect(f.nodes.get(path)!.bytes).toEqual(changed);
+    }
   });
   it('publishes a real local library snapshot, references, uses/views/captures/exports it, updates and removes reference-safely', async () => {
     const f = fixture();
@@ -269,7 +274,7 @@ describe('Windows ready resources through shared collection engines (host receip
     await expect(updateLibrary(f.lifecycleOptions, 'library', f.deps)).rejects.toMatchObject({ code: 'SKILL_COLLECTION_DEPENDENT_INVALID' });
     expect((await f.services.optionalSnapshot(HOME, { kind: 'library', id: 'library' }))!.record.digest).toBe(added.digest);
   });
-  it.each(['unknown-profile', 'changed-reference', 'root-replaced', 'source-alias', 'source-link', 'file-hardlink', 'lower-bound', 'source-drift'])('refuses %s without publishing a new descriptor', async (adverse) => {
+  it.each(['unknown-profile', 'changed-reference', 'root-replaced', 'source-alias', 'source-link', 'file-hardlink', 'lower-bound', 'source-drift'])('applies shared snapshot input admission to %s', async (adverse) => {
     const f = fixture(); const added = await addLibrary(f.lifecycleOptions, LIBRARY, f.deps);
     await addProfileLibraryReference(f.references, 'work', 'library');
     const before = Buffer.from(f.nodes.get(`${HOME}\\libraries\\library.json`)!.bytes!);
@@ -287,7 +292,8 @@ describe('Windows ready resources through shared collection engines (host receip
         return operation({ ...current, preparation: { ...current.preparation, snapshotDependencies: () => ({ ...snapshotDependencies(), ...(adverse === 'lower-bound' ? { limitPolicy: { ...SKILL_SNAPSHOT_LIMITS, maxAggregateFileBytes: 8 } } : { duringSourceFileCopy: async () => { f.nodes.get(`${LIBRARY}\\child\\data.bin`)!.bytes = Buffer.from('drift'); } }) }) } });
       }) };
     }
-    await expect(updateLibrary(f.lifecycleOptions, 'library', dependencies)).rejects.toThrow();
+    if (adverse === 'file-hardlink') await expect(updateLibrary(f.lifecycleOptions, 'library', dependencies)).resolves.toHaveProperty('digest');
+    else await expect(updateLibrary(f.lifecycleOptions, 'library', dependencies)).rejects.toThrow();
     expect(f.nodes.get(`${HOME}\\libraries\\library.json`)!.bytes).toEqual(before);
     expect(f.nodes.has(`${HOME}\\skill-snapshots\\sha256\\${added.digest}\\manifest.json`)).toBe(true);
   });
@@ -422,7 +428,7 @@ describe('Windows ready resources through shared collection engines (host receip
   });
   it('keeps unrecognized provider state an explicit refusal and admits externally owned local preparation roots', async () => {
     const f = fixture();
-    f.nodes.get(LIBRARY)!.security = { ...f.backend.inspectPath(LIBRARY).security, ownerSid: 'S-1-5-21-999' };
+    f.nodes.get(LIBRARY)!.security = { ...f.security(LIBRARY), ownerSid: 'S-1-5-21-999' };
     expect(await addLibrary(f.lifecycleOptions, LIBRARY, f.deps)).toMatchObject({ action: 'added' });
     ensureWindowsPrivateDirectoryPath(f.backend, `${HOME}\\providers`); f.file(`${HOME}\\providers\\unknown`, 'provider state');
     const descriptor = f.nodes.get(`${HOME}\\libraries\\library.json`)!.bytes;
@@ -455,7 +461,7 @@ describe('Windows ready resources through shared collection engines (host receip
     expect(await currentProfile(HOME, f.services.selectionReadServices)).toBe('work');
     expect(f.snapshot()).toBe(before);
   });
-  it('keeps actual detached reference/descriptor payloads irrelevant when read-data sharing is denied, while retaining private-leaf admission', async () => {
+  it('keeps actual detached reference/descriptor payloads irrelevant when read-data sharing is denied, while retaining physical-leaf admission', async () => {
     const f = fixture(); await addLibrary(f.lifecycleOptions, LIBRARY, f.deps);
     await addProfileLibraryReference(f.references, 'work', 'library');
     await removeProfileLibraryReference(f.references, 'work', 'library');
@@ -475,7 +481,9 @@ describe('Windows ready resources through shared collection engines (host receip
     expect((await captureProfile({ bazframeHome: HOME, profileId: 'work' }, createWindowsProfileDataReads(f.backend).captureDependencies)).profile.resources).toHaveLength(1);
     expect(denied).toEqual([]);
     f.nodes.get(retained.find((path) => path.includes('\\profiles\\'))!)!.numberOfLinks = 2;
+    await expect(readProfileSystemView(HOME, createWindowsProfileDataReads(f.backend).viewReads)).resolves.toHaveProperty('profiles');
+    expect((await captureProfileCollectionReferenceIndex(HOME, { kind: 'library', id: 'library' }, f.services.references)).diagnostics).toEqual([]);
+    f.nodes.get(retained.find((path) => path.includes('\\profiles\\'))!)!.reparseTag = 0xa0000003;
     await expect(readProfileSystemView(HOME, createWindowsProfileDataReads(f.backend).viewReads)).rejects.toThrow();
-    expect((await captureProfileCollectionReferenceIndex(HOME, { kind: 'library', id: 'library' }, f.services.references)).diagnostics.length).toBeGreaterThan(0);
   });
 });

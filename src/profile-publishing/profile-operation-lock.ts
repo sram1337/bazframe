@@ -10,7 +10,7 @@ import { isSafeProfileId } from '../profiles/profile-id.js';
 import { ensureManagedDirectory } from '../state/atomic-file.js';
 import { profilePublishingOperationLockRoot } from '../state/paths.js';
 import { withWindowsOperationLock, type WindowsOperationLockAuthority, type WindowsOperationLockIo } from '../state/win32-operation-lock.js';
-import { admitWindowsPrivateDirectory, ensureWindowsPrivateDirectoryPath } from '../state/win32-private-directory.js';
+import { admitWindowsPhysicalDirectory, ensureWindowsPrivateDirectoryPath } from '../state/win32-private-directory.js';
 
 const TRANSACTION = /^[a-f0-9]{32}$/u;
 const KEY = /^(?:@store|[A-Za-z0-9][A-Za-z0-9-]{0,63})$/u;
@@ -60,7 +60,7 @@ export async function withWindowsProfileOperationLocksForInternalTesting<T>(
   options: { lockIo?: WindowsOperationLockIo; afterOperationLock?(key: string): void | Promise<void> } = {}
 ): Promise<T> {
   const ordered = orderedProfileOperationKeys(keys, transactionId);
-  const admitted = admitWindowsPrivateDirectory(backend, home);
+  const admitted = admitWindowsPhysicalDirectory(backend, home);
   const root = win32.normalize(profilePublishingOperationLockRoot(home));
   ensureWindowsPrivateDirectoryPath(backend, root);
   const held: WindowsOperationLockAuthority[] = [];
@@ -123,7 +123,7 @@ function assertLiveProof(record: OperationAuthorityRecord): void {
     return;
   }
   // Do not mask native admission/capability refusals as generic invalid authority.
-  const current = admitWindowsPrivateDirectory(proof.backend, proof.homePath);
+  const current = admitWindowsPhysicalDirectory(proof.backend, proof.homePath);
   if (current.canonicalPath !== proof.admitted.canonicalPath || current.object.fileId !== proof.admitted.object.fileId || current.object.volumeIdentity !== proof.admitted.object.volumeIdentity) throw invalidAuthority();
   for (const lock of proof.held) lock.assertHeld();
 }

@@ -69,13 +69,12 @@ describe('actual managed activation with native observations', () => {
     expect(f.snapshot()).toBe(before);
   });
 
-  it.each(['canonicalPath', 'normalizedTarget', 'targetVolumeIdentity', 'targetFileId', 'security'] as const)('retains native membership %s in the actual observation map', async (field) => {
+  it.each(['canonicalPath', 'normalizedTarget', 'targetVolumeIdentity', 'targetFileId'] as const)('retains native membership %s in the actual observation map', async (field) => {
     const f = await membershipFixture(), membership = f.backend.inspectMembershipLink;
     let drift = false;
     f.backend.inspectMembershipLink = (path) => {
       const value = membership(path);
       if (!drift || path !== f.link) return value;
-      if (field === 'security') return { ...value, security: { ...value.security, daclBytes: Buffer.concat([value.security.daclBytes, Buffer.from([1])]) } };
       return { ...value, [field]: `${value[field]}-changed` };
     };
     const before = f.snapshot();
@@ -110,13 +109,11 @@ describe('actual managed activation with native observations', () => {
     expect(await services.captureExpectation(HOME, 'alpha')).toEqual(expected);
   });
 
-  it.each(['lastWriteTime', 'changeTime', 'security', 'entry'] as const)('retains final profiles-parent %s binding even with unchanged profile closure', async (field) => {
+  it.each(['lastWriteTime', 'changeTime', 'entry'] as const)('retains final profiles-parent %s binding even with unchanged profile closure', async (field) => {
     const f = await fixture(), services = f.services(), path = `${HOME}\\profiles`;
     const inspect = f.backend.inspectPath, enumerate = f.backend.enumerateStableDirectory;
     let drift = false;
-    const change = (value: WindowsPathInspection) => field === 'security'
-      ? { ...value, security: { ...value.security, descriptorControl: value.security.descriptorControl ^ 0x400 } }
-      : field === 'entry' ? value : { ...value, object: { ...value.object, [field]: '0000000000000099' } };
+    const change = (value: WindowsPathInspection) => field === 'entry' ? value : { ...value, object: { ...value.object, [field]: '0000000000000099' } };
     f.backend.inspectPath = (name) => { const value = inspect(name); return drift && name === path ? change(value) : value; };
     f.backend.enumerateStableDirectory = async (...args) => {
       const value = await enumerate(...args);

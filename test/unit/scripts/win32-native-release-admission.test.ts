@@ -106,6 +106,9 @@ describe('Win32 native release admission', () => {
     ['wrong Node version', (fixture: EvidenceFixture) => { fixture.installed.environment.node = '24.0.0'; }],
     ['wrong Rust toolchain', (fixture: EvidenceFixture) => { fixture.aggregate.rust = fixture.rust.replace('1.88.0', '1.89.0'); }],
     ['wrong MSVC toolchain', (fixture: EvidenceFixture) => { fixture.aggregate.msvcToolsVersion = '14.45.0'; }],
+    ['old contract-7/schema-6 evidence', (fixture: EvidenceFixture) => {
+      fixture.source.schemaVersion = 6; fixture.installed.schemaVersion = 6; fixture.aggregate.schemaVersion = 6;
+    }],
     ['old v5 evidence', (fixture: EvidenceFixture) => {
       fixture.source.schemaVersion = 5;
       fixture.installed.schemaVersion = 5;
@@ -119,7 +122,7 @@ describe('Win32 native release admission', () => {
       fixture.source.observations.privateDirectoryFirstVisibilityPrivate = false;
     }],
     ['failed membership observation', (fixture: EvidenceFixture) => {
-      fixture.source.observations.membershipLinkSecurityAdmitted = false;
+      fixture.source.observations.membershipExistingAclAdmitted = false;
     }],
     ['failed private-file observation', (fixture: EvidenceFixture) => {
       fixture.source.observations.privateFileFirstVisibilityPrivate = false;
@@ -223,7 +226,7 @@ function evidenceFixture(): EvidenceFixture {
   const rust = 'rustc 1.88.0 (6b00bc388 2025-06-23)\r\nhost: x86_64-pc-windows-msvc\r\n';
   const msvc = 'Path=C:\\VS\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\cl.exe\r\n';
   const aggregate = {
-    schemaVersion: 6,
+    schemaVersion: 7,
     purpose: 'Bazframe-owned native foundation evidence only; not release admission or a Windows support claim.',
     completion: 'passed',
     sourceCommit: commit,
@@ -244,7 +247,7 @@ function evidenceFixture(): EvidenceFixture {
 
 function receipt(kind: 'source-tree' | 'packed-install') {
   return {
-    schemaVersion: 6,
+    schemaVersion: 7,
     purpose: 'Bazframe-owned native Windows foundation evidence only; not a Windows support claim.',
     environment: { platform: 'win32', arch: 'x64', node: '22.19.0' },
     packageRootKind: kind,
@@ -267,9 +270,10 @@ function receipt(kind: 'source-tree' | 'packed-install') {
       junctionTargetPreserved: true,
       membershipJunctionDirectTarget: true,
       membershipJunctionNoReplace: true,
+      membershipCreationReceiptLossRetained: true,
       membershipJunctionExactInspection: true,
       membershipJunctionImmediateRevalidation: true,
-      membershipLinkSecurityAdmitted: true,
+      membershipExistingAclAdmitted: true,
       membershipForeignReparseRefused: true,
       membershipLinkOnlyRemoval: true,
       membershipRemovalReconciled: true,
@@ -293,8 +297,8 @@ function receipt(kind: 'source-tree' | 'packed-install') {
       directoryReparseObservedAsLeaf: true,
       boundedDirectoryClosure: true,
       directoryClosureLimitsRefused: true,
-      directoryClosureHardLinkRefused: true,
-      directoryClosureForeignFileAclRefused: true,
+      directoryClosureStableHardLinkAdmitted: true,
+      directoryClosureExistingFileAclAdmitted: true,
       directoryClosureDriftRefused: true,
       directoryClosureReparseRefusedTargetPreserved: true,
       directoryPublicationFreshNoReplace: true,
@@ -307,7 +311,7 @@ function receipt(kind: 'source-tree' | 'packed-install') {
       directoryPublicationDependentDriftRetained: true,
       directoryPublicationCorruptJournalRefused: true,
       directoryPublicationRestartRecovery: true,
-      operationLockPrivatePersistentNamespace: true,
+      operationLockFreshPrivatePersistentNamespace: true,
       operationLockAuthorityExpires: true,
       operationLockAuthorizesPublication: true,
       operationLockContentionAnnounced: true,

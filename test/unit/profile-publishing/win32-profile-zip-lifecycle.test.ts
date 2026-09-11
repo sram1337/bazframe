@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { windowsProvisioningFixture } from '../../helpers/windows-provisioning-fixture.js';
-import { ensureWindowsPrivateDirectoryPath, admitWindowsPrivateDirectory } from '../../../src/state/win32-private-directory.js';
+import { ensureWindowsPrivateDirectoryPath, admitWindowsPhysicalDirectory } from '../../../src/state/win32-private-directory.js';
 import { encodeProfileFavorites } from '../../../src/profiles/profile-favorites.js';
 import { encodeWindowsExecutableMetadata, WINDOWS_EXECUTABLE_METADATA } from '../../../src/profile-publishing/win32-profile-executable.js';
 import { encodeManagedProfileState } from '../../../src/profile-publishing/publication-state.js';
@@ -139,15 +139,16 @@ describe('Windows shared candidate and real ZIP lifecycle (host native receipts 
     const input = `${parent}\\source.zip`; f.file(input, ''); f.nodes.get(input)!.bytes = f.nodes.get(ZIP)!.bytes;
     if (kind === 'cloud-file') Object.assign(f.nodes.get(input)!, { attributes: 0x420, reparseTag: 0x9000001a });
     if (kind === 'cloud-parent') Object.assign(f.nodes.get(parent)!, { attributes: 0x410, reparseTag: 0x9000301a });
-    if (kind === 'foreign-parent') f.nodes.get(parent)!.security = { ...f.backend.inspectPath(parent).security, ownerSid: 'S-1-5-21-999' };
-    expect(() => admitWindowsPrivateDirectory(f.backend, kind === 'cloud-file' ? input : parent)).toThrow();
+    if (kind === 'foreign-parent') f.nodes.get(parent)!.security = { ...f.security(parent), ownerSid: 'S-1-5-21-999' };
+    if (kind === 'foreign-parent') expect(() => admitWindowsPhysicalDirectory(f.backend, parent)).not.toThrow();
+    else expect(() => admitWindowsPhysicalDirectory(f.backend, kind === 'cloud-file' ? input : parent)).toThrow();
     const read = vi.spyOn(f.zipIo, 'readInput');
     expect(await inspectProfileImport(HOME, { kind: 'zip', path: input }, f.dependencies)).toMatchObject({ mutationPerformed: false });
     expect(read).toHaveBeenCalledWith(input, capturedProfileLimitPolicy().maxAggregateBytes);
     expect(f.nodes.has(HOME)).toBe(false);
     const staged = [...f.nodes.keys()].find((path) => /bazframe-zip-.*\\input.zip$/u.test(path));
     expect(staged).toBeDefined(); expect(f.nodes.get(staged!)!.bytes).toEqual(f.nodes.get(input)!.bytes);
-    admitWindowsPrivateDirectory(f.backend, staged!.slice(0, staged!.lastIndexOf('\\')));
+    admitWindowsPhysicalDirectory(f.backend, staged!.slice(0, staged!.lastIndexOf('\\')));
   });
 
   it('copies a classified unsupported/mapped-drive byte source without managed volume admission', async () => {
@@ -283,20 +284,31 @@ describe('Windows shared candidate and real ZIP lifecycle (host native receipts 
     expect(await removeManagedProfile(HOME, 'empty', { requireGeneratedEmpty: true }, f.services)).toMatchObject({ action: 'removed' });
   });
 
+  it('accepts stable hardlinked ZIP input and occupied output with explicit overwrite', async () => {
+    const f = await fixture(false);
+    f.nodes.get(ZIP)!.numberOfLinks = 2;
+    const bytes = Buffer.from(f.nodes.get(ZIP)!.bytes!);
+    expect(await inspectProfileImport(HOME, { kind: 'zip', path: ZIP }, f.dependencies)).toMatchObject({ sourceKind: 'zip' });
+    expect(f.nodes.get(ZIP)!.bytes).toEqual(bytes);
+    await f.importZip();
+    await expect(exportManagedProfile({ home: HOME, profileName: 'work', outputPath: ZIP }, f.dependencies)).rejects.toThrow();
+    await expect(exportManagedProfile({ home: HOME, profileName: 'work', outputPath: ZIP, overwrite: true }, f.dependencies)).resolves.toHaveProperty('outputPath');
+  });
+
   it('uses namespace-safe external parents without imposing managed read privacy, while new output/staging files are protected', async () => {
     const f = await fixture(false);
-    const before = f.backend.inspectPath('C:\\boundary').security;
+    const before = f.security('C:\\boundary');
     const ace = Buffer.from([0, 0, 20, 0, 0x89, 0, 0x12, 0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]); // Everyone: read only.
     const acl = Buffer.concat([before.daclBytes, ace]); acl.writeUInt16LE(acl.length, 2); acl.writeUInt16LE(before.daclBytes.readUInt16LE(4) + 1, 4);
     f.nodes.get('C:\\boundary')!.security = { ...before, daclBytes: acl };
     f.nodes.get(ZIP)!.security = { ...before, daclBytes: acl };
-    expect(() => admitWindowsPrivateDirectory(f.backend, 'C:\\boundary')).toThrow();
+    expect(() => admitWindowsPhysicalDirectory(f.backend, 'C:\\boundary')).not.toThrow();
     expect((await f.dependencies.readZip!(ZIP)).profile.resources).toHaveLength(4);
     await f.importZip();
     const output = 'C:\\boundary\\external.zip';
     await exportManagedProfile({ home: HOME, profileName: 'work', outputPath: output }, f.dependencies);
-    expect(f.backend.inspectPath(output).security.daclBytes).toEqual(before.daclBytes);
-    expect(f.backend.inspectPath(output).security.descriptorControl & 0x1000).toBe(0x1000);
+    expect(f.security(output).daclBytes).toEqual(before.daclBytes);
+    expect(f.security(output).descriptorControl & 0x1000).toBe(0x1000);
   });
 
   it('parses a canonical resource ZIP larger than 64 MiB using bounded native ranges and the original parser', async () => {
@@ -321,11 +333,10 @@ describe('Windows shared candidate and real ZIP lifecycle (host native receipts 
     ranges.mockRestore(); whole.mockRestore();
   }, 30000);
 
-  it.each(['malformed', 'reparse', 'hardlink', 'oversize-range-receipt', 'range-truncated', 'range-identity'])('retains private copied input on %s refusal and never bootstraps inspection home', async (kind) => {
+  it.each(['malformed', 'reparse', 'oversize-range-receipt', 'range-truncated', 'range-identity'])('retains private copied input on %s refusal and never bootstraps inspection home', async (kind) => {
     const f = await fixture(false);
     if (kind === 'malformed') f.nodes.get(ZIP)!.bytes = Buffer.from('not a ZIP');
     if (kind === 'reparse') f.reparse(ZIP);
-    if (kind === 'hardlink') f.nodes.get(ZIP)!.numberOfLinks = 2;
     const original = f.backend.readStableFileRange;
     if (kind.startsWith('range-') || kind === 'oversize-range-receipt') f.backend.readStableFileRange = async (...args) => {
       const result = await original(...args);

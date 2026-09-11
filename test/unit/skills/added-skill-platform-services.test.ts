@@ -5,20 +5,20 @@ import { describe, expect, it, vi } from 'vitest';
 import type {
   BazframeWin32LockBackend,
   BazframeWin32NativeBackend,
-  WindowsPathInspection
+  WindowsPathInspection as PhysicalPathInspection, WindowsSecurityObservation
 } from '../../../src/core/win32-native.js';
-import { createWindowsAddedSkillPlatformServicesForInternalTesting, enumerateWindowsPrivateDirectory } from '../../../src/skills/added-skill-platform-services.js';
+import { createWindowsAddedSkillPlatformServicesForInternalTesting, enumerateWindowsPhysicalDirectory } from '../../../src/skills/added-skill-platform-services.js';
 
 describe('Windows added-Skill platform services', () => {
   it.each(['name', 'fileId', 'size', 'allocationSize', 'creationTime', 'lastWriteTime', 'changeTime', 'attributes', 'reparseTag', 'directory'] as const)('retains complete enumeration entry %s in raw evidence and digest', async (field) => {
     const f = windowsProvisioningFixture(); f.file('C:\\boundary\\entry', 'bytes');
-    const before = await enumerateWindowsPrivateDirectory(f.backend, 'C:\\boundary', 10);
+    const before = await enumerateWindowsPhysicalDirectory(f.backend, 'C:\\boundary', 10);
     const enumerate = f.backend.enumerateStableDirectory;
     f.backend.enumerateStableDirectory = async (...args) => {
       const value = await enumerate(...args);
       return { ...value, entries: value.entries.map((entry) => ({ ...entry, [field]: field === 'directory' ? !entry.directory : field === 'attributes' ? entry.attributes ^ 1 : field === 'reparseTag' ? 0xa0000003 : field === 'name' ? 'renamed' : 'f'.repeat(String(entry[field]).length) })) };
     };
-    const after = await enumerateWindowsPrivateDirectory(f.backend, 'C:\\boundary', 10);
+    const after = await enumerateWindowsPhysicalDirectory(f.backend, 'C:\\boundary', 10);
     expect(after.identity).not.toBe(before.identity);
     expect(after.nativeEntries[0]![field]).not.toBe(before.nativeEntries[0]![field]);
     expect(f.nodes.get('C:\\boundary\\entry')?.bytes).toEqual(Buffer.from('bytes'));
@@ -28,8 +28,8 @@ describe('Windows added-Skill platform services', () => {
     const f = windowsProvisioningFixture(), path = 'C:\\boundary';
     const inspect = f.backend.inspectPath, enumerate = f.backend.enumerateStableDirectory;
     let returned = false, finalAdmissions = 0;
-    const access = (value: WindowsPathInspection) => ({ ...value, object: { ...value.object, lastAccessTime: '0000000000000099' } });
-    const baseline = await enumerateWindowsPrivateDirectory(f.backend, path, 10);
+    const access = (value: PhysicalPathInspection) => ({ ...value, object: { ...value.object, lastAccessTime: '0000000000000099' } });
+    const baseline = await enumerateWindowsPhysicalDirectory(f.backend, path, 10);
     f.backend.inspectPath = (name) => {
       const value = inspect(name);
       if (returned && name === path) { finalAdmissions++; return access(value); }
@@ -41,7 +41,7 @@ describe('Windows added-Skill platform services', () => {
         directoryBefore: boundary === 'admitted-to-native' ? access(value.directoryBefore) : value.directoryBefore,
         directoryAfter: boundary === 'native-to-final' ? value.directoryAfter : access(value.directoryAfter) };
     };
-    const result = await enumerateWindowsPrivateDirectory(f.backend, path, 10);
+    const result = await enumerateWindowsPhysicalDirectory(f.backend, path, 10);
     expect(finalAdmissions).toBeGreaterThan(0);
     expect(result.identity).toBe(baseline.identity);
     expect(result.inspection.object.lastAccessTime).toBe('0000000000000099');
@@ -56,7 +56,7 @@ describe('Windows added-Skill platform services', () => {
     const f = windowsProvisioningFixture(), path = 'C:\\boundary';
     const inspect = f.backend.inspectPath, enumerate = f.backend.enumerateStableDirectory;
     let returned = false, finalAdmissions = 0;
-    const drift = (value: WindowsPathInspection) => ({ ...value, object: { ...value.object, lastWriteTime: '0000000000000099' } });
+    const drift = (value: PhysicalPathInspection) => ({ ...value, object: { ...value.object, lastWriteTime: '0000000000000099' } });
     f.backend.inspectPath = (name) => {
       const value = inspect(name);
       if (returned && name === path) { finalAdmissions++; return boundary === 'native-to-final' ? drift(value) : value; }
@@ -68,7 +68,7 @@ describe('Windows added-Skill platform services', () => {
         directoryBefore: boundary === 'admitted-to-native' ? drift(value.directoryBefore) : value.directoryBefore,
         directoryAfter: boundary === 'native-before-after' ? drift(value.directoryAfter) : value.directoryAfter };
     };
-    await expect(enumerateWindowsPrivateDirectory(f.backend, path, 10)).rejects.toMatchObject({ code: 'WINDOWS_ADDED_SKILL_NAMESPACE_CHANGED' });
+    await expect(enumerateWindowsPhysicalDirectory(f.backend, path, 10)).rejects.toMatchObject({ code: 'WINDOWS_ADDED_SKILL_NAMESPACE_CHANGED' });
     expect(finalAdmissions > 0).toBe(boundary === 'native-to-final');
   });
 
@@ -124,7 +124,7 @@ describe('Windows added-Skill platform services', () => {
       value.security.daclPresent = false;
       value.security.daclNull = true;
     }]
-  ])('rejects %s drift after the stable read receipt', async (_label, mutate) => {
+  ])('compares physical evidence, not %s policy, after stable reads', async (_label, mutate) => {
     const before = inspection({ directory: false, attributes: 0 });
     before.kind = 'regular-file';
     before.canonicalPath = 'C:\\demo-skill\\SKILL.md';
@@ -142,11 +142,13 @@ describe('Windows added-Skill platform services', () => {
       }))
     } as unknown as BazframeWin32NativeBackend & BazframeWin32LockBackend;
     const services = createWindowsAddedSkillPlatformServicesForInternalTesting(backend);
-    await expect(services.readStableUtf8File(
+    const result = services.readStableUtf8File(
       'C:\\demo-skill\\SKILL.md',
       'Skill definition',
       1024
-    )).rejects.toMatchObject({ code: 'WINDOWS_ADDED_SKILL_NAMESPACE_CHANGED' });
+    );
+    if (_label === 'final security flags') await expect(result).resolves.toContain('demo-skill');
+    else await expect(result).rejects.toMatchObject({ code: 'WINDOWS_ADDED_SKILL_NAMESPACE_CHANGED' });
   });
 
   it('binds same-name direct-entry replacement into the directory closure digest', async () => {
@@ -255,6 +257,9 @@ function privateDirectoryInspection(path: string, fileId: string): WindowsPathIn
     : '\\\\?\\Volume{12345678-1234-1234-1234-123456789abc}\\home';
   return value;
 }
+
+// Synthetic fixture metadata is not part of ordinary native physical receipts.
+type WindowsPathInspection = PhysicalPathInspection & { security: WindowsSecurityObservation };
 
 const USER = 'S-1-5-21-1';
 const SYSTEM = 'S-1-5-18';

@@ -3,11 +3,11 @@ import { win32 } from 'node:path';
 import { BazframeError, errorCode } from '../core/errors.js';
 import type { BazframeWin32NativeBackend, BazframeWin32LockBackend, WindowsPathInspection } from '../core/win32-native.js';
 import { stableWindowsPathInspection } from '../core/win32-stable-observation.js';
-import { enumerateWindowsPrivateDirectory } from '../skills/added-skill-platform-services.js';
+import { enumerateWindowsPhysicalDirectory } from '../skills/added-skill-platform-services.js';
 import { isSafeSkillId } from '../skills/skill-id.js';
-import { admitWindowsPrivateDirectory, admitWindowsPrivateFile, ensureWindowsPrivateDirectoryPath, isValidWindowsPathComponent } from '../state/win32-private-directory.js';
+import { admitWindowsPhysicalDirectory, admitWindowsPhysicalFile, ensureWindowsPrivateDirectoryPath, isValidWindowsPathComponent } from '../state/win32-private-directory.js';
 import { publishWindowsPrivateStateFile } from '../state/win32-atomic-file.js';
-import { readWindowsPrivateFileSnapshot } from '../profiles/win32-profile-selection.js';
+import { readWindowsPhysicalFileSnapshot } from '../profiles/win32-profile-selection.js';
 import { writeWindowsProfileFile } from '../profile-publishing/win32-profile-storage.js';
 import type { WindowsProfileLifecycleOptions } from '../profile-publishing/win32-profile-lifecycle.js';
 import { PROFILE_PORTABILITY_PRODUCTION_LIMITS } from '../profile-portability/profile-portability-policy.js';
@@ -35,7 +35,7 @@ export function createWindowsManagedGitRecordEffects(backend: BazframeWin32Nativ
     const parent = win32.dirname(path);
     if (parent === path) return false;
     let namespace;
-    try { namespace = await enumerateWindowsPrivateDirectory(backend, parent, maximum); }
+    try { namespace = await enumerateWindowsPhysicalDirectory(backend, parent, maximum); }
     catch (error) { if (errorCode(error) === 'WINDOWS_NATIVE_PATH_NOT_FOUND' && await absent(parent)) return true; throw error; }
     const matches = namespace.names.filter((name) => key(name) === key(win32.basename(path)));
     if (matches.length === 0) return true;
@@ -46,10 +46,10 @@ export function createWindowsManagedGitRecordEffects(backend: BazframeWin32Nativ
     if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 0 || maximumBytes > MAX_MANAGED_GIT_RECORD_BYTES) throw refused('record byte limit');
     const ancestors: Array<{ path: string; inspection: WindowsPathInspection }> = [];
     for (let cursor = win32.dirname(path);;) { ancestors.push({ path: cursor, inspection: backend.inspectPath(cursor) }); const parent = win32.dirname(cursor); if (parent === cursor) break; cursor = parent; }
-    const result = await readWindowsPrivateFileSnapshot(backend, path, maximumBytes);
+    const result = await readWindowsPhysicalFileSnapshot(backend, path, maximumBytes);
     for (const before of ancestors) {
       const after = backend.inspectPath(before.path);
-      if (!sameResourceIdentity(windowsResourceIdentity(before.inspection), windowsResourceIdentity(after)) || JSON.stringify(before.inspection.security) !== JSON.stringify(after.security) || before.inspection.object.attributes !== after.object.attributes) throw refused('record namespace changed during bounded read');
+      if (!sameResourceIdentity(windowsResourceIdentity(before.inspection), windowsResourceIdentity(after)) || before.inspection.object.attributes !== after.object.attributes) throw refused('record namespace changed during bounded read');
     }
     return { ...result, ...windowsResourceIdentity(result.inspection), sha256: hash(result.bytes), digest: hash(Buffer.from(JSON.stringify(stableWindowsPathInspection(result.inspection)) + hash(result.bytes))) };
   }
@@ -74,9 +74,9 @@ export function createWindowsManagedGitRecordEffects(backend: BazframeWin32Nativ
   }
   async function optionalManagedGitRecordInExistingNamespace(home: string, kind: ManagedGitResourceKind, id: string) {
     const path = win32.dirname(windowsManagedGitPaths.managedGitRecordPath(home, kind, id));
-    const before = admitWindowsPrivateDirectory(backend, path);
+    const before = admitWindowsPhysicalDirectory(backend, path);
     const record = await optionalManagedGitRecord(home, kind, id);
-    if (!sameResourceIdentity(windowsResourceIdentity(before), windowsResourceIdentity(admitWindowsPrivateDirectory(backend, path)))) throw refused('record namespace changed while checking optional provenance');
+    if (!sameResourceIdentity(windowsResourceIdentity(before), windowsResourceIdentity(admitWindowsPhysicalDirectory(backend, path)))) throw refused('record namespace changed while checking optional provenance');
     return record;
   }
   function assertAuthority() { if (authority === undefined) throw refused('live mutation authority required'); authority.assertHeld(); }
@@ -88,12 +88,12 @@ export function createWindowsManagedGitRecordEffects(backend: BazframeWin32Nativ
   async function detach(path: string, expected: ResourceIdentity & { sha256: string }) {
     assertAuthority(); const before = await snapshot(path);
     if (!sameResourceIdentity(before, expected) || before.sha256 !== expected.sha256) throw refused('file changed before detachment');
-    const parentPath = win32.dirname(path), parent = admitWindowsPrivateDirectory(backend, parentPath);
+    const parentPath = win32.dirname(path), parent = admitWindowsPhysicalDirectory(backend, parentPath);
     const name = `.bazframe-provider-${randomBytes(16).toString('hex')}.json`, destination = win32.join(parentPath, name);
     assertAuthority(); let error: unknown;
     try { await backend.renameFileNoReplace(parentPath, win32.basename(path), name); } catch (cause) { error = cause; }
     assertAuthority();
-    if (!sameResourceIdentity(windowsResourceIdentity(parent), windowsResourceIdentity(admitWindowsPrivateDirectory(backend, parentPath)))) throw refused('detach parent changed', error);
+    if (!sameResourceIdentity(windowsResourceIdentity(parent), windowsResourceIdentity(admitWindowsPhysicalDirectory(backend, parentPath)))) throw refused('detach parent changed', error);
     const missing = await absent(path);
     if (missing && !await absent(destination)) { const moved = await snapshot(destination); if (sameResourceIdentity(before, moved) && moved.bytes.equals(before.bytes)) return; }
     throw refused('file detachment unproven; retain both leaves', error);
@@ -101,27 +101,27 @@ export function createWindowsManagedGitRecordEffects(backend: BazframeWin32Nativ
   async function assertReadyProviderState(home: string) {
     const provider = win32.join(home, 'providers');
     if (await absent(provider)) return;
-    const roots = await enumerateWindowsPrivateDirectory(backend, provider, maximum);
+    const roots = await enumerateWindowsPhysicalDirectory(backend, provider, maximum);
     if (roots.names.some((name) => name !== 'git')) throw refused('unrecognized provider');
     if (!roots.names.includes('git')) return;
     const root = win32.join(provider, 'git');
-    for (const name of (await enumerateWindowsPrivateDirectory(backend, root, maximum)).names) {
+    for (const name of (await enumerateWindowsPhysicalDirectory(backend, root, maximum)).names) {
       if (!['records', 'checkouts', 'recovery', 'staging', 'isolation'].includes(name)) throw refused('unrecognized provider namespace');
-      const path = win32.join(root, name); admitWindowsPrivateDirectory(backend, path);
+      const path = win32.join(root, name); admitWindowsPhysicalDirectory(backend, path);
       if (name === 'staging' || name === 'isolation' || name === 'checkouts') continue;
       if (name === 'recovery') {
-        for (const leaf of (await enumerateWindowsPrivateDirectory(backend, path, maximum)).names) {
-          if (managedGitRetainedName(leaf)) { admitWindowsPrivateFile(backend, win32.join(path, leaf)); continue; }
-          if (/^(?:skill|library|package)-[a-z0-9-]+-[a-f0-9-]{36}$/u.test(leaf) || /^retained-[a-f0-9]{32}$/u.test(leaf)) { admitWindowsPrivateDirectory(backend, win32.join(path, leaf)); continue; }
+        for (const leaf of (await enumerateWindowsPhysicalDirectory(backend, path, maximum)).names) {
+          if (managedGitRetainedName(leaf)) { admitWindowsPhysicalFile(backend, win32.join(path, leaf)); continue; }
+          if (/^(?:skill|library|package)-[a-z0-9-]+-[a-f0-9-]{36}$/u.test(leaf) || /^retained-[a-f0-9]{32}$/u.test(leaf)) { admitWindowsPhysicalDirectory(backend, win32.join(path, leaf)); continue; }
           const journal = /^(skill|library|package)-(.+)\.json$/u.exec(leaf);
           if (journal !== null) { await readManagedGitJournal(home, journal[1] as ManagedGitResourceKind, journal[2]!); continue; }
           throw refused('provider recovery requires inspection');
         }
-      } else for (const kind of (await enumerateWindowsPrivateDirectory(backend, path, maximum)).names) {
+      } else for (const kind of (await enumerateWindowsPhysicalDirectory(backend, path, maximum)).names) {
         if (!['skill', 'library', 'package'].includes(kind)) throw refused('invalid provider kind');
         const directory = win32.join(path, kind);
-        for (const leaf of (await enumerateWindowsPrivateDirectory(backend, directory, maximum)).names) {
-          if (managedGitRetainedName(leaf)) { admitWindowsPrivateFile(backend, win32.join(directory, leaf)); continue; }
+        for (const leaf of (await enumerateWindowsPhysicalDirectory(backend, directory, maximum)).names) {
+          if (managedGitRetainedName(leaf)) { admitWindowsPhysicalFile(backend, win32.join(directory, leaf)); continue; }
           if (!leaf.endsWith('.json')) throw refused('invalid provider record name');
           await readManagedGitRecord(home, kind as ManagedGitResourceKind, leaf.slice(0, -5));
         }

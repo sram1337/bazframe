@@ -24,7 +24,7 @@ use non_windows as platform;
 #[cfg(windows)]
 use windows as platform;
 
-pub const NATIVE_CONTRACT_VERSION: u32 = 7;
+pub const NATIVE_CONTRACT_VERSION: u32 = 8;
 // Mirrors PROFILE_PORTABILITY_PRODUCTION_LIMITS.checkoutFileBytes. The native
 // boundary may lower a caller's bound but never allocates beyond this product
 // authority.
@@ -118,7 +118,6 @@ pub struct WindowsPathInspection {
     pub kind: String,
     pub volume: WindowsVolumeObservation,
     pub object: WindowsObjectObservation,
-    pub security: WindowsSecurityObservation,
     pub ancestry_reparse_free: bool,
 }
 
@@ -128,13 +127,13 @@ pub struct WindowsEditorTargetInspection {
     pub parent: WindowsPathInspection,
     pub entry_path: String,
     pub entry_object: WindowsObjectObservation,
-    pub entry_security: WindowsSecurityObservation,
     pub target: WindowsPathInspection,
     pub target_path: String,
 }
 
 #[napi(object)]
 pub struct WindowsPrivateDirectoryCreationReceipt {
+    pub creation_security: WindowsSecurityObservation,
     pub parent_before: WindowsPathInspection,
     pub created: WindowsPathInspection,
     pub parent_after: WindowsPathInspection,
@@ -142,6 +141,7 @@ pub struct WindowsPrivateDirectoryCreationReceipt {
 
 #[napi(object)]
 pub struct WindowsPrivateFileCreationReceipt {
+    pub creation_security: WindowsSecurityObservation,
     pub parent_before: WindowsPathInspection,
     pub created: WindowsPathInspection,
     pub parent_after: WindowsPathInspection,
@@ -182,7 +182,6 @@ pub struct WindowsMembershipLinkInspection {
     pub canonical_path: String,
     pub volume: WindowsVolumeObservation,
     pub object: WindowsObjectObservation,
-    pub security: WindowsSecurityObservation,
     pub ancestry_reparse_free: bool,
     pub normalized_target: String,
     pub target_volume_identity: String,
@@ -191,6 +190,7 @@ pub struct WindowsMembershipLinkInspection {
 
 #[napi(object)]
 pub struct WindowsPrivateJunctionCreationReceipt {
+    pub creation_security: WindowsSecurityObservation,
     pub parent_before: WindowsPathInspection,
     pub created: WindowsMembershipLinkInspection,
     pub parent_after: WindowsPathInspection,

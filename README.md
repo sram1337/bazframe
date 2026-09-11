@@ -13,7 +13,7 @@ Compose standard [Agent Skills](https://agentskills.io/) and personal `AGENTS.md
 - Shares ready profiles through deterministic ZIP exports or versioned GitHub repositories.
 - Provides a scriptable CLI, setup diagnostics, and a keyboard-first terminal UI.
 
-Bazframe is currently a beta for Pi 0.84.4 or newer on macOS and Linux. The broken published Pi 0.85.0 package is excluded because it omits a required runtime dependency.
+The npm package is currently a beta for Pi 0.84.4 or newer on macOS and Linux. The broken published Pi 0.85.0 package is excluded because it omits a required runtime dependency.
 
 ## Requirements
 
@@ -136,8 +136,9 @@ See [editing and ownership](docs/skills.md#editing-and-ownership) and [troublesh
 3. [Fresh-machine setup recipe](examples/setup-fresh-machine.sh) — bootstrap commands for a new machine.
 4. [Terminal UI design](docs/tui-design.md) — implemented TUI behavior and remaining gates.
 5. [Product design](docs/design.md) — product contracts for contributors.
-6. [Release process](docs/releasing.md) — validation and npm publication.
-7. [Contributing](CONTRIBUTING.md) — development setup, validation, and pull requests.
+6. [Architecture walkthrough](docs/architecture.html) — open in a browser from a source checkout for callers, consumers, module boundaries, utilities, and important files.
+7. [Release process](docs/releasing.md) — validation and npm publication.
+8. [Contributing](CONTRIBUTING.md) — development setup, validation, and pull requests.
 
 ## Support
 

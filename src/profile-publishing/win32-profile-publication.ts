@@ -3,10 +3,10 @@ import { win32 } from 'node:path';
 import { BazframeError, errorCode } from '../core/errors.js';
 import type { BazframeWin32NativeBackend, BazframeWin32LockBackend } from '../core/win32-native.js';
 import { stableWindowsPathInspection } from '../core/win32-stable-observation.js';
-import { readWindowsPrivateFileSnapshot } from '../profiles/win32-profile-selection.js';
-import { enumerateWindowsPrivateDirectory } from '../skills/added-skill-platform-services.js';
+import { readWindowsPhysicalFileSnapshot } from '../profiles/win32-profile-selection.js';
+import { enumerateWindowsPhysicalDirectory } from '../skills/added-skill-platform-services.js';
 import { publishWindowsPrivateStateFile } from '../state/win32-atomic-file.js';
-import { admitWindowsPrivateDirectory, ensureWindowsPrivateDirectoryPath } from '../state/win32-private-directory.js';
+import { admitWindowsPhysicalDirectory, ensureWindowsPrivateDirectoryPath } from '../state/win32-private-directory.js';
 import { captureProfile } from './profile-capture.js';
 import { windowsPhysicalIdentityText } from './profile-filesystem.js';
 import { assertWindowsOperationMutationAuthority, operationAuthorityTransactionId } from './profile-operation-lock.js';
@@ -21,11 +21,11 @@ import { writeWindowsProfileFile } from './win32-profile-storage.js';
 export function windowsPublicationEffects(backend: BazframeWin32NativeBackend & BazframeWin32LockBackend, options: WindowsProfileLifecycleOptions, services: ProfileLifecycleServices): NonNullable<ProfileLifecycleServices['publication']> {
   const policy = capturedProfileLimitPolicy();
   const snapshot = async (root: string, name: string) => {
-    const namespace = await enumerateWindowsPrivateDirectory(backend, root, policy.maxEntries);
+    const namespace = await enumerateWindowsPhysicalDirectory(backend, root, policy.maxEntries);
     const matches = namespace.names.filter((entry) => entry.normalize('NFC').toLowerCase() === name.toLowerCase());
     if (matches.length === 0) return { digest: 'absent', bytes: undefined, inspection: undefined };
     if (matches.length !== 1 || matches[0] !== name) throw changed();
-    const value = await readWindowsPrivateFileSnapshot(backend, win32.join(root, name), policy.maxManifestBytes);
+    const value = await readWindowsPhysicalFileSnapshot(backend, win32.join(root, name), policy.maxManifestBytes);
     return { ...value, digest: hash(Buffer.concat([Buffer.from(JSON.stringify(stableWindowsPathInspection(value.inspection))), value.bytes])) };
   };
   const retainedRoot = (home: string, id: string) => win32.join(home, 'profile-publishing', 'publication-state', id);
@@ -38,7 +38,7 @@ export function windowsPublicationEffects(backend: BazframeWin32NativeBackend & 
     },
     assertRoot(home, name, expected, authority) {
       assertWindowsOperationMutationAuthority(authority, backend, home, [name, '@store'], operationAuthorityTransactionId(authority));
-      const current = admitWindowsPrivateDirectory(backend, services.path(home, name));
+      const current = admitWindowsPhysicalDirectory(backend, services.path(home, name));
       if (windowsPhysicalIdentityText(current.object.volumeIdentity, current.object.fileId) !== expected.identity) throw changed();
     },
     async publishSidecar(home, name, expected, state, authority) {
@@ -49,7 +49,7 @@ export function windowsPublicationEffects(backend: BazframeWin32NativeBackend & 
       const desired = Buffer.from(encodeManagedProfileState(state, policy));
       const assertRoot = () => {
         assertHeld();
-        const current = admitWindowsPrivateDirectory(backend, root);
+        const current = admitWindowsPhysicalDirectory(backend, root);
         if (windowsPhysicalIdentityText(current.object.volumeIdentity, current.object.fileId) !== expected.identity) throw changed();
       };
       await services.withStateLock(home, name, async (stateAuthority) => {

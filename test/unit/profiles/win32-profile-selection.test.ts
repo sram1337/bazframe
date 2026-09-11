@@ -3,7 +3,7 @@ import { stableWindowsPathInspection } from '../../../src/core/win32-stable-obse
 import { describe, expect, it } from 'vitest';
 import { currentProfile, addProfile } from '../../../src/profiles/profile-management.js';
 import { createWindowsProfileProvisioningServicesForInternalTesting } from '../../../src/profiles/win32-profile-provisioning.js';
-import { createWindowsProfileSelectionReadServicesForInternalTesting, readWindowsSelectionSnapshot, readWindowsPrivateFileSnapshot } from '../../../src/profiles/win32-profile-selection.js';
+import { createWindowsProfileSelectionReadServicesForInternalTesting, readWindowsSelectionSnapshot, readWindowsPhysicalFileSnapshot } from '../../../src/profiles/win32-profile-selection.js';
 import { ensureWindowsPrivateDirectoryPath } from '../../../src/state/win32-private-directory.js';
 import { windowsProvisioningFixture } from '../../helpers/windows-provisioning-fixture.js';
 const HOME = 'C:\\boundary\\home';
@@ -22,7 +22,7 @@ describe('native selected-ID read-only composition', () => {
     const first = await readWindowsSelectionSnapshot(f.backend, HOME), second = await readWindowsSelectionSnapshot(f.backend, HOME);
     expect(first.digest).toBe(baseline.digest); expect(second.digest).toBe(first.digest);
     expect(first.inspection?.object.lastAccessTime).not.toBe(second.inspection?.object.lastAccessTime);
-    expect(first.bytes).toEqual(Buffer.from('alpha\r\n')); expect(first.inspection).toEqual(expect.objectContaining({ security: inspect(path).security }));
+    expect(first.bytes).toEqual(Buffer.from('alpha\r\n')); expect(first.inspection).not.toHaveProperty('security');
     expect(JSON.stringify(receipt)).toBe(raw); expect(second.bytes).not.toBe(receipt!.bytes);
     expect(f.snapshot()).toBe(state);
     const payload = JSON.stringify(stableWindowsPathInspection(first.inspection!));
@@ -41,7 +41,7 @@ describe('native selected-ID read-only composition', () => {
       return { ...value, after: { ...value.after, ...overrides[kind] } };
     };
     const before = f.snapshot();
-    await expect(readWindowsPrivateFileSnapshot(f.backend, path, 10)).rejects.toMatchObject({ code: 'WINDOWS_PROFILE_PROVISIONING_REFUSED' });
+    await expect(readWindowsPhysicalFileSnapshot(f.backend, path, 10)).rejects.toMatchObject({ code: 'WINDOWS_PROFILE_PROVISIONING_REFUSED' });
     expect(f.snapshot()).toBe(before);
   });
 
@@ -76,19 +76,20 @@ describe('native selected-ID read-only composition', () => {
     await expect(readWindowsSelectionSnapshot(f.backend, HOME)).rejects.toThrow();
     expect(f.snapshot()).toBe(before);
   });
-  it.each(['utf8', 'alias', 'hardlink', 'reparse', 'privacy', 'drift'] as const)('refuses %s without changing selection', async (kind) => {
+  it.each(['utf8', 'alias', 'hardlink', 'reparse', 'privacy', 'drift'] as const)('applies physical and stable selection admission to %s without changes', async (kind) => {
     const f = windowsProvisioningFixture();
     ensureWindowsPrivateDirectoryPath(f.backend, HOME);
     const path = `${HOME}\\${kind === 'alias' ? 'Active-Profile' : 'active-profile'}`;
     f.file(path, 'alpha\r\n');
     if (kind === 'utf8') f.nodes.get(path)!.bytes = Buffer.from([0xff]);
     if (kind === 'hardlink') f.nodes.get(path)!.numberOfLinks = 2;
-    if (kind === 'privacy') f.nodes.get(path)!.security = { ...f.backend.inspectPath(path).security, ownerSid: 'S-1-5-21-2' };
+    if (kind === 'privacy') f.nodes.get(path)!.security = { ...f.security(path), ownerSid: 'S-1-5-21-2' };
     if (kind === 'reparse') f.nodes.get(path)!.reparseTag = 0xa0000003;
     const read = f.backend.readStableFile;
     if (kind === 'drift') f.backend.readStableFile = async (...args) => { const value = await read(...args); return { ...value, after: { ...value.after, fileId: 'f'.repeat(32) } }; };
     const before = f.snapshot();
-    await expect(readWindowsSelectionSnapshot(f.backend, HOME)).rejects.toThrow();
+    if (kind === 'hardlink' || kind === 'privacy') await expect(readWindowsSelectionSnapshot(f.backend, HOME)).resolves.toMatchObject({ profileId: 'alpha' });
+    else await expect(readWindowsSelectionSnapshot(f.backend, HOME)).rejects.toThrow();
     expect(f.snapshot()).toBe(before);
   });
 });

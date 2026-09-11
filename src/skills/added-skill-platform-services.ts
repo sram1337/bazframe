@@ -11,12 +11,11 @@ import type {
   WindowsObjectObservation,
   WindowsDirectoryEntryObservation,
   WindowsPathInspection,
-  WindowsSecurityObservation
 } from '../core/win32-native.js';
 import { BazframeError, errorCode } from '../core/errors.js';
 import { withWindowsOperationLock } from '../state/win32-operation-lock.js';
 import {
-  admitWindowsPrivateDirectory,
+  admitWindowsPhysicalDirectory,
   createWindowsPrivateDirectory,
   isValidWindowsPathComponent
 } from '../state/win32-private-directory.js';
@@ -136,7 +135,7 @@ export function createWindowsAddedSkillPlatformServicesForInternalTesting(
     },
 
     inspectPrivateDirectory(path) {
-      return directoryProof(admitWindowsPrivateDirectory(backend, path));
+      return directoryProof(admitWindowsPhysicalDirectory(backend, path));
     },
 
     ensurePrivateDirectory(parentPath, component) {
@@ -145,7 +144,7 @@ export function createWindowsAddedSkillPlatformServicesForInternalTesting(
       }
       const childPath = win32.join(parentPath, component);
       try {
-        return directoryProof(admitWindowsPrivateDirectory(backend, childPath));
+        return directoryProof(admitWindowsPhysicalDirectory(backend, childPath));
       } catch (error) {
         if (errorCode(error) !== 'WINDOWS_NATIVE_PATH_NOT_FOUND') throw error;
       }
@@ -157,7 +156,7 @@ export function createWindowsAddedSkillPlatformServicesForInternalTesting(
         || maxEntries > ADDED_SKILL_NAMESPACE_ENTRY_LIMIT) {
         throw failure('WINDOWS_ADDED_SKILL_ENUMERATION_LIMIT_INVALID', 'The internal Windows added-Skill enumeration bound is invalid.');
       }
-      const { names, entries, identity } = await enumerateWindowsPrivateDirectory(backend, path, maxEntries);
+      const { names, entries, identity } = await enumerateWindowsPhysicalDirectory(backend, path, maxEntries);
       return { names, entries, identity };
     },
 
@@ -197,7 +196,7 @@ export function createWindowsAddedSkillPlatformServicesForInternalTesting(
         backend.inspectMembershipLink(membershipPath);
       } catch (error) {
         if (errorCode(error) === 'WINDOWS_NATIVE_PATH_NOT_FOUND') {
-          const parent = admitWindowsPrivateDirectory(backend, parentPath);
+          const parent = admitWindowsPhysicalDirectory(backend, parentPath);
           return { kind: 'absent', identity: `absent:${inspectionIdentity(parent)}:${skillId}` };
         }
         throw error;
@@ -226,7 +225,7 @@ export function createWindowsAddedSkillPlatformServicesForInternalTesting(
         );
       } catch (error) {
         if (errorCode(error) === 'WINDOWS_SKILL_MEMBERSHIP_ABSENT') {
-          const parent = admitWindowsPrivateDirectory(backend, parentPath);
+          const parent = admitWindowsPhysicalDirectory(backend, parentPath);
           return { kind: 'absent', identity: `absent:${inspectionIdentity(parent)}:${skillId}` };
         }
         throw error;
@@ -291,8 +290,7 @@ function linkState(
       inspectionIdentity(proof.target),
       proof.link.object.volumeIdentity,
       proof.link.object.fileId,
-      proof.link.normalizedTarget,
-      securityIdentity(proof.link.security)
+      proof.link.normalizedTarget
     ].join(':')
   };
 }
@@ -302,27 +300,6 @@ function inspectionIdentity(value: WindowsPathInspection): string {
     .update('bazframe-added-skill-inspection-v2\0')
     .update(JSON.stringify(stableWindowsPathInspection(value)))
     .digest('hex');
-}
-
-function securityIdentity(value: WindowsSecurityObservation): string {
-  return createHash('sha256')
-    .update(JSON.stringify(exactInspectionSecurity(value)))
-    .digest('hex');
-}
-
-function exactInspectionSecurity(value: WindowsSecurityObservation) {
-  return {
-    descriptorControl: value.descriptorControl,
-    daclPresent: value.daclPresent,
-    daclNull: value.daclNull,
-    daclDefaulted: value.daclDefaulted,
-    daclBytesBase64: value.daclBytes.toString('base64'),
-    ownerSid: value.ownerSid,
-    ownerDefaulted: value.ownerDefaulted,
-    groupSid: value.groupSid,
-    groupDefaulted: value.groupDefaulted,
-    currentUserSid: value.currentUserSid
-  };
 }
 
 function requireSameDirectory(left: WindowsPathInspection, right: WindowsPathInspection): void {
@@ -369,12 +346,12 @@ function failure(code: string, message: string, cause?: unknown): BazframeError 
 }
 
 /** Native observation shared by bounded internal profile readers; callers own their domain ceiling. */
-export async function enumerateWindowsPrivateDirectory(backend: BazframeWin32NativeBackend, path: string, maxEntries: number, admit: (backend: BazframeWin32NativeBackend, path: string) => WindowsPathInspection = admitWindowsPrivateDirectory): Promise<AddedSkillDirectoryEnumeration & { nativeEntries: WindowsDirectoryEntryObservation[]; inspection: WindowsPathInspection }> {
-  const before = admit(backend, path);
+export async function enumerateWindowsPhysicalDirectory(backend: BazframeWin32NativeBackend, path: string, maxEntries: number): Promise<AddedSkillDirectoryEnumeration & { nativeEntries: WindowsDirectoryEntryObservation[]; inspection: WindowsPathInspection }> {
+  const before = admitWindowsPhysicalDirectory(backend, path);
   const receipt = await backend.enumerateStableDirectory(path, maxEntries);
   requireSameDirectory(before, receipt.directoryBefore);
   requireSameDirectory(receipt.directoryBefore, receipt.directoryAfter);
-  const after = admit(backend, path);
+  const after = admitWindowsPhysicalDirectory(backend, path);
   requireSameDirectory(receipt.directoryAfter, after);
   const entries = [...receipt.entries].sort((left, right) => compare(left.name, right.name));
   const names = entries.map((entry) => entry.name);

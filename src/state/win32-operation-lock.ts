@@ -8,12 +8,11 @@ import type {
   WindowsFileLockCapability,
   WindowsObjectObservation,
   WindowsPathInspection,
-  WindowsSecurityObservation
 } from '../core/win32-native.js';
 import { BazframeError, errorCode } from '../core/errors.js';
 import {
-  admitWindowsPrivateDirectory,
-  admitWindowsPrivateFile,
+  admitWindowsPhysicalDirectory,
+  admitWindowsPhysicalFile,
   createWindowsPrivateDirectory,
   createWindowsPrivateFile,
   isValidWindowsPathComponent
@@ -117,9 +116,9 @@ export async function withWindowsOperationLock<T>(
   let capability: WindowsFileLockCapability | undefined;
   try {
     const acquisition = options.backend.acquireFileLock(namespace.guardPath);
-    requireSamePrivateFile(acquisition.guardBefore, acquisition.guardAfter);
-    const currentGuard = admitWindowsPrivateFile(options.backend, namespace.guardPath);
-    requireSamePrivateFile(acquisition.guardAfter, currentGuard);
+    requireSameLockFile(acquisition.guardBefore, acquisition.guardAfter);
+    const currentGuard = admitLockFile(options.backend, namespace.guardPath);
+    requireSameLockFile(acquisition.guardAfter, currentGuard);
 
     if (acquisition.state === 'busy') {
       return await throwBusy(options.backend, namespace);
@@ -275,7 +274,7 @@ export async function withWindowsOperationLock<T>(
 }
 
 async function prepareNamespace(options: WindowsOperationLockOptions): Promise<LockNamespace> {
-  const root = admitWindowsPrivateDirectory(options.backend, options.lockRootPath);
+  const root = admitWindowsPhysicalDirectory(options.backend, options.lockRootPath);
   const directoryPath = win32.join(options.lockRootPath, options.lockComponent);
   let directory: WindowsPathInspection;
   let directoryCreated = false;
@@ -288,7 +287,7 @@ async function prepareNamespace(options: WindowsOperationLockOptions): Promise<L
     directoryCreated = true;
   } catch (error) {
     if (errorCode(error) !== 'WINDOWS_PRIVATE_DIRECTORY_OCCUPIED') throw error;
-    directory = admitWindowsPrivateDirectory(options.backend, directoryPath);
+    directory = admitWindowsPhysicalDirectory(options.backend, directoryPath);
   }
   requireDirectDirectory(root, directory, options.lockComponent);
 
@@ -306,11 +305,11 @@ async function prepareNamespace(options: WindowsOperationLockOptions): Promise<L
     }
   }
   const guardPath = win32.join(directoryPath, GUARD_NAME);
-  const guard = admitWindowsPrivateFile(options.backend, guardPath);
+  const guard = admitLockFile(options.backend, guardPath);
   if (guard.object.size !== '0000000000000000') {
     throw invalid('persistent guard is not empty');
   }
-  const currentDirectory = admitWindowsPrivateDirectory(options.backend, directoryPath);
+  const currentDirectory = admitWindowsPhysicalDirectory(options.backend, directoryPath);
   requireSameDirectory(directory, currentDirectory);
   const lockKeySha256 = createHash('sha256')
     .update('bazframe-win32-operation-lock-key-v1\0')
@@ -379,8 +378,8 @@ async function ensureOwnerFile(
       if (errorCode(error) !== 'WINDOWS_PRIVATE_FILE_OCCUPIED') throw error;
     }
   }
-  const owner = admitWindowsPrivateFile(backend, namespace.ownerPath);
-  const directory = admitWindowsPrivateDirectory(backend, namespace.directoryPath);
+  const owner = admitLockFile(backend, namespace.ownerPath);
+  const directory = admitWindowsPhysicalDirectory(backend, namespace.directoryPath);
   requireSameDirectory(namespace.directory, directory);
   return owner;
 }
@@ -458,12 +457,12 @@ async function writeAndProveOwner(
 ): Promise<void> {
   validateOwnerFields(fields);
   const bytes = encodeOwner(fields);
-  const before = admitWindowsPrivateFile(backend, namespace.ownerPath);
-  requireSamePrivateFile(expectedOwner, before, false);
+  const before = admitLockFile(backend, namespace.ownerPath);
+  requireSameLockFile(expectedOwner, before, false);
   await io.writeExistingFile(namespace.ownerPath, bytes);
   const { bytes: observed, inspection } = await readOwner(backend, namespace.ownerPath);
   if (!observed.equals(bytes)) throw invalid('owner record read-back changed');
-  requireSamePrivateFile(expectedOwner, inspection, false);
+  requireSameLockFile(expectedOwner, inspection, false);
   const decoded = decodeOwner(observed);
   if (JSON.stringify(decoded) !== JSON.stringify(ownerRecord(fields))) {
     throw invalid('owner record did not decode to the intended value');
@@ -481,10 +480,10 @@ async function proveNamespaceClosure(
   if (entries.size !== 2 || !entries.has(GUARD_NAME) || !entries.has(OWNER_NAME)) {
     throw invalid('lock namespace proof is incomplete');
   }
-  const directory = admitWindowsPrivateDirectory(backend, namespace.directoryPath);
+  const directory = admitWindowsPhysicalDirectory(backend, namespace.directoryPath);
   requireSameDirectory(namespace.directory, directory);
-  const guard = admitWindowsPrivateFile(backend, namespace.guardPath);
-  const owner = admitWindowsPrivateFile(backend, namespace.ownerPath);
+  const guard = admitLockFile(backend, namespace.guardPath);
+  const owner = admitLockFile(backend, namespace.ownerPath);
   const listedGuard = entries.get(GUARD_NAME)!;
   const listedOwner = entries.get(OWNER_NAME)!;
   if (guard.object.size !== '0000000000000000'
@@ -503,14 +502,14 @@ async function readOwner(
   backend: BazframeWin32NativeBackend,
   ownerPath: string
 ): Promise<{ bytes: Buffer; inspection: WindowsPathInspection }> {
-  const before = admitWindowsPrivateFile(backend, ownerPath);
+  const before = admitLockFile(backend, ownerPath);
   const receipt = await backend.readStableFile(ownerPath, OWNER_RECORD_BYTES);
   if (!sameObjectIgnoringAccessTime(before.object, receipt.before)
     || !sameObjectIgnoringAccessTime(receipt.before, receipt.after)) {
     throw invalid('owner record changed while read');
   }
-  const after = admitWindowsPrivateFile(backend, ownerPath);
-  requireSamePrivateFile(before, after);
+  const after = admitLockFile(backend, ownerPath);
+  requireSameLockFile(before, after);
   return { bytes: receipt.bytes, inspection: after };
 }
 
@@ -617,13 +616,12 @@ function requireDirectDirectory(
 function requireSameDirectory(a: WindowsPathInspection, b: WindowsPathInspection): void {
   if (a.kind !== 'directory' || b.kind !== 'directory'
     || a.canonicalPath.toLowerCase() !== b.canonicalPath.toLowerCase()
-    || identity(a) !== identity(b)
-    || !sameSecurity(a.security, b.security)) {
-    throw invalid('lock directory identity or security changed');
+    || identity(a) !== identity(b)) {
+    throw invalid('lock directory identity changed');
   }
 }
 
-function requireSamePrivateFile(
+function requireSameLockFile(
   a: WindowsPathInspection,
   b: WindowsPathInspection,
   stableMetadata = true
@@ -631,9 +629,8 @@ function requireSamePrivateFile(
   if (a.kind !== 'regular-file' || b.kind !== 'regular-file'
     || a.canonicalPath.toLowerCase() !== b.canonicalPath.toLowerCase()
     || identity(a) !== identity(b)
-    || !sameSecurity(a.security, b.security)
     || (stableMetadata && !sameObjectIgnoringAccessTime(a.object, b.object))) {
-    throw invalid('lock file identity, metadata, or security changed');
+    throw invalid('lock file identity or metadata changed');
   }
 }
 
@@ -647,14 +644,6 @@ function sameObjectIgnoringAccessTime(
     && a.lastWriteTime === b.lastWriteTime && a.changeTime === b.changeTime
     && a.attributes === b.attributes && a.reparseTag === b.reparseTag
     && a.deletePending === b.deletePending && a.directory === b.directory;
-}
-
-function sameSecurity(a: WindowsSecurityObservation, b: WindowsSecurityObservation): boolean {
-  return a.descriptorControl === b.descriptorControl && a.daclPresent === b.daclPresent
-    && a.daclNull === b.daclNull && a.daclDefaulted === b.daclDefaulted
-    && a.daclBytes.equals(b.daclBytes) && a.ownerSid === b.ownerSid
-    && a.ownerDefaulted === b.ownerDefaulted && a.groupSid === b.groupSid
-    && a.groupDefaulted === b.groupDefaulted && a.currentUserSid === b.currentUserSid;
 }
 
 function identity(inspection: WindowsPathInspection): string {
@@ -731,4 +720,11 @@ function invalid(detail: string, cause?: unknown): BazframeError {
 
 function failure(code: string, message: string, cause?: unknown): BazframeError {
   return new BazframeError(code, message, cause === undefined ? undefined : { cause });
+}
+
+/** Guard locking and owner in-place rewrites must not act through a second name outside this lock namespace. */
+function admitLockFile(backend: BazframeWin32NativeBackend, path: string): WindowsPathInspection {
+  const value = admitWindowsPhysicalFile(backend, path);
+  if (value.object.numberOfLinks !== '00000001') throw invalid('lock file is multiply linked');
+  return value;
 }

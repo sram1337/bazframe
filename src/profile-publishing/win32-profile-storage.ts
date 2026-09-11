@@ -6,7 +6,7 @@ import { open } from 'node:fs/promises';
 import { win32 } from 'node:path';
 import { BazframeError, errorCode } from '../core/errors.js';
 import type { BazframeWin32NativeBackend, BazframeWin32LockBackend } from '../core/win32-native.js';
-import { readWindowsPrivateFileSnapshot } from '../profiles/win32-profile-selection.js';
+import { readWindowsPhysicalFileSnapshot } from '../profiles/win32-profile-selection.js';
 import { encodeProfileCollectionReference } from '../profiles/profile-skill-collection-reference.js';
 import { createWindowsAddedSkillPlatformServicesForInternalTesting } from '../skills/added-skill-platform-services.js';
 import { readDefaultSkillRegistration } from '../skills/default-skill-catalog.js';
@@ -34,8 +34,8 @@ export async function writeWindowsProfileFile(backend: BazframeWin32NativeBacken
   const value = Buffer.from(bytes);
   const created = createWindowsPrivateFile(backend, win32.dirname(path), win32.basename(path));
   await io.writeExistingFile(path, value);
-  const readback = await readWindowsPrivateFileSnapshot(backend, path, value.length);
-  if (created.object.fileId !== readback.inspection.object.fileId || created.object.volumeIdentity !== readback.inspection.object.volumeIdentity || JSON.stringify(created.security) !== JSON.stringify(readback.inspection.security) || !readback.bytes.equals(value)) throw invalid('fresh file changed during writing');
+  const readback = await readWindowsPhysicalFileSnapshot(backend, path, value.length);
+  if (created.object.fileId !== readback.inspection.object.fileId || created.object.volumeIdentity !== readback.inspection.object.volumeIdentity || created.object.numberOfLinks !== readback.inspection.object.numberOfLinks || !readback.bytes.equals(value)) throw invalid('fresh file changed during writing');
 }
 export function createWindowsProfileStorage(backend: BazframeWin32NativeBackend & BazframeWin32LockBackend, io: WindowsProfileStorageIo = defaultIo) {
   const excludedModes = new WeakMap<OperationMutationAuthority, Map<string, Array<{ path: string; executable: boolean }>>>();
