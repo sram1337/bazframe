@@ -38,7 +38,14 @@ export function createWindowsPhysicalReads(backend: BazframeWin32NativeBackend &
   }
   async function enumerate(path: string, max: number) {
     const value = await enumerateWindowsPhysicalDirectory(backend, path, max);
-    observe(`${path}:enumeration`, { ...value, inspection: stableWindowsPathInspection(value.inspection) });
+    // The shared identity hashes raw cached entry times. Compare its explicit
+    // inputs here instead; only plain directory entry write/change may refresh.
+    // Keep the original value/entries for callers and child reconciliation.
+    observe(`${path}:enumeration`, {
+      names: value.names, entries: value.entries, inspection: stableWindowsPathInspection(value.inspection),
+      nativeEntries: value.nativeEntries.map((entry) => entry.directory && entry.reparseTag === null && (entry.attributes & 0x410) === 0x10
+        ? { ...entry, lastWriteTime: null, changeTime: null } : entry)
+    });
     for (const entry of value.nativeEntries) {
       const child = normalize(win32.join(path, entry.name));
       listed.set(child, { parent: value.inspection, entry }); portableEntries.set(portable(child), { path: child, entry });

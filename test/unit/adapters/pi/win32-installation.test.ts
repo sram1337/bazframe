@@ -1,8 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { fileURLToPath } from 'node:url';
+import { createWindowsPiAdapterServices } from '../../../../src/adapters/pi/win32-adapter-services.js';
 import { windowsApplicationFixture, HOME, PI, PACKAGE } from '../../../helpers/windows-application-fixture.js';
 import { inspectPiAdapter, installPiAdapter, uninstallPiAdapter } from '../../../../src/adapters/pi/installer.js';
 import { VERSION } from '../../../../src/cli/help.js';
 import { decodePiRuntimeBinding } from '../../../../src/adapters/pi/runtime-binding.js';
+
+vi.mock('node:url', async (original) => ({ ...await original<typeof import('node:url')>(), fileURLToPath: vi.fn((...args: Parameters<typeof fileURLToPath>) => actualFileURLToPath(...args)) }));
+const { fileURLToPath: actualFileURLToPath } = await vi.importActual<typeof import('node:url')>('node:url');
+afterEach(() => vi.restoreAllMocks());
 
 function options(f: ReturnType<typeof windowsApplicationFixture>) {
   const context = { bazframeHome: HOME, bazframeVersion: VERSION, environment: f.environment, userHome: 'C:\\boundary' };
@@ -10,6 +16,28 @@ function options(f: ReturnType<typeof windowsApplicationFixture>) {
 }
 const extension = PI + '\\extensions\\bazframe.ts', binding = PI + '\\bazframe\\runtime.json', manifest = HOME + '\\adapters\\pi.json';
 describe('Windows installer/binding/retained discovery (concrete shared engine)', () => {
+  it('uses the actual Windows directory file-URL spelling without a packageRoot override and inspection never bootstraps', async () => {
+    const f = windowsApplicationFixture();
+    const rootFromUrl = actualFileURLToPath(new URL('file:///C:/boundary/package/'), { windows: true });
+    expect(rootFromUrl).toBe(PACKAGE + '\\');
+    vi.mocked(fileURLToPath).mockReturnValueOnce(rootFromUrl);
+    const context = { ...options(f), services: createWindowsPiAdapterServices(f.backend, f.environment, 'C:\\boundary', { stateIo: f.io, lockIo: f.io }) };
+    expect(fileURLToPath).toHaveBeenCalledWith(expect.any(URL));
+    const before = f.snapshot();
+    expect((await inspectPiAdapter(context)).state).toBe('missing');
+    expect(f.snapshot()).toBe(before);
+    await installPiAdapter(context);
+    const record = decodePiRuntimeBinding(f.nodes.get(binding)!.bytes!.toString());
+    expect(record.packageRoot).toBe(PACKAGE);
+    for (const root of [PACKAGE + '\\', 'C:/boundary/package', 'C:boundary\\package', '\\\\server\\share\\package', PACKAGE + '\\..\\package']) {
+      expect(() => decodePiRuntimeBinding(JSON.stringify({ ...record, packageRoot: root }))).toThrow();
+    }
+    const installed = f.snapshot();
+    expect((await inspectPiAdapter(context)).state).toBe('current');
+    expect(f.snapshot()).toBe(installed);
+    await uninstallPiAdapter(context);
+    expect(f.nodes.has(extension)).toBe(false);
+  });
   it('observes missing/current/adoptable/managed-missing and binds only its exact package independently of runtime home', async () => {
     const f = windowsApplicationFixture(), context = options(f), before = f.snapshot();
     expect((await inspectPiAdapter(context)).state).toBe('missing'); expect(f.snapshot()).toBe(before);

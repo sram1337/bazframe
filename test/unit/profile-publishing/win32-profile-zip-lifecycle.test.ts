@@ -6,7 +6,7 @@ import { windowsProvisioningFixture } from '../../helpers/windows-provisioning-f
 import { ensureWindowsPrivateDirectoryPath, admitWindowsPhysicalDirectory } from '../../../src/state/win32-private-directory.js';
 import { encodeProfileFavorites } from '../../../src/profiles/profile-favorites.js';
 import { encodeWindowsExecutableMetadata, WINDOWS_EXECUTABLE_METADATA } from '../../../src/profile-publishing/win32-profile-executable.js';
-import { encodeManagedProfileState } from '../../../src/profile-publishing/publication-state.js';
+import { publicationSidecarName, encodeManagedProfileState } from '../../../src/profile-publishing/publication-state.js';
 import { readWindowsTransactionJournal, scanWindowsTransactionJournals } from '../../../src/profile-publishing/win32-transaction-journal.js';
 import { createWindowsProfileZipLifecycleDependencies, createWindowsImportedResourceMembershipDependencies } from '../../../src/profile-publishing/win32-profile-lifecycle.js';
 import { createWindowsProfileActivationServicesForInternalTesting } from '../../../src/profile-publishing/win32-profile-activation.js';
@@ -70,6 +70,18 @@ async function fixture(homePresent = true) {
   const activation = createWindowsProfileActivationServicesForInternalTesting(f.backend, { lockIo: f.io, selectionIo: f.io, journal: { io: f.io } });
   const importZip = (options: Partial<Parameters<typeof importManagedProfile>[0]> = {}) => importManagedProfile({ home: HOME, source: { kind: 'zip', path: ZIP }, ...options }, dependencies);
   return { ...f, dependencies, services, source, importZip, activation, zipIo };
+}
+
+async function sidecarOnlyFixture(kind?: 'skill' | 'library' | 'package') {
+  const f = await fixture(); await f.importZip();
+  // Isolate the manual boundary: zero instructions, no physical memberships,
+  // just one imported membership in the real materialized sidecar.
+  const state = (await f.services.readManagedState(HOME, 'work'))!.state;
+  state.importedResources = state.importedResources.filter((resource) => resource.key.kind === kind);
+  f.file(`${HOME}\\profiles\\work\\${publicationSidecarName()}`, encodeManagedProfileState(state, capturedProfileLimitPolicy()));
+  f.file(`${HOME}\\profiles\\work\\AGENTS.md`, '');
+  for (const path of f.nodes.keys()) if (path.startsWith(`${HOME}\\profiles\\work\\skills`)) f.nodes.delete(path);
+  return f;
 }
 
 describe('Windows shared candidate and real ZIP lifecycle (host native receipts only)', () => {
@@ -276,6 +288,60 @@ describe('Windows shared candidate and real ZIP lifecycle (host native receipts 
     })).rejects.toMatchObject({ code: 'PROFILE_TRANSACTION_CHANGED' });
     expect((await f.services.capture(HOME, 'work'))!.identity).toBe(old!.identity);
     expect(await recoverProfilePublishingTransactions(HOME, undefined, f.services)).toContainEqual(expect.objectContaining({ action: 'ambiguous' }));
+  });
+
+  it.each(['skill', 'library', 'package'] as const)('refuses sidecar-only imported %s membership before effects; confirmed removal retains all bytes', async (kind) => {
+    const f = await sidecarOnlyFixture(kind);
+    const expected = (await f.services.capture(HOME, 'work'))!;
+    expect(expected.closure.entries.filter((entry) => entry.kind !== 'managed-sidecar' && entry.path !== WINDOWS_EXECUTABLE_METADATA)).toEqual([expect.objectContaining({ path: 'AGENTS.md', bytes: 0 })]);
+    const retained = () => JSON.stringify([...f.nodes].filter(([path]) => !path.startsWith(`${HOME}\\profiles`) && !path.startsWith(`${HOME}\\locks`) && !path.startsWith(`${HOME}\\profile-publishing\\operation-locks`) && !path.startsWith(`${HOME}\\profile-publishing\\transactions`)));
+    const before = retained(), profile = JSON.stringify([...f.nodes].filter(([path]) => path.startsWith(`${HOME}\\profiles\\work`)));
+    const journal = vi.spyOn(f.services, 'writeJournal'), move = vi.spyOn(f.services, 'move'), favorites = vi.spyOn(f.services, 'publishFavorites');
+    for (const hooks of [{}, { requireGeneratedEmpty: true }]) {
+      await expect(removeManagedProfile(HOME, 'work', hooks, f.services)).rejects.toMatchObject({ code: 'PROFILE_NOT_EMPTY' });
+      expect(journal).not.toHaveBeenCalled(); expect(move).not.toHaveBeenCalled(); expect(favorites).not.toHaveBeenCalled();
+      expect(JSON.stringify([...f.nodes].filter(([path]) => path.startsWith(`${HOME}\\profiles\\work`)))).toBe(profile);
+      expect(retained()).toBe(before);
+    }
+    const result = await removeManagedProfile(HOME, 'work', { expectedRemovalIdentity: expected }, f.services);
+    expect(result.action).toBe('removed');
+    expect(await f.services.capture(HOME, 'work')).toBeUndefined();
+    expect(await f.services.capture(HOME, 'work', result.retainedPath!.split('\\').at(-1)!)).toEqual(expected);
+    // Journal/lock files are allowed; immutable imported stores and ZIP input are not changed.
+    expect(retained()).toBe(before);
+    expect(f.nodes.has(`${HOME}\\active-profile`)).toBe(false);
+  });
+
+  it('still permits generated-empty sidecars with only inactive identity bindings', async () => {
+    const f = await sidecarOnlyFixture();
+    expect((await f.services.readManagedState(HOME, 'work'))!.state.capturedResourceIds.length).toBeGreaterThan(0);
+    await expect(removeManagedProfile(HOME, 'work', { requireGeneratedEmpty: true }, f.services)).resolves.toMatchObject({ action: 'removed' });
+  });
+
+  it.each(['changed', 'missing'] as const)('refuses %s sidecar between capture and generated-empty check before journal or move', async (change) => {
+    const f = await sidecarOnlyFixture('skill');
+    const read = f.services.readManagedState;
+    const sidecarPath = `${HOME}\\profiles\\work\\${publicationSidecarName()}`;
+    vi.spyOn(f.services, 'readManagedState').mockImplementation(async (...args) => {
+      if (change === 'missing') f.nodes.delete(sidecarPath);
+      else { const state = (await read(...args))!.state; state.importedResources = []; f.file(sidecarPath, encodeManagedProfileState(state, capturedProfileLimitPolicy())); }
+      return read(...args);
+    });
+    const journal = vi.spyOn(f.services, 'writeJournal'), move = vi.spyOn(f.services, 'move');
+    await expect(removeManagedProfile(HOME, 'work', {}, f.services)).rejects.toMatchObject({ code: 'PROFILE_MANAGED_LIFECYCLE_CHANGED' });
+    expect(journal).not.toHaveBeenCalled(); expect(move).not.toHaveBeenCalled();
+    expect(f.nodes.has(`${HOME}\\profiles\\work`)).toBe(true);
+  });
+
+  it('refuses confirmed removal of an active sidecar-only imported profile', async () => {
+    const f = await sidecarOnlyFixture('skill');
+    f.file(`${HOME}\\active-profile`, 'work\n');
+    const expected = (await f.services.capture(HOME, 'work'))!;
+    const journal = vi.spyOn(f.services, 'writeJournal'), move = vi.spyOn(f.services, 'move');
+    await expect(removeManagedProfile(HOME, 'work', { expectedRemovalIdentity: expected }, f.services)).rejects.toMatchObject({ code: 'ACTIVE_PROFILE_REMOVE_REFUSED' });
+    expect(journal).not.toHaveBeenCalled(); expect(move).not.toHaveBeenCalled();
+    expect(f.nodes.get(`${HOME}\\active-profile`)!.bytes!.toString()).toBe('work\n');
+    expect(await f.services.capture(HOME, 'work')).toEqual(expected);
   });
 
   it('treats owned executable metadata as generated-empty while retaining nonempty logical profiles', async () => {

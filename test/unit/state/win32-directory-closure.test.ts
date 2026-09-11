@@ -10,6 +10,7 @@ import type {
 import { BazframeError } from '../../../src/core/errors.js';
 import {
   captureWindowsDirectoryClosure,
+  requireEntryMatchesObject,
   WINDOWS_DIRECTORY_CLOSURE_PRODUCTION_POLICY,
   windowsDirectoryClosurePolicy
 } from '../../../src/state/win32-directory-closure.js';
@@ -34,6 +35,100 @@ type TestNode = {
 };
 
 describe('Windows directory closure composition', () => {
+  it('accepts stale directory entries followed by an authoritative child open and refreshed final enumeration without changing receipts', async () => {
+    const backend = tree({ 'C:\\state': dir(1), 'C:\\state\\child': dir(2), 'C:\\state\\child\\file': file(3, 'bytes') });
+    let opened = false;
+    const events: string[] = [], retained: Array<{ value: unknown; json: string }> = [];
+    backend.inspectOverride = (path, base) => {
+      if (path === 'C:\\state\\child') {
+        opened = true; events.push('open:current');
+        base.object.lastWriteTime = base.object.changeTime = hex(2);
+      }
+      return base;
+    };
+    const enumerate = backend.enumerateStableDirectory;
+    backend.enumerateStableDirectory = async (path, max) => {
+      const value = await enumerate(path, max);
+      if (path === 'C:\\state') {
+        events.push(opened ? 'entry:current' : 'entry:stale');
+        value.entries[0]!.lastWriteTime = value.entries[0]!.changeTime = hex(opened ? 2 : 1);
+      } else {
+        value.directoryBefore.object.lastWriteTime = value.directoryBefore.object.changeTime = hex(2);
+        value.directoryAfter.object.lastWriteTime = value.directoryAfter.object.changeTime = hex(2);
+      }
+      retained.push({ value, json: JSON.stringify(value) }); return value;
+    };
+    expect((await captureWindowsDirectoryClosure(backend, 'C:\\state')).closure.entries).toHaveLength(2);
+    expect(events.slice(0, 2)).toEqual(['entry:stale', 'open:current']);
+    expect(events.indexOf('entry:current')).toBeGreaterThan(events.indexOf('open:current'));
+    expect(retained.every(({ value, json }) => JSON.stringify(value) === json)).toBe(true);
+  });
+
+  it.each(['lastWriteTime', 'changeTime'] as const)('ignores only plain directory entry %s, including in failure diagnostics', (field) => {
+    const listed = entry('child', dir(2)), opened = objectObservation(dir(2));
+    listed[field] = hex(2);
+    expect(() => requireEntryMatchesObject(listed, opened, 'entry-vs-directory-open')).not.toThrow();
+    listed.creationTime = hex(3);
+    expect(() => requireEntryMatchesObject(listed, opened, 'entry-vs-directory-open')).toThrow(expect.objectContaining({
+      cause: expect.objectContaining({ differingFields: ['creationTime'] })
+    }));
+  });
+
+  it.each([['file', 0x20, null, false], ['reparse', 0x410, 0xa0000003, true], ['attribute-only', 0x410, null, true], ['tag-only', 0x10, 0xa0000003, true], ['missing-directory-attribute', 0, null, true]] as const)(
+    'retains %s entry timestamp equality even for matching malformed kinds/tags', (_kind, attributes, reparseTag, directory) => {
+      for (const field of ['lastWriteTime', 'changeTime'] as const) {
+        const listed = { ...entry('child', dir(2)), attributes, reparseTag, directory }, opened = { ...objectObservation(dir(2)), attributes, reparseTag, directory };
+        listed[field] = hex(2);
+        expect(() => requireEntryMatchesObject(listed, opened, 'entry-vs-directory-open')).toThrow(expect.objectContaining({ cause: expect.objectContaining({ differingFields: [field] }) }));
+      }
+    }
+  );
+
+  it.each(['name', 'fileId', 'creationTime', 'size', 'allocationSize', 'attributes', 'reparseTag', 'directory', 'count'] as const)(
+    'still refuses final directory entry %s drift after child traversal', async (field) => {
+      const backend = tree({ 'C:\\state': dir(1), 'C:\\state\\child': dir(2) });
+      const enumerate = backend.enumerateStableDirectory; let roots = 0;
+      backend.enumerateStableDirectory = async (path, max) => {
+        const value = await enumerate(path, max);
+        if (path === 'C:\\state' && ++roots === 2) {
+          const e = value.entries[0]!;
+          if (field === 'count') value.entries = [];
+          else if (field === 'attributes') e.attributes = 0x11;
+          else if (field === 'reparseTag') e.reparseTag = 0xa0000003;
+          else if (field === 'directory') e.directory = false;
+          else e[field] = field === 'name' ? 'other' : field === 'fileId' ? 'f'.repeat(32) : hex(2);
+        }
+        return value;
+      };
+      await expect(captureWindowsDirectoryClosure(backend, 'C:\\state')).rejects.toMatchObject({ code: 'WINDOWS_DIRECTORY_CLOSURE_CHANGED', cause: { message: 'initial-vs-final-enumeration' } });
+    }
+  );
+
+  it.each(['lastWriteTime', 'changeTime'] as const)('retains opened child-directory %s drift refusal during traversal', async (field) => {
+    const backend = tree({ 'C:\\state': dir(1), 'C:\\state\\child': dir(2) });
+    const enumerate = backend.enumerateStableDirectory;
+    backend.enumerateStableDirectory = async (path, max) => {
+      const value = await enumerate(path, max);
+      if (path === 'C:\\state\\child') value.directoryAfter.object[field] = hex(2);
+      return value;
+    };
+    await expect(captureWindowsDirectoryClosure(backend, 'C:\\state')).rejects.toMatchObject({ code: 'WINDOWS_DIRECTORY_CLOSURE_CHANGED', cause: { message: 'enumeration-before-vs-after', differingFields: [`object.${field}`] } });
+  });
+
+  it('does not report ignored cached times when a final directory entry has genuine creation-time drift', async () => {
+    const backend = tree({ 'C:\\state': dir(1), 'C:\\state\\child': dir(2) });
+    const enumerate = backend.enumerateStableDirectory; let roots = 0;
+    backend.enumerateStableDirectory = async (path, max) => {
+      const value = await enumerate(path, max);
+      if (path === 'C:\\state' && ++roots === 2) {
+        value.entries[0]!.lastWriteTime = value.entries[0]!.changeTime = hex(2);
+        value.entries[0]!.creationTime = hex(3);
+      }
+      return value;
+    };
+    await expect(captureWindowsDirectoryClosure(backend, 'C:\\state')).rejects.toMatchObject({ code: 'WINDOWS_DIRECTORY_CLOSURE_CHANGED', cause: { message: 'initial-vs-final-enumeration', differingFields: ['entries.creationTime', 'entries.serialization'] } });
+  });
+
   it('admits stable separate directory length domains without normalizing either receipt', async () => {
     const backend = tree({ 'C:\\state': dir(1), 'C:\\state\\empty': dir(2) });
     const enumerate = backend.enumerateStableDirectory;
@@ -110,7 +205,7 @@ describe('Windows directory closure composition', () => {
     });
   });
 
-  it.each(['fileId', 'creationTime', 'lastWriteTime', 'changeTime', 'attributes'] as const)(
+  it.each(['fileId', 'creationTime', 'attributes'] as const)(
     'still refuses directory cross-domain %s mismatch and reports only compared fields', async (field) => {
       const backend = tree({ 'C:\\state': dir(1), 'C:\\state\\empty': dir(2) });
       const listed = entry('empty', dir(2));

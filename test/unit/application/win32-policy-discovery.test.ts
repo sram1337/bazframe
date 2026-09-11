@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { windowsApplicationFixture, HOME, REPOSITORY } from '../../helpers/windows-application-fixture.js';
 import { disableGlobally, enableGlobally, readGlobalPolicy } from '../../../src/policy/global-policy.js';
 import { disableRepository, enableRepository, listRepositoryProjectStates, readRepositoryProjectState } from '../../../src/project/registration-store.js';
@@ -38,6 +38,29 @@ describe('shared Windows policy/discovery adverse paths', () => {
     const value = JSON.parse(f.nodes.get(file)!.bytes!.toString()); value.repository = 'C:\\boundary\\other'; f.file(file, JSON.stringify(value));
     expect((await listRepositoryProjectStates(HOME, services)).diagnostics).toHaveLength(1);
     await expect(services.withLock(HOME, 'stale test', (writer) => writer.publish(file, Buffer.from('{}'), expected, 65536))).rejects.toThrow(/changed/);
+  });
+  it.each(['C:/boundary/repo', 'C:\\boundary\\repo'])('accepts Git absolute output %s and physically inspects normalized local spelling', async (root) => {
+    const f = windowsApplicationFixture(); f.directories(REPOSITORY + '\\nested');
+    const inspect = vi.spyOn(f.backend, 'inspectPath');
+    const services = createWindowsGitRootServices(f.backend, { executableEffects: f.options.executableEffects, process: async () => ({ status: 0, stdout: root + '\r\n', stderr: '' }) });
+    const before = f.snapshot();
+    expect(await findGitRoot(REPOSITORY + '\\nested', f.environment, services)).toBe(REPOSITORY);
+    expect(inspect).toHaveBeenCalledWith(REPOSITORY);
+    expect(inspect.mock.calls.some(([path]) => path.includes('/'))).toBe(false);
+    expect(f.snapshot()).toBe(before);
+  });
+  it.each(['relative', 'C:repo', '/boundary/repo', '\\boundary\\repo', '//server/share/repo', '\\\\server\\share\\repo', '\\\\?\\C:\\boundary\\repo'])('refuses non-local-absolute discovery input %s before native admission', async (root) => {
+    const f = windowsApplicationFixture(), inspect = vi.spyOn(f.backend, 'inspectPath');
+    const services = createWindowsGitRootServices(f.backend);
+    await expect(services.canonical(root)).rejects.toMatchObject({ code: 'GIT_ROOT_INVALID' });
+    expect(inspect).not.toHaveBeenCalled();
+  });
+  it.each(['reparse', 'file', 'ancestry'] as const)('does not let slash normalization bypass %s physical admission', async (kind) => {
+    const f = windowsApplicationFixture();
+    if (kind === 'reparse') f.reparse(REPOSITORY);
+    if (kind === 'file') f.file(REPOSITORY, 'not a directory');
+    if (kind === 'ancestry') { const inspect = f.backend.inspectPath; f.backend.inspectPath = (path) => ({ ...inspect(path), ancestryReparseFree: false }) as unknown as ReturnType<typeof inspect>; }
+    await expect(createWindowsGitRootServices(f.backend).canonical('C:/boundary/repo')).rejects.toThrow();
   });
   it.each(['outside', 'permission', 'missing-git', 'timeout', 'malformed', 'mismatch', 'mixed-diagnostic'])('distinguishes discovery outcome %s without policy/state creation', async (outcome) => {
     const f = windowsApplicationFixture(); f.directories('C:\\boundary\\other');

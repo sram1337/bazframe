@@ -1,3 +1,5 @@
+import { createWindowsPhysicalReads } from '../../../src/profile-publishing/win32-physical-profile-reads.js';
+import { enumerateWindowsPhysicalDirectory } from '../../../src/skills/added-skill-platform-services.js';
 import { captureProfileCollectionReferenceIndex } from '../../../src/profiles/profile-skill-collection-reference.js';
 import { win32 } from 'node:path';
 import { loadProfile } from '../../../src/profiles/profile-store.js';
@@ -41,7 +43,138 @@ function fixture() {
   const services = createWindowsReadyResourceServices(f.backend, options);
   return { ...f, options, services, deps: { services }, lifecycleOptions: { bazframeHome: HOME }, references: { bazframeHome: HOME, services } };
 }
+// Source-ordered cache refresh: enumeration does not open the child. The first
+// actual child inspection returns current metadata and refreshes later entries.
+function directoryEntryRefresh(f: ReturnType<typeof fixture>) {
+  const inspect = f.backend.inspectPath, enumerate = f.backend.enumerateStableDirectory;
+  const child = `${LIBRARY}\\child`, current = '0000000000000002';
+  let opened = false;
+  const events: string[] = [], receipts: Array<{ value: unknown; json: string }> = [];
+  f.backend.inspectPath = (path) => {
+    const value = inspect(path);
+    if (path === child) {
+      opened = true; events.push('open:current');
+      value.object.lastWriteTime = value.object.changeTime = current;
+    }
+    return value;
+  };
+  f.backend.enumerateStableDirectory = async (path, max) => {
+    const value = await enumerate(path, max);
+    if (path === LIBRARY) {
+      events.push(opened ? 'entry:current' : 'entry:stale');
+      if (opened) for (const entry of value.entries) if (entry.name === 'child') entry.lastWriteTime = entry.changeTime = current;
+    }
+    if (path === child) {
+      value.directoryBefore.object.lastWriteTime = value.directoryBefore.object.changeTime = current;
+      value.directoryAfter.object.lastWriteTime = value.directoryAfter.object.changeTime = current;
+    }
+    receipts.push({ value, json: JSON.stringify(value) });
+    return value;
+  };
+  return { events, assertUnmodified() { expect(receipts.every(({ value, json }) => JSON.stringify(value) === json)).toBe(true); } };
+}
+
 describe('Windows ready resources through shared collection engines (host receipts)', () => {
+  it('adds a cold library through shared snapshot capture when child entries refresh only after the first authoritative open', async () => {
+    const f = fixture(), refresh = directoryEntryRefresh(f);
+    const source = JSON.stringify([...f.nodes].filter(([path]) => path.startsWith(LIBRARY)));
+    const result = await addLibrary(f.lifecycleOptions, LIBRARY, f.deps);
+    expect(result.action).toBe('added');
+    expect((await f.services.resolver.verifySnapshot(HOME, result.digest)).digest).toBe(result.digest);
+    const firstOpen = refresh.events.indexOf('open:current');
+    expect(firstOpen).toBeGreaterThan(0);
+    expect(refresh.events.slice(0, firstOpen).every((event) => event === 'entry:stale')).toBe(true);
+    expect(refresh.events.slice(firstOpen + 1)).toContain('entry:current');
+    expect(JSON.stringify([...f.nodes].filter(([path]) => path.startsWith(LIBRARY)))).toBe(source);
+    refresh.assertUnmodified();
+  });
+
+  it('repeats physical enumeration across directory-entry refresh without suppressing the raw shared digest change', async () => {
+    const f = fixture(), refresh = directoryEntryRefresh(f), reads = createWindowsPhysicalReads(f.backend);
+    const root = await reads.openDirectory(LIBRARY, LIBRARY);
+    const stale = await enumerateWindowsPhysicalDirectory(f.backend, LIBRARY, 100);
+    expect(await root.enumerate(100)).toEqual(['child']);
+    expect(await reads.inspectKind(`${LIBRARY}\\child`)).toBe('directory');
+    const current = await enumerateWindowsPhysicalDirectory(f.backend, LIBRARY, 100);
+    expect(current.identity).not.toBe(stale.identity);
+    expect(current.nativeEntries[0]!.lastWriteTime).not.toBe(stale.nativeEntries[0]!.lastWriteTime);
+    expect(await root.enumerate(100)).toEqual(['child']);
+    await root.assertStable(); await root.close(); refresh.assertUnmodified();
+  });
+
+  it.each(['lastWriteTime', 'changeTime'] as const)('still refuses opened child %s drift in physical assertStable', async (field) => {
+    const f = fixture(), reads = createWindowsPhysicalReads(f.backend);
+    const child = `${LIBRARY}\\child`, directory = await reads.openDirectory(child, LIBRARY);
+    const inspect = f.backend.inspectPath;
+    f.backend.inspectPath = (path) => { const value = inspect(path); if (path === child) value.object[field] = 'f'.repeat(16); return value; };
+    await expect(directory.assertStable()).rejects.toMatchObject({ code: 'WINDOWS_PROFILE_ACTIVATION_CHANGED' });
+  });
+
+  it.each(['name', 'count', 'fileId', 'creationTime', 'size', 'allocationSize', 'attributes', 'reparseTag', 'directory'] as const)(
+    'physical repeated enumeration retains directory entry %s comparison', async (field) => {
+      const f = fixture(), reads = createWindowsPhysicalReads(f.backend), root = await reads.openDirectory(LIBRARY, LIBRARY);
+      await root.enumerate(100);
+      const enumerate = f.backend.enumerateStableDirectory;
+      f.backend.enumerateStableDirectory = async (path, max) => {
+        const value = await enumerate(path, max);
+        if (path === LIBRARY) {
+          const e = value.entries[0]!;
+          if (field === 'count') value.entries = [];
+          else if (field === 'attributes') e.attributes = 0x11;
+          else if (field === 'reparseTag') e.reparseTag = 0xa0000003;
+          else if (field === 'directory') e.directory = false;
+          else e[field] = field === 'name' ? 'other' : field === 'fileId' ? 'f'.repeat(32) : 'f'.repeat(16);
+        }
+        return value;
+      };
+      await expect(root.enumerate(100)).rejects.toThrow();
+    }
+  );
+
+  it('still refuses same-size file-byte drift within a physical reader scope', async () => {
+    const f = fixture(), reads = createWindowsPhysicalReads(f.backend), path = `${LIBRARY}\\child\\data.bin`;
+    expect((await reads.readFile(path, 100)).bytes.toString()).toBe('source');
+    f.nodes.get(path)!.bytes = Buffer.from('change');
+    await expect(reads.readFile(path, 100)).rejects.toMatchObject({ code: 'WINDOWS_PROFILE_ACTIVATION_CHANGED' });
+  });
+
+  it.each(['file', 'reparse', 'attribute-only', 'tag-only', 'missing-directory-attribute'] as const)(
+    'physical repeated enumeration still compares %s entry write/change timestamps', async (kind) => {
+      for (const field of ['lastWriteTime', 'changeTime'] as const) {
+        const f = fixture(), reads = createWindowsPhysicalReads(f.backend), root = await reads.openDirectory(LIBRARY, LIBRARY);
+        const enumerate = f.backend.enumerateStableDirectory; let drift = false;
+        f.backend.enumerateStableDirectory = async (path, max) => {
+          const value = await enumerate(path, max);
+          if (path === LIBRARY) {
+            const e = value.entries[0]!;
+            e.directory = kind !== 'file';
+            e.attributes = kind === 'file' ? 0x20 : kind === 'missing-directory-attribute' ? 0 : ['reparse', 'attribute-only'].includes(kind) ? 0x410 : 0x10;
+            e.reparseTag = ['reparse', 'tag-only'].includes(kind) ? 0xa0000003 : null;
+            if (drift) e[field] = 'f'.repeat(16);
+          }
+          return value;
+        };
+        await root.enumerate(100); drift = true;
+        await expect(root.enumerate(100)).rejects.toThrow();
+      }
+    }
+  );
+
+  it.each(['canonicalPath', 'volumeIdentity', 'fileId'] as const)('physical enumeration still requires stable root %s', async (field) => {
+    const f = fixture(), reads = createWindowsPhysicalReads(f.backend), root = await reads.openDirectory(LIBRARY, LIBRARY);
+    await root.enumerate(100);
+    const enumerate = f.backend.enumerateStableDirectory;
+    f.backend.enumerateStableDirectory = async (path, max) => {
+      const value = await enumerate(path, max);
+      if (path === LIBRARY) {
+        if (field === 'canonicalPath') value.directoryAfter.canonicalPath += '-other';
+        else value.directoryAfter.object[field] = 'f'.repeat(field === 'fileId' ? 32 : 16);
+      }
+      return value;
+    };
+    await expect(root.enumerate(100)).rejects.toThrow();
+  });
+
   it.each(['none', 'manifest', 'root'])('defers package helper execution until consent and revalidates before it: %s', async (change) => {
     const f = fixture(), events: string[] = [];
     const services = createWindowsReadyResourceServices(f.backend, { ...f.options, resolvePackageExecutable: async (argv) => ({ executable: argv[0]!, args: argv.slice(1), afterAuthorization: async () => { events.push('helper'); return { executable: argv[0]!, args: argv.slice(1) }; } }) });

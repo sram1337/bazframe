@@ -9,8 +9,12 @@ export function createWindowsGitRootServices(backend: BazframeWin32NativeBackend
   return {
     paths: win32, windows: true,
     async canonical(directory) {
+      // Git emits C:/... on Windows. Admit only local drive-absolute input before
+      // normalization so relative, UNC and device paths cannot gain authority.
+      if (!/^[a-z]:[\\/]/iu.test(directory)) throw new BazframeError('GIT_ROOT_INVALID', 'Git discovery requires an independently admitted local physical worktree.');
+      directory = win32.normalize(directory);
       const inspection = backend.inspectPath(directory);
-      if (inspection.kind !== 'directory' || !inspection.ancestryReparseFree || inspection.object.reparseTag !== null || !/^[a-z]:\\/iu.test(directory)) throw new BazframeError('GIT_ROOT_INVALID', 'Git discovery requires an independently admitted local physical worktree.');
+      if (inspection.kind !== 'directory' || !inspection.ancestryReparseFree || inspection.object.reparseTag !== null) throw new BazframeError('GIT_ROOT_INVALID', 'Git discovery requires an independently admitted local physical worktree.');
       return win32.parse(directory).root.toUpperCase() + inspection.canonicalPath.slice(inspection.volume.canonicalVolumeGuidPath.length);
     },
     async run(cwd, environment) {

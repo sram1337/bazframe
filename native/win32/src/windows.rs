@@ -1051,7 +1051,7 @@ pub(crate) fn enumerate_windows_directory_stable(
     #[cfg(test)]
     prefix_reopen_tests::at_content_seam("enumeration-between-passes");
     let second = enumerate_directory_pass(opened.handle.0, max_entries)?;
-    if first != second {
+    if !same_directory_entries(&first, &second) {
         return Err(native_error(
             "ERR_WIN32_ENUMERATION_CHANGED",
             "directory entries changed between stable enumeration passes",
@@ -1090,6 +1090,31 @@ pub(crate) fn enumerate_windows_directory_stable(
             .collect(),
         directory_after,
     })
+}
+
+// Parent entries can cache older plain-directory write/change times until the
+// child is opened. This does not alter raw receipts or opened-object stability.
+fn same_directory_entries(first: &[RawDirectoryEntry], second: &[RawDirectoryEntry]) -> bool {
+    first.len() == second.len()
+        && first.iter().zip(second).all(|(a, b)| {
+            let plain_directories = a.directory
+                && b.directory
+                && a.reparse_tag == 0
+                && b.reparse_tag == 0
+                && a.attributes == b.attributes
+                && a.attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+                    == FILE_ATTRIBUTE_DIRECTORY;
+            a.name == b.name
+                && a.file_id == b.file_id
+                && a.size == b.size
+                && a.allocation_size == b.allocation_size
+                && a.creation_time == b.creation_time
+                && (plain_directories
+                    || (a.last_write_time == b.last_write_time && a.change_time == b.change_time))
+                && a.attributes == b.attributes
+                && a.reparse_tag == b.reparse_tag
+                && a.directory == b.directory
+        })
 }
 
 const DIRECTORY_ENUMERATION_BUFFER_BYTES: usize = 64 * 1024;
@@ -1278,9 +1303,17 @@ fn parse_directory_buffer(storage: &[usize]) -> NativeResult<Vec<RawDirectoryEnt
 }
 
 fn same_path_inspection(a: &WindowsPathInspection, b: &WindowsPathInspection) -> bool {
+    same_kind_path_inspection(a, b, "directory")
+}
+
+fn same_kind_path_inspection(
+    a: &WindowsPathInspection,
+    b: &WindowsPathInspection,
+    kind: &str,
+) -> bool {
     a.canonical_path == b.canonical_path
-        && a.kind == "directory"
-        && b.kind == "directory"
+        && a.kind == kind
+        && b.kind == kind
         && a.ancestry_reparse_free
         && b.ancestry_reparse_free
         && a.volume.identity == b.volume.identity
@@ -2815,6 +2848,200 @@ mod tests {
     use super::*;
 
     #[test]
+    fn directory_entry_comparison_accepts_only_plain_directory_cached_time_refresh() {
+        let mut before = raw("child");
+        before.directory = true;
+        before.attributes = FILE_ATTRIBUTE_DIRECTORY;
+        let mut after = before.clone();
+        after.last_write_time = "0000000000000002".into();
+        after.change_time = "0000000000000003".into();
+        assert_ne!(before, after); // Raw DTO equality and receipts stay exact.
+        assert!(same_directory_entries(&[before.clone()], &[after.clone()]));
+        assert!(same_directory_entries(&[after], &[before]));
+    }
+
+    #[test]
+    fn directory_entry_comparison_retains_identity_namespace_lengths_and_non_directory_times() {
+        fn directory() -> RawDirectoryEntry {
+            let mut value = raw("child");
+            value.directory = true;
+            value.attributes = FILE_ATTRIBUTE_DIRECTORY;
+            value
+        }
+        let before = directory();
+        macro_rules! changed {
+            ($field:ident, $value:expr) => {{
+                let mut after = directory();
+                after.$field = $value;
+                assert!(
+                    !same_directory_entries(&[before.clone()], &[after.clone()]),
+                    stringify!($field)
+                );
+                assert!(
+                    !same_directory_entries(&[after], &[before.clone()]),
+                    stringify!($field)
+                );
+            }};
+        }
+        changed!(name, "other".encode_utf16().collect());
+        changed!(file_id, "OTHER".into());
+        changed!(size, "OTHER".into());
+        changed!(allocation_size, "OTHER".into());
+        changed!(creation_time, "OTHER".into());
+        changed!(attributes, FILE_ATTRIBUTE_DIRECTORY | 1);
+        changed!(reparse_tag, 0xa0000003);
+        changed!(directory, false);
+        assert!(!same_directory_entries(&[before.clone()], &[]));
+        assert!(!same_directory_entries(&[], &[before.clone()]));
+        let other = raw("other");
+        assert!(!same_directory_entries(
+            &[before.clone(), other.clone()],
+            &[other, before]
+        ));
+        for (directory, attributes, reparse_tag) in [
+            (false, FILE_ATTRIBUTE_NORMAL, 0),
+            (
+                true,
+                FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT,
+                0xa0000003,
+            ),
+            (
+                true,
+                FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT,
+                0,
+            ),
+            (true, FILE_ATTRIBUTE_DIRECTORY, 0xa0000003),
+            (true, 0, 0),
+        ] {
+            let mut before = raw("entry");
+            before.directory = directory;
+            before.attributes = attributes;
+            before.reparse_tag = reparse_tag;
+            for write in [true, false] {
+                let mut after = before.clone();
+                if write {
+                    after.last_write_time = "OTHER".into();
+                } else {
+                    after.change_time = "OTHER".into();
+                }
+                assert!(!same_directory_entries(&[before.clone()], &[after]));
+            }
+        }
+        for write in [true, false] {
+            let before = crate::read_change::tests::inspection();
+            let mut after = crate::read_change::tests::inspection();
+            if write {
+                after.object.last_write_time = "OTHER".into();
+            } else {
+                after.object.change_time = "OTHER".into();
+            }
+            assert!(!same_path_inspection(&before, &after));
+        }
+    }
+
+    #[test]
+    fn editor_file_comparison_preserves_kind_ancestry_identity_and_stability() {
+        fn file() -> WindowsPathInspection {
+            let mut value = crate::read_change::tests::inspection();
+            value.kind = "regular-file".into();
+            value.object = observation();
+            value
+        }
+        let before = file();
+        assert!(same_kind_path_inspection(&before, &file(), "regular-file"));
+        // Directory and membership-target consumers must still reject files.
+        assert!(!same_path_inspection(&before, &file()));
+        let directory = crate::read_change::tests::inspection();
+        assert!(same_path_inspection(
+            &directory,
+            &crate::read_change::tests::inspection()
+        ));
+        assert!(!same_kind_path_inspection(
+            &directory,
+            &directory,
+            "regular-file"
+        ));
+        macro_rules! changed {
+            ($($field:ident).+, $value:expr) => {{
+                let mut after = file();
+                after.$($field).+ = $value;
+                assert!(!same_kind_path_inspection(&before, &after, "regular-file"), stringify!($($field).+));
+                assert!(!same_kind_path_inspection(&after, &before, "regular-file"), stringify!($($field).+));
+            }};
+        }
+        changed!(kind, "directory".into());
+        changed!(canonical_path, "OTHER".into());
+        changed!(ancestry_reparse_free, false);
+        changed!(volume.identity, "OTHER".into());
+        changed!(volume.filesystem_name, "OTHER".into());
+        changed!(volume.drive_type, "remote".into());
+        changed!(volume.canonical_volume_guid_path, "OTHER".into());
+        changed!(volume.remote_device, true);
+        changed!(object.volume_identity, "OTHER".into());
+        changed!(object.file_id, "OTHER".into());
+        changed!(object.size, "OTHER".into());
+        changed!(object.allocation_size, "OTHER".into());
+        changed!(object.number_of_links, "00000002".into());
+        changed!(object.creation_time, "OTHER".into());
+        changed!(object.last_write_time, "OTHER".into());
+        changed!(object.change_time, "OTHER".into());
+        changed!(object.attributes, FILE_ATTRIBUTE_DIRECTORY);
+        changed!(object.reparse_tag, 0xa000000c);
+        changed!(object.delete_pending, true);
+        changed!(object.directory, true);
+        let mut access = file();
+        access.object.last_access_time = "OTHER".into();
+        assert!(same_kind_path_inspection(&before, &access, "regular-file"));
+        let mut hardlinked = file();
+        hardlinked.object.number_of_links = "00000002".into();
+        assert!(same_kind_path_inspection(
+            &hardlinked,
+            &hardlinked,
+            "regular-file"
+        ));
+    }
+
+    #[test]
+    fn editor_target_accepts_actual_regular_files_and_refuses_directories_or_escape() {
+        let parent = std::env::temp_dir();
+        let component = format!(
+            "bazframe-editor-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = parent.join(&component);
+        let root_text = root.to_str().unwrap();
+        create_windows_private_directory(parent.to_str().unwrap(), &component).unwrap();
+        for name in ["AGENTS.md", "SKILL.md"] {
+            create_windows_private_file(root_text, name).unwrap();
+            let file = root.join(name);
+            std::fs::write(&file, b"invalid UTF-8 is editable: \xff").unwrap();
+            let proof = inspect_windows_editor_target(root_text, file.to_str().unwrap()).unwrap();
+            assert_eq!(proof.target.kind, "regular-file");
+            assert!(!proof.target.object.directory);
+            assert_eq!(proof.target.object.reparse_tag, 0);
+            assert_eq!(proof.entry_object.file_id, proof.target.object.file_id);
+            assert_native_code(
+                inspect_windows_editor_target(root_text, root_text),
+                "ERR_WIN32_EDITOR_TARGET_INVALID",
+            );
+            let nested = root.join("nested");
+            if !nested.exists() {
+                create_windows_private_directory(root_text, "nested").unwrap();
+            }
+            assert_native_code(
+                inspect_windows_editor_target(nested.to_str().unwrap(), file.to_str().unwrap()),
+                "ERR_WIN32_EDITOR_TARGET_INVALID",
+            );
+        }
+        // Only this freshly created fixture is removed; a failure retains it for inspection.
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn exact_hex_preserves_values_above_javascript_safe_integer_range() {
         assert_eq!(hex_u64(9_007_199_254_740_993), "0020000000000001");
         assert_eq!(hex_bytes(&[0, 1, 0xfe, 0xff]), "0001feff");
@@ -3142,7 +3369,7 @@ pub(crate) fn inspect_windows_editor_target(
     let after = inspect_editor_once(root, path)?;
     if !same_path_inspection(&before.root, &after.root)
         || !same_path_inspection(&before.parent, &after.parent)
-        || !same_path_inspection(&before.target, &after.target)
+        || !same_kind_path_inspection(&before.target, &after.target, "regular-file")
         || before.entry_path != after.entry_path
         || before.target_path != after.target_path
         || !same_stable_observation(&before.entry_object, &after.entry_object)

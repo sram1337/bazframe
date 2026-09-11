@@ -329,15 +329,19 @@ export function requireEntryMatchesObject(
 ): void {
   // NTFS enumeration lengths (FILE_ID_EXTD_DIR_INFO) and opened-directory
   // lengths (FILE_STANDARD_INFO) are distinct observation domains. Only files
-  // authorize cross-domain length equality; both sources retain full independent
-  // stability checks, and their receipts are never normalized.
+  // authorize cross-domain length equality; both sources retain independent
+  // same-domain length checks, and their receipts are never normalized.
   const compareLengths = !entry.directory || !object.directory;
+  // Cached parent entries may refresh after a plain child directory is opened.
+  // Opened-object stability stays strict; files and reparses keep these times.
+  const compareTimes = entry.attributes !== object.attributes
+    || !plainPhysicalDirectory(entry) || !plainPhysicalDirectory(object);
   if (entry.fileId !== object.fileId
     || (compareLengths && entry.size !== object.size)
     || (compareLengths && entry.allocationSize !== object.allocationSize)
     || entry.creationTime !== object.creationTime
-    || entry.lastWriteTime !== object.lastWriteTime
-    || entry.changeTime !== object.changeTime
+    || (compareTimes && entry.lastWriteTime !== object.lastWriteTime)
+    || (compareTimes && entry.changeTime !== object.changeTime)
     || entry.attributes !== object.attributes
     || entry.reparseTag !== object.reparseTag
     || entry.directory !== object.directory
@@ -345,10 +349,26 @@ export function requireEntryMatchesObject(
     throw changed('listed child identity or metadata changed before it was consumed', comparisonDiagnostic(
       comparison, object.directory ? 'directory' : 'file',
       [...ENTRY_OBJECT_FIELDS.filter((field) => entry[field] !== object[field]
-        && (compareLengths || (field !== 'size' && field !== 'allocationSize'))),
+        && (compareLengths || (field !== 'size' && field !== 'allocationSize'))
+        && (compareTimes || (field !== 'lastWriteTime' && field !== 'changeTime'))),
         ...(object.deletePending ? ['deletePending'] : [])]
     ));
   }
+}
+
+function plainPhysicalDirectory(value: Pick<WindowsObjectObservation, 'directory' | 'attributes' | 'reparseTag'>): boolean {
+  return value.directory && value.reparseTag === null && (value.attributes & 0x410) === 0x10;
+}
+
+// Comparison-only projection. Kind/tag/attributes still have to match; raw
+// entries (and their same-domain lengths) are retained without normalization.
+function entryComparison(entry: WindowsDirectoryEntryObservation, other: WindowsDirectoryEntryObservation | undefined) {
+  return other !== undefined && entry.attributes === other.attributes && plainPhysicalDirectory(entry) && plainPhysicalDirectory(other)
+    ? { ...entry, lastWriteTime: null, changeTime: null } : entry;
+}
+
+function comparedEntries(a: WindowsDirectoryEntryObservation[], b: WindowsDirectoryEntryObservation[]) {
+  return a.map((entry, index) => entryComparison(entry, b[index]));
 }
 
 function sameEnumeration(
@@ -357,7 +377,7 @@ function sameEnumeration(
 ): boolean {
   return sameDirectoryInspection(a.directoryBefore, b.directoryBefore)
     && sameDirectoryInspection(a.directoryAfter, b.directoryAfter)
-    && JSON.stringify(a.entries) === JSON.stringify(b.entries);
+    && JSON.stringify(comparedEntries(a.entries, b.entries)) === JSON.stringify(comparedEntries(b.entries, a.entries));
 }
 
 function sameObject(a: WindowsObjectObservation, b: WindowsObjectObservation): boolean {
@@ -375,7 +395,7 @@ function sameObject(a: WindowsObjectObservation, b: WindowsObjectObservation): b
     && a.directory === b.directory;
 }
 
-// Diagnostics run only after the unchanged authorization comparisons fail.
+// Diagnostics run only after the authorization comparisons fail.
 // Enumerate static field names; never include observed values or entry names.
 const ENTRY_OBJECT_FIELDS = [
   'fileId', 'size', 'allocationSize', 'creationTime', 'lastWriteTime',
@@ -412,13 +432,12 @@ function enumerationDifferences(a: WindowsStableDirectoryEnumerationReceipt, b: 
   if (a.entries.length !== b.entries.length) fields.push('entries.length');
   const entryFields = ['name', ...ENTRY_OBJECT_FIELDS] as const;
   for (const field of entryFields) {
-    if (a.entries.some((entry, index) => b.entries[index] !== undefined && entry[field] !== b.entries[index]![field])) {
+    if (a.entries.some((entry, index) => b.entries[index] !== undefined && entryComparison(entry, b.entries[index])[field] !== entryComparison(b.entries[index]!, entry)[field])) {
       fields.push(`entries.${field}`);
     }
   }
-  // Preserve visibility of the original exact serialized-enumeration comparison,
-  // including any ordering/shape discrepancy not represented by field equality.
-  if (JSON.stringify(a.entries) !== JSON.stringify(b.entries)) fields.push('entries.serialization');
+  // Diagnose the compared projection, not ignored cached entry timestamps.
+  if (JSON.stringify(comparedEntries(a.entries, b.entries)) !== JSON.stringify(comparedEntries(b.entries, a.entries))) fields.push('entries.serialization');
   return fields;
 }
 

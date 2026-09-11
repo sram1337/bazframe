@@ -157,6 +157,8 @@ Ordinary physical profile/resource reads, ZIP source/input reads and editor targ
 
 Directory enumeration must be bounded, produce deterministic Bazframe ordering, and support pre/post ancestry and closure evidence for the operation. Every entry counts toward the bound; only entries the operation admits or traverses require object-level admission. Requested journal storage need not validate unrelated sibling objects. Share denial and a particular native change token are permitted hardening, not requirements. The contract does not claim to detect a deliberate same-size or timestamp-restored mutation by an excluded same-authority process.
 
+Cached parent-directory entries can refresh a plain physical child directory's write/change timestamps after its first authoritative open. Entry/open and repeated-entry comparisons therefore exclude only those two cached fields for matching plain physical directories; opened-directory metadata stability, file/reparse timestamps, creation time, identity, namespace, attributes and same-domain lengths remain strict. Raw receipts and shared identity digests retain the observed values; this is a capture-local comparison policy, not a retry or metadata-normalization operation.
+
 ### 5.5 Cooperating-writer serialization
 
 Mutations and any recovery that can mutate state must serialize cooperating Bazframe writers using canonical roots, deterministic operation keys, and existing global/profile/resource lock order. The lock design must ensure that:

@@ -239,7 +239,18 @@ export async function removeManagedProfile(home: string, profileName: string, ho
       && JSON.stringify(expected) !== JSON.stringify(hooks.expectedRemovalIdentity)) {
       throw new BazframeError('PROFILE_REMOVE_AUTHORIZATION_STALE', 'Profile removal authorization is stale; review the profile again.');
     }
-    if(expected!==undefined&&(hooks.requireGeneratedEmpty===true||(services.header.schemaVersion===2&&hooks.expectedRemovalIdentity===undefined))){const content=expected.closure.entries.filter((entry)=>entry.kind!=='managed-sidecar'&&(services.header.schemaVersion!==2||entry.path!=='.bazframe-win32-executable.json'));if(content.length!==1||content[0]?.kind!=='file'||content[0].path!=='AGENTS.md'||content[0].bytes!==0)throw new BazframeError('PROFILE_NOT_EMPTY',`Profile is not generated-empty and cannot be removed without recursive confirmation: ${profileName}`);}
+    if (expected !== undefined && (hooks.requireGeneratedEmpty === true || (services.header.schemaVersion === 2 && hooks.expectedRemovalIdentity === undefined))) {
+      const content = expected.closure.entries.filter((entry) => entry.kind !== 'managed-sidecar' && (services.header.schemaVersion !== 2 || entry.path !== '.bazframe-win32-executable.json'));
+      let hasImportedMembership = false;
+      if (services.header.schemaVersion === 2 && expected.sidecarSha256 !== null) {
+        const sidecar = await services.readManagedState(home, profileName);
+        if (sidecar?.sha256 !== expected.sidecarSha256) throw changed('removal sidecar changed after capture');
+        hasImportedMembership = sidecar.state.importedResources.length !== 0;
+      }
+      if (hasImportedMembership || content.length !== 1 || content[0]?.kind !== 'file' || content[0].path !== 'AGENTS.md' || content[0].bytes !== 0) {
+        throw new BazframeError('PROFILE_NOT_EMPTY', `Profile is not generated-empty and cannot be removed without recursive confirmation: ${profileName}`);
+      }
+    }
     if (expected === undefined) {
       await services.withStateLock(home, profileName, async (lockAuthority) => {
         const stateAuthority = { assertHeld() { lockAuthority.assertHeld(); assertOperationMutationAuthority(authority, home, [profileName, '@store'], transactionId); } };
