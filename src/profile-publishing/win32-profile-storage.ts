@@ -125,6 +125,7 @@ export function createWindowsProfileStorage(backend: BazframeWin32NativeBackend 
       assertSource: reads.assertExpectation,
       async copyEntry(root, name, candidate, entry) {
         if (root !== home) throw invalid('copy home changed');
+        if (entry.kind === 'direct-skill-reference' || entry.kind === 'inert-directory') throw invalid('read-only profile evidence cannot authorize copying');
         assertCandidate(home, candidate, authority);
         if (entry.kind === 'managed-sidecar' || entry.path === WINDOWS_EXECUTABLE_METADATA) return;
         const destination = win32.join(candidate, ...entry.path.split('/'));

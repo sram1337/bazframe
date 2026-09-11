@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { lstat } from 'node:fs/promises';
-import { basename, dirname, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { decodeUtf8Instructions, MAX_EFFECTIVE_INSTRUCTION_BYTES } from '../core/content.js';
 import { BazframeError, errorCode } from '../core/errors.js';
 import { profileDirectory } from '../profiles/profile-store.js';
@@ -29,7 +29,10 @@ import {
 export type PhysicalProfileClosureEntryV1 =
   | { path: string; kind: 'file'; sha256: string; bytes: number; executable: boolean }
   | { path: string; kind: 'membership-link'; targetIdentity: string; sha256?: string; bytes?: number }
-  | { path: string; kind: 'managed-sidecar'; sha256: string; bytes: number };
+  | { path: string; kind: 'managed-sidecar'; sha256: string; bytes: number }
+  // Capture-local read/use evidence; strict transport/lifecycle captures never produce these entries.
+  | { path: string; kind: 'direct-skill-reference'; sha256: string; bytes: number }
+  | { path: 'source-units'; kind: 'inert-directory'; identity: string };
 export interface PhysicalProfileClosureV1 { schemaVersion: 1; profileName: string; entries: PhysicalProfileClosureEntryV1[] }
 export interface PhysicalProfileExpectation { identity: string; sidecarSha256: string | null; profileClosureSha256: string; closure: PhysicalProfileClosureV1 }
 
@@ -77,6 +80,8 @@ export interface PhysicalProfileDirectory {
 }
 export interface PhysicalProfileReadServices {
   collectionReferenceBytes?: boolean;
+  inertSourceUnits?: boolean;
+  ordinarySkillReference?(home: string, path: string, name: string, maxBytes: number): Promise<{ catalogIdentity?: string; sha256: string; bytes: number }>;
   retainedRootFile?(path: string, name: string): Promise<boolean>;
   retainedCollectionFile?(path: string, name: string): Promise<boolean>;
   rootMetadata?: { name: string; validate(bytes: Buffer, policy: CapturedProfileLimitPolicy): number; validateClosure?(): void };
@@ -106,6 +111,40 @@ export const defaultPhysicalReads: PhysicalProfileReadServices = {
     return `catalog:skill:${name}`;
   }
 };
+
+/** Ordinary view/use only. Strict export, candidates, lifecycle and recovery keep defaultPhysicalReads. */
+export const ordinaryPhysicalReads: PhysicalProfileReadServices = {
+  ...defaultPhysicalReads,
+  inertSourceUnits: true,
+  async ordinarySkillReference(home, path, name, maxBytes) {
+    const link = await readStablePhysicalLink(path);
+    if (!isAbsolute(link.target)) throw invalid('direct Skill reference target must be absolute');
+    // Reuse the POSIX external-root boundary: no-follow target leaf, not new host-root ancestry policy.
+    const target = await openStablePhysicalDirectory(link.target, link.target);
+    try {
+      const definitionPath = stableReadChildPath(target, 'SKILL.md');
+      const definition = await readStablePhysicalFile(definitionPath, Math.min(maxBytes, 1024 * 1024));
+      if (parseSkillDeclaredName(decodeUtf8Instructions(definition.bytes, 'Skill definition', definitionPath, Math.min(maxBytes, 1024 * 1024)), definitionPath) !== name) throw invalid('direct Skill reference declares another name');
+      let catalogIdentity: string | undefined;
+      try {
+        const registration = await readDefaultSkillRegistrationLink(home, name);
+        if (registration.target === link.target) catalogIdentity = `catalog:skill:${name}`;
+      } catch (error) { if (errorCode(error) !== 'DEFAULT_SKILL_NOT_FOUND') throw error; }
+      const after = await readStablePhysicalLink(path);
+      if (after.target !== link.target || identityText(after.identity) !== identityText(link.identity)) throw invalid('direct Skill reference changed');
+      await assertStablePhysicalDirectory(target);
+      const sha256 = hash(Buffer.from(JSON.stringify({ link: identityText(link.identity), target: link.target, targetIdentity: identityText(target.identity), definition: hash(definition.bytes) })));
+      return { ...(catalogIdentity === undefined ? {} : { catalogIdentity }), sha256, bytes: definition.bytes.length };
+    } finally { await target.handle.close(); }
+  }
+};
+
+export function captureOrdinaryProfileExpectation(home: string, name: string, limits: Partial<CapturedProfileLimitPolicy> = {}, hooks: { beforeSecondPass?: () => Promise<void> } = {}, reads: PhysicalProfileReadServices = ordinaryPhysicalReads): Promise<PhysicalProfileExpectation> {
+  return capturePhysicalProfileExpectation(home, name, limits, hooks, reads);
+}
+export async function assertOrdinaryProfileExpectation(home: string, name: string, expected: PhysicalProfileExpectation): Promise<void> {
+  if (!samePhysicalProfileExpectation(await captureOrdinaryProfileExpectation(home, name), expected)) throw new BazframeError('PROFILE_PHYSICAL_CLOSURE_CHANGED', `Profile ${JSON.stringify(name)} changed while in use.`);
+}
 
 const ROOT_ENTRIES = new Set(['AGENTS.md', 'skills', 'libraries', 'packages', publicationSidecarName()]);
 
@@ -187,10 +226,17 @@ async function captureClosurePass(home: string, profileId: string, profile: Phys
   } };
   const rootNames = await profile.enumerate(policy.maxEntries);
   for (const name of rootNames) {
-    if (!ROOT_ENTRIES.has(name) && name !== reads.rootMetadata?.name && !await reads.retainedRootFile?.(profile.childPath(name), name)) throw invalid('profile contains an unknown managed entry');
+    if (!ROOT_ENTRIES.has(name) && name !== reads.rootMetadata?.name && !(reads.inertSourceUnits && name === 'source-units') && !await reads.retainedRootFile?.(profile.childPath(name), name)) throw invalid(`profile contains an unknown managed entry ${JSON.stringify(name)}`);
   }
   if (!rootNames.includes('AGENTS.md')) throw invalid('profile instructions are missing');
   const entries: PhysicalProfileClosureEntryV1[] = [await fileEntry(profile.childPath('AGENTS.md'), 'AGENTS.md', policy, reads, true)];
+  if (reads.inertSourceUnits && rootNames.includes('source-units')) {
+    const inert = await reads.openDirectory(profile.childPath('source-units'), home);
+    try {
+      entries.push({ path: 'source-units', kind: 'inert-directory', identity: inert.identity });
+      await inert.assertStable();
+    } finally { await inert.close(); }
+  }
   const traversed = { count: rootNames.length };
   if (reads.rootMetadata !== undefined && rootNames.includes(reads.rootMetadata.name)) {
     const file = await reads.readFile(profile.childPath(reads.rootMetadata.name), policy.maxManifestBytes);
@@ -237,8 +283,15 @@ async function membershipEntries(home: string, profileId: string, rootPath: stri
         const path = root.childPath(name);
         const kind = await reads.inspectKind(path);
         if (kind === 'link') {
-          const targetIdentity = await reads.membershipIdentity(home, path, name);
-          result.push({ path: `skills/${name}`, kind: 'membership-link', targetIdentity });
+          if (reads.ordinarySkillReference !== undefined) {
+            const reference = await reads.ordinarySkillReference(home, path, name, policy.maxBlobBytes);
+            result.push(reference.catalogIdentity === undefined
+              ? { path: `skills/${name}`, kind: 'direct-skill-reference', sha256: reference.sha256, bytes: reference.bytes }
+              : { path: `skills/${name}`, kind: 'membership-link', targetIdentity: reference.catalogIdentity, sha256: reference.sha256, bytes: reference.bytes });
+          } else {
+            const targetIdentity = await reads.membershipIdentity(home, path, name);
+            result.push({ path: `skills/${name}`, kind: 'membership-link', targetIdentity });
+          }
         } else if (kind === 'directory') {
           result.push(...await physicalSkillEntries(root, name, policy, traversed, reads));
         } else {
@@ -260,7 +313,8 @@ async function membershipEntries(home: string, profileId: string, rootPath: stri
     await root.assertStable();
     return result;
   } catch (error) {
-    if (errorCode(error) === 'ENOENT') return [];
+    // Ordinary read/use requires complete member evidence, including missing targets.
+    if (reads.ordinarySkillReference === undefined && errorCode(error) === 'ENOENT') return [];
     throw error;
   } finally { await root.close().catch(() => undefined); }
 }

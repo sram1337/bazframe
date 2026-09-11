@@ -11,6 +11,8 @@ import { readArtifactTree } from './artifact-tree.js';
 import {
   assertPhysicalProfileExpectation,
   capturePhysicalProfileExpectation,
+  captureOrdinaryProfileExpectation,
+  assertOrdinaryProfileExpectation,
   physicalProfileLocalSkillNames,
   type PhysicalProfileClosureEntryV1
 } from './physical-profile-closure.js';
@@ -98,8 +100,8 @@ export interface ProfileSystemViewReadServices {
   scanCollections: typeof scanGlobalSkillCollections;
 }
 const defaultViewReads: ProfileSystemViewReadServices = {
-  scanProfileNames, captureExpectation: capturePhysicalProfileExpectation,
-  assertExpectation: assertPhysicalProfileExpectation, readManagedState: readOptionalManagedProfileState,
+  scanProfileNames, captureExpectation: captureOrdinaryProfileExpectation,
+  assertExpectation: assertOrdinaryProfileExpectation, readManagedState: readOptionalManagedProfileState,
   inspectCatalog: inspectDefaultSkillCatalog, scanCollections: scanGlobalSkillCollections
 };
 
@@ -357,6 +359,7 @@ async function buildSkillNamespace(
 }
 
 function ordinaryMembership(entry: PhysicalProfileClosureEntryV1): { stableIdentity: string; key: CapturedResourceKey } | undefined {
+  // Direct runtime references and inert entries have no catalog selectors or managed ownership.
   if (entry.kind !== 'membership-link') return undefined;
   const match = /^catalog:(skill|library|package):([a-z0-9]+(?:-[a-z0-9]+)*)$/u.exec(entry.targetIdentity);
   if (match === null) throw invalid('ordinary membership identity is invalid');

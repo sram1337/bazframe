@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdir, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, rm, rename, symlink, writeFile } from 'node:fs/promises';
 import { createTempDirectory, type TempDirectory } from '../../helpers/temp-directory.js';
-import { capturePhysicalProfileExpectation, samePhysicalProfileExpectation, serializeWindowsPhysicalProfileProof, serializePosixPhysicalProfileProof, serializePosixBackupProof, samePhysicalProfileProof } from '../../../src/profile-publishing/physical-profile-closure.js';
+import { captureOrdinaryProfileExpectation, assertOrdinaryProfileExpectation, capturePhysicalProfileExpectation, samePhysicalProfileExpectation, serializeWindowsPhysicalProfileProof, serializePosixPhysicalProfileProof, serializePosixBackupProof, samePhysicalProfileProof } from '../../../src/profile-publishing/physical-profile-closure.js';
 
 let temporary: TempDirectory | undefined;
 afterEach(async () => { await temporary?.cleanup(); temporary = undefined; });
@@ -9,6 +9,63 @@ afterEach(async () => { await temporary?.cleanup(); temporary = undefined; });
 async function setup() {
   temporary = await createTempDirectory(); await temporary.mkdir('profiles/work/skills'); await temporary.write('profiles/work/AGENTS.md', 'hello\n'); return temporary;
 }
+
+describe('ordinary read/use closure boundaries', () => {
+  async function direct() {
+    const temp = await setup();
+    await temp.write('external/review/SKILL.md', '---\nname: review\n---\n');
+    await symlink(temp.path('external/review'), temp.path('profiles/work/skills/review'), 'dir');
+    return temp;
+  }
+  it('admits a direct unregistered reference without tree traversal or catalog authority', async () => {
+    const temp = await direct();
+    await symlink(temp.path('missing'), temp.path('external/review/unreadable-resource'));
+    const proof = await captureOrdinaryProfileExpectation(temp.root, 'work');
+    expect(proof.closure.entries).toContainEqual(expect.objectContaining({ path: 'skills/review', kind: 'direct-skill-reference', bytes: Buffer.byteLength('---\nname: review\n---\n') }));
+    await assertOrdinaryProfileExpectation(temp.root, 'work', proof);
+    await expect(capturePhysicalProfileExpectation(temp.root, 'work')).rejects.toMatchObject({ code: 'DEFAULT_SKILL_NOT_FOUND' });
+  });
+  it.each([Buffer.from('---\nname: review\n---\n\0'), Buffer.from([0xff])])('rejects invalid definition bytes in direct references', async (bytes) => {
+    const temp = await direct(); await writeFile(temp.path('external/review/SKILL.md'), bytes);
+    await expect(captureOrdinaryProfileExpectation(temp.root, 'work')).rejects.toThrow();
+  });
+  it('retains matching catalog projection but not same-name foreign ownership', async () => {
+    const temp = await direct(); await temp.mkdir('skills');
+    await temp.write('other/review/SKILL.md', '---\nname: review\n---\n');
+    await symlink(temp.path('other/review'), temp.path('skills/review'), 'dir');
+    expect((await captureOrdinaryProfileExpectation(temp.root, 'work')).closure.entries).toContainEqual(expect.objectContaining({ kind: 'direct-skill-reference' }));
+    await expect(capturePhysicalProfileExpectation(temp.root, 'work')).rejects.toMatchObject({ code: 'PROFILE_PHYSICAL_CLOSURE_INVALID' });
+    await rm(temp.path('skills/review')); await symlink(temp.path('external/review'), temp.path('skills/review'), 'dir');
+    expect((await captureOrdinaryProfileExpectation(temp.root, 'work')).closure.entries).toContainEqual(expect.objectContaining({ kind: 'membership-link', targetIdentity: 'catalog:skill:review' }));
+  });
+  it.each(['definition', 'retarget', 'replace-target'] as const)('refuses %s drift across capture passes', async (variant) => {
+    const temp = await direct();
+    await temp.write('other/review/SKILL.md', '---\nname: review\n---\n');
+    await expect(captureOrdinaryProfileExpectation(temp.root, 'work', {}, { async beforeSecondPass() {
+      if (variant === 'definition') await temp.write('external/review/SKILL.md', '---\nname: review\n---\nchanged');
+      if (variant === 'retarget') { await rm(temp.path('profiles/work/skills/review')); await symlink(temp.path('other/review'), temp.path('profiles/work/skills/review'), 'dir'); }
+      if (variant === 'replace-target') { await rename(temp.path('external/review'), temp.path('external/old')); await rename(temp.path('other/review'), temp.path('external/review')); }
+    } })).rejects.toThrow();
+  });
+  it('binds only the exact physical inert root, never its contents, and keeps strict captures strict', async () => {
+    const temp = await setup(); await temp.mkdir('profiles/work/source-units');
+    await symlink(temp.path('missing'), temp.path('profiles/work/source-units/unreadable'));
+    const proof = await captureOrdinaryProfileExpectation(temp.root, 'work');
+    await temp.write('profiles/work/source-units/opaque', 'changed');
+    await assertOrdinaryProfileExpectation(temp.root, 'work', proof);
+    await expect(capturePhysicalProfileExpectation(temp.root, 'work')).rejects.toThrow('source-units');
+    await rename(temp.path('profiles/work/source-units'), temp.path('retained')); await temp.mkdir('profiles/work/source-units');
+    await expect(assertOrdinaryProfileExpectation(temp.root, 'work', proof)).rejects.toThrow();
+  });
+  it('rejects unknown root names, inert root reparses and invalid direct definitions', async () => {
+    const temp = await direct(); await temp.write('profiles/work/unknown-root', 'x');
+    await expect(captureOrdinaryProfileExpectation(temp.root, 'work')).rejects.toThrow('unknown-root');
+    await rm(temp.path('profiles/work/unknown-root')); await symlink(temp.path('external'), temp.path('profiles/work/source-units'), 'dir');
+    await expect(captureOrdinaryProfileExpectation(temp.root, 'work')).rejects.toThrow();
+    await rm(temp.path('profiles/work/source-units')); await temp.write('external/review/SKILL.md', '---\nname: wrong\n---\n');
+    await expect(captureOrdinaryProfileExpectation(temp.root, 'work')).rejects.toThrow('another name');
+  });
+});
 
 describe('physical profile closure', () => {
   it('captures sidecar-free instructions and changes when bytes change', async () => {

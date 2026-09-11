@@ -11,6 +11,8 @@ import { copyPhysicalProfileClosureToCandidate, type ProfileClosureCopyEffects }
 import {
   assertPhysicalProfileExpectation,
   capturePhysicalProfileExpectation,
+  captureOrdinaryProfileExpectation,
+  assertOrdinaryProfileExpectation,
   physicalProfileLocalSkillNames,
   type PhysicalProfileExpectation
 } from './physical-profile-closure.js';
@@ -159,8 +161,8 @@ export interface ManagedProfileActivationServices {
   beforeReturn?(): void | Promise<void>;
 }
 const defaultActivationServices: ManagedProfileActivationServices = {
-  captureExpectation: capturePhysicalProfileExpectation,
-  assertExpectation: assertPhysicalProfileExpectation,
+  captureExpectation: captureOrdinaryProfileExpectation,
+  assertExpectation: assertOrdinaryProfileExpectation,
   readSystemView: readProfileSystemView,
   withOperationLocks: (home, keys, transactionId, operation) => withProfileOperationLocks(home, keys,
     (authority) => operation({ assertHeld: () => assertOperationMutationAuthority(authority, home, keys, transactionId) }), transactionId),

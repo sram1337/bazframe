@@ -3,6 +3,7 @@ import { captureWindowsDirectoryClosure } from '../state/win32-directory-closure
 import { win32 } from 'node:path';
 import type { BazframeWin32LockBackend, BazframeWin32NativeBackend } from '../core/win32-native.js';
 import { BazframeError, errorCode } from '../core/errors.js';
+import { replaceUnsafeDisplayCharacters } from '../core/safe-text.js';
 import {
   ADDED_SKILL_NAMESPACE_ENTRY_LIMIT,
   enumerateWindowsPhysicalDirectory,
@@ -160,8 +161,15 @@ export function createWindowsProfileProvisioningServicesForInternalTesting(
         try {
           await loadProfile(home, name, { platformServices: services });
           result.profileIds.push(name);
-        } catch {
-          result.diagnostics.push(`Skipping invalid profile ${JSON.stringify(name)}.`);
+        } catch (error) {
+          const details: string[] = [];
+          let cause: unknown = error;
+          for (let depth = 0; depth < 4 && cause instanceof Error; depth++) {
+            details.push(`${errorCode(cause) ?? 'PROFILE_READ_FAILED'}: ${cause.message}`);
+            cause = cause.cause;
+          }
+          const diagnostic = replaceUnsafeDisplayCharacters(details.join(' → '), ' ').slice(0, 1000);
+          result.diagnostics.push(`Skipping invalid profile ${JSON.stringify(name)}: ${diagnostic}.`);
         }
       }
       const after = await enumerate(win32.join(home, 'profiles'));

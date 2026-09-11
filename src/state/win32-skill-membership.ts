@@ -107,6 +107,7 @@ export async function createWindowsSkillMembership(
     requireSameTarget(beforeTarget, afterTarget);
     if (mutationReceipt !== undefined) {
       assertWindowsPrivateCreationSecurity(mutationReceipt.creationSecurity);
+      if (mutationReceipt.created.object.reparseTag !== 0xa0000003) throw new Error('fresh membership receipt is not a junction');
       requireSameParent(beforeParent, mutationReceipt.parentBefore);
       requireSameParent(mutationReceipt.parentBefore, mutationReceipt.parentAfter);
       const receiptProof = prove({

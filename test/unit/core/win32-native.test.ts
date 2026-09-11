@@ -211,7 +211,7 @@ describe('Bazframe-owned Windows native loader', () => {
     await expect(load(module({ stableRead: stableRead(changed) })).readStableFileRange('C:\\state\\archive.zip', 0, 3, 10)).rejects.toThrow();
   });
 
-  it('accepts only exact no-follow junction membership receipts', () => {
+  it('accepts exact no-follow directory symlink and junction inspection receipts', () => {
     const backend = load(module());
     expect(backend.inspectMembershipLink('C:\\state\\membership')).toMatchObject({
       object: { reparseTag: 0xa0000003, directory: true },
@@ -219,6 +219,9 @@ describe('Bazframe-owned Windows native loader', () => {
       targetVolumeIdentity: VOLUME,
       targetFileId: FILE_ID
     });
+
+    expect(load(module({ membershipInspection: membershipInspection({ object: { reparseTag: 0xa000000c } }) }))
+      .inspectMembershipLink('C:\\state\\membership').object.reparseTag).toBe(0xa000000c);
 
     for (const malformed of [
       { extra: true },
@@ -228,7 +231,6 @@ describe('Bazframe-owned Windows native loader', () => {
       { targetFileId: '1' },
       { security: { extra: true } },
       { security: { ownerSid: 'not-a-sid' } },
-      { object: { reparseTag: 0xa000000c } },
       { object: { reparseTag: 0x8000001b } },
       { object: { attributes: 16 } },
       { object: { deletePending: true } }
@@ -263,6 +265,7 @@ describe('Bazframe-owned Windows native loader', () => {
     for (const malformed of [
       { extra: true },
       { parentAfter: directoryInspection('other-parent') },
+      { created: membershipInspection({ object: { reparseTag: 0xa000000c } }) },
       { created: membershipInspection({ canonicalPath: '\\\\?\\Volume{12345678-1234-1234-1234-123456789abc}\\state\\other' }) }
     ]) {
       expect(() => load(module({ junctionCreation: junctionCreation(malformed) }))

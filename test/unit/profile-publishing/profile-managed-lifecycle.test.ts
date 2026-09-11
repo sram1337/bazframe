@@ -14,8 +14,11 @@ import { capturedProfileLimitPolicy } from '../../../src/profile-publishing/prof
 import { capturedResourceId, importedResourceIdentity, ordinaryResourceIdentity, profileLocalResourceIdentity, profileLocalResourceInstanceId, resourceIdentityDigest } from '../../../src/profile-publishing/captured-profile.js';
 import { encodeProfileFavorites, readProfileFavorites } from '../../../src/profiles/profile-favorites.js';
 import { readTransactionJournal } from '../../../src/profile-publishing/transaction-journal.js';
+import { readProfileSystemView } from '../../../src/profile-publishing/profile-view.js';
+import { loadProfile } from '../../../src/profiles/profile-store.js';
 import { readOptionalManagedProfileState } from '../../../src/profile-publishing/managed-profile-state.js';
 import { recoverProfilePublishingTransactions } from '../../../src/profile-publishing/profile-recovery.js';
+import { captureOrdinaryProfileExpectation } from '../../../src/profile-publishing/physical-profile-closure.js';
 
 let temporary: TempDirectory | undefined;
 afterEach(async () => { await temporary?.cleanup(); temporary = undefined; });
@@ -74,6 +77,43 @@ async function writeManagedState(profile: string, state = managedState()) {
 }
 
 describe('hidden managed profile lifecycle', () => {
+  it.each([false, true])('reads and selects direct references with inert source-units and sidecar=%s, without lifecycle transport authority', async (sidecar) => {
+    const home = await setup(), root = await plainProfile(home, 'source');
+    const target = temporary!.path('external/review');
+    await mkdir(target, { recursive: true }); await writeFile(join(target, 'SKILL.md'), '---\nname: review\n---\n');
+    await mkdir(join(root, 'skills')); await symlink(target, join(root, 'skills/review'), 'dir');
+    await mkdir(join(root, 'source-units')); await symlink('/missing-inert-target', join(root, 'source-units/opaque'));
+    if (sidecar) await writeFile(join(root, '.bazframe-profile-state.json'), encodeManagedProfileState({ schemaVersion: 1, profileInstanceId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', publication: null, capturedResourceIds: [], importedResources: [] }, capturedProfileLimitPolicy()));
+    expect((await loadProfile(home, 'source')).skillDirectories).toEqual([join(root, 'skills/review')]);
+    const view = await readProfileSystemView(home);
+    expect(view.resources).toEqual([]); expect(view.skills).toEqual([]);
+    expect((await useManagedProfile(home, 'source')).active).toBe(true);
+    expect(await readFile(join(home, 'active-profile'), 'utf8')).toBe('source\n');
+    await expect(duplicateManagedProfile(home, 'source', 'copy')).rejects.toThrow('source-units');
+    await expect(useManagedProfile(home, 'sram-dev')).rejects.toThrow();
+    expect(await readFile(join(home, 'active-profile'), 'utf8')).toBe('source\n');
+    expect(await readlink(join(root, 'source-units/opaque'))).toBe('/missing-inert-target');
+    expect(await readFile(join(target, 'SKILL.md'), 'utf8')).toBe('---\nname: review\n---\n');
+  });
+
+  it.each([false, true])('refuses a broken direct target with preceding valid sibling=%s and preserves selection', async (sibling) => {
+    const home = await setup(), root = await plainProfile(home, 'source');
+    await mkdir(join(root, 'skills'));
+    if (sibling) {
+      const target = temporary!.path('external/a-valid');
+      await mkdir(target, { recursive: true });
+      await writeFile(join(target, 'SKILL.md'), '---\nname: a-valid\n---\n');
+      await symlink(target, join(root, 'skills/a-valid'), 'dir');
+    }
+    await symlink(temporary!.path('missing/z-broken'), join(root, 'skills/z-broken'), 'dir');
+    await writeFile(join(home, 'active-profile'), 'previous\n');
+    await expect(loadProfile(home, 'source')).rejects.toMatchObject({ code: 'SKILL_READ_FAILED' });
+    await expect(captureOrdinaryProfileExpectation(home, 'source')).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(readProfileSystemView(home)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(useManagedProfile(home, 'source')).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await readFile(join(home, 'active-profile'), 'utf8')).toBe('previous\n');
+  });
+
   it('duplicates sidecar-free profiles without eager state and keeps the result inactive', async () => {
     const home = await setup();
     await plainProfile(home, 'active');

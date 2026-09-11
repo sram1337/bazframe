@@ -17,9 +17,14 @@ vi.mock('node:path', async (original) => {
 afterEach(() => vi.restoreAllMocks());
 import { BazframeError } from '../../../src/core/errors.js';
 import * as operationLocks from '../../../src/profile-publishing/profile-operation-lock.js';
-import { addProfile, currentProfile } from '../../../src/profiles/profile-management.js';
+import { addProfile, currentProfile, listProfiles } from '../../../src/profiles/profile-management.js';
 import { createWindowsProfileProvisioningServicesForInternalTesting } from '../../../src/profiles/win32-profile-provisioning.js';
 import { createWindowsProfileSelectionReadServicesForInternalTesting } from '../../../src/profiles/win32-profile-selection.js';
+import { loadProfile } from '../../../src/profiles/profile-store.js';
+import { addProfileSkill, removeProfileSkill } from '../../../src/profiles/profile-skill-membership.js';
+import { createWindowsOrdinaryProfileReads } from '../../../src/profile-publishing/win32-physical-profile-reads.js';
+import { capturedProfileLimitPolicy } from '../../../src/profile-publishing/profile-publishing-policy.js';
+import { encodeManagedProfileState } from '../../../src/profile-publishing/publication-state.js';
 import { inspectManagedProfileActivation, useManagedProfile } from '../../../src/profile-publishing/profile-managed-lifecycle.js';
 import { createWindowsProfileActivationServicesForInternalTesting, type WindowsProfileActivationTestOptions } from '../../../src/profile-publishing/win32-profile-activation.js';
 import { ensureWindowsPrivateDirectoryPath } from '../../../src/state/win32-private-directory.js';
@@ -55,6 +60,86 @@ async function membershipFixture() {
 }
 
 describe('actual managed activation with native observations', () => {
+  it.each([false, true])('loads/lists/uses unregistered references and inert legacy content with sidecar=%s', async (sidecar) => {
+    const f = await membershipFixture(); f.nodes.delete(f.catalog);
+    const inert = `${HOME}\\profiles\\alpha\\source-units`;
+    f.directory(inert); f.reparse(`${inert}\\opaque`);
+    const enumerate = f.backend.enumerateStableDirectory;
+    f.backend.enumerateStableDirectory = async (path, max) => { if (path.startsWith(inert)) throw new Error('inert contents must not be traversed'); return enumerate(path, max); };
+    if (sidecar) f.file(`${HOME}\\profiles\\alpha\\.bazframe-profile-state.json`, encodeManagedProfileState({ schemaVersion: 1, profileInstanceId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', publication: null, capturedResourceIds: [], importedResources: [] }, capturedProfileLimitPolicy()));
+    const platform = createWindowsAddedSkillPlatformServicesForInternalTesting(f.backend);
+    const before = f.snapshot();
+    expect((await loadProfile(HOME, 'alpha', { platformServices: platform })).skillDirectories).toEqual([f.target]);
+    expect(await listProfiles(HOME, { provisioningServices: createWindowsProfileProvisioningServicesForInternalTesting(f.backend) })).toEqual({ profileIds: ['alpha', 'bravo'], diagnostics: [] });
+    const view = await f.services().readSystemView(HOME);
+    expect(view.resources).toEqual([]); expect(view.skills).toEqual([]);
+    expect(view.profiles.find((profile) => profile.name === 'alpha')?.resourceIdentities).toEqual([]);
+    expect(f.snapshot()).toBe(before);
+    await expect(createWindowsOrdinaryProfileReads(f.backend).captureExpectation(HOME, 'alpha')).rejects.toThrow('source-units');
+    const preserved = JSON.stringify([...f.nodes].filter(([path]) => path.startsWith(`${HOME}\\profiles\\`) || path.startsWith(f.target) || path.startsWith(`${HOME}\\skills`)));
+    expect((await useManagedProfile(HOME, 'alpha', f.services())).active).toBe(true);
+    expect(JSON.stringify([...f.nodes].filter(([path]) => path.startsWith(`${HOME}\\profiles\\`) || path.startsWith(f.target) || path.startsWith(`${HOME}\\skills`)))).toBe(preserved);
+    expect(await currentProfile(HOME, f.selection)).toBe('alpha');
+    await expect(useManagedProfile(HOME, 'sram-dev', f.services())).rejects.toThrow();
+    expect(await currentProfile(HOME, f.selection)).toBe('alpha');
+  });
+
+  it('keeps unregistered management and strict capture refused with no profile/source writes', async () => {
+    const f = await membershipFixture(); f.nodes.delete(f.catalog);
+    const platformServices = createWindowsAddedSkillPlatformServicesForInternalTesting(f.backend, { lockIo: f.io });
+    await expect(createWindowsOrdinaryProfileReads(f.backend).captureExpectation(HOME, 'alpha')).rejects.toMatchObject({ code: 'DEFAULT_SKILL_NOT_FOUND' });
+    const source = JSON.stringify([...f.nodes].filter(([path]) => path.startsWith(`${HOME}\\profiles\\`) || path.startsWith(f.target)));
+    await expect(addProfileSkill({ bazframeHome: HOME, platformServices }, 'alpha', 'demo-skill')).rejects.toThrow();
+    await expect(removeProfileSkill({ bazframeHome: HOME, platformServices }, 'alpha', 'demo-skill')).rejects.toThrow();
+    expect(JSON.stringify([...f.nodes].filter(([path]) => path.startsWith(`${HOME}\\profiles\\`) || path.startsWith(f.target)))).toBe(source);
+  });
+
+  it('does not grant same-name foreign references catalog ownership', async () => {
+    const f = await membershipFixture(); const other = 'C:\\boundary\\other\\demo-skill';
+    f.directory('C:\\boundary\\other'); f.directory(other); f.file(`${other}\\SKILL.md`, '---\nname: demo-skill\n---\n');
+    const membership = f.backend.inspectMembershipLink;
+    f.backend.inspectMembershipLink = (path) => { const value = membership(path); const destination = f.backend.inspectPath(path === f.link ? other : f.target); return { ...value, normalizedTarget: destination.canonicalPath, targetVolumeIdentity: destination.object.volumeIdentity, targetFileId: destination.object.fileId }; };
+    vi.mocked(fs.readlink).mockImplementation(async (path) => String(path) === f.link ? other : f.target);
+    expect((await loadProfile(HOME, 'alpha', { platformServices: createWindowsAddedSkillPlatformServicesForInternalTesting(f.backend) })).skillDirectories).toEqual([other]);
+    const view = await f.services().readSystemView(HOME);
+    expect(view.profiles.find((profile) => profile.name === 'alpha')?.resourceIdentities).toEqual([]);
+    expect(view.skills[0]).toMatchObject({ ownerProfiles: [], selectors: ['demo-skill'], directory: f.target });
+    await expect(createWindowsOrdinaryProfileReads(f.backend).captureExpectation(HOME, 'alpha')).rejects.toThrow();
+    expect((await useManagedProfile(HOME, 'alpha', f.services())).active).toBe(true);
+  });
+
+  it.each(['definition', 'retarget'] as const)('refuses direct reference %s drift at final selection checks', async (variant) => {
+    const f = await membershipFixture(); f.nodes.delete(f.catalog);
+    await useManagedProfile(HOME, 'bravo', f.services());
+    await expect(useManagedProfile(HOME, 'alpha', f.services({ hooks: { beforeReplacement() {
+      if (variant === 'definition') f.nodes.get(`${f.target}\\SKILL.md`)!.bytes = Buffer.from('---\nname: demo-skill\n---\nchanged');
+      else f.reparse(f.link);
+    } } }))).rejects.toThrow();
+    expect(await currentProfile(HOME, f.selection)).toBe('bravo');
+  });
+
+  it('refuses a link replaced during ordinary load definition reads', async () => {
+    const f = await membershipFixture(); f.nodes.delete(f.catalog);
+    const read = f.backend.readStableFile;
+    f.backend.readStableFile = async (...args) => { const value = await read(...args); if (args[0] === `${f.target}\\SKILL.md`) f.reparse(f.link); return value; };
+    await expect(loadProfile(HOME, 'alpha', { platformServices: createWindowsAddedSkillPlatformServicesForInternalTesting(f.backend) })).rejects.toMatchObject({ code: 'SKILL_READ_FAILED' });
+  });
+
+  it('refuses direct definition drift between native capture passes', async () => {
+    const f = await membershipFixture(); f.nodes.delete(f.catalog);
+    await expect(f.services().captureExpectation(HOME, 'alpha', {}, { async beforeSecondPass() { f.nodes.get(`${f.target}\\SKILL.md`)!.bytes = Buffer.from('---\nname: demo-skill\n---\nchanged'); } })).rejects.toThrow();
+  });
+
+  it('reports bounded actionable per-profile load failures and keeps listing healthy siblings', async () => {
+    const f = await membershipFixture(); f.nodes.delete(f.catalog);
+    f.nodes.get(`${f.target}\\SKILL.md`)!.bytes = Buffer.from('invalid definition');
+    const before = f.snapshot();
+    const result = await listProfiles(HOME, { provisioningServices: createWindowsProfileProvisioningServicesForInternalTesting(f.backend) });
+    expect(result.profileIds).toEqual(['bravo']);
+    expect(result.diagnostics[0]).toContain('alpha'); expect(result.diagnostics[0]).toContain('SKILL_READ_FAILED'); expect(result.diagnostics[0]).toContain('INVALID_SKILL_DEFINITION'); expect(result.diagnostics[0]).toContain('YAML frontmatter');
+    expect(f.snapshot()).toBe(before);
+  });
+
   it.each(['volumeIdentity', 'fileId', 'size', 'allocationSize', 'numberOfLinks', 'creationTime', 'lastWriteTime', 'changeTime', 'attributes', 'reparseTag', 'deletePending', 'directory'] as const)('retains native membership object %s across actual closure passes', async (field) => {
     const f = await membershipFixture(), membership = f.backend.inspectMembershipLink;
     let drift = false;
@@ -198,14 +283,14 @@ describe('actual managed activation with native observations', () => {
     const inspection = await inspectManagedProfileActivation(HOME, 'alpha', services);
     expect(inspection.expectation).toEqual(baseline.expectation);
     await expect(services.assertExpectation(HOME, 'alpha', baseline.expectation)).resolves.toBeUndefined();
-    expect(inspection.expectation.closure.entries).toContainEqual({ path: 'skills/demo-skill', kind: 'membership-link', targetIdentity: 'catalog:skill:demo-skill' });
+    expect(inspection.expectation.closure.entries).toContainEqual(expect.objectContaining({ path: 'skills/demo-skill', kind: 'membership-link', targetIdentity: 'catalog:skill:demo-skill' }));
     const view = await services.readSystemView(HOME);
     expect(view.profiles.find((profile) => profile.name === 'alpha')?.resourceIdentities).toEqual(['catalog:skill:demo-skill']);
     expect(view.resources).toEqual([{ stableIdentity: 'catalog:skill:demo-skill', key: { kind: 'skill', name: 'demo-skill' }, ownerProfiles: ['alpha'], materialization: { kind: 'ordinary' }, projected: true }]);
     expect(view.skills[0]).toMatchObject({ ownerProfiles: ['alpha'], selectors: ['demo-skill', 'alpha/demo-skill'], directory: target, directlyAttachable: true });
     expect((await useManagedProfile(HOME, 'alpha', services)).active).toBe(true);
-    // Recreating an admitted junction to the same logical member is a fresh valid capture.
-    expect((await useManagedProfile(HOME, 'alpha', f.services({ hooks: { afterStateLock() { f.reparse(link); } } }))).active).toBe(true);
+    // Read/use binds the physical reference, not just its logical catalog identity.
+    await expect(useManagedProfile(HOME, 'alpha', f.services({ hooks: { afterStateLock() { f.reparse(link); } } }))).rejects.toThrow();
     const old = { ...f.nodes.get(`${HOME}\\active-profile`)! };
     await expect(useManagedProfile(HOME, 'alpha', f.services({ hooks: { afterStateLock() { f.file(link, 'not a junction'); } } }))).rejects.toThrow();
     expect(f.nodes.get(`${HOME}\\active-profile`)).toEqual(old);

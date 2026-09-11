@@ -17,7 +17,7 @@ import { inspectDefaultSkillCatalog, readDefaultSkillRegistration } from '../ski
 import { decodeLibrary, decodePackage, type SkillCollectionNamespace, type SkillCollectionKey, type CollectionRootPathPolicy } from '../skill-collections/skill-collection-store.js';
 import { SKILL_SNAPSHOT_LIMITS, verifySkillSnapshot, type SkillSnapshotLimitPolicy } from '../skill-collections/skill-snapshot.js';
 import { isReservedProfileSiblingName } from './publication-state.js';
-import { createWindowsOrdinaryProfileReads, createWindowsPhysicalReads } from './win32-physical-profile-reads.js';
+import { createWindowsOrdinaryProfileReads, createWindowsProfileUseReads, createWindowsPhysicalReads } from './win32-physical-profile-reads.js';
 import { createWindowsProfileStorage } from './win32-profile-storage.js';
 import { assertWindowsOperationMutationAuthority, operationAuthorityTransactionId, type OperationMutationAuthority } from './profile-operation-lock.js';
 import { assertWindowsLifecycleJournalsTerminal } from './win32-profile-lifecycle.js';
@@ -106,7 +106,7 @@ export function createWindowsProfileDataReads(backend: BazframeWin32NativeBacken
     return { records, diagnostics: [] };
   }
   const viewReads: ProfileSystemViewReadServices = {
-    ...profiles, joinPath: win32.join, readTree: storage.readTree,
+    ...createWindowsProfileUseReads(backend), joinPath: win32.join, readTree: storage.readTree,
     assertReadAuthority(home) {
       if (operation !== undefined) assertWindowsOperationMutationAuthority(operation.authority, backend, home, ['@store'], operationAuthorityTransactionId(operation.authority));
     },

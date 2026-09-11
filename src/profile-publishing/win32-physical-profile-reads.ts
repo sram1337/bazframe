@@ -3,11 +3,12 @@ import { createHash } from 'node:crypto';
 import { stableWindowsMembershipLinkInspection, stableWindowsPathInspection } from '../core/win32-stable-observation.js';
 import { win32 } from 'node:path';
 import type { BazframeWin32NativeBackend, BazframeWin32LockBackend, WindowsDirectoryEntryObservation, WindowsPathInspection } from '../core/win32-native.js';
-import { BazframeError } from '../core/errors.js';
+import { BazframeError, errorCode } from '../core/errors.js';
 import { PROFILE_PORTABILITY_PRODUCTION_LIMITS } from '../profile-portability/profile-portability-policy.js';
 import { isSafeProfileId } from '../profiles/profile-id.js';
 import { readWindowsPhysicalFileSnapshot } from '../profiles/win32-profile-selection.js';
 import { createWindowsAddedSkillPlatformServicesForInternalTesting, enumerateWindowsPhysicalDirectory } from '../skills/added-skill-platform-services.js';
+import { readDirectWindowsSkillReference } from '../skills/skill-metadata.js';
 import { readDefaultSkillRegistration } from '../skills/default-skill-catalog.js';
 import { requireDirectChild, requireEntryMatchesObject } from '../state/win32-directory-closure.js';
 import { admitWindowsPhysicalDirectory, admitWindowsPhysicalFile, isValidWindowsPathComponent } from '../state/win32-private-directory.js';
@@ -20,7 +21,7 @@ import type { ManagedProfileStateContentSnapshot } from './managed-profile-state
 import { decodeWindowsExecutableMetadata, WINDOWS_EXECUTABLE_METADATA } from './win32-profile-executable.js';
 
 /** One capture-local observation scope. Reparse classification never follows a failed physical admission. */
-export function createWindowsPhysicalReads(backend: BazframeWin32NativeBackend & BazframeWin32LockBackend, profileRoot?: string, lower: Partial<CapturedProfileLimitPolicy> = {}): PhysicalProfileReadServices {
+export function createWindowsPhysicalReads(backend: BazframeWin32NativeBackend & BazframeWin32LockBackend, profileRoot?: string, lower: Partial<CapturedProfileLimitPolicy> = {}, ordinaryUse = false): PhysicalProfileReadServices {
   const policy = capturedProfileLimitPolicy(lower);
   const admitDirectory = admitWindowsPhysicalDirectory;
   const platform = createWindowsAddedSkillPlatformServicesForInternalTesting(backend);
@@ -72,6 +73,30 @@ export function createWindowsPhysicalReads(backend: BazframeWin32NativeBackend &
   }
   return {
     collectionReferenceBytes: true,
+    ...(ordinaryUse ? { inertSourceUnits: true,
+      async ordinarySkillReference(home: string, path: string, name: string, maxBytes: number) {
+        const native = backend.inspectMembershipLink(path);
+        const entry = listed.get(normalize(path));
+        if (entry === undefined) throw changed();
+        requireEntryMatchesObject(entry.entry, native.object, 'entry-vs-directory-open');
+        observe(`${path}:native-link`, stableWindowsMembershipLinkInspection(native));
+        const reference = await readDirectWindowsSkillReference(platform, win32.dirname(path), name, maxBytes);
+        const after = backend.inspectMembershipLink(path);
+        observe(`${path}:native-link`, stableWindowsMembershipLinkInspection(after));
+        let catalogIdentity: string | undefined;
+        try {
+          const registration = await readDefaultSkillRegistration(home, name, { platformServices: platform });
+          const catalog = platform.inspectSkillLink(win32.join(home, 'skills'), name, registration.target);
+          if (catalog.kind === 'current' && catalog.canonicalTargetPath.toLowerCase() === reference.link.canonicalTargetPath.toLowerCase()) {
+            catalogIdentity = `catalog:skill:${name}`;
+            observe(`catalog:${name}`, { registration, catalog });
+          }
+        } catch (error) { if (errorCode(error) !== 'DEFAULT_SKILL_NOT_FOUND') throw error; }
+        observe(`${path}:reference`, reference.link);
+        const sha256 = createHash('sha256').update(JSON.stringify(reference.link)).update(reference.definition).digest('hex');
+        return { ...(catalogIdentity === undefined ? {} : { catalogIdentity }), sha256, bytes: reference.definition.length };
+      }
+    } : {}),
     async retainedRootFile(path, name) { if (!/^resource-[a-f0-9]{32}\.tmp$/u.test(name)) return false; await reconcile(path, admitWindowsPhysicalFile(backend, path), 'file'); return true; },
     async retainedCollectionFile(path, name) { if (!isRetainedResourceFile(name)) return false; await reconcile(path, admitWindowsPhysicalFile(backend, path), 'file'); return true; },
     ...(profileRoot === undefined ? {} : { rootMetadata: { name: WINDOWS_EXECUTABLE_METADATA, validate(bytes: Buffer, limits: CapturedProfileLimitPolicy) { modeMappings = decodeWindowsExecutableMetadata(bytes, limits).files; return modeMappings.length; },
@@ -123,7 +148,15 @@ export function createWindowsPhysicalReads(backend: BazframeWin32NativeBackend &
   };
 }
 
-export function createWindowsOrdinaryProfileReads(backend: BazframeWin32NativeBackend & BazframeWin32LockBackend): Pick<ManagedProfileActivationServices, 'captureExpectation' | 'assertExpectation'> & {
+/** Historical strict capture used by lifecycle, recovery and export. */
+export function createWindowsOrdinaryProfileReads(backend: BazframeWin32NativeBackend & BazframeWin32LockBackend) {
+  return createWindowsProfileReads(backend, false);
+}
+/** Runtime/view/selection capture; never supplies durable lifecycle or export proofs. */
+export function createWindowsProfileUseReads(backend: BazframeWin32NativeBackend & BazframeWin32LockBackend) {
+  return createWindowsProfileReads(backend, true);
+}
+function createWindowsProfileReads(backend: BazframeWin32NativeBackend & BazframeWin32LockBackend, ordinaryUse: boolean): Pick<ManagedProfileActivationServices, 'captureExpectation' | 'assertExpectation'> & {
   captureSibling(home: string, name: string, component: string, limits?: Partial<CapturedProfileLimitPolicy>, hooks?: { beforeSecondPass?: () => Promise<void> }): Promise<PhysicalProfileExpectation | undefined>;
   readManagedState(home: string, name: string, limits?: Partial<CapturedProfileLimitPolicy>): Promise<ManagedProfileStateContentSnapshot | undefined>;
 } {
@@ -136,7 +169,7 @@ export function createWindowsOrdinaryProfileReads(backend: BazframeWin32NativeBa
     if (matches.length === 0) return undefined;
     if (matches.length !== 1 || matches[0] !== component) throw changed();
     const root = win32.join(path, component);
-    const expectation = await capturePhysicalProfileAtPath(home, root, profileName, limits, hooks, createWindowsPhysicalReads(backend, root, limits));
+    const expectation = await capturePhysicalProfileAtPath(home, root, profileName, limits, hooks, createWindowsPhysicalReads(backend, root, limits, ordinaryUse));
     if ((await enumerate(path)).identity !== profiles.identity) throw changed();
     return { closure: expectation.closure, ...serializeWindowsPhysicalProfileProof(expectation) };
   }

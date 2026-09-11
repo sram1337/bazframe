@@ -16,6 +16,7 @@ const VOLUME_GUID = /^\\\\\?\\Volume\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{
 const FILE_ATTRIBUTE_DIRECTORY = 0x10;
 const FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
 const IO_REPARSE_TAG_MOUNT_POINT = 0xa0000003;
+const IO_REPARSE_TAG_SYMLINK = 0xa000000c;
 const requireFromHere = createRequire(import.meta.url);
 const nativeArtifactUrl = new URL(
   '../../artifacts/native/win32-x64-msvc/bazframe-win32.node',
@@ -735,7 +736,7 @@ function membershipLinkInspection(value: unknown): WindowsMembershipLinkInspecti
     const targetFileId = hex(record.targetFileId, HEX_128);
     if (!canonicalPath.toLowerCase().startsWith(volume.canonicalVolumeGuidPath.toLowerCase())
       || object.volumeIdentity !== volume.identity || !object.directory || object.deletePending
-      || object.reparseTag !== IO_REPARSE_TAG_MOUNT_POINT
+      || (object.reparseTag !== IO_REPARSE_TAG_MOUNT_POINT && object.reparseTag !== IO_REPARSE_TAG_SYMLINK)
       || (object.attributes & FILE_ATTRIBUTE_DIRECTORY) === 0
       || (object.attributes & FILE_ATTRIBUTE_REPARSE_POINT) === 0) invalid();
     return {
@@ -772,6 +773,7 @@ function privateJunctionCreationReceipt(
   const created = membershipLinkInspection(record.created);
   const parentAfter = pathInspection(record.parentAfter);
   if (parentBefore.kind !== 'directory' || parentAfter.kind !== 'directory'
+    || created.object.reparseTag !== IO_REPARSE_TAG_MOUNT_POINT
     || !sameDirectoryIdentity(parentBefore, parentAfter)
     || parentBefore.volume.identity !== created.volume.identity
     || !isDirectCanonicalChild(parentBefore.canonicalPath, created.canonicalPath, finalComponent)) {

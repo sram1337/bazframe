@@ -49,7 +49,9 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::IO::{DeviceIoControl, IO_STATUS_BLOCK, OVERLAPPED};
 use windows_sys::Win32::System::Ioctl::{FSCTL_GET_REPARSE_POINT, FSCTL_SET_REPARSE_POINT};
-use windows_sys::Win32::System::SystemServices::IO_REPARSE_TAG_MOUNT_POINT;
+use windows_sys::Win32::System::SystemServices::{
+    IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK,
+};
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentProcessId, GetProcessTimes, OpenProcess, OpenProcessToken,
     PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, WaitForSingleObject,
@@ -264,6 +266,7 @@ pub(crate) fn create_windows_private_junction(
         );
         if !same_directory_identity(&parent_before, &parent_after)
             || !same_stable_observation(&created_object, &created.object)
+            || created.object.reparse_tag != IO_REPARSE_TAG_MOUNT_POINT
             || created.canonical_path != expected_child
             || created.volume.identity != parent_before.volume.identity
             || created.object.volume_identity != parent_before.object.volume_identity
@@ -1337,33 +1340,36 @@ fn inspect_membership_link_once(path: &str) -> NativeResult<WindowsMembershipLin
     let tag = attribute_tag(link.0)?;
     if tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
         || tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
-        || tag.ReparseTag != IO_REPARSE_TAG_MOUNT_POINT
+        || !matches!(
+            tag.ReparseTag,
+            IO_REPARSE_TAG_MOUNT_POINT | IO_REPARSE_TAG_SYMLINK
+        )
     {
         return Err(native_error(
             "ERR_WIN32_MEMBERSHIP_LINK_INVALID",
-            "Windows membership entry is not an NTFS directory junction",
+            "Windows membership entry is not an NTFS directory junction or absolute directory symlink",
         ));
     }
     let canonical_path = final_path(link.0)?;
     let object = snapshot_membership_link(link.0)?;
     let volume = inspect_volume(link.0, &canonical_path, &object)?;
-    let target_path = read_junction_target(link.0)?;
+    let target_path = read_membership_target(link.0)?;
     let target = open_admitted_path(&target_path, FILE_READ_ATTRIBUTES).map_err(|_| {
         native_error(
             "ERR_WIN32_MEMBERSHIP_TARGET_INVALID",
-            "Windows membership junction target is not an admitted physical directory",
+            "Windows membership link target is not an admitted physical directory",
         )
     })?;
     let target_inspection = inspect_opened_path(&target).map_err(|_| {
         native_error(
             "ERR_WIN32_MEMBERSHIP_TARGET_INVALID",
-            "Windows membership junction target could not be proved",
+            "Windows membership link target could not be proved",
         )
     })?;
     if target_inspection.kind != "directory" {
         return Err(native_error(
             "ERR_WIN32_MEMBERSHIP_TARGET_INVALID",
-            "Windows membership junction target is not a physical directory",
+            "Windows membership link target is not a physical directory",
         ));
     }
 
@@ -1371,20 +1377,20 @@ fn inspect_membership_link_once(path: &str) -> NativeResult<WindowsMembershipLin
     let reopened_link = open_existing(link_path, FILE_READ_ATTRIBUTES).map_err(|_| {
         native_error(
             "ERR_WIN32_MEMBERSHIP_CHANGED",
-            "Windows membership junction changed while it was inspected",
+            "Windows membership link changed while it was inspected",
         )
     })?;
     let reopened_link_state = (|| -> NativeResult<_> {
         Ok((
             final_path(reopened_link.0)?,
             snapshot_membership_link(reopened_link.0)?,
-            read_junction_target(reopened_link.0)?,
+            read_membership_target(reopened_link.0)?,
         ))
     })()
     .map_err(|_| {
         native_error(
             "ERR_WIN32_MEMBERSHIP_CHANGED",
-            "Windows membership junction changed while it was inspected",
+            "Windows membership link changed while it was inspected",
         )
     })?;
     if reopened_link_state.0 != canonical_path
@@ -1393,7 +1399,7 @@ fn inspect_membership_link_once(path: &str) -> NativeResult<WindowsMembershipLin
     {
         return Err(native_error(
             "ERR_WIN32_MEMBERSHIP_CHANGED",
-            "Windows membership junction changed while it was inspected",
+            "Windows membership link changed while it was inspected",
         ));
     }
     let reopened_target = open_admitted_path(&target_path, FILE_READ_ATTRIBUTES)
@@ -1401,13 +1407,13 @@ fn inspect_membership_link_once(path: &str) -> NativeResult<WindowsMembershipLin
         .map_err(|_| {
             native_error(
                 "ERR_WIN32_MEMBERSHIP_CHANGED",
-                "Windows membership junction target changed while it was inspected",
+                "Windows membership link target changed while it was inspected",
             )
         })?;
     if !same_path_inspection(&target_inspection, &reopened_target) {
         return Err(native_error(
             "ERR_WIN32_MEMBERSHIP_CHANGED",
-            "Windows membership junction target changed while it was inspected",
+            "Windows membership link target changed while it was inspected",
         ));
     }
 
@@ -1461,11 +1467,14 @@ fn snapshot_membership_link(handle: HANDLE) -> NativeResult<WindowsObjectObserva
     let tag = attribute_tag(handle)?;
     if tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
         || tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
-        || tag.ReparseTag != IO_REPARSE_TAG_MOUNT_POINT
+        || !matches!(
+            tag.ReparseTag,
+            IO_REPARSE_TAG_MOUNT_POINT | IO_REPARSE_TAG_SYMLINK
+        )
     {
         return Err(native_error(
             "ERR_WIN32_MEMBERSHIP_LINK_INVALID",
-            "Windows membership entry is not an NTFS directory junction",
+            "Windows membership entry is not an NTFS directory junction or absolute directory symlink",
         ));
     }
     let id: FILE_ID_INFO = query_file_information(handle, FileIdInfo, "query membership identity")?;
@@ -1476,7 +1485,7 @@ fn snapshot_membership_link(handle: HANDLE) -> NativeResult<WindowsObjectObserva
     if standard.EndOfFile < 0 || standard.AllocationSize < 0 || standard.DeletePending {
         return Err(native_error(
             "ERR_WIN32_MEMBERSHIP_LINK_INVALID",
-            "Windows membership junction metadata is invalid",
+            "Windows membership link metadata is invalid",
         ));
     }
     Ok(WindowsObjectObservation {
@@ -1490,13 +1499,17 @@ fn snapshot_membership_link(handle: HANDLE) -> NativeResult<WindowsObjectObserva
         last_write_time: hex_i64_bits(basic.LastWriteTime),
         change_time: hex_i64_bits(basic.ChangeTime),
         attributes: basic.FileAttributes,
-        reparse_tag: IO_REPARSE_TAG_MOUNT_POINT,
+        reparse_tag: tag.ReparseTag,
         delete_pending: false,
         directory: true,
     })
 }
 
-fn read_junction_target(handle: HANDLE) -> NativeResult<String> {
+fn read_membership_target(handle: HANDLE) -> NativeResult<String> {
+    if attribute_tag(handle)?.ReparseTag == IO_REPARSE_TAG_SYMLINK {
+        let (target, relative) = read_editor_symlink(handle).map_err(|_| malformed_junction())?;
+        return absolute_membership_symlink_target(&target, relative);
+    }
     let mut buffer = [0_u8; MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
     let mut returned = 0_u32;
     // SAFETY: the opened handle names the reparse object itself and the fixed output buffer and
@@ -1514,13 +1527,22 @@ fn read_junction_target(handle: HANDLE) -> NativeResult<String> {
         )
     };
     if ok == 0 {
-        return Err(last_win_error("read Windows membership junction data"));
+        return Err(last_win_error("read Windows membership link data"));
     }
     let bytes = returned as usize;
     if bytes > buffer.len() {
         return Err(malformed_junction());
     }
     parse_mount_point_reparse_data(&buffer[..bytes])
+}
+
+fn absolute_membership_symlink_target(target: &str, relative: bool) -> NativeResult<String> {
+    if relative {
+        return Err(malformed_junction());
+    }
+    let target = target.strip_prefix("\\??\\").unwrap_or(target);
+    validate_input_path(target).map_err(|_| malformed_junction())?;
+    Ok(target.to_owned())
 }
 
 fn build_mount_point_reparse_data(target: &str) -> NativeResult<Vec<u8>> {
@@ -1657,7 +1679,7 @@ fn decode_utf16_bytes(bytes: &[u8]) -> NativeResult<String> {
 fn malformed_junction() -> Error<String> {
     native_error(
         "ERR_WIN32_MEMBERSHIP_LINK_INVALID",
-        "Windows membership junction data is malformed or ambiguous",
+        "Windows membership link data is malformed or ambiguous",
     )
 }
 
@@ -1685,6 +1707,54 @@ mod prefix_reopen_tests;
 #[cfg(test)]
 mod membership_reparse_tests {
     use super::*;
+
+    fn symlink_data(target: &str, flags: u32) -> Vec<u8> {
+        let target: Vec<u8> = target.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let mut data = Vec::new();
+        data.extend_from_slice(&IO_REPARSE_TAG_SYMLINK.to_le_bytes());
+        data.extend_from_slice(&((12 + target.len()) as u16).to_le_bytes());
+        data.extend_from_slice(&0_u16.to_le_bytes());
+        data.extend_from_slice(&0_u16.to_le_bytes());
+        data.extend_from_slice(&(target.len() as u16).to_le_bytes());
+        data.extend_from_slice(&0_u16.to_le_bytes());
+        data.extend_from_slice(&0_u16.to_le_bytes());
+        data.extend_from_slice(&flags.to_le_bytes());
+        data.extend_from_slice(&target);
+        data
+    }
+
+    #[test]
+    fn accepts_absolute_directory_symlink_targets_only() {
+        for spelling in ["C:\\physical\\skill", "\\??\\C:\\physical\\skill"] {
+            let (target, relative) =
+                parse_symlink_reparse_data(&symlink_data(spelling, 0)).unwrap();
+            assert_eq!(
+                absolute_membership_symlink_target(&target, relative).unwrap(),
+                "C:\\physical\\skill"
+            );
+        }
+        for (target, relative) in [
+            ("relative\\skill", true),
+            ("C:\\physical\\skill", true),
+            ("\\??\\UNC\\server\\share", false),
+            ("\\\\server\\share", false),
+            ("relative\\skill", false),
+        ] {
+            assert!(absolute_membership_symlink_target(target, relative).is_err());
+        }
+    }
+
+    #[test]
+    fn refuses_malformed_symlink_buffers_without_following() {
+        let valid = symlink_data("\\??\\C:\\physical\\skill", 0);
+        for offset in [0, 4, 6, 8, 10, 12, 14, 16] {
+            let mut malformed = valid.clone();
+            malformed[offset] ^= 0xff;
+            assert!(parse_symlink_reparse_data(&malformed).is_err());
+        }
+        assert!(parse_symlink_reparse_data(&valid[..19]).is_err());
+        assert!(parse_symlink_reparse_data(&symlink_data("C:\\bad\0target", 0)).is_err());
+    }
 
     #[test]
     fn accepts_exact_mount_point_data() {
@@ -3182,7 +3252,15 @@ fn read_editor_symlink(handle: HANDLE) -> NativeResult<(String, bool)> {
         return Err(last_win_error("read editor file symlink"));
     }
     let length = returned as usize;
-    if length < 20 || length > buffer.len() {
+    if length > buffer.len() {
+        return Err(editor_invalid());
+    }
+    parse_symlink_reparse_data(&buffer[..length])
+}
+
+fn parse_symlink_reparse_data(buffer: &[u8]) -> NativeResult<(String, bool)> {
+    let length = buffer.len();
+    if !(20..=MAXIMUM_REPARSE_DATA_BUFFER_SIZE).contains(&length) {
         return Err(editor_invalid());
     }
     let u16_at = |offset| u16::from_le_bytes([buffer[offset], buffer[offset + 1]]) as usize;

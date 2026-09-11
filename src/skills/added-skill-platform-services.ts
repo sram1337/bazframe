@@ -60,7 +60,7 @@ export type AddedSkillLinkState =
   | { kind: 'absent'; identity: string }
   | {
       kind: 'current';
-      /** Usable drive-absolute junction spelling, not canonical authority. */
+      /** Usable drive-absolute direct-link spelling, not canonical authority. */
       targetPath: string;
       /** Native canonical physical target bound to the exact target identity. */
       canonicalTargetPath: string;

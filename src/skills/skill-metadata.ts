@@ -1,9 +1,22 @@
-import { join } from 'node:path';
+import { join, win32 } from 'node:path';
+import type { AddedSkillPlatformServices } from './added-skill-platform-services.js';
 import { readUtf8InstructionFile } from '../core/content.js';
 import { BazframeError } from '../core/errors.js';
 import { assertSafeSkillId } from './skill-id.js';
 
 export const SKILL_DEFINITION = 'SKILL.md';
+
+/** Read authority only: a physical direct target and bounded definition, not catalog membership. */
+export async function readDirectWindowsSkillReference(platform: AddedSkillPlatformServices, parent: string, name: string, maxBytes = MAX_SKILL_DEFINITION_BYTES) {
+  const link = await platform.readSkillLink(parent, name);
+  if (link.kind !== 'current') throw new BazframeError('SKILL_READ_FAILED', 'Direct Skill reference disappeared.');
+  const path = (platform.joinPath ?? win32.join)(link.targetPath, SKILL_DEFINITION);
+  const definition = await platform.readStableUtf8File(path, 'Skill definition', Math.min(maxBytes, MAX_SKILL_DEFINITION_BYTES));
+  if (parseSkillDeclaredName(definition, path) !== name) throw new BazframeError('SKILL_READ_FAILED', 'Direct Skill reference declares another name.');
+  const after = platform.inspectSkillLink(parent, name, link.targetPath);
+  if (after.kind !== 'current' || after.identity !== link.identity) throw new BazframeError('SKILL_READ_FAILED', 'Direct Skill reference changed while reading its definition.');
+  return { link, definition: Buffer.from(definition, 'utf8') };
+}
 
 export interface SkillMetadataReader {
   readStableUtf8File(path: string, label: string, maxBytes: number): Promise<string>;

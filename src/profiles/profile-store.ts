@@ -1,4 +1,4 @@
-import { readSkillDeclaredName } from '../skills/skill-metadata.js';
+import { readSkillDeclaredName, readDirectWindowsSkillReference } from '../skills/skill-metadata.js';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { join } from 'node:path';
@@ -10,7 +10,6 @@ import { readAtMostOneBeyond } from '../state/bounded-file-read.js';
 import { withStateLock } from '../state/lock.js';
 export { resolveBazframeHome } from '../state/paths.js';
 import type { AddedSkillPlatformServices } from '../skills/added-skill-platform-services.js';
-import { readDefaultSkillRegistration } from '../skills/default-skill-catalog.js';
 import { isSafeSkillId } from '../skills/skill-id.js';
 import { assertSafeProfileId } from './profile-id.js';
 
@@ -43,7 +42,7 @@ export async function loadProfile(
 ): Promise<Profile> {
   const directory = profileDirectory(bazframeHome, profileId);
   if (options.platformServices !== undefined) {
-    return loadWindowsProfile(bazframeHome, profileId, (options.platformServices.joinPath ?? join)(bazframeHome, 'profiles', profileId), options.platformServices);
+    return loadWindowsProfile(profileId, (options.platformServices.joinPath ?? join)(bazframeHome, 'profiles', profileId), options.platformServices);
   }
   let metadata;
   try {
@@ -85,7 +84,6 @@ export async function loadProfile(
 }
 
 async function loadWindowsProfile(
-  bazframeHome: string,
   profileId: string,
   directory: string,
   platformServices: AddedSkillPlatformServices
@@ -145,27 +143,16 @@ async function loadWindowsProfile(
       skillDirectories.push(local);
       continue;
     }
-    let registration;
     try {
-      registration = await readDefaultSkillRegistration(
-        bazframeHome,
-        skillId,
-        { platformServices }
-      );
-      const membership = platformServices.inspectSkillLink(
-        skillsRoot,
-        skillId,
-        registration.target
-      );
-      if (membership.kind !== 'current') throw new Error('membership disappeared');
+      const reference = await readDirectWindowsSkillReference(platformServices, skillsRoot, skillId);
+      skillDirectories.push(reference.link.targetPath);
     } catch (error) {
       throw new BazframeError(
         'SKILL_READ_FAILED',
-        `Could not prove catalog-backed profile skill candidate: ${pathJoin(skillsRoot, skillId)}${formatErrorCode(error)}`,
+        `Could not prove direct profile skill reference: ${pathJoin(skillsRoot, skillId)}${formatErrorCode(error)}`,
         { cause: error }
       );
     }
-    skillDirectories.push(registration.target);
   }
   if (enumeration.identity !== 'absent') {
     const after = await platformServices.enumeratePrivateDirectory(
@@ -173,6 +160,7 @@ async function loadWindowsProfile(
       ADDED_SKILL_NAMESPACE_ENTRY_LIMIT
     );
     if (after.identity !== enumeration.identity
+      || JSON.stringify(after.entries) !== JSON.stringify(enumeration.entries)
       || after.names.join('\0') !== enumeration.names.join('\0')) {
       throw new BazframeError(
         'SKILLS_READ_FAILED',

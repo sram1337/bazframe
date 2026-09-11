@@ -13,6 +13,21 @@ import { readProfileSystemView, resolveProfileResourceSelector } from '../../../
 let temporary: TempDirectory | undefined;
 afterEach(async () => { await temporary?.cleanup(); temporary = undefined; });
 
+describe('ordinary direct-reference view', () => {
+  it('keeps a differently targeted same-name reference out of catalog ownership and selectors', async () => {
+    const { home } = await setup();
+    const external = temporary!.path('external/review'), registered = temporary!.path('registered/review');
+    for (const target of [external, registered]) { await mkdir(target, { recursive: true }); await writeFile(join(target, 'SKILL.md'), '---\nname: review\n---\n'); }
+    await mkdir(join(home, 'skills')); await symlink(await realpath(registered), join(home, 'skills/review'), 'dir');
+    await mkdir(join(home, 'profiles/work/skills'), { recursive: true }); await writeFile(join(home, 'profiles/work/AGENTS.md'), 'work\n');
+    await symlink(external, join(home, 'profiles/work/skills/review'), 'dir');
+    const view = await readProfileSystemView(home);
+    expect(view.profiles[0]?.resourceIdentities).toEqual([]);
+    expect(view.skills).toEqual([expect.objectContaining({ directory: await realpath(registered), ownerProfiles: [], selectors: ['review'], directlyAttachable: true })]);
+    expect(view.resources.every((resource) => resource.ownerProfiles.length === 0)).toBe(true);
+  });
+});
+
 const alphaId = '11111111-1111-4111-8111-111111111111';
 const betaId = '22222222-2222-4222-8222-222222222222';
 const captureA = 'a'.repeat(64);

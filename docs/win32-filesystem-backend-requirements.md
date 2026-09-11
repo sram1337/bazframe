@@ -220,17 +220,18 @@ Profile editor launch retains the current shell-free `VISUAL`/`EDITOR` executabl
 
 ### 6.4 Skill membership and source lifecycle
 
-Ordinary Skill membership remains a direct shared reference with no copy fallback. On Windows the accepted representation is one exactly validated directory symlink or junction. Creation and use require:
+Ordinary Skill membership remains a direct shared reference with no copy fallback. On Windows existing read/use accepts one exactly validated absolute directory symlink or junction independently of catalog registration. Fresh private creation produces a junction with a junction-specific creation receipt. Direct-reference admission requires:
 
 - an accepted safe membership name and physical parent;
 - an exact absolute canonical target on independently accepted local storage;
-- no-replace link creation;
 - a recognized directory-symlink or junction tag and normalized exact target;
 - immediate parent, link, target, and target-identity revalidation;
 - direct target behavior rather than a link chain; and
-- refusal of foreign, malformed, substituted, or otherwise unexpected reparses.
+- refusal of relative, UNC, chained, malformed, substituted, or otherwise unexpected reparses.
 
-Removal revalidates the exact current target and removes only the membership link as a leaf, never traversing or deleting its target. Native identity-bound link removal or a held link-object capability may harden this boundary but is not required for parity. After an uncertain final syscall, Bazframe reports the observed present/absent/ambiguous state without deleting a target. The disclosed same-user final-syscall race remains.
+Ordinary load/view/use binds the physical link and target plus bounded matching `SKILL.md` evidence, without recursively fingerprinting the external Skill tree. Only exact matching catalog links project catalog resource ownership and selectors. An unregistered or differently targeted reference remains read-only runtime input, not catalog mutation authority. Ordinary view/use also preserves the exact physical profile `source-units` root without traversing its inert contents. Export, lifecycle, candidate, and recovery captures remain strict.
+
+Membership add/remove still requires exact current catalog authorization; creation is no-replace. Removal revalidates the exact current target and removes only the membership link as a leaf, never traversing or deleting its target. Native identity-bound link removal or a held link-object capability may harden this boundary but is not required for parity. After an uncertain final syscall, Bazframe reports the observed present/absent/ambiguous state without deleting a target. The disclosed same-user final-syscall race remains.
 
 `skill add|update|remove|edit|list` and `profile skill add|remove|list` retain stable remote checkout paths, provenance, reference-index refusal, lock ordering, exact parallel links, idempotence, diagnostics, and local-versus-remote ownership. `skill edit` remains limited to an externally owned local Added Skill and retains its contained final-file-link, shell-free editor, and immediate revalidation contract.
 
@@ -266,7 +267,7 @@ The Windows port must preserve the exact implemented feature and CLI-only bounda
 
 Current correction: native contract 8 separates physical observations from mandatory `creationSecurity` receipts, removes existing owner/ACL admission and ordinary single-link input refusal, and removes the raw-list selection dependency. Foundation receipt schema 7 and product-slice schema 4 require new observations; older receipts are historical evidence only and cannot qualify these semantics. A lost fresh-junction creation receipt leaves a present authorized junction ambiguous rather than asserting private creation; a previously present exact junction remains current. The correction and its final diagnostic cleanup are independently accepted at source/host level. The changed contract-8 binary still requires native and installed-product qualification; this correction has only source/host evidence.
 
-The Bazframe-owned Windows x64 Rust/N-API backend supplies local-NTFS/path admission, lossless physical identity inspection and separate same-handle fresh-creation security evidence, bounded whole-file and ranged reads/enumeration, protected private directory/file creation, no-replace sibling directory and regular-file publication, same-volume two-admitted-parent directory movement, cooperating-writer locks, exact authorized junction inspection and private creation, and native contract 8 read-only contained final-file editor inspection. These capabilities address measured Node/Windows gaps. TypeScript owns product policy and composes the narrow native operations; implementation topology is not a permanent product requirement.
+The Bazframe-owned Windows x64 Rust/N-API backend supplies local-NTFS/path admission, lossless physical identity inspection and separate same-handle fresh-creation security evidence, bounded whole-file and ranged reads/enumeration, protected private directory/file creation, no-replace sibling directory and regular-file publication, same-volume two-admitted-parent directory movement, cooperating-writer locks, exact direct directory-link inspection and private junction creation, and native contract 8 read-only contained final-file editor inspection. These capabilities address measured Node/Windows gaps. TypeScript owns product policy and composes the narrow native operations; implementation topology is not a permanent product requirement.
 
 Internal onboarding, healthy local Skill membership and managed activation/current/switching exist behind injected services. Onboarding retains its directory-publication/recovery composition; the connected product uses shared lifecycle policy rather than nesting transaction engines.
 
