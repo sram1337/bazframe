@@ -241,8 +241,8 @@ export interface Win32NativeLoadOptions {
 }
 
 /**
- * Loads the root-bundled Bazframe binary for internal capability tests.
- * The public CLI platform gate does not call or expose this function.
+ * Loads the root-bundled Bazframe binary with exact capability checks.
+ * Public Windows application services load this package-local backend lazily.
  */
 export function loadBazframeWin32Native(
   options: Win32NativeLoadOptions = {}

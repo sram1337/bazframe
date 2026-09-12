@@ -10,12 +10,14 @@ You need:
 
 - Node.js 22.19.0 or newer, including `npm`.
 - Pi 0.84.4 or newer, excluding the broken published 0.85.0 package.
-- macOS or Linux.
+- macOS, Linux, or native Windows x64 with accepted local NTFS for Bazframe home and temporary/staging state, plus the matching bundled native addon. Windows ARM64 and network-backed managed state are unsupported.
 - Access to a Pi-supported model provider.
 
 Git is not required for basic profile use or ZIP import/export. System Git is required for public Git profile import and remote resources; publishing and private Git import also require GitHub CLI (`gh`). Bazframe installs only exact profile commits reachable from the repository's `refs/heads/main`.
 
 After installing Pi, start it and enter `/login` to choose and authenticate with a model provider. Pi supports selected subscriptions and API keys; see [Pi's provider and authentication documentation](https://github.com/earendil-works/pi#readme).
+
+Use drive-absolute paths on Windows, such as `C:\Skills\review`. `VISUAL` then `EDITOR` selects one executable name/path, not a shell command; fixed flags require an executable wrapper. No compiler, WSL or runtime native download is required by the accepted Windows package. TUI terminal coverage remains separately bounded.
 
 ## Install and update
 
@@ -26,7 +28,7 @@ npm install --global --ignore-scripts '@earendil-works/pi-coding-agent@>=0.84.4 
 npm install --global bazframe
 ```
 
-The current beta is Bazframe's default npm release. Verify the installed commands:
+The current beta is Bazframe's default npm release. This source prepares Windows public routing; the already-published `0.1.0-beta.3` is unchanged. Windows use requires a separately qualified package with the matching native addon, not an ordinary binary-free checkout build. See [the Windows requirements](win32-filesystem-backend-requirements.md). Verify the installed commands:
 
 ```bash
 pi --version

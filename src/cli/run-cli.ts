@@ -14,10 +14,6 @@ import { childExitStatus, spawnPi } from '../agents/spawn-pi.js';
 import { BazframeError } from '../core/errors.js';
 import { EXIT_STATUS } from '../core/exit-status.js';
 import type { InheritedChildRunner } from '../core/external-editor.js';
-import {
-  assertBazframePlatformSupported,
-  WINDOWS_PLATFORM_UNSUPPORTED_CODE
-} from '../core/platform-support.js';
 import { boundedPathForDisplay, boundedTextForDisplay, escapeUnsafeDisplayCharacters, stringifyForTerminal } from '../core/safe-text.js';
 import { composeInstructions } from '../harness/compose-instructions.js';
 import { createTemporaryInstructionFile } from '../harness/temporary-instructions.js';
@@ -208,13 +204,12 @@ export interface CliDependencies {
   }) => Promise<number>;
 }
 
-export function runCli(argv: readonly string[], dependencies: CliDependencies = {}): Promise<number> { return runCliShared(argv, dependencies, true); }
-/** The sole internal gate bypass; every post-gate handler and composition is shared. */
-export function runCliForInternalTesting(argv: readonly string[], dependencies: CliDependencies & { application: ApplicationServices }): Promise<number> { return runCliShared(argv, dependencies, false); }
+export function runCli(argv: readonly string[], dependencies: CliDependencies = {}): Promise<number> { return runCliShared(argv, dependencies); }
+/** Compatibility test wrapper; public and internal callers use identical dispatch. */
+export function runCliForInternalTesting(argv: readonly string[], dependencies: CliDependencies & { application: ApplicationServices }): Promise<number> { return runCli(argv, dependencies); }
 async function runCliShared(
   argv: readonly string[],
-  dependencies: CliDependencies,
-  publicGate: boolean
+  dependencies: CliDependencies
 ): Promise<number> {
   const writeStdout = dependencies.writeStdout ?? ((text: string) => process.stdout.write(text));
   const writeStderr = dependencies.writeStderr ?? ((text: string) => process.stderr.write(text));
@@ -227,7 +222,7 @@ async function runCliShared(
     environment,
     dependencies.stderrIsTty ?? process.stderr.isTTY === true
   ));
-  const parsed = parseArgv(argv, publicGate ? undefined : dependencies.application?.paths.isAbsolute);
+  const parsed = parseArgv(argv, dependencies.application?.paths.isAbsolute ?? ((dependencies.platform ?? process.platform) === 'win32' ? nodePaths.win32.isAbsolute : nodePaths.isAbsolute));
   const jsonMode = 'json' in parsed && parsed.json === true;
 
   if (parsed.kind === 'help') {
@@ -252,8 +247,7 @@ async function runCliShared(
     let result: Record<string, unknown> | undefined;
     const diagnostics: ProtocolDiagnostic[] = [];
     try {
-      if (publicGate) assertBazframePlatformSupported(dependencies.platform);
-      dependencies = { ...dependencies, application: dependencies.application ?? createApplicationServices() };
+      dependencies = { ...dependencies, application: dependencies.application ?? createApplicationServices(dependencies.platform) };
       if(parsed.command.name==='profile-publish'&&!parsed.command.yes)throw new BazframeError('PROFILE_PUBLISH_CONFIRMATION_REQUIRED','Profile publication in JSON mode requires --yes.');
       if (parsed.command.name === 'packages-add' && isManagedGitSource(parsed.command.root) && !parsed.command.yes) throw new BazframeError('MANAGED_GIT_BUILD_CONFIRMATION_REQUIRED', 'Package acquisition from a remote Git source in JSON mode requires --yes.');
       if (parsed.command.name === 'packages-update' && !parsed.command.yes) throw new BazframeError('MANAGED_GIT_BUILD_CONFIRMATION_REQUIRED', 'Package update from a remote Git source in JSON mode requires --yes.');
@@ -278,16 +272,12 @@ async function runCliShared(
   }
 
   try {
-    if (publicGate) assertBazframePlatformSupported(dependencies.platform);
-    dependencies = { ...dependencies, application: dependencies.application ?? createApplicationServices() };
+    dependencies = { ...dependencies, application: dependencies.application ?? createApplicationServices(dependencies.platform) };
     return await invokeWithProfileRuntime(parsed.command, dependencies, (next) => runCommand(parsed.command,next,writeStdout,writeStderr,stdoutColors,stderrColors));
   } catch (error) {
     const id=commandId(parsed.command);
     const message = isLifecycleCommandId(id)?projectLifecycleSafeMessage(error instanceof Error?error.message:'Bazframe encountered an unexpected internal error.'):boundedTextForDisplay(error instanceof Error ? error.message : String(error));
-    const code = error instanceof BazframeError && error.code === WINDOWS_PLATFORM_UNSUPPORTED_CODE
-      ? `${WINDOWS_PLATFORM_UNSUPPORTED_CODE}: `
-      : '';
-    writeStderr(`${stderrColors.error('error:')} ${code}${message}\n`);
+    writeStderr(`${stderrColors.error('error:')} ${message}\n`);
     return interruptionExitStatus(error) ?? (isLifecycleCommandId(id)&&isLifecycleRefusalError(error)?EXIT_STATUS.usage:EXIT_STATUS.failure);
   }
 }

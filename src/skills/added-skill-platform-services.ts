@@ -17,6 +17,7 @@ import { withWindowsOperationLock } from '../state/win32-operation-lock.js';
 import {
   admitWindowsPhysicalDirectory,
   createWindowsPrivateDirectory,
+  ensureWindowsPrivateDirectoryPath,
   isValidWindowsPathComponent
 } from '../state/win32-private-directory.js';
 import {
@@ -68,10 +69,13 @@ export type AddedSkillLinkState =
     };
 
 /**
- * Narrow internal product seam for the healthy local added-Skill lifecycle.
- * Supplying it never bypasses the public Windows platform gate.
+ * Platform effects for the healthy local added-Skill lifecycle.
  */
 export interface AddedSkillPlatformServices {
+  /** Read-only canonical home spelling through physically admitted existing ancestry. */
+  canonicalHomePath?(home: string): string;
+  /** Protected bootstrap; callers must validate source and overlap before creation. */
+  ensureHomePath?(home: string): void;
   assertManagedSkillLocation?(home: string, canonicalTarget: string): Promise<void>;
   joinPath?: typeof win32.join;
   resolvePath?: typeof win32.resolve;
@@ -103,13 +107,30 @@ export interface AddedSkillPlatformServices {
   ): Promise<'removed' | 'absent'>;
 }
 
-/** Internal construction seam used by native conformance; public dispatch does not import it. */
+/** Shared Windows construction seam, also used by native conformance. */
 export function createWindowsAddedSkillPlatformServicesForInternalTesting(
   backend: BazframeWin32NativeBackend & BazframeWin32LockBackend,
   options: { lockIo?: import('../state/win32-operation-lock.js').WindowsOperationLockIo; membershipIo?: import('../state/win32-skill-membership.js').WindowsSkillMembershipIo; readLinkPath?: (path: string) => Promise<string> } = {}
 ): AddedSkillPlatformServices {
   return {
     joinPath: win32.join, resolvePath: win32.resolve, isAbsolutePath: win32.isAbsolute,
+    canonicalHomePath(home) {
+      const missing: string[] = [];
+      let cursor = home;
+      for (;;) {
+        try {
+          const existing = admitWindowsPhysicalDirectory(backend, cursor);
+          return win32.join(existing.canonicalPath, ...missing);
+        } catch (error) {
+          if (errorCode(error) !== 'WINDOWS_NATIVE_PATH_NOT_FOUND') throw error;
+          const parent = win32.dirname(cursor);
+          if (parent === cursor || !isValidWindowsPathComponent(win32.basename(cursor))) throw error;
+          missing.unshift(win32.basename(cursor));
+          cursor = parent;
+        }
+      }
+    },
+    ensureHomePath(home) { ensureWindowsPrivateDirectoryPath(backend, home); },
     selectionReadServices: { readSelectedProfileId: async (home) => (await readWindowsSelectionSnapshot(backend, home)).profileId },
     async assertManagedSkillLocation(home, canonicalTarget) {
       const id = win32.basename(canonicalTarget);

@@ -284,6 +284,7 @@ async function setup() {
   const lockEvents: string[] = [];
 
   const services: AddedSkillPlatformServices = {
+    joinPath: join,
     async withLock(lockPath, _details, operation) {
       lockEvents.push(`enter:${lockPath}`);
       let held = true;

@@ -27,16 +27,16 @@ export function verifyProductReceipt(value, packageRootKind, binarySha256) {
     'observations',
     'failures'
   ]);
-  if (value.schemaVersion !== 4
-    || value.purpose !== 'Internal managed profile activation, current selection, onboarding and healthy local added-Skill Windows product-slice evidence only.'
+  if (value.schemaVersion !== 5
+    || value.purpose !== 'Limited Windows product-slice evidence: internal managed profile activation, current selection, onboarding, healthy local added-Skill lifecycle and public CLI smoke only.'
     || value.packageRootKind !== packageRootKind
     || value.completion !== 'passed'
     || value.releaseAdmission !== 'not-authorized'
     || value.windowsSupportClaim !== false
-    || value.publicWindowsGate !== 'closed'
+    || value.publicWindowsGate !== 'open'
     || !Array.isArray(value.failures)
     || value.failures.length !== 0) {
-    throw new Error('Windows added-Skill evidence changed its exact closed contract.');
+    throw new Error('Windows added-Skill evidence changed its exact limited product contract.');
   }
   const names = [
     'binarySha256',
@@ -83,7 +83,10 @@ export function verifyProductReceipt(value, packageRootKind, binarySha256) {
     'linkLeavesAbsent',
     'sourcePreserved',
     'nativeLockNamespacesPersist',
-    'publicWindowsGateClosed',
+    'publicEntrypointMappings',
+    'publicFreshProfileLifecycle',
+    'publicActiveForceRemoveRefusedUnchanged',
+    'publicAbsentHomeReadOnly',
     'currentMissingNoWrites',
     'activeMissingSelectionRefused',
     'selectionProtectedFirstVisibility',

@@ -138,7 +138,7 @@ describe('qualification-only transfer and promotion', () => {
 
   it('requires every product boolean and exact source/packed roots before promotion', async () => {
     const f = await fixture(), source = productReceipt('source-tree');
-    const names = Object.keys(source.observations).slice(1); expect(names).toHaveLength(72);
+    const names = Object.keys(source.observations).slice(1); expect(names).toHaveLength(75);
     const promote = (receipt: unknown) => promoteQualificationInputs({ foundation: f.foundation, source: new Map([['source.json', json(receipt)]]),
       installed: f.productInstalled, foundationBinding: baseBinding, sourceBinding: baseBinding, installedBinding: baseBinding, expected, options: f.options });
     for (const name of names) for (const value of [false, undefined, 'true']) {
@@ -147,7 +147,7 @@ describe('qualification-only transfer and promotion', () => {
     }
     await expect(promote(productReceipt('packed-install'))).rejects.toThrow();
     await expect(promote({ ...source, schemaVersion: 2 })).rejects.toThrow();
-    await expect(promote({ ...source, publicWindowsGate: 'open' })).rejects.toThrow();
+    await expect(promote({ ...source, publicWindowsGate: 'closed' })).rejects.toThrow();
     await expect(promote({ ...source, failures: ['private'] })).rejects.toThrow();
   });
 
@@ -197,8 +197,10 @@ describe('qualification-only transfer and promotion', () => {
 describe('whole-tarball reconstruction', () => {
   it('builds independently in two temporary roots and compares real npm whole bytes, refusing drift before a product starts', async () => {
     const root = await mkdtemp(join(tmpdir(), 'bazframe-repack-')); roots.push(root);
-    // Include nonignored untracked inputs so independent builds reflect development work without staging.
+    // Include untracked inputs and exclude tracked deletions so independent builds reflect development work without staging.
     const files = spawnSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], { encoding: 'utf8' }); expect(files.status).toBe(0);
+    const deleted = spawnSync('git', ['ls-files', '--deleted', '-z'], { encoding: 'utf8' }); expect(deleted.status).toBe(0);
+    const deletedFiles = new Set(deleted.stdout.split('\0'));
     const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
     const run = (command: string, args: string[], cwd: string) => {
       const result = spawnSync(command, args, { cwd, encoding: 'utf8', shell: process.platform === 'win32', env: { ...process.env, BAZFRAME_WIN32_NATIVE_PACK_MODE: 'foundation-evidence' } });
@@ -207,7 +209,7 @@ describe('whole-tarball reconstruction', () => {
     const npmVersion = run(npm, ['--version'], process.cwd()), tarballs: Buffer[] = [];
     for (const name of ['producer', 'consumer']) {
       const target = join(root, name); await mkdir(target);
-      for (const file of files.stdout.split('\0').filter(Boolean)) {
+      for (const file of files.stdout.split('\0').filter((file) => file !== '' && !deletedFiles.has(file))) {
         await mkdir(dirname(join(target, file)), { recursive: true }); await cp(file, join(target, file));
       }
       // Independent builds/dist, shared read-only locked compiler/dependency inputs on this host only.
@@ -316,13 +318,13 @@ function receipt(kind: 'source-tree' | 'packed-install') {
 
 function productReceipt(packageRootKind: 'source-tree' | 'packed-install') {
   return {
-    schemaVersion: 4,
-    purpose: 'Internal managed profile activation, current selection, onboarding and healthy local added-Skill Windows product-slice evidence only.',
+    schemaVersion: 5,
+    purpose: 'Limited Windows product-slice evidence: internal managed profile activation, current selection, onboarding, healthy local added-Skill lifecycle and public CLI smoke only.',
     packageRootKind,
     completion: 'passed',
     releaseAdmission: 'not-authorized',
     windowsSupportClaim: false,
-    publicWindowsGate: 'closed',
+    publicWindowsGate: 'open',
     observations: {
       binarySha256,
       absentHomeReadOnly: true,
@@ -368,7 +370,10 @@ function productReceipt(packageRootKind: 'source-tree' | 'packed-install') {
       linkLeavesAbsent: true,
       sourcePreserved: true,
       nativeLockNamespacesPersist: true,
-      publicWindowsGateClosed: true,
+      publicEntrypointMappings: true,
+      publicFreshProfileLifecycle: true,
+      publicActiveForceRemoveRefusedUnchanged: true,
+      publicAbsentHomeReadOnly: true,
       currentMissingNoWrites: true,
       activeMissingSelectionRefused: true,
       selectionProtectedFirstVisibility: true,

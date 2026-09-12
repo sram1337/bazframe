@@ -84,6 +84,32 @@
     .map-caption { margin: 19px 0 0; color: var(--muted); font-size: 12px; }
     .flow-line { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; margin: 15px 0; font-size: 12px; color: var(--muted); }
     .flow-line code { color: var(--ink); }
+    .api-diagram { margin: 0 0 26px; padding: 20px; background: #f8f9fc; border: 1px solid var(--line); border-radius: 12px; }
+    .api-diagram figcaption { margin-bottom: 17px; font-size: 13px; font-weight: 650; }
+    .api-diagram figcaption small { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; font-weight: 400; }
+    .api-flow { display: grid; grid-template-columns: minmax(0, 1fr) 42px minmax(0, 1fr) 42px minmax(0, 1fr); }
+    .api-node { min-width: 0; padding: 15px; border: 1px solid #cbd5e7; border-radius: 8px; background: #eef2fc; }
+    .api-node.read { background: #edf6f3; border-color: #bcd9cf; }
+    .api-node.write { background: #fff4e3; border-color: #e3c79c; }
+    .api-node.result { background: white; border-color: #b8c3d5; }
+    .api-kind { display: block; margin-bottom: 9px; font: 650 10px var(--mono); color: var(--muted); letter-spacing: .6px; }
+    .api-node a { display: block; }
+    .api-node code { padding: 0; background: transparent; font-size: 11px; }
+    .api-node p { margin: 9px 0 0; font-size: 12px; line-height: 1.5; }
+    .api-entry { max-width: 480px; margin: 0 auto; text-align: center; }
+    .api-scope { padding: 16px; border: 1px dashed #a6b4d0; border-radius: 9px; background: white; }
+    .api-scope-title { margin: 0 0 15px; font-size: 12px; }
+    .api-scope-title small { display: block; margin-top: 4px; color: var(--muted); }
+    .api-connector { position: relative; min-height: 42px; color: var(--blue); }
+    .api-connector::before { content: ""; position: absolute; left: 0; top: 50%; width: 100%; height: 2px; background: currentColor; }
+    .api-connector::after { content: ""; position: absolute; right: 0; top: calc(50% - 4px); border-top: 5px solid transparent; border-bottom: 5px solid transparent; border-left: 7px solid currentColor; }
+    .api-connector span { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -100%); padding-bottom: 5px; font: 10px var(--mono); }
+    .api-down { height: 42px; }
+    .api-down::before { left: 50%; top: 0; width: 2px; height: 100%; }
+    .api-down::after { left: calc(50% - 4px); right: auto; top: auto; bottom: 0; border-left: 5px solid transparent; border-right: 5px solid transparent; border-bottom: 0; border-top: 7px solid currentColor; }
+    .api-down span { left: calc(50% + 12px); transform: translateY(-50%); padding: 0; }
+    .api-note { margin: 14px 0 0; color: var(--muted); font-size: 12px; }
+    .api-divider { margin: 22px 0 14px; padding-top: 17px; border-top: 1px solid var(--line); font-size: 12px; font-weight: 650; }
     .comparison { margin-top: 18px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--line); }
     .comparison > div { padding: 20px; background: white; min-width: 0; }
     .comparison strong { display: block; font-size: 15px; margin-bottom: 7px; }
@@ -142,6 +168,13 @@
       .map-row { grid-template-columns: 1fr; gap: 9px; }
       .map-arrow { margin-left: 0; }
     }
+    @media screen and (max-width: 1150px) {
+      .api-flow { grid-template-columns: minmax(0, 1fr); }
+      .api-connector { height: 42px; }
+      .api-connector::before { left: 50%; top: 0; width: 2px; height: 100%; }
+      .api-connector::after { left: calc(50% - 4px); right: auto; top: auto; bottom: 0; border-left: 5px solid transparent; border-right: 5px solid transparent; border-bottom: 0; border-top: 7px solid currentColor; }
+      .api-connector span { left: calc(50% + 12px); transform: translateY(-50%); padding: 0; }
+    }
     @media (max-width: 760px) {
       .sidebar { position: static; width: auto; padding: 22px; }
       .sidebar .subtitle { margin-bottom: 18px; }
@@ -160,6 +193,8 @@
       summary { padding: 17px; }
       summary .tag { float: none; display: block; margin: 5px 0 0; }
       .detail-body { padding: 19px 17px; }
+      .api-diagram { padding: 14px; }
+      .api-scope { padding: 12px; }
       .module { padding: 20px; }
       .storage { padding: 20px; }
       .search label { width: 100%; }
@@ -175,7 +210,7 @@
       h2 { font-size: 19pt; }
       section { margin-top: 28px; }
       a { color: #243b87; }
-      .card, .module, .rule, .map, tr { break-inside: avoid; }
+      .card, .module, .rule, .map, .api-diagram, tr { break-inside: avoid; }
       .storage { background: #f3f3f3; color: black; }
       .storage .comment, .storage .highlight { color: #333; }
       .map-row { grid-template-columns: 100px minmax(0, 1fr); }
@@ -250,7 +285,7 @@
           <div class="map-nodes">
             <a class="node effect" href="#storage"><strong>Managed filesystem</strong><small>records, links, immutable bytes, locks, journals</small></a>
             <a class="node effect" href="#module-providers"><strong>External processes</strong><small>Git / gh, authorized builds, editors</small></a>
-            <a class="node effect" href="#platform"><strong>Platform implementations</strong><small>Node/POSIX defaults; internal Windows backend</small></a>
+            <a class="node effect" href="#platform"><strong>Platform implementations</strong><small>Node/POSIX defaults; Windows backend</small></a>
           </div>
         </div>
         <div class="map-arrow"><b>↑</b> validated data returns to callers and runtime consumers</div>
@@ -313,7 +348,22 @@
       <details id="journey-membership" open>
         <summary>Attach an added Skill to a profile <span class="tag">MEMBERSHIP WRITE</span></summary>
         <div class="detail-body">
-          <div class="flow-line"><code>profile skill add --profile personal review</code><span>→</span><code>addProfileSkill()</code><span>→</span><code>profiles/personal/skills/review</code></div>
+          <figure class="api-diagram" aria-labelledby="flow-membership-title">
+            <figcaption id="flow-membership-title">API flow: add an ordinary Skill membership<small>Successful new membership on macOS/Linux. Arrows inside the enclosing function show operation order.</small></figcaption>
+            <div class="api-node api-entry"><span class="api-kind">CALLER · CLI OR TUI</span><a href="../src/cli/run-cli.ts"><code>runCli()</code></a><a href="../src/application/tui-service.ts"><code>BazframeTuiService.addMembership()</code></a><p>Explicit profile: personal · added Skill: review</p></div>
+            <div class="api-connector api-down"><span>calls</span></div>
+            <div class="api-scope">
+              <p class="api-scope-title"><a href="../src/profiles/profile-skill-membership.ts"><code>addProfileSkill() → addProfileSkillFor()</code></a><small>Holds the global state lock, then the profile membership lock.</small></p>
+              <div class="api-flow">
+                <div class="api-node read"><span class="api-kind">READ</span><code>resolveRegistration()</code><br><code>inspectMembership()</code><p>Resolve the canonical source and inspect the destination link.</p></div>
+                <div class="api-connector"><span>then</span></div>
+                <div class="api-node read"><span class="api-kind">REVALIDATE</span><code>assertParentsStable()</code><a href="../src/skills/default-skill-catalog.ts"><code>readDefaultSkillRegistration()</code></a><p>Recheck parent identities and the exact registered target.</p></div>
+                <div class="api-connector"><span>then</span></div>
+                <div class="api-node write"><span class="api-kind">WRITE</span><code>symlink(target, membershipPath)</code><p>Create <code>profiles/personal/skills/review</code> pointing directly to the source. Recheck parents afterward.</p></div>
+              </div>
+            </div>
+            <p class="api-note">Returns <code>ProfileSkillMembershipResult</code>. An already-current membership returns without a write. Imported resources use the separate identity-based API described below.</p>
+          </figure>
           <ol class="steps">
             <li><strong>Parse the command and select the target.</strong><p><a href="../src/cli/run-cli.ts">CLI dispatch</a> distinguishes explicit <code>--profile</code> from active-profile shorthand. The TUI calls <code>addMembership(profileId, skill)</code> with an explicit target.</p></li>
             <li><strong>Choose ordinary membership or imported identity.</strong><p>Ordinary added Skills use <a href="../src/profiles/profile-skill-membership.ts"><code>addProfileSkill()</code></a> and <a href="../src/skills/default-skill-catalog.ts"><code>readDefaultSkillRegistration()</code></a>. Imported selectors resolve through <a href="../src/profile-publishing/profile-resource-membership.ts"><code>mutateImportedProfileResourceMembership()</code></a>, using stable resource identities instead of catalog links.</p></li>
@@ -326,7 +376,22 @@
       <details id="journey-activation">
         <summary>Activate a library update or package build <span class="tag">SNAPSHOT + RECORD WRITE</span></summary>
         <div class="detail-body">
-          <div class="flow-line"><code>updateLibrary() / buildPackage()</code><span>→</span><code>prepare*</code><span>→</span><code>validate dependents</code><span>→</span><code>activate digest</code></div>
+          <figure class="api-diagram" aria-labelledby="flow-activation-title">
+            <figcaption id="flow-activation-title">API flow: prepare and activate a collection<small>Local library update or package build on macOS/Linux. The enclosing function coordinates the steps.</small></figcaption>
+            <div class="api-node api-entry"><span class="api-kind">PUBLIC DOMAIN API</span><a href="../src/skill-collections/skill-collection-lifecycle.ts"><code>updateLibrary() / buildPackage()</code></a><p>Called by the corresponding CLI command.</p></div>
+            <div class="api-connector api-down"><span>calls</span></div>
+            <div class="api-scope">
+              <p class="api-scope-title"><a href="../src/skill-collections/skill-collection-lifecycle.ts"><code>replace()</code></a><small>Global state lock; validate the existing descriptor and canonical source identity first.</small></p>
+              <div class="api-flow">
+                <div class="api-node write"><span class="api-kind">PREPARE + SNAPSHOT WRITE</span><a href="../src/skill-collections/skill-collection-preparation.ts"><code>prepareLibrary() / preparePackage()</code></a><a href="../src/skill-collections/skill-snapshot.ts"><code>publishSkillSnapshot()</code></a><p>Library: copy prepared source bytes. Package: run its authorized build, then snapshot the artifact.</p></div>
+                <div class="api-connector"><span>then</span></div>
+                <div class="api-node read"><span class="api-kind">VALIDATE</span><code>validateIndependent()</code><br><code>captureValidatedIndex()</code><br><code>validateDependents()</code><p>Check the candidate and every referencing profile. Recheck the record, index, source, and declaration.</p></div>
+                <div class="api-connector"><span>then</span></div>
+                <div class="api-node write"><span class="api-kind">ACTIVATION WRITE</span><a href="../src/state/atomic-file.ts"><code>writeFileAtomic()</code></a><p>Replace <code>libraries/&lt;id&gt;.json</code> or <code>packages/&lt;id&gt;.json</code> with the new digest. Injected implementations use <code>services.replace()</code>.</p></div>
+              </div>
+            </div>
+            <p class="api-note">The snapshot is prepared before activation. If validation fails, the previous descriptor remains active. Library snapshotting happens on add/update; export reads the activated bytes.</p>
+          </figure>
           <ol class="steps">
             <li><strong>Enter the shared collection lifecycle under the global lock.</strong><p><a href="../src/skill-collections/skill-collection-lifecycle.ts">Collection lifecycle</a> validates the record and canonical source identity. Remote updates first enter <a href="../src/providers/managed-git.ts">managed Git orchestration</a>, which composes the collection engine with checkout/provenance changes.</p></li>
             <li><strong>Prepare immutable input.</strong><p><a href="../src/skill-collections/skill-collection-preparation.ts"><code>prepareLibrary()</code></a> copies prepared bytes without executing code. <code>preparePackage()</code> validates the manifest and authorized build, runs literal argv, then snapshots the declared artifact through <a href="../src/skill-collections/skill-snapshot.ts"><code>publishSkillSnapshot()</code></a>.</p></li>
@@ -339,7 +404,25 @@
       <details id="journey-runtime">
         <summary>Start Pi with the active profile <span class="tag">READ + RUNTIME PROJECTION</span></summary>
         <div class="detail-body">
-          <div class="flow-line"><code>pi</code><span>→</span><code>installed extension</code><span>→</span><code>resolveState()</code><span>→</span><code>skillPaths + systemPrompt</code></div>
+          <figure class="api-diagram" aria-labelledby="flow-runtime-title">
+            <figcaption id="flow-runtime-title">API flow: Pi resource and prompt callbacks<small>Separate callbacks in <a href="../artifacts/pi/bazframe.ts">artifacts/pi/bazframe.ts</a>, using the supported default runtime. Arrows show work and returned data within each callback.</small></figcaption>
+            <div class="api-flow">
+              <div class="api-node read"><span class="api-kind">EVENT → READ</span><code>resources_discover</code><br><code>resolveState(event.cwd)</code><p>Resolve policy and the enabled profile. Save the resolved state for subsequent callbacks.</p></div>
+              <div class="api-connector"><span>then</span></div>
+              <div class="api-node write"><span class="api-kind">PROJECT · POSSIBLE CACHE WRITE</span><code>prepareProfileSkillPaths()</code><p>Check Pi Skill-command collisions. Create alias wrappers only when needed.</p></div>
+              <div class="api-connector"><span>returns</span></div>
+              <div class="api-node result"><span class="api-kind">PI CONSUMES</span><code>{ skillPaths }</code><p>Pi discovers the returned Skill paths. No source acquisition or package build occurs.</p></div>
+            </div>
+            <p class="api-divider">Later, when Pi calls <code>before_agent_start</code>:</p>
+            <div class="api-flow">
+              <div class="api-node read"><span class="api-kind">EVENT → INSPECT CONTEXT</span><code>before_agent_start</code><br><code>contextPaths(systemPromptOptions)</code><p>Use the saved profile state and check whether Pi supplied native context files.</p></div>
+              <div class="api-connector"><span>then</span></div>
+              <div class="api-node"><span class="api-kind">COMPOSE IN MEMORY</span><code>injectedInstructions()</code><p>Append profile instructions. If context files are empty, include available global Pi instructions first.</p></div>
+              <div class="api-connector"><span>returns</span></div>
+              <div class="api-node result"><span class="api-kind">PI CONSUMES</span><code>{ systemPrompt }</code><p>The incoming prompt plus the Bazframe instruction sections. No profile-file write occurs.</p></div>
+            </div>
+            <p class="api-note">This shows an enabled, valid profile with effective Skills. Disabled sessions contribute nothing; projection errors are reported rather than silently replacing existing Pi commands.</p>
+          </figure>
           <ol class="steps">
             <li><strong>Pi calls the installed extension's handlers.</strong><p><a href="../artifacts/pi/bazframe.ts"><code>session_start</code> and <code>resources_discover</code></a> resolve state for their current cwd. The supported default path uses readers authored in this artifact; it does not spawn Bazframe commands.</p></li>
             <li><strong>Resolve policy before loading the active profile.</strong><p>Global policy applies everywhere; a canonical Git worktree may supply an override. Effective disable retains native Pi behavior and bypasses profile loading. Enabled sessions read selection, instructions, direct Skills, imported resources, and referenced snapshots.</p></li>
@@ -352,10 +435,33 @@
       <details id="journey-sharing">
         <summary>Move a profile to another installation <span class="tag">CAPTURE / TRANSPORT / MATERIALIZE</span></summary>
         <div class="detail-body">
-          <div class="flow-line"><code>captureProfile()</code><span>→</span><code>ZIP or GitHub</code><span>→</span><code>materializeCapturedProfile()</code><span>→</span><code>candidate swap</code></div>
+          <figure class="api-diagram" aria-labelledby="flow-sharing-title">
+            <figcaption id="flow-sharing-title">API flow: ZIP export and import<small>Successful ZIP operations. GitHub publication has its own transaction sequence, described below.</small></figcaption>
+            <div class="api-flow">
+              <div class="api-node"><span class="api-kind">EXPORT API</span><a href="../src/profile-publishing/profile-lifecycle.ts"><code>exportManagedProfile()</code></a><p>Select the explicit or active profile.</p></div>
+              <div class="api-connector"><span>calls</span></div>
+              <div class="api-node read"><span class="api-kind">CAPTURE</span><a href="../src/profile-publishing/profile-capture.ts"><code>captureProfile()</code></a><p>Return the canonical manifest, blobs, and preview from ready resources.</p></div>
+              <div class="api-connector"><span>then</span></div>
+              <div class="api-node write"><span class="api-kind">EXPORT API WRITES</span><a href="../src/profile-publishing/profile-zip.ts"><code>writeProfileZip()</code></a><p>Write the selected output archive; require explicit overwrite for an occupied output.</p></div>
+            </div>
+            <p class="api-divider">On the receiving installation:</p>
+            <div class="api-node api-entry"><span class="api-kind">IMPORT API</span><a href="../src/profile-publishing/profile-lifecycle.ts"><code>importManagedProfile()</code></a><p>Inspect the archive and resolve destination/overwrite consent before entering the transaction.</p></div>
+            <div class="api-connector api-down"><span>calls</span></div>
+            <div class="api-scope">
+              <p class="api-scope-title"><a href="../src/profile-publishing/profile-transaction.ts"><code>executeProfileCandidateSwap()</code></a><small>Operation locks and journal; the steps below run inside this function.</small></p>
+              <div class="api-flow">
+                <div class="api-node write"><span class="api-kind">STAGING + JOURNAL WRITE</span><code>services.createCandidate()</code><br><code>services.writeJournal()</code><p>Create the private candidate and record transaction intent before materializing resources.</p></div>
+                <div class="api-connector"><span>then</span></div>
+                <div class="api-node write"><span class="api-kind">MATERIALIZATION CALLBACK</span><a href="../src/profile-publishing/profile-lifecycle.ts"><code>materializeWithPackageOrdering()</code></a><a href="../src/profile-publishing/profile-materialization.ts"><code>materializeCapturedProfile()</code></a><p>Prepare Skills, libraries, then packages. Return state for the candidate sidecar.</p></div>
+                <div class="api-connector"><span>then</span></div>
+                <div class="api-node write"><span class="api-kind">VALIDATE + ACTIVATE</span><code>services.move()</code><br><code>advance('COMMITTED')</code><p>Under the state lock, revalidate, retain any replaced profile as a backup, and move the candidate into place.</p></div>
+              </div>
+            </div>
+            <p class="api-note">Materialization runs inside the candidate-swap transaction, before activation. A newly imported profile remains inactive. Dry-run uses inspection and does not enter this mutation sequence.</p>
+          </figure>
           <ol class="steps">
             <li><strong>Capture a portable, bounded resource closure.</strong><p><a href="../src/profile-publishing/profile-capture.ts"><code>captureProfile()</code></a> produces canonical manifest bytes, content-addressed blobs, and an exact preview. It captures ready artifacts without builds. Remote resources remain exact references unless bundled; machine-local identities, paths, and publication linkage are not transport identity.</p></li>
-            <li><strong>Write a ZIP or publish exact Git history.</strong><p><a href="../src/profile-publishing/profile-lifecycle.ts"><code>exportManagedProfile()</code></a> uses <a href="../src/profile-publishing/profile-zip.ts">ZIP I/O</a>. <a href="../src/profile-publishing/profile-publication.ts"><code>publishManagedProfile()</code></a> uses the GitHub transport with expected-old leases and durable publication intent. On macOS/Linux, <code>publishSidecarCandidate()</code> preserves authored content by copying the profile into a candidate, updating its sidecar, and swapping directories through publication's own journaled sequence. The internal Windows effect updates only the sidecar while retaining the profile root.</p></li>
+            <li><strong>Write a ZIP or publish exact Git history.</strong><p><a href="../src/profile-publishing/profile-lifecycle.ts"><code>exportManagedProfile()</code></a> uses <a href="../src/profile-publishing/profile-zip.ts">ZIP I/O</a>. <a href="../src/profile-publishing/profile-publication.ts"><code>publishManagedProfile()</code></a> uses the GitHub transport with expected-old leases and durable publication intent. On macOS/Linux, <code>publishSidecarCandidate()</code> preserves authored content by copying the profile into a candidate, updating its sidecar, and swapping directories through publication's own journaled sequence. The Windows effect updates only the sidecar while retaining the profile root.</p></li>
             <li><strong>Inspect, authorize, and materialize at the destination.</strong><p><code>inspectProfileImport()</code> performs no Bazframe-home mutation. Real import resolves collisions and explicit overwrite consent, then <a href="../src/profile-publishing/profile-materialization.ts">materializes</a> Skills, libraries, and package artifacts. Uncached remote packages may require a report and build consent; exact healthy cached resources can be reused offline.</p></li>
             <li><strong>Activate the imported candidate through the shared transaction engine.</strong><p><a href="../src/profile-publishing/profile-transaction.ts"><code>executeProfileCandidateSwap()</code></a>, the <a href="../src/profile-publishing/transaction-journal.ts">journal</a>, and <a href="../src/profile-publishing/profile-recovery.ts">recovery</a> reconcile old/candidate/final state. When ownership cannot be proved, the operation retains the affected state and reports the ambiguity.</p></li>
           </ol>
@@ -379,7 +485,7 @@
         <article class="module" id="module-application">
           <h3>src/application/ + src/tui/</h3><p><code>ApplicationServices</code> selects effect implementations. <code>BazframeTuiService</code> translates domain reads into dashboard DTOs and exposes targeted mutations. React/Ink components handle terminal interaction and rendering.</p>
           <div class="files"><a href="../src/application/application-services.ts">application-services.ts</a><a href="../src/application/tui-service.ts">tui-service.ts</a><a href="../src/application/win32-application-services.ts">win32-application-services.ts</a><a href="../src/tui/app.tsx">app.tsx</a><a href="../src/tui/state.ts">state.ts</a><a href="../src/tui/run-tui.tsx">run-tui.tsx</a></div>
-          <div class="module-meta"><span><b>Callers:</b> CLI composition, TUI bootstrap, internal Windows runtime composition.</span><span><b>Boundary:</b> reusable product functions own decisions; UI state does not confer write authority.</span></div>
+          <div class="module-meta"><span><b>Callers:</b> CLI composition, TUI bootstrap, Windows runtime composition.</span><span><b>Boundary:</b> reusable product functions own decisions; UI state does not confer write authority.</span></div>
         </article>
         <article class="module" id="module-profiles">
           <h3>src/profiles/</h3><p>Profile IDs, physical profile loading, active selection, provisioning, favorites, direct Skill membership, and typed collection references. Reference indexes prove dependencies before destructive mutations or collection activation.</p>
@@ -419,7 +525,7 @@
         <article class="module" id="module-adapter">
           <h3>src/adapters/pi/ + artifacts/pi/</h3><p>Installer ownership and runtime integration are different concerns. The installer hashes the desired/installed artifact and verifies its manifest. The tracked TypeScript artifact is the actual extension Pi loads; it is not generated from <code>src/adapters/pi/</code>.</p>
           <div class="files"><a href="../src/adapters/pi/installer.ts">installer.ts</a><a href="../src/adapters/pi/ownership.ts">ownership.ts</a><a href="../src/adapters/pi/manifest.ts">manifest.ts</a><a href="../src/adapters/pi/runtime-services.ts">runtime-services.ts</a><a href="../src/adapters/pi/runtime-binding.ts">runtime-binding.ts</a><a href="../artifacts/pi/bazframe.ts">artifacts/pi/bazframe.ts</a></div>
-          <div class="module-meta"><span><b>Callers:</b> CLI install/uninstall and setup inspection; Pi invokes the artifact.</span><span><b>Boundary:</b> supported default artifact readers are self-contained at runtime; internal Windows binding connects shared compiled services after integrity checks.</span></div>
+          <div class="module-meta"><span><b>Callers:</b> CLI install/uninstall and setup inspection; Pi invokes the artifact.</span><span><b>Boundary:</b> POSIX default artifact readers are self-contained at runtime; Windows binding connects shared compiled services after integrity checks.</span></div>
         </article>
         <article class="module" id="module-status">
           <h3>src/status/</h3><p>Read-only inspection and reporting of adapter ownership/drift, project/global policy, selected profile, resource availability, snapshots, and retained recovery state. It reports corrective commands without executing them.</p>
@@ -478,7 +584,7 @@
 └── locks/                               <span class="comment"># cooperating-writer coordination</span></code></pre></div>
       <div class="grid two" style="margin-top: 16px">
         <article class="card"><h3>Three different byte locations</h3><p><strong>Source:</strong> live Skill content or library/package input.<br><strong>Collection snapshot:</strong> an activated prepared artifact under <code>skill-snapshots</code>.<br><strong>Sharing store:</strong> imported/captured blobs and trees under <code>profile-publishing</code>.</p><p class="small">Do not treat those stores as interchangeable or require a mutable source to exist before consuming a healthy immutable artifact.</p></article>
-        <article class="card"><h3>Adapter installation location</h3><p><code>&lt;PI_CODING_AGENT_DIR&gt;/extensions/bazframe.ts</code> is the installed extension. Default agent directory: <code>~/.pi/agent</code>. Bazframe's home stores ownership metadata and runtime cache, not Pi settings or repository instructions.</p><p class="small">Internal Windows installation additionally binds runtime code through <code>bazframe/runtime.json</code> in the Pi agent directory. The runtime binding is checked before shared services are imported.</p></article>
+        <article class="card"><h3>Adapter installation location</h3><p><code>&lt;PI_CODING_AGENT_DIR&gt;/extensions/bazframe.ts</code> is the installed extension. Default agent directory: <code>~/.pi/agent</code>. Bazframe's home stores ownership metadata and runtime cache, not Pi settings or repository instructions.</p><p class="small">Windows installation additionally binds runtime code through <code>bazframe/runtime.json</code> in the Pi agent directory. The runtime binding is checked before shared services are imported.</p></article>
       </div>
       <div class="callout warn"><strong>Retained state.</strong> Managed profile removal detaches the named non-active profile and retains private state. Ambiguous transactions and process-exposed workspaces may also remain. Snapshot GC and a general workspace-reclamation subsystem are deferred; do not infer “unused” means safe to recursively delete.</div>
     </section>
@@ -515,7 +621,7 @@
         <article class="rule"><h3>Publish only after validation</h3><p>Use the applicable lock, expected identity, bounded stable reads, candidate preparation, and revalidation before effects. Single state files use atomic replacement; multi-step profile operations use journals/candidate reconciliation. Preserve ambiguous or malformed state instead of guessing a repair.</p></article>
         <article class="rule"><h3>Consent is operation-specific</h3><p><code>--yes</code> accepts routine confirmations and safe suffix choices, never overwrite/discard. Package build reports bind authorization to exact inputs and literal argv. <code>--force</code> has narrowly defined meanings for profile removal and owned adapter repair.</p></article>
         <article class="rule"><h3>Presentation is a boundary</h3><p>Use singular noun-verb commands. Sharing commands emit schema-v2 success/refusal/error results with mutation effects; unrelated JSON remains v1. Human color is separate. <code>status</code> attention is successful JSON with exit 3, not a mutation failure.</p></article>
-        <article class="rule"><h3>Preserve Agent Skills compatibility</h3><p>Pi's public loader is authoritative on the supported runtime path; internal Windows physical reads preserve the loader contract. No inter-Skill dependency schema is inferred from prose or metadata. Packs, child subsets, and snapshot GC require separate product decisions.</p></article>
+        <article class="rule"><h3>Preserve Agent Skills compatibility</h3><p>Pi's public loader is authoritative on the supported runtime path; Windows physical reads preserve the loader contract. No inter-Skill dependency schema is inferred from prose or metadata. Packs, child subsets, and snapshot GC require separate product decisions.</p></article>
       </div>
     </section>
 
@@ -527,7 +633,7 @@
         <article class="card"><div class="label">Windows implementation</div><h3>Windows x64 / local NTFS</h3><p><a href="../src/application/win32-application-services.ts"><code>createWindowsApplicationServices()</code></a> lazily shares one native backend identity across policy, profiles, resources, Git, adapter, and editor services. Each mutation acquires fresh authority; the backend object is not a cached permission token.</p><p><a href="../src/core/win32-native.ts"><code>core/win32-native.ts</code></a> validates the native contract. <a href="../native/win32/src/lib.rs"><code>native/win32/src/</code></a> implements identity, privacy, stable reads, locks, junctions, and publication primitives through the packaged N-API addon.</p></article>
       </div>
       <div class="flow-line"><code>shared lifecycle function</code><span>→</span><code>operation Services / Effects</code><span>→</span><code>win32 implementation</code><span>→</span><code>native backend</code></div>
-      <div class="callout warn"><p><strong>Entrypoint routing.</strong> <a href="../src/core/platform-support.ts"><code>assertBazframePlatformSupported()</code></a> currently refuses Windows command effects; help/version remain available. The default <a href="../artifacts/pi/bazframe.ts">Pi entry point</a> gates before binding I/O, package import, native initialization, or state reads. Internal test entry points exercise composition separately from default dispatch.</p><p>Host/source tests and foundation/product CI receipts cover narrower workloads than the full installed-product matrix required before npm publication. See the <a href="win32-filesystem-backend-requirements.md">Windows requirements</a>. Windows Terminal, representative SSH, ambiguous-width rendering, and manual assistive-technology evidence also remain separate <a href="tui-design.md">TUI gates</a>.</p></div>
+      <div class="callout warn"><p><strong>Entrypoint routing.</strong> The public <a href="../src/cli/run-cli.ts"><code>runCli()</code></a> selects lazy <a href="../src/application/win32-application-services.ts">Windows application services</a>; help/version/usage remain independent of native initialization. The default <a href="../artifacts/pi/bazframe.ts">Pi entry point</a> awaits compatibility, binding, package/runtime integrity and native bootstrap, and installs fail-closed handlers on initialization failure. Native loading requires the matching package-local x64 addon and admitted local NTFS storage. This source transition does not change the already-published beta.3 package.</p><p>Host/source tests and foundation/product CI receipts cover narrower workloads than the full installed-product matrix required before npm publication. See the <a href="win32-filesystem-backend-requirements.md">Windows requirements</a>. Windows Terminal, representative SSH, ambiguous-width rendering, and manual assistive-technology evidence also remain separate <a href="tui-design.md">TUI gates</a>.</p></div>
     </section>
 
     <section id="reading" aria-labelledby="reading-title">

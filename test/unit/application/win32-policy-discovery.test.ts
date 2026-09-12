@@ -5,6 +5,7 @@ import { disableRepository, enableRepository, listRepositoryProjectStates, readR
 import { repositoryRegistrationPath } from '../../../src/project/registration.js';
 import { findGitRoot } from '../../../src/project/git-root.js';
 import { createWindowsGitRootServices } from '../../../src/project/win32-git-root.js';
+import type { runManagedGitProcess } from '../../../src/providers/managed-git-process.js';
 
 describe('shared Windows policy/discovery adverse paths', () => {
   it('roundtrips precedence and retained project/global removals without following retained payloads', async () => {
@@ -42,9 +43,11 @@ describe('shared Windows policy/discovery adverse paths', () => {
   it.each(['C:/boundary/repo', 'C:\\boundary\\repo'])('accepts Git absolute output %s and physically inspects normalized local spelling', async (root) => {
     const f = windowsApplicationFixture(); f.directories(REPOSITORY + '\\nested');
     const inspect = vi.spyOn(f.backend, 'inspectPath');
-    const services = createWindowsGitRootServices(f.backend, { executableEffects: f.options.executableEffects, process: async () => ({ status: 0, stdout: root + '\r\n', stderr: '' }) });
+    const run = vi.fn<typeof runManagedGitProcess>(async () => ({ status: 0, stdout: root + '\r\n', stderr: '' }));
+    const services = createWindowsGitRootServices(f.backend, { executableEffects: f.options.executableEffects, process: run });
     const before = f.snapshot();
     expect(await findGitRoot(REPOSITORY + '\\nested', f.environment, services)).toBe(REPOSITORY);
+    expect(run).toHaveBeenCalledExactlyOnceWith('C:\\tools\\git.exe', ['-c', 'core.quotePath=false', 'rev-parse', '--path-format=absolute', '--show-toplevel'], REPOSITORY + '\\nested', { ...f.environment, LANG: 'C', LC_ALL: 'C' }, { timeoutMilliseconds: 5000, terminationGraceMilliseconds: 2000, maxStreamBytes: 65536 }, { stdin: 'ignore' });
     expect(inspect).toHaveBeenCalledWith(REPOSITORY);
     expect(inspect.mock.calls.some(([path]) => path.includes('/'))).toBe(false);
     expect(f.snapshot()).toBe(before);
@@ -62,11 +65,12 @@ describe('shared Windows policy/discovery adverse paths', () => {
     if (kind === 'ancestry') { const inspect = f.backend.inspectPath; f.backend.inspectPath = (path) => ({ ...inspect(path), ancestryReparseFree: false }) as unknown as ReturnType<typeof inspect>; }
     await expect(createWindowsGitRootServices(f.backend).canonical('C:/boundary/repo')).rejects.toThrow();
   });
-  it.each(['outside', 'permission', 'missing-git', 'timeout', 'malformed', 'mismatch', 'mixed-diagnostic'])('distinguishes discovery outcome %s without policy/state creation', async (outcome) => {
+  it.each(['outside', 'permission', 'missing-git', 'timeout', 'uncertain', 'malformed', 'mismatch', 'mixed-diagnostic'])('distinguishes discovery outcome %s without policy/state creation', async (outcome) => {
     const f = windowsApplicationFixture(); f.directories('C:\\boundary\\other');
-    const before = f.snapshot(); let observedEnvironment: NodeJS.ProcessEnv = {};
-    const services = createWindowsGitRootServices(f.backend, { executableEffects: f.options.executableEffects, process: async (_exe, _args, _cwd, environment) => {
-      observedEnvironment = environment;
+    const before = f.snapshot(); let observedEnvironment: NodeJS.ProcessEnv = {}; let observedOptions: unknown;
+    const services = createWindowsGitRootServices(f.backend, { executableEffects: f.options.executableEffects, process: async (_exe, _args, _cwd, environment, _limits, options) => {
+      observedEnvironment = environment; observedOptions = options;
+      if (outcome === 'uncertain') return { status: 128, stdout: '', stderr: 'fatal: not a git repository (or any of the parent directories): .git', uncertainTermination: true };
       if (outcome === 'missing-git') return { status: null, stdout: '', stderr: '', error: Object.assign(new Error('missing'), { code: 'ENOENT' }) };
       if (outcome === 'timeout') return { status: 128, stdout: '', stderr: 'fatal: not a git repository (or any of the parent directories): .git', failure: 'timeout' };
       if (outcome === 'permission') return { status: 128, stdout: '', stderr: 'fatal: permission denied' };
@@ -75,6 +79,7 @@ describe('shared Windows policy/discovery adverse paths', () => {
     } });
     const error = await findGitRoot(REPOSITORY, { ...f.environment, Git_Dir: 'C:\\foreign', lc_all: 'fr_FR' }, services).catch((error: unknown) => error);
     expect(error).toMatchObject({ code: outcome === 'outside' ? 'NOT_GIT_WORKTREE' : outcome === 'missing-git' ? 'GIT_NOT_FOUND' : outcome === 'malformed' ? 'GIT_ROOT_INVALID' : outcome === 'mismatch' ? 'GIT_ROOT_MISMATCH' : 'GIT_DISCOVERY_FAILED' });
+    expect(observedOptions).toEqual({ stdin: 'ignore' });
     expect(observedEnvironment.Git_Dir).toBeUndefined(); expect(observedEnvironment.LC_ALL).toBe('C'); expect(observedEnvironment.lc_all).toBeUndefined();
     expect(f.snapshot()).toBe(before);
   });

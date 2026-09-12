@@ -31,6 +31,8 @@ export interface ManagedGitProcessResult {
 }
 
 export interface ManagedGitProcessOptions {
+  /** Noninteractive callers may opt out of inheriting the parent's input handle. */
+  stdin?: 'inherit' | 'ignore';
   /** Serial, interval-free storage sampling. A thrown error stops the process tree. */
   monitor?: () => void | Promise<void>;
   spawnProcess?: typeof spawn;
@@ -61,7 +63,7 @@ export function runManagedGitProcess(
         env: environment,
         shell: false,
         detached: processGroups,
-        stdio: ['inherit', 'pipe', 'pipe']
+        stdio: [options.stdin ?? 'inherit', 'pipe', 'pipe']
       });
     } catch (error) {
       resolve({ status: null, stdout: '', stderr: '', error: asError(error) });

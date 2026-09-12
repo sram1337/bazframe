@@ -1,12 +1,14 @@
 ---
 name: bazframe
 description: Manages, exports, and imports Bazframe profiles, added Skills, Skill libraries, Skill packages, policy, the Pi adapter, status, and the terminal UI. Use when configuring or diagnosing Bazframe.
-compatibility: Requires the Bazframe CLI and Pi 0.84.4 or newer, excluding the broken published 0.85.0 package.
+compatibility: Requires Node.js 22.19.0 or newer, the Bazframe CLI on macOS/Linux or Windows x64 with accepted local NTFS and its matching bundled native addon, and Pi 0.84.4 or newer, excluding the broken published 0.85.0 package.
 ---
 
 # Bazframe
 
 Bazframe composes a personal profile with coding-agent runtime and repository context.
+
+Windows commands use drive-absolute paths, for example `bazframe skill add "C:\Skills\review"`. Keep Bazframe home and temporary/staging state on accepted local NTFS; ARM64 and network-backed managed state are unsupported. Never replace a missing or incompatible addon with a PATH import or bypass integrity checks. Windows public routing in this source is not evidence that the already-published beta.3 or an arbitrary checkout build supports it; use the qualified package. Node/Pi/terminal qualification is environment-specific.
 
 ## Safety and ownership
 
@@ -69,6 +71,8 @@ bazframe package remove <package>
 `package add` performs the initial build and activation; `package build` rebuilds the current source revision; `package update` acquires and activates a remote Git revision. Profile reference changes never build. Removal is refused while referenced. Removing a resource acquired from a remote Git source removes its Bazframe-managed checkout and provenance while leaving the upstream remote available. A failed library update or package build leaves the previous activated snapshot in use. Libraries and packages have typed, separate namespaces, so both may have the same ID. A healthy library or package may contain `0 Skills`; profiles always reference the complete object, never selected children.
 
 ## Bundled Skills
+
+A local Skill may be added before any profile exists; this bootstraps protected catalog/lock state, not a profile or active selection. Imported managed profiles may legitimately omit a physical `skills/` directory; do not create one manually to silence diagnostics.
 
 The npm package ships generated `bazframe` and `bazify` Skills under `dist/skills/`. Installation registers neither one. Add a desired generated directory explicitly with `bazframe skill add <installed-package>/dist/skills/<skill>`, then add its membership to a profile. `bazify` uses `./bazframe/` for review tracking, extracts one Skill or a collection into a source-owned package at `~/<name>`, adapts dedicated Skill repositories in place, and publishes new packages only to a private GitHub repository after explicit consent.
 

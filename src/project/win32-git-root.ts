@@ -19,7 +19,8 @@ export function createWindowsGitRootServices(backend: BazframeWin32NativeBackend
     },
     async run(cwd, environment) {
       const executable = await resolveControlledExecutable(executableEnvironmentValue(environment, 'BAZFRAME_GIT_EXECUTABLE', true) ?? 'git', { cwd, environment, platform: 'win32', effects: options.executableEffects });
-      const result = await (options.process ?? runManagedGitProcess)(executable, ['-c', 'core.quotePath=false', 'rev-parse', '--path-format=absolute', '--show-toplevel'], cwd, environment, { timeoutMilliseconds: 5000, terminationGraceMilliseconds: 2000, maxStreamBytes: 64 * 1024 });
+      // Read-only discovery needs no input and must not inherit a Pi/RPC input handle.
+      const result = await (options.process ?? runManagedGitProcess)(executable, ['-c', 'core.quotePath=false', 'rev-parse', '--path-format=absolute', '--show-toplevel'], cwd, environment, { timeoutMilliseconds: 5000, terminationGraceMilliseconds: 2000, maxStreamBytes: 64 * 1024 }, { stdin: 'ignore' });
       const failed = result.status !== 0 || result.failure !== undefined || result.error !== undefined || result.monitorError !== undefined || result.signal != null || result.uncertainTermination === true;
       return { stdout: result.stdoutBytes ?? Buffer.from(result.stdout), stderr: Buffer.from(result.stderr), ...(failed ? { error: Object.assign(new Error('Git discovery failed'), { code: result.status ?? errorCode(result.error), killed: result.failure !== undefined || result.uncertainTermination === true, signal: result.signal }) } : {}) };
     }

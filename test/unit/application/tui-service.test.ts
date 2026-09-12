@@ -124,11 +124,11 @@ describe('Bazframe TUI service', () => {
     const fixture = await createFixture();
     const reviewer = (await fixture.service.loadDashboard()).profiles
       .find((profile) => profile.id === 'reviewer');
-    expect(reviewer).toBeDefined();
+    expect(reviewer?.removalIdentity).toBeDefined();
     await expect(fixture.service.removeProfile('reviewer', {
       kind: 'recursive',
       confirmedProfileId: 'focused',
-      removalIdentity: reviewer!.removalIdentity
+      removalIdentity: reviewer!.removalIdentity!
     })).rejects.toThrow(/exactly match/u);
     await expect(fixture.service.addMembership('reviewer', {
       originId: 'other',
@@ -152,7 +152,7 @@ describe('Bazframe TUI service', () => {
     });
     const reviewed = (await fixture.service.loadDashboard()).profiles
       .find((profile) => profile.id === 'reviewer');
-    expect(reviewed).toBeDefined();
+    expect(reviewed?.removalIdentity).toBeDefined();
 
     // A cooperating second client replaces the reviewed ID while holding the
     // same core global state lock used by all profile lifecycle operations.
@@ -166,7 +166,7 @@ describe('Bazframe TUI service', () => {
     await expect(fixture.service.removeProfile('reviewer', {
       kind: 'recursive',
       confirmedProfileId: 'reviewer',
-      removalIdentity: reviewed!.removalIdentity
+      removalIdentity: reviewed!.removalIdentity!
     })).rejects.toMatchObject({ code: 'PROFILE_REMOVE_AUTHORIZATION_STALE' });
     expect(await fixture.directory.readText('home/profiles/reviewer/AGENTS.md'))
       .toBe('replacement instructions\n');

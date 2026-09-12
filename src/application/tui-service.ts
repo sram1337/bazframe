@@ -108,7 +108,8 @@ export interface ProfileSummary {
   id: string;
   directory: string;
   instructionsPath: string;
-  removalIdentity: ProfileRemovalIdentity | PhysicalProfileExpectation;
+  removalIdentity?: ProfileRemovalIdentity | PhysicalProfileExpectation;
+  removalDiagnostic?: string;
   active: boolean;
   favorite: boolean;
   membershipWritable: boolean;
@@ -579,6 +580,7 @@ async function inspectDashboard(
     }
   }
   const importedDirectGroupIds=new Set<string>();
+  const missingMembershipNamespaces = new Set<string>();
   const profiles = await inspectProfiles(
     options.bazframeHome,
     defaultCatalog?.registrations ?? [],
@@ -586,15 +588,28 @@ async function inspectDashboard(
     new Set(favoriteProfileIds),
     global,
     diagnostics,
-    options.application
+    options.application,
+    missingMembershipNamespaces
   );
   try{
     const systemView=await readProfileSystemView(options.bazframeHome, options.application?.view);
     const profileApplications=new Map(projectTuiProfileApplications(systemView,activeProfileId??null).map((item)=>[item.name,item.extension]));
     for(const profile of profiles){
       Object.assign(profile,profileApplications.get(profile.id)??{});
+      // Only a successfully validated managed view may legitimately omit this
+      // physical namespace. Keep ENOENT as a capability reason unless imported
+      // direct membership is actually available; do not hide other diagnostics.
+      const managed = systemView.profiles.find((item) => item.name === profile.id);
+      if (missingMembershipNamespaces.has(profile.id) && managed?.profileInstanceId != null && !managed.incomplete) {
+        const index = diagnostics.findIndex((item) => item.id === `profile-${profile.id}-skills`);
+        if (index !== -1) diagnostics.splice(index, 1);
+      }
+
       const projected=systemView.skills.filter((item)=>item.ownerProfiles.includes(profile.id)&&item.sourceResourceIdentity.startsWith('imported:'));
-      if(projected.some((item)=>item.directlyAttachable))profile.membershipWritable=true;
+      if(projected.some((item)=>item.directlyAttachable)) {
+        profile.membershipWritable=true;
+        if (missingMembershipNamespaces.has(profile.id)) delete profile.membershipDiagnostic;
+      }
       for(const item of projected)profile.memberships.push({id:item.displayName,membershipId:item.directlyAttachable?importedMembershipProjectionId(profile.id,item.sourceResourceIdentity):`${profile.id}:derived:${item.stableIdentity}`,originId:item.sourceResourceIdentity,skillId:item.displayName,path:item.directory,kind:'managed',manageable:item.directlyAttachable});
       for(const resource of systemView.namespace.filter((item)=>item.ownerProfiles.includes(profile.id)&&item.stableIdentity.startsWith('imported:')&&item.kind!=='skill')){
         const kind:SkillCollectionKind=resource.kind==='library'?'library':'package';
@@ -757,7 +772,8 @@ async function inspectProfiles(
   favoriteProfileIds: ReadonlySet<string>,
   globalCollections: { collections: GlobalSkillCollectionInspection[]; diagnostics: SkillCollectionDiagnostic[] },
   diagnostics: DashboardDiagnostic[],
-  application?: ApplicationServices
+  application?: ApplicationServices,
+  missingMembershipNamespaces = new Set<string>()
 ): Promise<ProfileSummary[]> {
   const join = application?.paths.join ?? nodePaths.join;
   const stat = application?.reads?.stat ?? lstat;
@@ -810,7 +826,15 @@ async function inspectProfiles(
       // Capture before projecting the disclosed paths and memberships. A
       // cooperating mutation can therefore only make this identity stale; it
       // cannot authorize newer profile content than the dashboard described.
-      const removalIdentity = await (application?.lifecycle === undefined ? captureProfileRemovalIdentity(directory) : application.lifecycle.removalIdentity(bazframeHome, entry.name));
+      // Removal-only closure rules must not hide an ordinarily readable profile.
+      // Retain the refusal for an explicit removal action, not startup attention.
+      let removalIdentity: ProfileSummary['removalIdentity'];
+      let removalDiagnostic: string | undefined;
+      try {
+        removalIdentity = await (application?.lifecycle === undefined ? captureProfileRemovalIdentity(directory) : application.lifecycle.removalIdentity(bazframeHome, entry.name));
+      } catch (error) {
+        removalDiagnostic = diagnostic(`profile-${entry.name}-removal`, error).message;
+      }
       const instructionsPath = join(directory, 'AGENTS.md');
       await (application?.reads?.instructions ?? readUtf8InstructionFile)(
         instructionsPath,
@@ -835,6 +859,7 @@ async function inspectProfiles(
           );
         }
       } catch (error) {
+        if (errorCode(error) === 'ENOENT') missingMembershipNamespaces.add(entry.name);
         membershipDiagnostic = errorCode(error) === 'ENOENT'
           ? `Profile has no skills directory: ${skillsDirectory}`
           : `Could not inspect profile skills directory: ${skillsDirectory}${formatErrorCode(error)}`;
@@ -865,7 +890,7 @@ async function inspectProfiles(
         id: entry.name,
         directory,
         instructionsPath,
-        removalIdentity,
+        ...(removalIdentity === undefined ? { removalDiagnostic } : { removalIdentity }),
         active: entry.name === activeProfileId,
         favorite: favoriteProfileIds.has(entry.name),
         membershipWritable,

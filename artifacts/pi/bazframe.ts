@@ -168,8 +168,6 @@ interface SkillAlias {
 }
 
 const BAZFRAME_RUNTIME_PLATFORM = process.platform;
-const WINDOWS_PLATFORM_UNSUPPORTED_MESSAGE =
-	"Native Windows support is not available in this Bazframe release. Use Bazframe on macOS or Linux; help and version output remain available.";
 
 interface AdapterState {
 	cwd: string;
@@ -194,15 +192,15 @@ interface GitResult {
 	error?: Error;
 }
 
-function initialAdapterState(cwd: string, blocked = BAZFRAME_RUNTIME_PLATFORM === "win32"): AdapterState {
+function initialAdapterState(cwd: string, initializationError?: string): AdapterState {
 	return {
 		cwd,
 		bazframeHome: process.env.BAZFRAME_HOME ?? join(homedir(), ".bazframe"),
-		initialized: blocked,
+		initialized: initializationError !== undefined,
 		projectBehavior: "outside-git",
 		globalPolicy: "enabled",
 		skillAliases: [],
-		...(blocked ? { error: WINDOWS_PLATFORM_UNSUPPORTED_MESSAGE } : {}),
+		...(initializationError === undefined ? {} : { error: initializationError }),
 	};
 }
 
@@ -1577,19 +1575,29 @@ function showFailure(ctx: ExtensionContext, message: string): void {
 	process.exitCode = 1;
 }
 
-export default function bazframePiAdapter(pi: ExtensionAPI): void {
-    // This gate precedes binding I/O, package import, native initialization and state reads.
-    installHandlers(pi, undefined, BAZFRAME_RUNTIME_PLATFORM === "win32");
+export default async function bazframePiAdapter(pi: ExtensionAPI): Promise<void> {
+    if (BAZFRAME_RUNTIME_PLATFORM !== "win32") {
+        installHandlers(pi, undefined);
+        return;
+    }
+    try {
+        await createWindowsBoundPiAdapterForInternalTesting(pi);
+    } catch (error) {
+        // Pi may continue natively after a rejected factory. Keep failure handlers active
+        // until Pi reloads this extension; never fall back to standalone state reads.
+        installHandlers(pi, undefined, error instanceof Error ? error.message : String(error));
+    }
 }
 export function createBazframePiAdapterForInternalTesting(pi: ExtensionAPI, services: PiRuntimeServices): void {
-    installHandlers(pi, services, false);
+    installHandlers(pi, services);
 }
-function installHandlers(pi: ExtensionAPI, services: PiRuntimeServices | undefined, blocked: boolean): void {
-	let state = initialAdapterState(process.cwd(), blocked);
+function installHandlers(pi: ExtensionAPI, services: PiRuntimeServices | undefined, initializationError?: string): void {
+	const blocked = initializationError !== undefined;
+	let state = initialAdapterState(process.cwd(), initializationError);
 	let contextModeNotified = false;
 
 	pi.on("session_start", async (_event, ctx) => {
-		state = blocked ? initialAdapterState(ctx.cwd, true) : await resolveState(ctx.cwd, services);
+		state = blocked ? initialAdapterState(ctx.cwd, initializationError) : await resolveState(ctx.cwd, services);
 		contextModeNotified = false;
 		if (state.error !== undefined && ctx.hasUI) {
 			ctx.ui.notify(`Bazframe profile failed to load: ${state.error}`, "error");
@@ -1597,7 +1605,7 @@ function installHandlers(pi: ExtensionAPI, services: PiRuntimeServices | undefin
 	});
 
 	pi.on("resources_discover", async (event, ctx) => {
-		state = blocked ? initialAdapterState(event.cwd, true) : await resolveState(event.cwd, services);
+		state = blocked ? initialAdapterState(event.cwd, initializationError) : await resolveState(event.cwd, services);
 		if (!state.initialized || state.error !== undefined || state.profile === undefined) return;
 		try {
 			const prepared = await prepareProfileSkillPaths(state, pi, services);
@@ -1680,7 +1688,7 @@ function installHandlers(pi: ExtensionAPI, services: PiRuntimeServices | undefin
 			switch (args.trim()) {
 				case "info":
 					if (blocked) {
-						ctx.ui.notify(WINDOWS_PLATFORM_UNSUPPORTED_MESSAGE, "error");
+						ctx.ui.notify(initializationError!, "error");
 						return;
 					}
 					ctx.ui.notify(info(state, pi, ctx), state.error === undefined ? "info" : "error");
@@ -1696,8 +1704,8 @@ function installHandlers(pi: ExtensionAPI, services: PiRuntimeServices | undefin
 	});
 }
 
-/** Internal post-gate installed bootstrap. Its reference is part of installed owned code,
- * not runtime BAZFRAME_HOME or arbitrary record data. Public Windows dispatch stays closed. */
+/** Installer-bound Windows bootstrap, also exported for internal tests. Its reference
+ * is part of installed owned code, not runtime BAZFRAME_HOME or arbitrary record data. */
 export async function createWindowsBoundPiAdapterForInternalTesting(pi: ExtensionAPI, effects: {
     readFile?: typeof readBootstrapBytes;
     importRuntime?: (url: string) => Promise<{ createBoundPiRuntimeServices(options: object): PiRuntimeServices }>;
@@ -1730,7 +1738,7 @@ export async function createWindowsBoundPiAdapterForInternalTesting(pi: Extensio
     const hostPi = await import("@earendil-works/pi-coding-agent");
     const runtime = await (effects.importRuntime ?? ((url: string) => import(url)))(pathToFileURL(runtimePath).href);
     const services: PiRuntimeServices = runtime.createBoundPiRuntimeServices({ parse: hostPi.parseFrontmatter, environment: process.env, userHome: homedir() });
-    installHandlers(pi, services, false);
+    installHandlers(pi, services);
     } catch (cause) { throw new Error(failed().message, { cause }); }
 }
 async function readBootstrapBytes(path: string, maximum: number): Promise<Buffer> {

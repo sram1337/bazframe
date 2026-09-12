@@ -10,6 +10,29 @@ import type {
 import { createWindowsAddedSkillPlatformServicesForInternalTesting, enumerateWindowsPhysicalDirectory } from '../../../src/skills/added-skill-platform-services.js';
 
 describe('Windows added-Skill platform services', () => {
+
+  it('resolves a prospective home through admitted physical ancestry without creating anything', () => {
+    const f = windowsProvisioningFixture();
+    const services = createWindowsAddedSkillPlatformServicesForInternalTesting(f.backend);
+    const before = f.snapshot();
+    expect(services.canonicalHomePath!('C:\\boundary\\missing\\home')).toBe(
+      f.backend.inspectPath('C:\\boundary').canonicalPath + '\\missing\\home'
+    );
+    expect(f.snapshot()).toBe(before);
+  });
+
+  it.each(['reparse', 'access'])('refuses prospective home %s ancestry without creation', (mode) => {
+    const f = windowsProvisioningFixture();
+    if (mode === 'reparse') f.reparse('C:\\boundary\\ancestor');
+    else {
+      const inspect = f.backend.inspectPath;
+      f.backend.inspectPath = (path) => { if (path === 'C:\\boundary') throw Object.assign(new Error('access refused'), { code: 'EACCES' }); return inspect(path); };
+    }
+    const before = f.snapshot();
+    const services = createWindowsAddedSkillPlatformServicesForInternalTesting(f.backend);
+    expect(() => services.canonicalHomePath!('C:\\boundary\\ancestor\\missing\\home')).toThrow();
+    expect(f.snapshot()).toBe(before);
+  });
   it.each(['name', 'fileId', 'size', 'allocationSize', 'creationTime', 'lastWriteTime', 'changeTime', 'attributes', 'reparseTag', 'directory'] as const)('retains complete enumeration entry %s in raw evidence and digest', async (field) => {
     const f = windowsProvisioningFixture(); f.file('C:\\boundary\\entry', 'bytes');
     const before = await enumerateWindowsPhysicalDirectory(f.backend, 'C:\\boundary', 10);

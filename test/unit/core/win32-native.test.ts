@@ -504,7 +504,7 @@ describe('Bazframe-owned Windows native loader', () => {
     });
   });
 
-  it('does not connect the internal loader seam to the public Windows CLI gate', async () => {
+  it('uses the production native loader on public Windows dispatch without POSIX fallback', async () => {
     const reached: string[] = [];
     let stderr = '';
     const status = await runCli(['status'], {
@@ -517,8 +517,9 @@ describe('Bazframe-owned Windows native loader', () => {
       profileRuntime: async () => { reached.push('runtime'); throw new Error('bypass'); }
     });
     expect(status).toBe(1);
-    expect(reached).toEqual([]);
-    expect(stderr).toContain('WINDOWS_PLATFORM_UNSUPPORTED');
+    expect(reached).not.toContain('runtime');
+    expect(stderr).not.toContain('WINDOWS_PLATFORM_UNSUPPORTED');
+    if (process.platform !== 'win32') expect(stderr).toContain('native Windows');
   });
 });
 

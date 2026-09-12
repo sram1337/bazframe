@@ -16,6 +16,39 @@ const quick = {
 };
 
 describe('managed Git process runner', () => {
+  it.each([
+    [undefined, false], ['inherit', false], ['ignore', false],
+    [undefined, true], ['inherit', true], ['ignore', true]
+  ] as const)('passes stdin %s at the shared spawn boundary with process groups %s (synthetic child)', async (stdin, posixProcessGroups) => {
+    const child = new EventEmitter() as ChildProcess;
+    Object.assign(child, { pid: 123, stdout: new EventEmitter(), stderr: new EventEmitter() });
+    const environment = { PATH: '/literal/tools', MARKER: 'unchanged' };
+    const argv = ['rev-parse', 'literal ; argument'];
+    let observed: unknown[] = [];
+    const result = await runManagedGitProcess('literal-git', argv, '/literal/cwd', environment, quick, {
+      ...(stdin === undefined ? {} : { stdin }),
+      posixProcessGroups,
+      signalProcess: (pid, signal) => {
+        expect([pid, signal]).toEqual([-123, 0]);
+        throw Object.assign(new Error('naturally absent'), { code: 'ESRCH' });
+      },
+      spawnProcess: ((executable, args, options) => {
+        observed = [executable, args, options];
+        queueMicrotask(() => {
+          child.stdout!.emit('data', Buffer.from([0, 255, 13, 10]));
+          child.stderr!.emit('data', Buffer.from('abcd'));
+          child.emit('close', 128);
+        });
+        return child;
+      }) as typeof spawn
+    });
+    expect(observed).toEqual(['literal-git', argv, {
+      cwd: '/literal/cwd', env: environment, shell: false,
+      detached: posixProcessGroups, stdio: [stdin ?? 'inherit', 'pipe', 'pipe']
+    }]);
+    expect(result).toEqual({ status: 128, stdout: Buffer.from([0, 255, 13, 10]).toString('utf8'), stdoutBytes: Buffer.from([0, 255, 13, 10]), stderr: 'abcd' });
+  });
+
   it('uses literal argv and independently accepts streams exactly at their byte bounds', async () => {
     const exact = await runManagedGitProcess(
       process.execPath,
@@ -187,10 +220,10 @@ describe('Windows immediate-child bounded receipts', () => {
     expect(await pending).toMatchObject({ failure: 'parent-signal', signal: 'SIGTERM', uncertainTermination: true });
     for (const signal of signals) expect(process.listeners(signal).filter((listener) => !before.get(signal)!.has(listener))).toEqual([]);
   });
-  it('retains uncertainty when close arrives after timeout even if kill reports success', async () => {
+  it.each([undefined, 'ignore'] as const)('retains uncertainty with stdin %s when close arrives after timeout even if kill reports success', async (stdin) => {
     const child = new EventEmitter() as ChildProcess;
     Object.assign(child, { pid: 123, stdout: new EventEmitter(), stderr: new EventEmitter(), kill: () => { queueMicrotask(() => child.emit('close', 0)); return true; } });
-    const result = await runManagedGitProcess('C:\\tools\\git.exe', [], 'C:\\fetched', {}, { ...quick, timeoutMilliseconds: 1 }, { posixProcessGroups: false, spawnProcess: (() => child) as typeof spawn });
+    const result = await runManagedGitProcess('C:\\tools\\git.exe', [], 'C:\\fetched', {}, { ...quick, timeoutMilliseconds: 1 }, { ...(stdin === undefined ? {} : { stdin }), posixProcessGroups: false, spawnProcess: (() => child) as typeof spawn });
     expect(result).toMatchObject({ failure: 'timeout', uncertainTermination: true });
   });
   it('settles pid-less spawn error without waiting for timeout or close', async () => {

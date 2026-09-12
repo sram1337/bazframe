@@ -1536,6 +1536,32 @@ describe('TuiApp', () => {
     expect(onExitCode).not.toHaveBeenCalled();
   });
 
+  it('refuses removal with the retained reason before either confirmation when proof is unavailable', async () => {
+    const service = fakeService();
+    const snapshot = await service.loadDashboard();
+    Object.assign(snapshot.profiles[0]!, {
+      removalIdentity: undefined,
+      removalDiagnostic: 'Invalid physical profile closure: source-units is inert.'
+    });
+    const view = render(<TuiApp service={service} />);
+    await openProfiles(view);
+    expect(view.lastFrame()).not.toContain('source-units');
+
+    view.stdin.write('x');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Removal unavailable'));
+    expect(view.lastFrame()).toContain('source-units is inert');
+    expect(view.lastFrame()).not.toContain('confirm generated-empty removal');
+    expect(view.lastFrame()).not.toContain('Type exact profile ID');
+    expect(service.removeProfile).not.toHaveBeenCalled();
+
+    // No removal modal traps ordinary navigation or instruction editing.
+    view.stdin.write('\r');
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Profiles / ▶ focused'));
+    view.stdin.write('e');
+    await vi.waitFor(() => expect(service.editProfileInstructions).toHaveBeenCalledWith('focused'));
+    expect(service.removeProfile).not.toHaveBeenCalled();
+  });
+
   it('requires exact-ID authorization before translating recursive profile removal', async () => {
     const service = fakeService();
     vi.mocked(service.removeProfile).mockRejectedValueOnce(new BazframeError(

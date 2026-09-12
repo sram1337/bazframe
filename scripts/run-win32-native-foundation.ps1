@@ -10,8 +10,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# This is a source-build and evidence harness for the closed internal Windows
-# foundation. It is not a Bazframe installer, release-admission step, or
+# This is a source-build harness for Windows foundation and limited product
+# evidence, including public CLI smoke. It is not a Bazframe installer, release-admission step, or
 # Windows support switch.
 $isWindowsRuntime = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
     [System.Runtime.InteropServices.OSPlatform]::Windows
@@ -220,19 +220,19 @@ try {
     }
     $productSourceEvidence = Get-Content -LiteralPath $productSourceEvidencePath -Raw | ConvertFrom-Json
     $productInstalledEvidence = Get-Content -LiteralPath $productInstalledEvidencePath -Raw | ConvertFrom-Json
-    if ($productSourceEvidence.schemaVersion -ne 4 -or
-        $productInstalledEvidence.schemaVersion -ne 4 -or
+    if ($productSourceEvidence.schemaVersion -ne 5 -or
+        $productInstalledEvidence.schemaVersion -ne 5 -or
         $productSourceEvidence.completion -ne 'passed' -or
         $productInstalledEvidence.completion -ne 'passed' -or
         $productSourceEvidence.releaseAdmission -ne 'not-authorized' -or
         $productInstalledEvidence.releaseAdmission -ne 'not-authorized' -or
         $productSourceEvidence.windowsSupportClaim -ne $false -or
         $productInstalledEvidence.windowsSupportClaim -ne $false -or
-        $productSourceEvidence.publicWindowsGate -ne 'closed' -or
-        $productInstalledEvidence.publicWindowsGate -ne 'closed' -or
+        $productSourceEvidence.publicWindowsGate -ne 'open' -or
+        $productInstalledEvidence.publicWindowsGate -ne 'open' -or
         $productSourceEvidence.observations.binarySha256 -ne $binaryHash -or
         $productInstalledEvidence.observations.binarySha256 -ne $binaryHash) {
-        throw 'Windows added-Skill product reports changed their closed support boundary.'
+        throw 'Windows added-Skill product reports changed their limited product boundary.'
     }
     $productSourceObservations = $productSourceEvidence.observations | ConvertTo-Json -Compress
     $productInstalledObservations = $productInstalledEvidence.observations | ConvertTo-Json -Compress

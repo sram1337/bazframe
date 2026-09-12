@@ -58,7 +58,24 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const DETAIL_KEY = /^[a-z][A-Za-z0-9]{0,63}$/u;
 const KIND_ORDER: readonly ResourceKind[] = ['skill', 'library', 'package'];
 const CONFIRMATION_ORDER: readonly JsonConfirmationV2[] = ['publish-preview', 'public-visibility', 'package-build'];
+// Public Windows loader failures are fixed remediation, never raw native
+// messages, operands or causes. Storage/operation errors remain outside this
+// narrow allowlist and retain the existing unknown-error fallback.
+const NATIVE_LOADER_MESSAGES = new Map<string, string>([
+  ['WINDOWS_NATIVE_PLATFORM_UNSUPPORTED', 'The Bazframe native Windows backend requires native Windows.'],
+  ['WINDOWS_NATIVE_ARCH_UNSUPPORTED', 'The Bazframe native Windows backend requires Windows x64.'],
+  ['WINDOWS_NATIVE_ARTIFACT_MISSING', 'The bundled Bazframe Windows native artifact is missing. Reinstall Bazframe from the reviewed package.'],
+  ['WINDOWS_NATIVE_ARTIFACT_INCOMPATIBLE', 'The bundled Bazframe Windows native artifact is incompatible. Reinstall Bazframe for Windows x64 with a supported Node version.'],
+  ['WINDOWS_NATIVE_ARTIFACT_LOAD_FAILED', 'The bundled Bazframe Windows native artifact could not be loaded. Reinstall Bazframe for Windows x64 with a supported Node version.'],
+  ['WINDOWS_NATIVE_EXPORT_MISSING', 'The bundled Bazframe Windows native artifact lacks required capabilities. Reinstall the matching reviewed Bazframe package.'],
+  ['WINDOWS_NATIVE_CONTRACT_MISMATCH', 'The bundled Bazframe Windows native contract or limits do not match this build. Reinstall the matching reviewed Bazframe package.'],
+  ['WINDOWS_NATIVE_VERSION_MISMATCH', 'The bundled Bazframe Windows native artifact does not match this package version. Reinstall the matching reviewed Bazframe package.'],
+  ['WINDOWS_NATIVE_TARGET_MISMATCH', 'The bundled Bazframe Windows native artifact reports an unexpected target. Reinstall Bazframe for Windows x64.'],
+  ['WINDOWS_NATIVE_PACKAGE_METADATA_INVALID', 'The installed Bazframe package metadata is unavailable or invalid. Reinstall the reviewed Bazframe package.']
+]);
+
 const ALLOWED_CODES = new Set([
+  ...NATIVE_LOADER_MESSAGES.keys(),
   'CAPTURED_PROFILE_INVALID', 'CLI_USAGE', 'OFFLINE', 'PROFILE_ARTIFACT_TREE_ABSENT', 'PROFILE_ARTIFACT_TREE_INVALID',
   'PROFILE_ARTIFACT_TREE_OCCUPIED', 'PROFILE_AUTHENTICATION_REQUIRED', 'PROFILE_BLOB_ABSENT', 'PROFILE_BLOB_INVALID',
   'PROFILE_CAPTURE_CHANGED', 'PROFILE_CAPTURE_INVALID', 'PROFILE_CONFIRMATION_REQUIRED', 'PROFILE_GIT_ADAPTER_REQUIRED', 'PROFILE_INTERNAL_ERROR',
@@ -82,7 +99,7 @@ const ALLOWED_CODES = new Set([
   'PROFILE_REMOTE_MATERIALIZATION_CLEANUP_UNPROVEN', 'PROFILE_REMOTE_MATERIALIZATION_RECOVERY_REQUIRED', 'NO_ACTIVE_PROFILE',
   'PROFILE_TRANSACTION_INVALID', 'PROFILE_VERSION_NOT_LATEST', 'PROFILE_VIEW_CHANGED', 'PROFILE_VIEW_INVALID',
   'PROFILE_VIEW_LIMIT', 'PROFILE_ZIP_INVALID', 'PROFILE_ZIP_OUTPUT_OCCUPIED', 'REMOTE_MATERIALIZER_UNAVAILABLE',
-  'REMOTE_UNAVAILABLE', 'WINDOWS_PLATFORM_UNSUPPORTED'
+  'REMOTE_UNAVAILABLE'
 ]);
 
 export function projectProfileStateV2(profile: ProfileDomainView, active: boolean): JsonProfileStateV2 {
@@ -180,7 +197,7 @@ export function jsonRefusalV2(codeValue: string, message: string, interaction: J
 }
 export function jsonErrorV2(category: JsonErrorV2['category'], codeValue: string, message: string, details?: Readonly<JsonDetailsV2>): JsonErrorV2 {
   const copiedDetails = details === undefined ? undefined : safeDetails(details);
-  return { category: enumValue(category, ['usage','authentication','network','integrity','operational','internal'] as const, 'error category'), code: code(codeValue), message: safeMessage(message), ...(copiedDetails === undefined || Object.keys(copiedDetails).length === 0 ? {} : { details: copiedDetails }) };
+  return { category: enumValue(category, ['usage','authentication','network','integrity','operational','internal'] as const, 'error category'), code: code(codeValue), message: safeMessage(NATIVE_LOADER_MESSAGES.get(codeValue) ?? message), ...(copiedDetails === undefined || Object.keys(copiedDetails).length === 0 ? {} : { details: copiedDetails }) };
 }
 export function lifecycleSuccessV2<C extends LifecycleCommandV2>(command: C, result: LifecycleResultByCommandV2[C], diagnostics: readonly JsonDiagnosticV2[] = []): JsonLifecycleV2<LifecycleResultByCommandV2[C]> {
   const canonicalCommand = lifecycleCommand(command) as C;

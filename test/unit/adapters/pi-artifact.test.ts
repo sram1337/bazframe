@@ -33,10 +33,11 @@ interface LoadedAdapter {
     on: (name: string, handler: Handler) => void;
     registerCommand: (name: string, command: Command) => void;
     getCommands: () => RuntimeCommand[];
-  }) => void;
+  }) => void | Promise<void>;
 }
 
 interface Harness {
+  ready: void | Promise<void>;
   events: Map<string, Handler>;
   commands: Map<string, Command>;
 }
@@ -51,7 +52,7 @@ afterEach(async () => {
 });
 
 describe('packaged Pi adapter command', () => {
-  it('gates native Windows before state resolution, resources, agent start, and info', async () => {
+  it('fails closed with the missing Windows binding reason before state, resources, agent start, and info', async () => {
     const directory = await createTempDirectory('bazframe-pi-artifact-win32-gate-');
     temporaryDirectories.push(directory);
     process.env.BAZFRAME_HOME = directory.path('must-not-be-read');
@@ -61,6 +62,7 @@ describe('packaged Pi adapter command', () => {
       poisonResolveState: true
     });
     const harness = register(adapter, []);
+    await harness.ready;
     const notifications: Array<{ message: string; level: string }> = [];
     const context = {
       cwd: directory.path('cwd'),
@@ -77,7 +79,8 @@ describe('packaged Pi adapter command', () => {
       { systemPrompt: 'native', systemPromptOptions: { contextFiles: [] } }, context
     ) as { systemPrompt: string };
     expect(beforeAgent.systemPrompt).toContain('Do not act on the user request.');
-    expect(beforeAgent.systemPrompt).toContain('Native Windows support is not available');
+    expect(beforeAgent.systemPrompt).toContain('Windows Pi runtime binding is missing, stale or changed');
+    expect(beforeAgent.systemPrompt).not.toContain('bazframe_profile_instructions');
 
     let reloaded = 0;
     let info = { message: '', level: '' };
@@ -88,7 +91,7 @@ describe('packaged Pi adapter command', () => {
       ui: { notify: (message: string, level: string) => { info = { message, level }; } }
     });
     expect(info).toEqual({
-      message: 'Native Windows support is not available in this Bazframe release. Use Bazframe on macOS or Linux; help and version output remain available.',
+      message: expect.stringMatching(/Windows Pi runtime binding.*Reinstall.*adapter install/),
       level: 'error'
     });
     await command.handler('reload', {
@@ -99,7 +102,11 @@ describe('packaged Pi adapter command', () => {
     await expect(required(harness.events, 'resources_discover')(
       { cwd: directory.path('after-reload') }, context
     )).resolves.toBeUndefined();
-    expect(notifications.every(({ message }) => message.includes('Native Windows support is not available'))).toBe(true);
+    expect(notifications.every(({ message }) => message.includes('Windows Pi runtime binding'))).toBe(true);
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    expect(required(harness.events, 'input')({}, { ...context, hasUI: false })).toEqual({ action: 'handled' });
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('Windows Pi runtime binding'));
+    expect(process.exitCode).toBe(1);
   });
 
   it.each([
@@ -1214,12 +1221,12 @@ async function activeFixture(
 function register(adapter: LoadedAdapter, runtimeCommands: RuntimeCommand[]): Harness {
   const events = new Map<string, Handler>();
   const commands = new Map<string, Command>();
-  adapter.default({
+  const ready = adapter.default({
     on: (name, handler) => { events.set(name, handler); },
     registerCommand: (name, command) => { commands.set(name, command); },
     getCommands: () => runtimeCommands
   });
-  return { events, commands };
+  return { events, commands, ready };
 }
 
 async function loadArtifact(

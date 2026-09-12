@@ -1,9 +1,10 @@
 import { readFile } from 'node:fs/promises';
-import { describe, expect, it } from 'vitest';
-import {
-  WINDOWS_PLATFORM_UNSUPPORTED_CODE,
-  WINDOWS_PLATFORM_UNSUPPORTED_MESSAGE
-} from '../../../src/core/platform-support.js';
+import { describe, expect, it, vi } from 'vitest';
+import * as native from '../../../src/core/win32-native.js';
+import { createWindowsApplicationServices } from '../../../src/application/win32-application-services.js';
+import { win32 } from 'node:path';
+import type { ApplicationServices } from '../../../src/application/application-services.js';
+import { BazframeError } from '../../../src/core/errors.js';
 import { runCli, type CliDependencies } from '../../../src/cli/run-cli.js';
 import { parseArgv, type Command } from '../../../src/cli/parse-argv.js';
 
@@ -75,7 +76,7 @@ const LIFECYCLE = new Set<Command['name']>([
   'profile-version-use'
 ]);
 
-describe('native Windows pre-acceptance platform gate', () => {
+describe('public Windows lazy routing', () => {
   it('keeps the table synchronized with every command shape reachable from the parser', () => {
     expect(PARSED_COMMAND_NAMES_ARE_COVERED).toBe(true);
     const names = COMMAND_CASES.map(([expected, argv]) => {
@@ -142,34 +143,40 @@ describe('native Windows pre-acceptance platform gate', () => {
     `);
   });
 
-  it.each(COMMAND_CASES)('refuses %s before runtime, confirmation, cwd, TUI, editor, or process seams', async (_name, argv) => {
+  it.each(COMMAND_CASES)('routes %s to injected Windows application services without POSIX fallback', async (name, argv) => {
     const invocation = await invoke(argv, 'win32');
 
     expect(invocation.status).toBe(1);
     expect(invocation.stdout).toBe('');
     expect(invocation.stderr).toBe(
-      `error: ${WINDOWS_PLATFORM_UNSUPPORTED_CODE}: ${WINDOWS_PLATFORM_UNSUPPORTED_MESSAGE}\n`
+      'error: Windows application reached\n'
     );
-    expect(invocation.reached).toEqual([]);
+    expect(invocation.reached).toEqual([...(['projects-overview', 'project-enable', 'project-disable', 'status', 'tui', 'pi'].includes(name) ? ['cwd'] : []), 'application']);
   });
 
   it.each(COMMAND_CASES.filter(([name]) => !JSON_UNSUPPORTED.has(name)))(
-    'emits the stable JSON platform error for %s without reaching effects',
+    'retains JSON protocol for %s when Windows application admission refuses',
     async (name, argv) => {
       const invocation = await invoke([...argv, '--json'], 'win32');
       const document = JSON.parse(invocation.stdout) as Record<string, unknown>;
 
+      if (name === 'profile-publish') {
+        expect(invocation.status).toBe(2);
+        expect(invocation.reached).toEqual([]);
+        expect(document).toMatchObject({ schemaVersion: 2, outcome: 'refusal', refusal: { code: 'PROFILE_PUBLISH_CONFIRMATION_REQUIRED' } });
+        return;
+      }
       expect(invocation.status).toBe(1);
       expect(invocation.stderr).toBe('');
-      expect(invocation.reached).toEqual([]);
+      expect(invocation.reached).toEqual([...(['projects-overview', 'project-enable', 'project-disable', 'status', 'tui', 'pi'].includes(name) ? ['cwd'] : []), 'application']);
       if (LIFECYCLE.has(name)) {
         expect(document).toMatchObject({
           schemaVersion: 2,
           outcome: 'error',
           error: {
-            category: 'operational',
-            code: WINDOWS_PLATFORM_UNSUPPORTED_CODE,
-            message: WINDOWS_PLATFORM_UNSUPPORTED_MESSAGE
+            category: 'network',
+            code: 'REMOTE_UNAVAILABLE',
+            message: 'Windows application reached'
           }
         });
       } else {
@@ -178,13 +185,20 @@ describe('native Windows pre-acceptance platform gate', () => {
           ok: false,
           error: {
             category: 'operational',
-            code: WINDOWS_PLATFORM_UNSUPPORTED_CODE,
-            message: WINDOWS_PLATFORM_UNSUPPORTED_MESSAGE
+            code: 'REMOTE_UNAVAILABLE',
+            message: 'Windows application reached'
           }
         });
       }
     }
   );
+
+  it.each(COMMAND_CASES.filter(([name]) => JSON_UNSUPPORTED.has(name)))('rejects JSON for %s before application access', async (_name, argv) => {
+    const windows = await invoke([...argv, '--json'], 'win32');
+    expect(windows.status).toBe(2);
+    expect(windows.reached).toEqual([]);
+    expect(windows).toEqual(await invoke([...argv, '--json'], 'linux'));
+  });
 
   it.each([
     ['root help', []],
@@ -201,13 +215,49 @@ describe('native Windows pre-acceptance platform gate', () => {
     expect(windows.reached).toEqual([]);
   });
 
-  it('does not import or construct the internal Windows added-Skill service from public dispatch', async () => {
-    const [dispatcher, gate] = await Promise.all([
-      readFile(new URL('../../../src/cli/run-cli.ts', import.meta.url), 'utf8'),
-      readFile(new URL('../../../src/core/platform-support.ts', import.meta.url), 'utf8')
-    ]);
-    expect(dispatcher).not.toContain('added-skill-platform-services');
-    expect(gate).not.toContain('added-skill-platform-services');
+  it.each([
+    'WINDOWS_NATIVE_PLATFORM_UNSUPPORTED', 'WINDOWS_NATIVE_ARCH_UNSUPPORTED',
+    'WINDOWS_NATIVE_ARTIFACT_MISSING', 'WINDOWS_NATIVE_ARTIFACT_INCOMPATIBLE',
+    'WINDOWS_NATIVE_ARTIFACT_LOAD_FAILED', 'WINDOWS_NATIVE_EXPORT_MISSING',
+    'WINDOWS_NATIVE_CONTRACT_MISMATCH', 'WINDOWS_NATIVE_VERSION_MISMATCH',
+    'WINDOWS_NATIVE_TARGET_MISMATCH', 'WINDOWS_NATIVE_PACKAGE_METADATA_INVALID'
+  ])('retains fixed loader remediation in public lifecycle JSON-v2 for %s', async (code) => {
+    const application = createWindowsApplicationServices({ backend: () => {
+      throw new BazframeError(code, 'PRIVATE_OPERAND token=PRIVATE_SECRET', { cause: new Error('PRIVATE_CAUSE') });
+    } });
+    let stdout = '', stderr = '';
+    expect(await runCli(['profile', 'export', '--json'], {
+      platform: 'win32', application, environment: {}, userHome: 'C:\\unused',
+      writeStdout: (text) => { stdout += text; }, writeStderr: (text) => { stderr += text; }
+    })).toBe(1);
+    expect(stderr).toBe('');
+    expect(JSON.parse(stdout)).toMatchObject({ schemaVersion: 2, outcome: 'error', error: { code, message: expect.stringMatching(/requires|Reinstall/) } });
+    expect(stdout).not.toMatch(/PRIVATE_|cause|stack/);
+  });
+
+  it('keeps unknown/native-storage JSON-v2 errors closed rather than allowlisting a prefix', async () => {
+    const application = createWindowsApplicationServices({ backend: () => { throw new BazframeError('WINDOWS_NATIVE_ACCESS_DENIED', 'PRIVATE_REASON'); } });
+    let stdout = '';
+    await runCli(['profile', 'export', '--json'], { platform: 'win32', application, environment: {}, userHome: 'C:\\unused', writeStdout: (text) => { stdout += text; }, writeStderr() {} });
+    expect(JSON.parse(stdout)).toMatchObject({ error: { code: 'PROFILE_INTERNAL_ERROR' } });
+    expect(stdout).not.toContain('PRIVATE_REASON');
+  });
+
+  it.each(['skill', 'library', 'package'])('parses drive-absolute %s input before selecting the non-injected Windows application', async (kind) => {
+    const load = vi.spyOn(native, 'loadBazframeWin32Native').mockImplementation(() => {
+      throw new BazframeError('WINDOWS_NATIVE_ARTIFACT_MISSING', 'Expected native loader route');
+    });
+    try {
+      let stdout = '', stderr = '';
+      const status = await runCli([kind, 'add', 'C:\\fixtures\\local', '--json'], {
+        platform: 'win32', environment: {}, userHome: 'C:\\unused',
+        writeStdout: (text) => { stdout += text; }, writeStderr: (text) => { stderr += text; }
+      });
+      expect(status).toBe(1);
+      expect(load).toHaveBeenCalledOnce();
+      expect(stderr).toBe('');
+      expect(JSON.parse(stdout)).toMatchObject({ schemaVersion: 1, ok: false, error: { code: 'WINDOWS_NATIVE_ARTIFACT_MISSING' } });
+    } finally { load.mockRestore(); }
   });
 
   it('uses the same built dispatcher for bazframe and bzf', async () => {
@@ -231,12 +281,18 @@ async function invoke(
   };
   const dependencies: CliDependencies = {
     platform,
+    application: new Proxy({ paths: win32 } as ApplicationServices, { get(target, key) {
+      if (key === 'paths') return target.paths;
+      reached.push('application');
+      throw new BazframeError('REMOTE_UNAVAILABLE', 'Windows application reached');
+    } }),
     environment: {},
     userHome: '/not-read/bazframe-platform-gate',
-    cwd: () => poison('cwd') as never,
+    cwd: () => { reached.push('cwd'); return 'C:\\not-read'; },
+    stdinIsTty: true, stdoutIsTty: true,
     writeStdout: (text) => { stdout += text; },
     writeStderr: (text) => { stderr += text; },
-    launchTui: async () => poison('TUI') as never,
+    launchTui: async (options) => { void options.application!.profiles; return poison('TUI') as never; },
     profileRuntime: async () => poison('profile runtime') as never,
     confirmManagedGitPackageBuild: () => poison('managed Git confirmation') as never,
     confirmProfileImportPackageBuild: () => poison('profile package confirmation') as never,

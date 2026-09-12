@@ -11,13 +11,13 @@ const args = process.argv.slice(2);
 const packageRoot = resolve(argument('--package-root') ?? fileURLToPath(new URL('..', import.meta.url)));
 const outputPath = resolve(argument('--output') ?? join(packageRoot, 'win32-added-skill-evidence.json'));
 const report = {
-  schemaVersion: 4,
-  purpose: 'Internal managed profile activation, current selection, onboarding and healthy local added-Skill Windows product-slice evidence only.',
+  schemaVersion: 5,
+  purpose: 'Limited Windows product-slice evidence: internal managed profile activation, current selection, onboarding, healthy local added-Skill lifecycle and public CLI smoke only.',
   packageRootKind: packageRoot.includes('node_modules') ? 'packed-install' : 'source-tree',
   completion: 'failed',
   releaseAdmission: 'not-authorized',
   windowsSupportClaim: false,
-  publicWindowsGate: 'closed',
+  publicWindowsGate: 'open',
   observations: {},
   failures: []
 };
@@ -247,30 +247,53 @@ try {
 
   diagnosticScenario = 'public-gate';
   markStep('start');
-  const poisonHome = join(testRoot, 'public-gate-poison');
-  let publicGateClosed = true;
+  let publicFreshProfileLifecycle = true;
+  let publicActiveForceRemoveRefusedUnchanged = true;
+  let publicAbsentHomeReadOnly = true;
   markStep('invoke-cli');
   const packageManifest = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8'));
   for (const executable of ['bazframe', 'bzf']) {
     requireCondition(packageManifest.bin[executable] === 'dist/cli.js', 'public entrypoint mapping changed');
-    try {
-      if (report.packageRootKind === 'packed-install') {
-        execFileSync('cmd.exe', ['/d', '/s', '/c', `""${join(packageRoot, '..', '.bin', `${executable}.cmd`)}" profile use focused"`], {
-          windowsVerbatimArguments: true,
-          env: { ...process.env, BAZFRAME_HOME: poisonHome }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']
-        });
-      } else execFileSync(process.execPath, [join(packageRoot, packageManifest.bin[executable]), 'profile', 'use', 'focused'], {
-        env: { ...process.env, BAZFRAME_HOME: poisonHome }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']
-      });
-      publicGateClosed = false;
-    } catch (error) {
-      publicGateClosed &&= error?.status === 1 && String(error.stderr).includes('WINDOWS_PLATFORM_UNSUPPORTED');
-    }
+    const publicHome = join(testRoot, `public-${executable}`);
+    // Literal argv only; packed runs use the genuine local npm CMD shim. Each
+    // alias gets independent state; source runs are entrypoint, not shim proof.
+    const invoke = (argv, expectedStatus = 0) => {
+      const options = { env: { ...process.env, BAZFRAME_HOME: publicHome }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] };
+      let status = 0, stdout, stderr = '';
+      try {
+        stdout = report.packageRootKind === 'packed-install'
+          ? execFileSync('cmd.exe', ['/d', '/s', '/c', `""${join(packageRoot, '..', '.bin', `${executable}.cmd`)}" ${argv.join(' ')}"`], { ...options, windowsVerbatimArguments: true })
+          : execFileSync(process.execPath, [join(packageRoot, packageManifest.bin[executable]), ...argv], options);
+      } catch (error) { status = error.status; stdout = error.stdout; stderr = String(error.stderr); }
+      requireCondition(status === expectedStatus && stderr === '', 'public CLI status or diagnostics differed');
+      const document = JSON.parse(stdout);
+      requireCondition(document.schemaVersion === 1 && document.ok === (expectedStatus === 0), 'public CLI protocol differed');
+      return document;
+    };
+    const absent = invoke(['profile', 'list', '--json']);
+    publicAbsentHomeReadOnly &&= absent.result.profiles.length === 0
+      && await expectCode(() => backend.inspectPath(publicHome), 'WINDOWS_NATIVE_PATH_NOT_FOUND');
+    const added = invoke(['profile', 'add', 'focused', '--json']);
+    const publicProfile = join(publicHome, 'profiles', 'focused');
+    const instructions = await readFile(join(publicProfile, 'AGENTS.md'));
+    publicFreshProfileLifecycle &&= added.result.action === 'added' && added.result.profileId === 'focused'
+      && instructions.length === 0 && backend.inspectPath(join(publicProfile, 'skills')).kind === 'directory'
+      && await expectCode(() => backend.inspectPath(join(publicHome, 'active-profile')), 'WINDOWS_NATIVE_PATH_NOT_FOUND');
+    invoke(['profile', 'use', 'focused', '--json']);
+    const current = invoke(['profile', 'current', '--json']);
+    const selectionPath = join(publicHome, 'active-profile');
+    const selection = await readFile(selectionPath);
+    const selectionIdentity = objectKey(backend.inspectPath(selectionPath));
+    publicFreshProfileLifecycle &&= current.result.profileId === 'focused' && selection.toString('utf8') === 'focused\n';
+    const beforeProfile = await closureModule.captureWindowsDirectoryClosure(backend, publicProfile);
+    const refused = invoke(['profile', 'remove', 'focused', '--force', '--json'], 1);
+    const afterProfile = await closureModule.captureWindowsDirectoryClosure(backend, publicProfile);
+    publicActiveForceRemoveRefusedUnchanged &&= refused.error.code === 'ACTIVE_PROFILE_REMOVE_REFUSED'
+      && beforeProfile.closureSha256 === afterProfile.closureSha256
+      && selection.equals(await readFile(selectionPath))
+      && selectionIdentity === objectKey(backend.inspectPath(selectionPath))
+      && invoke(['profile', 'current', '--json']).result.profileId === 'focused';
   }
-  markStep('poison-home-check');
-  let poisonHomeAbsent = false;
-  try { await readFile(poisonHome); }
-  catch (error) { poisonHomeAbsent = error?.code === 'ENOENT'; }
 
   diagnosticScenario = 'contention';
   markStep('start');
@@ -563,7 +586,10 @@ try {
     linkLeavesAbsent: catalogAbsent && profileAbsent,
     sourcePreserved,
     nativeLockNamespacesPersist: locksPersist,
-    publicWindowsGateClosed: publicGateClosed && poisonHomeAbsent,
+    publicEntrypointMappings: true,
+    publicFreshProfileLifecycle,
+    publicActiveForceRemoveRefusedUnchanged,
+    publicAbsentHomeReadOnly,
     ...activationObservations
   };
   markStep('verify-observations');

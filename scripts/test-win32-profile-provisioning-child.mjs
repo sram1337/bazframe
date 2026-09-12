@@ -46,6 +46,7 @@ const FAILURE_CODES = new Set([
   ].map((suffix) => `WINDOWS_PRIVATE_FILE_${suffix}`),
 ]);
 const CLOSURE_REASONS = new Map([
+  ['WINDOWS_DIRECTORY_CLOSURE_CHANGED|Windows directory closure changed: directory closure file physical state or identity changed while reading.', 'directory-closure-file-physical-state-or-identity-changed-while-reading'],
   ['WINDOWS_DIRECTORY_CLOSURE_CHANGED|Windows directory closure changed: directory contents changed between closure passes.', 'directory-contents-changed-between-closure-passes'],
   ['WINDOWS_DIRECTORY_CLOSURE_CHANGED|Windows directory closure changed: directory root or physical ancestry changed while capturing its closure.', 'directory-root-or-physical-ancestry-changed-while-capturing-its-closure'],
   ['WINDOWS_DIRECTORY_CLOSURE_CHANGED|Windows directory closure changed: listed directory could not be admitted after enumeration.', 'listed-directory-could-not-be-admitted-after-enumeration'],

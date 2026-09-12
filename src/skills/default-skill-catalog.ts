@@ -521,11 +521,6 @@ async function addWindowsDefaultSkill(
   );
   const id = win32.basename(targetProof.canonicalPath);
   assertSafeSkillId(id);
-  await assertWindowsAllowedSkillLocation(
-    options.platformServices,
-    bazframeHome,
-    targetProof.canonicalPath
-  );
   const declared = await readSkillDeclaredName(target, options.platformServices);
   if (declared !== id) {
     throw new BazframeError(
@@ -533,8 +528,21 @@ async function addWindowsDefaultSkill(
       `Skill root ${target} declares name ${JSON.stringify(declared)} instead of canonical basename ${JSON.stringify(id)}.`
     );
   }
+  await assertWindowsAllowedSkillLocation(
+    options.platformServices,
+    bazframeHome,
+    targetProof.canonicalPath,
+    true
+  );
+  options.platformServices.ensureHomePath?.(bazframeHome);
+  // Locks need an admitted existing root; bootstrap only after source/name and
+  // prospective canonical overlap validation, never during a read-only call.
+  await assertWindowsAllowedSkillLocation(options.platformServices, bazframeHome, targetProof.canonicalPath);
+  options.platformServices.ensurePrivateDirectory(bazframeHome, 'locks');
   const registrationPath = (options.platformServices.joinPath ?? join)((options.platformServices.joinPath ?? join)(bazframeHome, 'skills'), id);
   return windowsCatalogLock(options, bazframeHome, 'bazframe skill add', registrationPath, async (authority) => {
+    authority.assertHeld();
+    await assertWindowsAllowedSkillLocation(options.platformServices, bazframeHome, targetProof.canonicalPath);
     options.platformServices.ensurePrivateDirectory(bazframeHome, 'skills');
     const root = (options.platformServices.joinPath ?? join)(bazframeHome, 'skills');
     const before = options.platformServices.inspectSkillLink(root, id, target);
@@ -556,6 +564,8 @@ async function addWindowsDefaultSkill(
       || await readSkillDeclaredName(target, options.platformServices) !== id) {
       throw new BazframeError('DEFAULT_SKILL_CHANGED', `Default skill target identity changed: ${target}`);
     }
+    await assertWindowsAllowedSkillLocation(options.platformServices, bazframeHome, finalTarget.canonicalPath);
+    authority.assertHeld();
     const action = await options.platformServices.createSkillLink(authority, root, id, target);
     return { action, id, registrationPath, target };
   });
@@ -568,6 +578,11 @@ async function removeWindowsDefaultSkill(
 ): Promise<DefaultSkillCatalogResult> {
   const root = (options.platformServices.joinPath ?? join)(bazframeHome, 'skills');
   const registrationPath = (options.platformServices.joinPath ?? join)(root, skillId);
+  try { options.platformServices.inspectPrivateDirectory(root); }
+  catch (error) {
+    if (errorCode(error) !== 'WINDOWS_NATIVE_PATH_NOT_FOUND') throw error;
+    return { action: 'absent', id: skillId, registrationPath, target: '' };
+  }
   return windowsCatalogLock(options, bazframeHome, 'bazframe skill remove', registrationPath, async (authority) => {
     let before: DefaultSkillRegistration;
     try {
@@ -762,9 +777,12 @@ function occupiedRegistration(path: string, raw: RawRegistration | undefined): B
 async function assertWindowsAllowedSkillLocation(
   platformServices: AddedSkillPlatformServices,
   home: string,
-  canonicalTarget: string
+  canonicalTarget: string,
+  allowMissingHome = false
 ): Promise<void> {
-  const canonicalHome = platformServices.inspectPrivateDirectory(home).canonicalPath;
+  const canonicalHome = allowMissingHome && platformServices.canonicalHomePath !== undefined
+    ? platformServices.canonicalHomePath(home)
+    : platformServices.inspectPrivateDirectory(home).canonicalPath;
   const within = (parent: string, child: string) => { const path = win32.relative(parent, child); return path !== '..' && !path.startsWith(`..${win32.sep}`) && !win32.isAbsolute(path); };
   if (!within(canonicalHome, canonicalTarget) && !within(canonicalTarget, canonicalHome)) return;
   if (platformServices.assertManagedSkillLocation !== undefined) return platformServices.assertManagedSkillLocation(home, canonicalTarget);

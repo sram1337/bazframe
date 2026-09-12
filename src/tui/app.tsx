@@ -518,6 +518,13 @@ export function TuiApp({ service, onExitCode, onForceExit, dimensions }: TuiAppP
   }, []);
 
   const openRemoveConfirmation = useCallback((profile: ProfileSummary) => {
+    if (profile.removalIdentity === undefined) {
+      setMessage({
+        tone: 'error',
+        text: `Removal unavailable: ${profile.removalDiagnostic ?? 'Refresh the dashboard and try again.'}`
+      });
+      return;
+    }
     dispatch({
       type: 'open-modal',
       modal: {

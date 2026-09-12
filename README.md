@@ -13,13 +13,13 @@ Compose standard [Agent Skills](https://agentskills.io/) and personal `AGENTS.md
 - Shares ready profiles through deterministic ZIP exports or versioned GitHub repositories.
 - Provides a scriptable CLI, setup diagnostics, and a keyboard-first terminal UI.
 
-The npm package is currently a beta for Pi 0.84.4 or newer on macOS and Linux. The broken published Pi 0.85.0 package is excluded because it omits a required runtime dependency.
+Bazframe is currently a beta for Pi 0.84.4 or newer. This source opens public CLI routing on Windows x64 alongside macOS and Linux; Windows package qualification remains a separate release gate. The already-published `0.1.0-beta.3` does not gain these source changes. The broken published Pi 0.85.0 package is excluded because it omits a required runtime dependency.
 
 ## Requirements
 
 - [Node.js](https://nodejs.org/) 22.19.0 or newer, including npm.
 - Pi 0.84.4 or newer, excluding the broken published 0.85.0 package.
-- macOS or Linux.
+- macOS, Linux, or native Windows x64 with Bazframe home and temporary/staging state on accepted local NTFS. Windows requires the matching package-bundled native addon; ARM64, network-backed managed state and other filesystems are unsupported.
 - A model provider configured for Pi; see [Pi's authentication documentation](https://github.com/earendil-works/pi#readme).
 - Git for remote resources and Git profile imports; [GitHub CLI](https://cli.github.com/) (`gh`) for publishing and private Git imports. Neither is required for basic profile use or ZIP sharing.
 
@@ -45,6 +45,8 @@ bazframe status
 # Start Pi normally.
 pi
 ```
+
+On Windows, use drive-absolute paths, for example `bazframe skill add "C:\Skills\review"`. Set `VISUAL` or `EDITOR` to one executable name/path, not a shell command or flags; use an executable wrapper for fixed arguments. A local Skill can be added before creating a profile; adding it does not select or invent a profile. No WSL, compiler or runtime native download is required by an accepted Windows package. See [Windows qualification and limits](docs/win32-filesystem-backend-requirements.md); opening CLI routing is not a production-ready TUI claim.
 
 Inside Pi, run `/bazframe info` to inspect the effective profile and `/bazframe reload` after changing profile instructions or resources. `bzf` is an equivalent short alias for `bazframe`.
 
