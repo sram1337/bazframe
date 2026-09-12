@@ -379,6 +379,7 @@ function fakeBackend(
   }
 ): BazframeWin32NativeBackend {
   return {
+    async sampleDirectory() { throw new Error('unexpected mutable sample'); },
     inspectPath(path) {
       const inspection = inspectPath(path);
       if (path === 'C:\\' && inspection.canonicalPath.toLowerCase() !== canonicalPath(path).toLowerCase()) {

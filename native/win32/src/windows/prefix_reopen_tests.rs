@@ -972,3 +972,245 @@ fn seed_timestamps_different(path: &str) -> TestResult<()> {
     }
     Ok(())
 }
+
+#[test]
+fn mutable_directory_sample_preserves_physical_refusals_and_stable_proof() {
+    let component = format!(
+        "bazframe-directory-sample-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let root = directory(std::env::temp_dir().to_str().unwrap(), &component).unwrap();
+    let target = directory(&root, "live").unwrap();
+    assert!(
+        sample_windows_directory(&target, 0)
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    let mutation = target.clone();
+    let _guard = ClearHook;
+    CONTENT_SEAM.with(|slot| {
+        *slot.borrow_mut() = Some((
+            "sample-after-pass",
+            Box::new(move || {
+                file(&mutation, "config.lock").unwrap();
+            }),
+        ))
+    });
+    let sample = sample_windows_directory(&target, 0).unwrap();
+    assert!(sample.entries.is_empty()); // Not a claim that the current directory is empty.
+    assert_eq!(
+        sample.directory_before.object.file_id,
+        sample.directory_after.object.file_id
+    );
+    assert!(!same_path_inspection(
+        &sample.directory_before,
+        &sample.directory_after
+    ));
+    let mutation = target.clone();
+    CONTENT_SEAM.with(|slot| {
+        *slot.borrow_mut() = Some((
+            "enumeration-after-passes",
+            Box::new(move || {
+                file(&mutation, "HEAD.lock").unwrap();
+            }),
+        ))
+    });
+    assert_eq!(
+        enumerate_windows_directory_stable(&target, 1)
+            .err()
+            .unwrap()
+            .status,
+        "ERR_WIN32_ENUMERATION_CHANGED"
+    );
+    assert_eq!(
+        sample_windows_directory(&target, 1).err().unwrap().status,
+        "ERR_WIN32_ENUMERATION_LIMIT"
+    );
+    assert_eq!(
+        sample_windows_directory(&target, 2).unwrap().entries.len(),
+        2
+    );
+    let replacement = directory(&root, "replace").unwrap();
+    let mutation = replacement.clone();
+    CONTENT_SEAM.with(|slot| {
+        *slot.borrow_mut() = Some((
+            "sample-after-pass",
+            Box::new(move || {
+                std::fs::rename(&mutation, format!("{mutation}-old")).unwrap();
+                std::fs::create_dir(&mutation).unwrap();
+            }),
+        ))
+    });
+    assert_eq!(
+        sample_windows_directory(&replacement, 0)
+            .err()
+            .unwrap()
+            .status,
+        "ERR_WIN32_ENUMERATION_CHANGED"
+    );
+    create_sample_fixture_junction(&root, "link", &target);
+    assert_eq!(
+        sample_windows_directory(&join_direct_child(&root, "link"), 2)
+            .err()
+            .unwrap()
+            .status,
+        "ERR_WIN32_REPARSE_REFUSED"
+    );
+    assert_eq!(
+        sample_windows_directory(&join_direct_child(&root, "link\\child"), 2)
+            .err()
+            .unwrap()
+            .status,
+        "ERR_WIN32_REPARSE_REFUSED"
+    );
+    let file_path = file(&root, "regular").unwrap();
+    assert_eq!(
+        sample_windows_directory(&file_path, 1)
+            .err()
+            .unwrap()
+            .status,
+        "ERR_WIN32_NOT_DIRECTORY"
+    );
+    let blocked = directory(&root, "access-denied").unwrap();
+    deny_fixture_directory_listing(&blocked);
+    let _unprivileged = SampleAccessTestToken::enter();
+    assert_eq!(
+        sample_windows_directory(&blocked, 0).err().unwrap().status,
+        "ERR_WIN32_ACCESS_DENIED"
+    );
+    // Retain only these fresh private fixtures, including the exact denied ACL and replacement operands.
+}
+
+// Construct a deliberate reparse operand without making the unrelated junction
+// publication/readback workflow a prerequisite of directory-sampling tests.
+fn create_sample_fixture_junction(parent: &str, name: &str, target: &str) {
+    let path = directory(parent, name).unwrap();
+    let handle = open_existing_with_share(&path, GENERIC_WRITE, 0).unwrap();
+    let data = build_mount_point_reparse_data(&full_path(target).unwrap()).unwrap();
+    let mut returned = 0;
+    // SAFETY: new owned directory handle and the validated, live mount-point buffer.
+    assert_ne!(
+        unsafe {
+            DeviceIoControl(
+                handle.0,
+                FSCTL_SET_REPARSE_POINT,
+                data.as_ptr().cast(),
+                data.len() as u32,
+                null_mut(),
+                0,
+                &mut returned,
+                null_mut(),
+            )
+        },
+        0
+    );
+}
+
+// SSH administrators can have SeBackupPrivilege enabled. Test actual DACL denial
+// under a temporary test-thread impersonation token, never change the process token.
+struct SampleAccessTestToken;
+impl SampleAccessTestToken {
+    fn enter() -> Self {
+        use windows_sys::Win32::Security::{
+            AdjustTokenPrivileges, ImpersonateSelf, SecurityImpersonation, TOKEN_ADJUST_PRIVILEGES,
+        };
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
+        // SAFETY: impersonate this test thread only, with a copied token.
+        assert_ne!(unsafe { ImpersonateSelf(SecurityImpersonation) }, 0);
+        let guard = Self;
+        let mut token = null_mut();
+        // SAFETY: valid pseudo-thread handle and live output; guard reverts on panic.
+        assert_ne!(
+            unsafe {
+                OpenThreadToken(
+                    GetCurrentThread(),
+                    TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES,
+                    1,
+                    &mut token,
+                )
+            },
+            0
+        );
+        let token = OwnedHandle(token);
+        // SAFETY: disable privileges on this test-thread token only; no output requested.
+        assert_ne!(
+            unsafe { AdjustTokenPrivileges(token.0, 1, null(), 0, null_mut(), null_mut()) },
+            0
+        );
+        guard
+    }
+}
+impl Drop for SampleAccessTestToken {
+    fn drop(&mut self) {
+        // SAFETY: remove only the impersonation established by this test guard.
+        assert_ne!(unsafe { windows_sys::Win32::Security::RevertToSelf() }, 0);
+    }
+}
+
+fn deny_fixture_directory_listing(path: &str) {
+    use windows_sys::Win32::Security::Authorization::SetSecurityInfo;
+    use windows_sys::Win32::Storage::FileSystem::WRITE_DAC;
+    let handle = open_existing(path, READ_CONTROL | WRITE_DAC).unwrap();
+    let user = inspect_security(handle.0).unwrap().current_user_sid;
+    let sddl = wide(&format!(
+        "O:{user}D:P(D;;0x1;;;{user})(A;;FA;;;{user})(A;;FA;;;SY)(A;;FA;;;BA)"
+    ));
+    let mut descriptor = null_mut();
+    // SAFETY: valid terminated SDDL and live writable output; this is a new owned fixture only.
+    assert_ne!(
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                null_mut(),
+            )
+        },
+        0
+    );
+    let owned = OwnedLocal(descriptor);
+    let (mut present, mut defaulted, mut acl) = (0, 0, null_mut());
+    // SAFETY: the valid descriptor and output pointers remain live.
+    assert_ne!(
+        unsafe { GetSecurityDescriptorDacl(owned.0, &mut present, &mut acl, &mut defaulted) },
+        0
+    );
+    // SAFETY: owned fixture handle has WRITE_DAC; only its new private DACL is changed.
+    assert_eq!(
+        unsafe {
+            SetSecurityInfo(
+                handle.0,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                acl,
+                null_mut(),
+            )
+        },
+        ERROR_SUCCESS
+    );
+}
+
+#[test]
+fn mutable_directory_comparison_uses_observed_clone_operands_only_as_live_evidence() {
+    use crate::read_change::tests::inspection;
+    let mut before = inspection();
+    let mut after = inspection();
+    before.object.last_write_time = "01dd42bd4fec59b3".into();
+    before.object.change_time = before.object.last_write_time.clone();
+    after.object.last_write_time = "01dd42bd50175875".into();
+    after.object.change_time = after.object.last_write_time.clone();
+    assert!(same_sample_directory(&before, &after));
+    assert!(!same_path_inspection(&before, &after));
+    after.object.size = "0000000000002000".into();
+    after.object.allocation_size = "0000000000002000".into();
+    assert!(same_sample_directory(&before, &after));
+    after.object.creation_time = "0000000000000002".into();
+    assert!(!same_sample_directory(&before, &after));
+}

@@ -59,6 +59,8 @@ export interface ManagedGitInspectionEffects {
  stat(path: string, options?: { bigint: true }): Promise<GitInspectionMetadata>;
  open(path: string, flags: number): Promise<FileHandle>;
  opendir(path: string, maxEntries?: number): Promise<{ read(): Promise<{ name: string } | null>; close(): Promise<void> }>;
+ /** Live monitoring only; never used for final inspection. POSIX opendir already has these semantics. */
+ sampleOpendir?: ManagedGitInspectionEffects['opendir'];
  readlink(path: string): Promise<string>;
 }
 function objectIdentity(value: { identity?: ResourceIdentity; dev?: bigint; ino?: bigint }): ResourceIdentity {
@@ -75,6 +77,7 @@ const lstat: ManagedGitInspectionEffects['stat'] = effects?.stat ?? ((path) => n
 const open: ManagedGitInspectionEffects['open'] = effects?.open ?? nativeOpen;
 const opendir: ManagedGitInspectionEffects['opendir'] = effects?.opendir ?? ((path) => nativeOpendir(path));
 const readlink = effects?.readlink ?? nativeReadlink;
+const sampleOpendir = effects?.sampleOpendir ?? opendir;
 
 
 async function inspectManagedGitAcquisition(
@@ -122,7 +125,7 @@ async function sampleManagedGitAcquisitionInProgress(
   let rootPresent = false;
   let containerStream: Awaited<ReturnType<typeof opendir>> | undefined;
   try {
-    containerStream = await opendir(container, 2);
+    containerStream = await sampleOpendir(container, 2);
     while (true) {
       const entry = await containerStream.read();
       if (entry === null) break;
@@ -176,7 +179,7 @@ async function sampleMutableDirectory(
   }
   let stream: Awaited<ReturnType<typeof opendir>> | undefined;
   try {
-    stream = await opendir(directory, policy.maxStagingEntries);
+    stream = await sampleOpendir(directory, policy.maxStagingEntries);
     while (true) {
       const entry = await stream.read();
       if (entry === null) break;

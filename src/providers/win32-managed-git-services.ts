@@ -122,6 +122,12 @@ export function createWindowsGitInspectionEffects(backend: BazframeWin32NativeBa
       let index = 0, closed = false;
       return { async read() { if (closed) throw refused('expired enumeration'); const name = namespace.names[index++]; return name === undefined ? null : { name }; }, async close() { closed = true; } };
     },
+    async sampleOpendir(path, maxEntries = PROFILE_PORTABILITY_PRODUCTION_LIMITS.stagingEntries) {
+      // This single native physical sample is not a namespace closure or publication proof.
+      const sample = await backend.sampleDirectory(path, maxEntries).catch((error: unknown) => { throw inspectionError(error); });
+      let index = 0, closed = false;
+      return { async read() { if (closed) throw refused('expired enumeration'); const name = sample.names[index++]; return name === undefined ? null : { name }; }, async close() { closed = true; } };
+    },
     async readlink() { throw refused('Git reparse entries are unsupported'); }
   };
 }

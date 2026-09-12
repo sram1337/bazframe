@@ -2,7 +2,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { BazframeError, errorCode } from './errors.js';
 
-export const BAZFRAME_WIN32_NATIVE_CONTRACT_VERSION = 8;
+export const BAZFRAME_WIN32_NATIVE_CONTRACT_VERSION = 9;
 export const BAZFRAME_WIN32_NATIVE_TARGET = 'win32-x64-msvc';
 // Must remain equal to native/win32/src/lib.rs and the authoritative profile
 // portability production ceilings.
@@ -165,7 +165,15 @@ export interface WindowsStableDirectoryEnumerationReceipt {
   directoryAfter: WindowsPathInspection;
 }
 
+/** A bounded physical observation of a mutating directory, never stable namespace evidence. */
+export interface WindowsDirectorySample {
+  directoryBefore: WindowsPathInspection;
+  names: string[];
+  directoryAfter: WindowsPathInspection;
+}
+
 export interface BazframeWin32NativeBackend {
+  sampleDirectory(path: string, maxEntries: number): Promise<WindowsDirectorySample>;
   inspectZipSource(path: string): WindowsObjectObservation;
   inspectPath(path: string): WindowsPathInspection;
   inspectMembershipLink(path: string): WindowsMembershipLinkInspection;
@@ -230,6 +238,7 @@ interface RawNativeModule {
   readWindowsFileRangeStable: (path: string, offset: number, length: number, maxFileBytes: number) => unknown;
   readWindowsFileStable: (path: string, maxBytes: number) => unknown;
   enumerateWindowsDirectoryStable: (path: string, maxEntries: number) => unknown;
+  sampleWindowsDirectory: (path: string, maxEntries: number) => unknown;
 }
 
 export interface Win32NativeLoadOptions {
@@ -625,6 +634,17 @@ export function loadBazframeWin32Native(
       }
       return stableReadReceipt(receipt, maxBytes);
     },
+    async sampleDirectory(path: string, maxEntries: number): Promise<WindowsDirectorySample> {
+      requirePath(path);
+      if (!Number.isSafeInteger(maxEntries) || maxEntries < 0 || Object.is(maxEntries, -0)
+        || maxEntries > BAZFRAME_WIN32_NATIVE_MAX_STABLE_DIRECTORY_ENTRIES) {
+        throw failure('WINDOWS_NATIVE_ENUMERATION_LIMIT_INVALID', 'The Bazframe native directory sample entry bound is invalid.');
+      }
+      let receipt: unknown;
+      try { receipt = await Promise.resolve(native.sampleWindowsDirectory(path, maxEntries)); }
+      catch (error) { throw nativeOperationFailure(error); }
+      return directorySample(receipt, maxEntries);
+    },
     async enumerateStableDirectory(
       path: string,
       maxEntries: number
@@ -684,7 +704,8 @@ function nativeModule(value: unknown): RawNativeModule {
     'renameWindowsFileNoReplace',
     'readWindowsFileStable',
     'readWindowsFileRangeStable',
-    'enumerateWindowsDirectoryStable'
+    'enumerateWindowsDirectoryStable',
+    'sampleWindowsDirectory'
   ] as const) {
     if (typeof record[name] !== 'function') {
       throw failure(
@@ -856,6 +877,28 @@ function stableReadReceipt(value: unknown, maxBytes: number, range?: { offset: n
   } catch (error) {
     if (error instanceof BazframeError && error.code === 'WINDOWS_NATIVE_READ_CHANGED') throw error;
     throw receiptFailure('Native Windows stable-read evidence is malformed.', error);
+  }
+}
+
+function directorySample(value: unknown, maxEntries: number): WindowsDirectorySample {
+  try {
+    const record = exactRecord(value, ['directoryBefore', 'names', 'directoryAfter'], 'directory sample');
+    const directoryBefore = pathInspection(record.directoryBefore), directoryAfter = pathInspection(record.directoryAfter);
+    if (!sameDirectoryIdentity(directoryBefore, directoryAfter)
+      || directoryBefore.object.creationTime !== directoryAfter.object.creationTime
+      || directoryBefore.object.attributes !== directoryAfter.object.attributes
+      || directoryBefore.object.numberOfLinks !== directoryAfter.object.numberOfLinks
+      || JSON.stringify(directoryBefore.volume) !== JSON.stringify(directoryAfter.volume)) {
+      throw failure('WINDOWS_NATIVE_DIRECTORY_CHANGED', 'The native directory sample reports changed physical identity.');
+    }
+    if (!Array.isArray(record.names) || record.names.length > maxEntries) invalid();
+    const names = record.names.map(directoryEntryName);
+    if (new Set(names.map(name => name.normalize('NFC').toLowerCase())).size !== names.length) invalid();
+    for (let index = 1; index < names.length; index += 1) if (compareUtf16(names[index - 1]!, names[index]!) >= 0) invalid();
+    return { directoryBefore, names, directoryAfter };
+  } catch (error) {
+    if (error instanceof BazframeError && error.code === 'WINDOWS_NATIVE_DIRECTORY_CHANGED') throw error;
+    throw receiptFailure('Native Windows directory sample is malformed.', error);
   }
 }
 

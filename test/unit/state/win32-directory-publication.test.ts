@@ -619,6 +619,7 @@ function harness(options: { destination?: TestNode; oldFile?: string } = {}) {
   };
 
   const backend: BazframeWin32NativeBackend = {
+    async sampleDirectory() { throw new Error('unexpected mutable sample'); },
     inspectPath(path) {
       const node = required(nodes, path);
       if (node.kind === 'reparse') throw new BazframeError('WINDOWS_NATIVE_REPARSE_REFUSED', 'reparse');

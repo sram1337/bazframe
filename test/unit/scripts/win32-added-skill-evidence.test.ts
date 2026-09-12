@@ -26,6 +26,10 @@ const { verifyProductReceipt, verifyProductPair } = await import(pathToFileURL(
 ).href);
 
 describe('Windows added-Skill product evidence verifier', () => {
+  it('refuses the previous contract-8 product schema', () => {
+    const previous = receipt('source-tree');
+    expect(() => verifyProductReceipt({ ...previous, schemaVersion: 5 }, 'source-tree', 'a'.repeat(64))).toThrow();
+  });
   it('exports main-safe exact single and pair validators with fixed root kinds', () => {
     const source = receipt('source-tree'), installed = receipt('packed-install');
     expect(verifyProductReceipt(source, 'source-tree', 'a'.repeat(64))).toBe(source);
@@ -134,7 +138,7 @@ function run(source: string, installed: string) {
 
 function receipt(packageRootKind: 'source-tree' | 'packed-install') {
   return {
-    schemaVersion: 5,
+    schemaVersion: 6,
     purpose: 'Limited Windows product-slice evidence: internal managed profile activation, current selection, onboarding, healthy local added-Skill lifecycle and public CLI smoke only.',
     packageRootKind,
     completion: 'passed',
@@ -304,7 +308,7 @@ describe('Windows failed-product diagnostic privacy', () => {
     ], { encoding: 'utf8' });
     expect(result.status).toBe(1);
     const receipt = JSON.parse(await readFile(output, 'utf8'));
-    expect(receipt).toMatchObject({ schemaVersion: 5, completion: 'failed', observations: {}, windowsSupportClaim: false });
+    expect(receipt).toMatchObject({ schemaVersion: 6, completion: 'failed', observations: {}, windowsSupportClaim: false });
     expect(receipt.failures).toHaveLength(1);
     expect(receipt.failures[0]).toMatchObject({ scenario: 'startup', substep: process.platform === 'win32' ? 'nativeModule' : 'start' });
     expect(JSON.stringify(receipt)).not.toContain(root);

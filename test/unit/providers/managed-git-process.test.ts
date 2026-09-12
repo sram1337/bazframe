@@ -209,6 +209,20 @@ describe('managed Git process runner', () => {
 });
 
 describe('Windows immediate-child bounded receipts', () => {
+  it('keeps native monitor failure and uncertainty after a subsequent close0', async () => {
+    const child = new EventEmitter() as ChildProcess;
+    let unreferenced = false, destroyed = 0;
+    const stream = () => Object.assign(new EventEmitter(), { destroy() { destroyed += 1; } });
+    Object.assign(child, { pid: 123, stdout: stream(), stderr: stream(), unref() { unreferenced = true; }, kill() { queueMicrotask(() => child.emit('close', 0)); return true; } });
+    const monitorError = Object.assign(new Error('native physical sampling refused'), { code: 'WINDOWS_NATIVE_DIRECTORY_CHANGED' });
+    const result = await runManagedGitProcess('C:\\tools\\git.exe', [], 'C:\\fetched', {}, quick, {
+      posixProcessGroups: false, spawnProcess: (() => child) as typeof spawn,
+      monitor: async () => { await Promise.resolve(); throw monitorError; }
+    });
+    expect(result).toMatchObject({ status: 0, failure: 'monitor-failure', uncertainTermination: true });
+    expect(result.monitorError).toBe(monitorError);
+    expect(unreferenced).toBe(true); expect(destroyed).toBe(2);
+  });
   it('reports parent cancellation with uncertainty and removes signal listeners', async () => {
     const signals = ['SIGHUP', 'SIGINT', 'SIGTERM'] as const;
     const before = new Map(signals.map((signal) => [signal, new Set(process.listeners(signal))]));

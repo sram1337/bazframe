@@ -356,6 +356,7 @@ function createFixture() {
   const inspectProcessInstance = vi.fn(() => ({ state: processState }));
 
   const backend: BazframeWin32NativeBackend & BazframeWin32LockBackend = {
+    async sampleDirectory() { throw new Error('unexpected mutable sample'); },
     inspectPath: inspection,
     inspectMembershipLink() { throw new Error('unexpected membership inspection'); },
     createPrivateJunction() { throw new Error('unexpected membership mutation'); },

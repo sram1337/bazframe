@@ -22,7 +22,7 @@ const args = process.argv.slice(2);
 const packageRoot = resolve(argument('--package-root') ?? fileURLToPath(new URL('..', import.meta.url)));
 const outputPath = resolve(argument('--output') ?? join(packageRoot, 'win32-native-evidence.json'));
 const report = {
-  schemaVersion: 7,
+  schemaVersion: 8,
   purpose: 'Bazframe-owned native Windows foundation evidence only; not a Windows support claim.',
   environment: {
     platform: process.platform,
@@ -417,6 +417,8 @@ try {
 
   const enumeration = await backend.enumerateStableDirectory(closureRoot, 4);
   const enumerationNames = enumeration.entries.map((entry) => entry.name);
+  const mutableSample = await backend.sampleDirectory(closureRoot, 4);
+  await expectCode(() => backend.sampleDirectory(closureRoot, 3), 'WINDOWS_NATIVE_ENUMERATION_LIMIT_EXCEEDED');
   requireCondition(
     JSON.stringify(enumerationNames) === JSON.stringify([...enumerationNames].sort()),
     'stable directory enumeration order'
@@ -1131,6 +1133,9 @@ try {
       === JSON.stringify(secondEnumeration.entries),
     stableDirectoryEnumerationMultiBufferComplete: manyFirst.entries.length === manyNames.length
       && JSON.stringify(manyFirst.entries) === JSON.stringify(manySecond.entries),
+    mutableDirectorySamplePhysicalAndBounded: JSON.stringify(mutableSample.names) === JSON.stringify(enumerationNames)
+      && mutableSample.directoryBefore.object.fileId === mutableSample.directoryAfter.object.fileId
+      && mutableSample.directoryBefore.ancestryReparseFree && mutableSample.directoryAfter.ancestryReparseFree,
     stableDirectoryEnumerationKeptIdentity: enumeration.directoryBefore.object.fileId
       === enumeration.directoryAfter.object.fileId,
     directoryEnumerationIdentityReconciled: closureIdentityReconciled,

@@ -284,8 +284,8 @@ jobs:
           $sourceConformance = if (Test-Path native-source-evidence.json) { Get-Content native-source-evidence.json -Raw | ConvertFrom-Json } else { $null }
           $installedConformance = if (Test-Path native-installed-evidence.json) { Get-Content native-installed-evidence.json -Raw | ConvertFrom-Json } else { $null }
           $completion = if ($null -ne $binarySha256 -and
-              $sourceConformance.schemaVersion -eq 7 -and
-              $installedConformance.schemaVersion -eq 7 -and
+              $sourceConformance.schemaVersion -eq 8 -and
+              $installedConformance.schemaVersion -eq 8 -and
               $sourceConformance.completion -eq 'passed' -and
               $installedConformance.completion -eq 'passed' -and
               $sourceConformance.releaseAdmission -eq 'not-authorized' -and
@@ -295,7 +295,7 @@ jobs:
               $sourceConformance.observations.binarySha256 -eq $binarySha256 -and
               $installedConformance.observations.binarySha256 -eq $binarySha256) { 'passed' } else { 'failed' }
           $evidence = [ordered]@{
-            schemaVersion = 7
+            schemaVersion = 8
             purpose = 'Bazframe-owned native foundation evidence only; not release admission or a Windows support claim.'
             completion = $completion
             sourceCommit = '${{ github.sha }}'

@@ -24,7 +24,7 @@ use non_windows as platform;
 #[cfg(windows)]
 use windows as platform;
 
-pub const NATIVE_CONTRACT_VERSION: u32 = 8;
+pub const NATIVE_CONTRACT_VERSION: u32 = 9;
 // Mirrors PROFILE_PORTABILITY_PRODUCTION_LIMITS.checkoutFileBytes. The native
 // boundary may lower a caller's bound but never allocates beyond this product
 // authority.
@@ -586,6 +586,57 @@ pub fn read_windows_file_stable(path: String, max_bytes: u32) -> Result<AsyncTas
         max_bytes,
         range: None,
     }))
+}
+
+/// Non-authoritative bounded names from one physical, handle-bound directory pass.
+#[napi(object)]
+pub struct WindowsDirectorySample {
+    pub directory_before: WindowsPathInspection,
+    pub names: Vec<Utf16String>,
+    pub directory_after: WindowsPathInspection,
+}
+
+pub struct DirectorySampleTask {
+    path: String,
+    max_entries: u32,
+}
+
+impl Task for DirectorySampleTask {
+    type Output = DirectoryEnumerationData;
+    type JsValue = WindowsDirectorySample;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        into_async_napi(platform::sample_windows_directory(
+            &self.path,
+            self.max_entries,
+        ))
+    }
+
+    fn resolve(&mut self, _env: Env, data: Self::Output) -> Result<Self::JsValue> {
+        Ok(WindowsDirectorySample {
+            directory_before: data.directory_before,
+            names: data
+                .entries
+                .into_iter()
+                .map(|entry| Utf16String::from(entry.name))
+                .collect(),
+            directory_after: data.directory_after,
+        })
+    }
+}
+
+#[napi(js_name = "sampleWindowsDirectory")]
+pub fn sample_windows_directory(
+    path: String,
+    max_entries: u32,
+) -> Result<AsyncTask<DirectorySampleTask>> {
+    if max_entries > MAX_STABLE_DIRECTORY_ENTRIES {
+        return Err(Error::new(
+            Status::InvalidArg,
+            "ERR_WIN32_ENUMERATION_LIMIT: directory sample exceeds the native entry limit",
+        ));
+    }
+    Ok(AsyncTask::new(DirectorySampleTask { path, max_entries }))
 }
 
 pub struct StableDirectoryEnumerationTask {

@@ -532,6 +532,7 @@ function tree(initial: Record<string, TestNode>) {
     enumerateCalls,
     enumerationBounds,
     enumerateCount,
+    async sampleDirectory() { throw new Error('unexpected mutable sample'); },
     inspectPath(path) {
       inspectCalls.push(path);
       const node = required(nodes, path);

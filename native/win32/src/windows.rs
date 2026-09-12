@@ -1034,6 +1034,67 @@ fn read_windows_file_bytes(
     })
 }
 
+// Live acquisition monitoring is not a stable namespace proof. Keep one bounded
+// handle-bound pass, and reject physical replacement without requiring content quiescence.
+pub(crate) fn sample_windows_directory(
+    path: &str,
+    max_entries: u32,
+) -> NativeResult<DirectoryEnumerationData> {
+    let opened = open_admitted_path(path, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES)?;
+    let directory_before = inspect_opened_path(&opened)?;
+    if directory_before.kind != "directory" {
+        return Err(native_error(
+            "ERR_WIN32_NOT_DIRECTORY",
+            "directory sampling requires a directory",
+        ));
+    }
+    let entries = enumerate_directory_pass(opened.handle.0, max_entries)?;
+    #[cfg(test)]
+    prefix_reopen_tests::at_content_seam("sample-after-pass");
+    let directory_after = inspect_opened_path(&opened)?;
+    let current = inspect_windows_path(path)?;
+    if !same_sample_directory(&directory_before, &directory_after)
+        || !same_sample_directory(&directory_after, &current)
+    {
+        return Err(native_error(
+            "ERR_WIN32_ENUMERATION_CHANGED",
+            "directory physical identity changed during sampling",
+        ));
+    }
+    Ok(DirectoryEnumerationData {
+        directory_before,
+        entries: entries
+            .into_iter()
+            .map(|entry| DirectoryEntryData {
+                name: entry.name,
+                file_id: entry.file_id,
+                size: entry.size,
+                allocation_size: entry.allocation_size,
+                creation_time: entry.creation_time,
+                last_write_time: entry.last_write_time,
+                change_time: entry.change_time,
+                attributes: entry.attributes,
+                reparse_tag: entry.reparse_tag,
+                directory: entry.directory,
+            })
+            .collect(),
+        directory_after,
+    })
+}
+
+fn same_sample_directory(a: &WindowsPathInspection, b: &WindowsPathInspection) -> bool {
+    same_directory_identity(a, b)
+        && a.ancestry_reparse_free
+        && b.ancestry_reparse_free
+        && a.volume.filesystem_name == b.volume.filesystem_name
+        && a.volume.drive_type == b.volume.drive_type
+        && a.volume.canonical_volume_guid_path == b.volume.canonical_volume_guid_path
+        && a.volume.remote_device == b.volume.remote_device
+        && a.object.creation_time == b.object.creation_time
+        && a.object.attributes == b.object.attributes
+        && a.object.number_of_links == b.object.number_of_links
+}
+
 pub(crate) fn enumerate_windows_directory_stable(
     path: &str,
     max_entries: u32,

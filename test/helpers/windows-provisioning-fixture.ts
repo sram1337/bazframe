@@ -92,6 +92,10 @@ export function windowsProvisioningFixture() {
       if (bytes.byteLength > maxBytes) throw new BazframeError('WINDOWS_NATIVE_READ_LIMIT_EXCEEDED', 'limit');
       return { bytes, byteCount: hex(bytes.byteLength), before: value.object, after: inspect(path).object };
     },
+    async sampleDirectory(path, maxEntries) {
+      const receipt = await backend.enumerateStableDirectory(path, maxEntries);
+      return { directoryBefore: receipt.directoryBefore, names: receipt.entries.map(entry => entry.name), directoryAfter: receipt.directoryAfter };
+    },
     async enumerateStableDirectory(path, maxEntries) {
       const exact = lookup(path);
       const directoryBefore = inspect(exact);

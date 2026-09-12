@@ -27,7 +27,7 @@ export function verifyProductReceipt(value, packageRootKind, binarySha256) {
     'observations',
     'failures'
   ]);
-  if (value.schemaVersion !== 5
+  if (value.schemaVersion !== 6
     || value.purpose !== 'Limited Windows product-slice evidence: internal managed profile activation, current selection, onboarding, healthy local added-Skill lifecycle and public CLI smoke only.'
     || value.packageRootKind !== packageRootKind
     || value.completion !== 'passed'

@@ -202,8 +202,8 @@ try {
 
     $sourceEvidence = Get-Content -LiteralPath $sourceEvidencePath -Raw | ConvertFrom-Json
     $installedEvidence = Get-Content -LiteralPath $installedEvidencePath -Raw | ConvertFrom-Json
-    if ($sourceEvidence.schemaVersion -ne 7 -or $installedEvidence.schemaVersion -ne 7) {
-        throw 'Native conformance reports do not use evidence schema version 7.'
+    if ($sourceEvidence.schemaVersion -ne 8 -or $installedEvidence.schemaVersion -ne 8) {
+        throw 'Native conformance reports do not use evidence schema version 8.'
     }
     if ($sourceEvidence.completion -ne 'passed' -or $installedEvidence.completion -ne 'passed') {
         throw 'Native conformance reports did not both pass.'
@@ -220,8 +220,8 @@ try {
     }
     $productSourceEvidence = Get-Content -LiteralPath $productSourceEvidencePath -Raw | ConvertFrom-Json
     $productInstalledEvidence = Get-Content -LiteralPath $productInstalledEvidencePath -Raw | ConvertFrom-Json
-    if ($productSourceEvidence.schemaVersion -ne 5 -or
-        $productInstalledEvidence.schemaVersion -ne 5 -or
+    if ($productSourceEvidence.schemaVersion -ne 6 -or
+        $productInstalledEvidence.schemaVersion -ne 6 -or
         $productSourceEvidence.completion -ne 'passed' -or
         $productInstalledEvidence.completion -ne 'passed' -or
         $productSourceEvidence.releaseAdmission -ne 'not-authorized' -or
@@ -255,7 +255,7 @@ try {
     $tarballPayload = [System.IO.File]::ReadAllBytes($tarball)
     $tarballName = Split-Path -Leaf $tarball
     $report = [ordered]@{
-        schemaVersion = 7
+        schemaVersion = 8
         purpose = 'Bazframe-owned native foundation evidence only; not release admission or a Windows support claim.'
         completion = 'passed'
         sourceCommit = $sourceCommit

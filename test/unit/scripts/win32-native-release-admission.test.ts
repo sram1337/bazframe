@@ -138,6 +138,7 @@ describe('Win32 native release admission', () => {
     }],
     ['nested/external receipt mismatch', (fixture: EvidenceFixture) => { fixture.aggregate.sourceConformance.observations.stableByteCount = '000000000000000e'; }],
     ['extra schema field', (fixture: EvidenceFixture) => { fixture.installed.extra = true; }],
+    ['historical contract-8 receipt', (fixture: EvidenceFixture) => { fixture.source.schemaVersion = 7; fixture.installed.schemaVersion = 7; fixture.aggregate.schemaVersion = 7; }],
     ['wrong checksum', (fixture: EvidenceFixture) => { fixture.checksum = `${'0'.repeat(64)}\r\n`; }],
     ['wrong aggregate digest', (fixture: EvidenceFixture) => { fixture.aggregate.binarySha256 = '0'.repeat(64); }],
     ['wrong source receipt digest', (fixture: EvidenceFixture) => { fixture.source.observations.binarySha256 = '0'.repeat(64); }],
@@ -226,7 +227,7 @@ function evidenceFixture(): EvidenceFixture {
   const rust = 'rustc 1.88.0 (6b00bc388 2025-06-23)\r\nhost: x86_64-pc-windows-msvc\r\n';
   const msvc = 'Path=C:\\VS\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\cl.exe\r\n';
   const aggregate = {
-    schemaVersion: 7,
+    schemaVersion: 8,
     purpose: 'Bazframe-owned native foundation evidence only; not release admission or a Windows support claim.',
     completion: 'passed',
     sourceCommit: commit,
@@ -247,7 +248,7 @@ function evidenceFixture(): EvidenceFixture {
 
 function receipt(kind: 'source-tree' | 'packed-install') {
   return {
-    schemaVersion: 7,
+    schemaVersion: 8,
     purpose: 'Bazframe-owned native Windows foundation evidence only; not a Windows support claim.',
     environment: { platform: 'win32', arch: 'x64', node: '22.19.0' },
     packageRootKind: kind,
@@ -293,6 +294,7 @@ function receipt(kind: 'source-tree' | 'packed-install') {
       stableDirectoryEnumerationDeterministic: true,
       stableDirectoryEnumerationMultiBufferComplete: true,
       stableDirectoryEnumerationKeptIdentity: true,
+      mutableDirectorySamplePhysicalAndBounded: true,
       directoryEnumerationIdentityReconciled: true,
       directoryReparseObservedAsLeaf: true,
       boundedDirectoryClosure: true,

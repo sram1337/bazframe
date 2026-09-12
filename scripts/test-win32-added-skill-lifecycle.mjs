@@ -11,7 +11,7 @@ const args = process.argv.slice(2);
 const packageRoot = resolve(argument('--package-root') ?? fileURLToPath(new URL('..', import.meta.url)));
 const outputPath = resolve(argument('--output') ?? join(packageRoot, 'win32-added-skill-evidence.json'));
 const report = {
-  schemaVersion: 5,
+  schemaVersion: 6,
   purpose: 'Limited Windows product-slice evidence: internal managed profile activation, current selection, onboarding, healthy local added-Skill lifecycle and public CLI smoke only.',
   packageRootKind: packageRoot.includes('node_modules') ? 'packed-install' : 'source-tree',
   completion: 'failed',

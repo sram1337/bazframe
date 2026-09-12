@@ -479,6 +479,42 @@ describe('Bazframe-owned Windows native loader', () => {
     )).rejects.toMatchObject({ code: 'WINDOWS_NATIVE_DIRECTORY_CHANGED' });
   });
 
+  it('requires the separately bound mutable capability', () => {
+    expect(() => load(module({ sampleWindowsDirectory: undefined }))).toThrow(expect.objectContaining({ code: 'WINDOWS_NATIVE_EXPORT_MISSING' }));
+  });
+
+  it('admits the observed mutable timestamp operands but not the same receipt as stable proof', async () => {
+    const directoryBefore = inspection({ kind: 'directory', object: { directory: true, attributes: 18, lastWriteTime: '01dd42bd4fec59b3', changeTime: '01dd42bd4fec59b3' } });
+    const directoryAfter = inspection({ kind: 'directory', object: { directory: true, attributes: 18, lastWriteTime: '01dd42bd50175875', changeTime: '01dd42bd50175875' } });
+    const native = module({ sampleWindowsDirectory: () => ({ directoryBefore, names: ['config'], directoryAfter }), enumerateWindowsDirectoryStable: () => ({ directoryBefore, entries: [], directoryAfter }) });
+    expect((await load(native).sampleDirectory('C:\\state', 1)).names).toEqual(['config']);
+    await expect(load(native).enumerateStableDirectory('C:\\state', 1)).rejects.toMatchObject({ code: 'WINDOWS_NATIVE_DIRECTORY_CHANGED' });
+  });
+
+  it.each([
+    { fileId: '00000000000000000000000000000002' }, { creationTime: '0000000000000002' },
+    { attributes: 18 }, { numberOfLinks: '00000002' }, { reparseTag: 0xa0000003, attributes: 0x410 }, { deletePending: true }
+  ])('refuses physical sample drift %j', async (object) => {
+    const directoryBefore = inspection({ kind: 'directory', object: { directory: true, attributes: 16 } });
+    const directoryAfter = inspection({ kind: 'directory', object: { directory: true, attributes: 16, ...object } });
+    await expect(load(module({ sampleWindowsDirectory: () => ({ directoryBefore, names: [], directoryAfter }) })).sampleDirectory('C:\\state', 0)).rejects.toThrow();
+  });
+
+  it.each([['a', 'A'], ['..'], ['b', 'a'], ['a', 'a'], ['a/b']])('rejects ambiguous or unsafe sample names %j', async (...names) => {
+    const directoryBefore = directoryInspection('state');
+    await expect(load(module({ sampleWindowsDirectory: () => ({ directoryBefore, names, directoryAfter: directoryBefore }) })).sampleDirectory('C:\\state', names.length)).rejects.toMatchObject({ code: 'WINDOWS_NATIVE_RECEIPT_INVALID' });
+  });
+
+  it('retains mutable access errors and bounds, without a stable fallback', async () => {
+    const sample = vi.fn(() => { throw coded('ERR_WIN32_ACCESS_DENIED'); });
+    const stable = vi.fn();
+    const backend = load(module({ sampleWindowsDirectory: sample, enumerateWindowsDirectoryStable: stable }));
+    await expect(backend.sampleDirectory('C:\\state', -1)).rejects.toMatchObject({ code: 'WINDOWS_NATIVE_ENUMERATION_LIMIT_INVALID' });
+    expect(sample).not.toHaveBeenCalled();
+    await expect(backend.sampleDirectory('C:\\state', 1)).rejects.toMatchObject({ code: 'WINDOWS_NATIVE_ACCESS_DENIED' });
+    expect(sample).toHaveBeenCalledTimes(1); expect(stable).not.toHaveBeenCalled();
+  });
+
   it.each([-1, -0, 1.5, Number.NaN, BAZFRAME_WIN32_NATIVE_MAX_STABLE_DIRECTORY_ENTRIES + 1])(
     'rejects invalid caller enumeration bound %s before native invocation',
     async (maxEntries) => {
@@ -538,7 +574,7 @@ function load(
 
 function module(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   const info = {
-    contractVersion: 8,
+    contractVersion: 9,
     packageVersion: VERSION,
     target: 'win32-x64-msvc',
     maxStableReadBytes: BAZFRAME_WIN32_NATIVE_MAX_STABLE_READ_BYTES,
@@ -563,6 +599,7 @@ function module(overrides: Record<string, unknown> = {}): Record<string, unknown
     readWindowsFileRangeStable: () => Promise.resolve(overrides.stableRead ?? stableRead()),
     readWindowsFileStable: () => Promise.resolve(overrides.stableRead ?? stableRead()),
     enumerateWindowsDirectoryStable: () => Promise.resolve(overrides.enumeration ?? enumeration()),
+    sampleWindowsDirectory: () => Promise.resolve({ directoryBefore: directoryInspection('state'), names: [], directoryAfter: directoryInspection('state') }),
     ...without(overrides, [
       'info', 'inspection', 'membershipInspection', 'junctionCreation', 'creation', 'privateFileCreation',
       'lockAcquisition', 'processInspection', 'stableRead', 'enumeration'

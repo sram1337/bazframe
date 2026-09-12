@@ -249,6 +249,7 @@ function setup(options: {
     return junctionReceipt(link);
   });
   const backend: BazframeWin32NativeBackend = {
+    async sampleDirectory() { throw new Error('unexpected mutable sample'); },
     inspectPath,
     inspectMembershipLink(path) {
       if (path !== MEMBER || link === undefined) {

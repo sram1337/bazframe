@@ -211,3 +211,13 @@ pub(crate) fn inspect_windows_editor_target(
         "Windows editor inspection requires win32-x64-msvc",
     ))
 }
+
+pub(crate) fn sample_windows_directory(
+    _path: &str,
+    _max_entries: u32,
+) -> NativeResult<crate::DirectoryEnumerationData> {
+    Err(native_error(
+        "ERR_WIN32_UNSUPPORTED_TARGET",
+        "Directory sampling requires Windows",
+    ))
+}

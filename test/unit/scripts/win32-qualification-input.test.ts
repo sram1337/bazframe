@@ -24,7 +24,7 @@ async function fixture() {
   const source = receipt('source-tree'), installed = receipt('packed-install');
   const rust = 'rustc 1.88.0 (test)\r\nhost: x86_64-pc-windows-msvc\r\n';
   const msvc = 'Path=C:\\VS\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\cl.exe\r\n';
-  const aggregate = { schemaVersion: 7, purpose: 'Bazframe-owned native foundation evidence only; not release admission or a Windows support claim.',
+  const aggregate = { schemaVersion: 8, purpose: 'Bazframe-owned native foundation evidence only; not release admission or a Windows support claim.',
     completion: 'passed', sourceCommit: commit, runnerImage: 'win22', runnerImageVersion: 'test-image', node: 'v22.19.0', rust,
     msvcToolsVersion: '14.44.35207', msvc, binarySha256, sourceConformance: source, installedConformance: installed,
     releaseAdmission: 'not-authorized', windowsSupportClaim: false };
@@ -56,6 +56,20 @@ async function zip(entries: Map<string, Buffer>, extra?: 'duplicate' | 'link' | 
 function json(value: unknown) { return Buffer.from(`${JSON.stringify(value, null, 2)}\n`); }
 
 describe('qualification-only transfer and promotion', () => {
+  it('keeps foundation producer, workflow and local harness schema gates aligned', async () => {
+    const producer = await readFile('scripts/test-win32-native-foundation.mjs', 'utf8');
+    const workflow = await readFile('.github/workflows/win32-native-foundation.yml', 'utf8');
+    const harness = await readFile('scripts/run-win32-native-foundation.ps1', 'utf8');
+    const schema = receipt('source-tree').schemaVersion;
+    expect(producer).toContain(`schemaVersion: ${schema},`);
+    for (const kind of ['source', 'installed']) {
+      expect(workflow).toContain(`$${kind}Conformance.schemaVersion -eq ${schema} -and`);
+      expect(harness).toContain(`$${kind}Evidence.schemaVersion -ne ${schema}`);
+    }
+    expect(workflow).toMatch(new RegExp(`^\\s+schemaVersion = ${schema}$`, 'm'));
+    expect(harness).toContain(`evidence schema version ${schema}.`);
+  });
+
   it.each(['push/tag', 'same-repository PR', 'fork PR'])('authenticates distinct trusted head and source identity for %s', async (event) => {
     const identity = { ...expected, headSha: event === 'push/tag' ? commit : 'd'.repeat(40), headRepositoryId: event === 'fork PR' ? '999' : expected.repositoryId };
     expect(() => verifyQualificationMetadata(metadata(baseBinding, identity), baseBinding, identity, 'foundation')).not.toThrow();
@@ -127,7 +141,7 @@ describe('qualification-only transfer and promotion', () => {
 
   it('requires every foundation boolean literally true before input transport', async () => {
     const f = await fixture();
-    const names = Object.keys(f.source.observations).slice(3); expect(names).toHaveLength(63);
+    const names = Object.keys(f.source.observations).slice(3); expect(names).toHaveLength(64);
     for (const name of names) for (const value of [false, undefined, 'true']) {
       const changed = structuredClone(f.source);
       (changed.observations as Record<string, unknown>)[name] = value;
@@ -237,7 +251,7 @@ describe('whole-tarball reconstruction', () => {
 
 function receipt(kind: 'source-tree' | 'packed-install') {
   return {
-    schemaVersion: 7,
+    schemaVersion: 8,
     purpose: 'Bazframe-owned native Windows foundation evidence only; not a Windows support claim.',
     environment: { platform: 'win32', arch: 'x64', node: '22.19.0' },
     packageRootKind: kind,
@@ -283,6 +297,7 @@ function receipt(kind: 'source-tree' | 'packed-install') {
       stableDirectoryEnumerationDeterministic: true,
       stableDirectoryEnumerationMultiBufferComplete: true,
       stableDirectoryEnumerationKeptIdentity: true,
+      mutableDirectorySamplePhysicalAndBounded: true,
       directoryEnumerationIdentityReconciled: true,
       directoryReparseObservedAsLeaf: true,
       boundedDirectoryClosure: true,
@@ -318,7 +333,7 @@ function receipt(kind: 'source-tree' | 'packed-install') {
 
 function productReceipt(packageRootKind: 'source-tree' | 'packed-install') {
   return {
-    schemaVersion: 5,
+    schemaVersion: 6,
     purpose: 'Limited Windows product-slice evidence: internal managed profile activation, current selection, onboarding, healthy local added-Skill lifecycle and public CLI smoke only.',
     packageRootKind,
     completion: 'passed',

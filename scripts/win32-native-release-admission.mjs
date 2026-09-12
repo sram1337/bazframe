@@ -64,6 +64,7 @@ const OBSERVATION_BOOLEANS = Object.freeze([
   'stableDirectoryEnumerationDeterministic',
   'stableDirectoryEnumerationMultiBufferComplete',
   'stableDirectoryEnumerationKeptIdentity',
+  'mutableDirectorySamplePhysicalAndBounded',
   'directoryEnumerationIdentityReconciled',
   'directoryReparseObservedAsLeaf',
   'boundedDirectoryClosure',
@@ -336,7 +337,7 @@ function validateAggregateEvidence({ aggregate, releaseCommit, binarySha256, sou
     'node', 'rust', 'msvcToolsVersion', 'msvc', 'binarySha256', 'sourceConformance',
     'installedConformance', 'releaseAdmission', 'windowsSupportClaim'
   ], 'aggregate evidence');
-  equal(aggregate.schemaVersion, 7, 'aggregate schemaVersion');
+  equal(aggregate.schemaVersion, 8, 'aggregate schemaVersion');
   equal(aggregate.purpose, AGGREGATE_PURPOSE, 'aggregate purpose');
   equal(aggregate.completion, 'passed', 'aggregate completion');
   equal(aggregate.sourceCommit, releaseCommit, 'aggregate source commit');
@@ -367,7 +368,7 @@ function validateConformanceReceipt(receipt, expectedKind, packageVersion, binar
     'schemaVersion', 'purpose', 'environment', 'packageRootKind', 'completion',
     'releaseAdmission', 'windowsSupportClaim', 'observations', 'failures'
   ], `${expectedKind} receipt`);
-  equal(receipt.schemaVersion, 7, `${expectedKind} schemaVersion`);
+  equal(receipt.schemaVersion, 8, `${expectedKind} schemaVersion`);
   equal(receipt.purpose, FOUNDATION_PURPOSE, `${expectedKind} purpose`);
   exactObject(receipt.environment, ['platform', 'arch', 'node'], `${expectedKind} environment`);
   equal(receipt.environment.platform, 'win32', `${expectedKind} platform`);

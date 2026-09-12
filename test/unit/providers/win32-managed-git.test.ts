@@ -76,6 +76,8 @@ describe('Windows inspection under the shared mutable acquisition sampler', () =
     f.file(leaf, 'temporary');
     const effects = createWindowsGitInspectionEffects(f.backend), open = effects.opendir;
     effects.opendir = async (...args) => { const stream = await open(...args); if (args[0] === pack) f.nodes.delete(leaf); return stream; };
+    const sample = effects.sampleOpendir!;
+    effects.sampleOpendir = async (...args) => { const stream = await sample(...args); if (args[0] === pack) f.nodes.delete(leaf); return stream; };
     const inspector = createManagedGitAcquisitionInspector(effects), limits = managedGitAcquisitionLimitPolicy(), identity = windowsResourceIdentity(f.backend.inspectPath(container));
     await inspector.sampleManagedGitAcquisitionInProgress(container, root, limits, identity);
     f.file(leaf, 'temporary'); await expect(inspector.inspectManagedGitAcquisition(container, root, limits)).rejects.toThrow();
@@ -84,5 +86,31 @@ describe('Windows inspection under the shared mutable acquisition sampler', () =
     await expect(inspector.sampleManagedGitAcquisitionInProgress(container, root, limits, identity)).rejects.toMatchObject({ code: 'WINDOWS_ACCESS_DENIED' });
     f.backend.inspectPath = inspect; f.nodes.delete(container);
     await expect(inspector.sampleManagedGitAcquisitionInProgress(container, root, limits, identity)).rejects.toMatchObject({ code: 'MANAGED_GIT_ACQUISITION_CHANGED' });
+  });
+});
+
+describe('Windows live enumeration is not final stable evidence', () => {
+  it('samples observed same-ID .git timestamp drift without weakening final inspection', async () => {
+    const f = windowsProvisioningFixture(), container = 'C:\\state\\acquire', root = container + '\\repo', git = root + '\\.git';
+    for (const path of ['C:\\state', container, root, git]) f.directory(path);
+    const stable = f.backend.enumerateStableDirectory;
+    let sampled = false;
+    Object.assign(f.backend, { async sampleDirectory(path: string, maxEntries: number) {
+      const receipt = await stable(path, maxEntries);
+      if (path === git) {
+        sampled = true;
+        receipt.directoryBefore.object.lastWriteTime = receipt.directoryBefore.object.changeTime = '01dd42bd4fec59b3';
+        receipt.directoryAfter.object.lastWriteTime = receipt.directoryAfter.object.changeTime = '01dd42bd50175875';
+      }
+      return { directoryBefore: receipt.directoryBefore, names: receipt.entries.map(entry => entry.name), directoryAfter: receipt.directoryAfter };
+    } });
+    f.backend.enumerateStableDirectory = async (path, maxEntries) => {
+      if (path === git) throw new BazframeError('WINDOWS_NATIVE_DIRECTORY_CHANGED', 'Observed live directory timestamps changed.');
+      return stable(path, maxEntries);
+    };
+    const inspector = createManagedGitAcquisitionInspector(createWindowsGitInspectionEffects(f.backend));
+    await inspector.sampleManagedGitAcquisitionInProgress(container, root, managedGitAcquisitionLimitPolicy(), windowsResourceIdentity(f.backend.inspectPath(container)));
+    expect(sampled).toBe(true);
+    await expect(inspector.inspectManagedGitAcquisition(container, root, managedGitAcquisitionLimitPolicy())).rejects.toMatchObject({ code: 'WINDOWS_NATIVE_DIRECTORY_CHANGED' });
   });
 });
