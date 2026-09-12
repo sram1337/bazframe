@@ -991,6 +991,8 @@ fn mutable_directory_sample_preserves_physical_refusals_and_stable_proof() {
             .entries
             .is_empty()
     );
+    // Child creation alone need not produce observable directory metadata drift.
+    seed_timestamps(&target).unwrap();
     let mutation = target.clone();
     let _guard = ClearHook;
     CONTENT_SEAM.with(|slot| {
@@ -998,11 +1000,17 @@ fn mutable_directory_sample_preserves_physical_refusals_and_stable_proof() {
             "sample-after-pass",
             Box::new(move || {
                 file(&mutation, "config.lock").unwrap();
+                seed_timestamps_different(&mutation).unwrap();
             }),
         ))
     });
     let sample = sample_windows_directory(&target, 0).unwrap();
     assert!(sample.entries.is_empty()); // Not a claim that the current directory is empty.
+    assert!(
+        std::fs::metadata(join_direct_child(&target, "config.lock"))
+            .unwrap()
+            .is_file()
+    );
     assert_eq!(
         sample.directory_before.object.file_id,
         sample.directory_after.object.file_id
@@ -1011,12 +1019,15 @@ fn mutable_directory_sample_preserves_physical_refusals_and_stable_proof() {
         &sample.directory_before,
         &sample.directory_after
     ));
+    seed_timestamps(&target).unwrap();
+    let stable_before = inspect_windows_path(&target).unwrap();
     let mutation = target.clone();
     CONTENT_SEAM.with(|slot| {
         *slot.borrow_mut() = Some((
             "enumeration-after-passes",
             Box::new(move || {
                 file(&mutation, "HEAD.lock").unwrap();
+                seed_timestamps_different(&mutation).unwrap();
             }),
         ))
     });
@@ -1027,6 +1038,15 @@ fn mutable_directory_sample_preserves_physical_refusals_and_stable_proof() {
             .status,
         "ERR_WIN32_ENUMERATION_CHANGED"
     );
+    assert!(
+        std::fs::metadata(join_direct_child(&target, "HEAD.lock"))
+            .unwrap()
+            .is_file()
+    );
+    assert!(!same_path_inspection(
+        &stable_before,
+        &inspect_windows_path(&target).unwrap()
+    ));
     assert_eq!(
         sample_windows_directory(&target, 1).err().unwrap().status,
         "ERR_WIN32_ENUMERATION_LIMIT"

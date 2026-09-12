@@ -1,5 +1,5 @@
 import { spawnBoundedPackageProcess } from '../../src/core/child-process.js';
-import { symlinkSync, unlinkSync, realpathSync, mkdtempSync, mkdirSync, writeFileSync, readdirSync, lstatSync, readFileSync, renameSync, existsSync, rmSync } from 'node:fs';
+import { readlinkSync, symlinkSync, unlinkSync, realpathSync, mkdtempSync, mkdirSync, writeFileSync, readdirSync, lstatSync, readFileSync, renameSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, win32 } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -27,7 +27,18 @@ export function windowsGitHostFixture() {
     function visit(path: string) {
       try {
       const stat = lstatSync(path, { bigint: true }), name = windowsPath(path);
-      if (stat.isSymbolicLink()) { if (fixture.nodes.get(name)?.kind !== 'reparse') throw new Error('Host translator does not invent Windows junctions for Git symlinks'); observed.add(name); return; }
+      if (stat.isSymbolicLink()) {
+        const node = fixture.nodes.get(name);
+        if (node?.kind !== 'reparse') {
+          let literalTarget: string | null = null;
+          let readlinkError: { code: string | null; message: string } | undefined;
+          try { literalTarget = readlinkSync(path); } catch (error) {
+            readlinkError = { code: error instanceof Error && 'code' in error ? String(error.code) : null, message: error instanceof Error ? error.message : String(error) };
+          }
+          throw new Error(`Host translator does not invent Windows junctions for Git symlinks: ${JSON.stringify({ path, name, literalTarget, node: node === undefined ? null : { kind: node.kind, id: node.id }, readlinkError })}`);
+        }
+        observed.add(name); return;
+      }
       const inode = `${stat.dev}:${stat.ino}`;
       let id = inodeIds.get(inode); if (id === undefined) { id = nextId++; inodeIds.set(inode, id); }
       const prior = fixture.nodes.get(name);
