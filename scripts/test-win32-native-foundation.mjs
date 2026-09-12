@@ -15,7 +15,7 @@ import {
   writeFile
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const args = process.argv.slice(2);
@@ -341,8 +341,36 @@ try {
   );
   const directorySymlink = join(membershipParent, 'directory-symlink');
   await symlink(membershipTarget, directorySymlink, 'dir');
-  const directorySymlinkRefused = await expectCode(
-    () => backend.inspectMembershipLink(directorySymlink),
+  const directorySymlinkProof = backend.inspectMembershipLink(directorySymlink);
+  const repeatedDirectorySymlinkProof = backend.inspectMembershipLink(directorySymlink);
+  const directorySymlinkCanonicalPath = `${backend.inspectPath(membershipParent).canonicalPath}\\directory-symlink`;
+  requireCondition(
+    [directorySymlinkProof, repeatedDirectorySymlinkProof].every((proof) =>
+      proof.object.reparseTag === 0xa000000c
+      && proof.canonicalPath.toLowerCase() === directorySymlinkCanonicalPath.toLowerCase()
+      && proof.normalizedTarget.toLowerCase() === membershipTargetBefore.canonicalPath.toLowerCase()
+      && proof.targetVolumeIdentity === membershipTargetBefore.object.volumeIdentity
+      && proof.targetFileId === membershipTargetBefore.object.fileId)
+    && repeatedDirectorySymlinkProof.object.volumeIdentity === directorySymlinkProof.object.volumeIdentity
+    && repeatedDirectorySymlinkProof.object.fileId === directorySymlinkProof.object.fileId
+    && await readFile(join(directorySymlink, 'marker.txt'), 'utf8') === 'membership target\n'
+    && await readFile(membershipMarker, 'utf8') === 'membership target\n',
+    'absolute directory symlink exact repeated inspection'
+  );
+  const relativeDirectorySymlink = join(membershipParent, 'relative-directory-symlink');
+  const relativeMembershipTarget = relative(membershipParent, membershipTarget);
+  requireCondition(
+    relativeMembershipTarget.length > 0 && !isAbsolute(relativeMembershipTarget)
+      && resolve(membershipParent, relativeMembershipTarget) === resolve(membershipTarget),
+    'relative directory symlink fixture target'
+  );
+  await symlink(relativeMembershipTarget, relativeDirectorySymlink, 'dir');
+  requireCondition(
+    await readFile(join(relativeDirectorySymlink, 'marker.txt'), 'utf8') === 'membership target\n',
+    'relative directory symlink readable target'
+  );
+  const relativeDirectorySymlinkRefused = await expectCode(
+    () => backend.inspectMembershipLink(relativeDirectorySymlink),
     'WINDOWS_NATIVE_MEMBERSHIP_LINK_INVALID'
   );
   const danglingTarget = join(outside, 'dangling-membership-target');
@@ -366,7 +394,7 @@ try {
   const foreignAclProof = membershipModule.inspectWindowsSkillMembership(membershipOptions('foreign-acl-skill'));
   const membershipTargetAfterForeignAcl = backend.inspectPath(membershipTarget);
   const membershipForeignReparseRefused = chainedMembershipRefused
-    && directorySymlinkRefused
+    && relativeDirectorySymlinkRefused
     && danglingMembershipRefused
     && await readFile(membershipMarker, 'utf8') === 'membership target\n';
   const membershipExistingAclAdmitted = foreignAclProof.link.normalizedTarget === membershipProof.link.normalizedTarget
