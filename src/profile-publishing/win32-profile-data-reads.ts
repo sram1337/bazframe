@@ -111,6 +111,7 @@ export function createWindowsProfileDataReads(backend: BazframeWin32NativeBacken
       if (operation !== undefined) assertWindowsOperationMutationAuthority(operation.authority, backend, home, ['@store'], operationAuthorityTransactionId(operation.authority));
     },
     async scanProfileNames(home) {
+      if (!await optionalChild(home, 'profiles')) return [];
       const names = (await enumerate(win32.join(home, 'profiles'))).names.filter((name) => {
         if (isSafeProfileId(name) && isValidWindowsPathComponent(name)) return true;
         if (!isReservedProfileSiblingName(name)) throw unsupported(); return false;

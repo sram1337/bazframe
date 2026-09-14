@@ -2,6 +2,8 @@ import { createWindowsReadyResourceServices } from '../../../src/skill-collectio
 import { addLibrary, updateLibrary } from '../../../src/skill-collections/skill-collection-lifecycle.js';
 import { addProfileLibraryReference } from '../../../src/profiles/profile-skill-collection-reference-lifecycle.js';
 import { createHash } from 'node:crypto';
+import { BazframeError } from '../../../src/core/errors.js';
+import { PROFILE_PORTABILITY_PRODUCTION_LIMITS } from '../../../src/profile-portability/profile-portability-policy.js';
 import { win32 } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
@@ -77,6 +79,99 @@ async function liveFixture() {
   await f.backend.renameDirectoryNoReplace(`${HOME}\\profiles`, win32.basename(f.path), 'work');
   return f;
 }
+
+describe('Windows profile namespace absence (virtual native receipts)', () => {
+  it('returns an effect-free empty full view for an admitted empty home without inspecting absent profiles', async () => {
+    const f = windowsProvisioningFixture(); f.directory(HOME);
+    const root = win32.join(HOME, 'profiles');
+    // The native boundary reports this mapped code, not Node ENOENT.
+    expect(() => f.backend.inspectPath(root)).toThrow(expect.objectContaining({ code: 'WINDOWS_NATIVE_PATH_NOT_FOUND' }));
+    const inspect = vi.spyOn(f.backend, 'inspectPath');
+    const before = f.snapshot();
+    const reads = createWindowsProfileDataReads(f.backend).viewReads;
+    await expect(readProfileSystemView(HOME, reads)).resolves.toEqual({ profiles: [], resources: [], namespace: [], skills: [] });
+    expect(inspect).not.toHaveBeenCalledWith(root);
+    expect(f.snapshot()).toBe(before); expect(f.writes).toEqual([]);
+  });
+
+  it.each(['missing-home', 'missing-ancestor', 'file-home', 'reparse-home', 'reparse-ancestor', 'colliding-parent-entries', 'file-profiles', 'reparse-profiles', 'alias-profiles', 'colliding-profiles'])(
+    'does not treat %s as authoritative empty namespace evidence', async (mode) => {
+      const f = windowsProvisioningFixture(); f.directory(HOME);
+      const root = win32.join(HOME, 'profiles');
+      if (mode === 'missing-home') f.nodes.delete(HOME);
+      if (mode === 'missing-ancestor') f.nodes.delete(win32.dirname(HOME));
+      if (mode === 'file-home') f.file(HOME, 'occupied');
+      if (mode === 'reparse-home') f.reparse(HOME);
+      if (mode === 'reparse-ancestor') f.reparse(win32.dirname(HOME));
+      if (mode === 'colliding-parent-entries') { f.directory(win32.join(HOME, 'unrelated')); f.directory(win32.join(HOME, 'UNRELATED')); }
+      if (mode === 'file-profiles') f.file(root, 'occupied');
+      if (mode === 'reparse-profiles') f.reparse(root);
+      if (mode === 'alias-profiles' || mode === 'colliding-profiles') f.directory(win32.join(HOME, 'PROFILES'));
+      if (mode === 'colliding-profiles') f.directory(root);
+      const before = f.snapshot();
+      await expect(createWindowsProfileDataReads(f.backend).viewReads.scanProfileNames(HOME)).rejects.toThrow();
+      expect(f.snapshot()).toBe(before); expect(f.writes).toEqual([]);
+    }
+  );
+
+  it.each(['WINDOWS_NATIVE_ACCESS_DENIED', 'WINDOWS_NATIVE_DIRECTORY_CHANGED', 'WINDOWS_NATIVE_ENUMERATION_INCOMPLETE', 'WINDOWS_NATIVE_ENUMERATION_LIMIT_EXCEEDED'])(
+    'propagates an incomplete parent enumeration (%s) unchanged', async (code) => {
+      const f = windowsProvisioningFixture(); f.directory(HOME);
+      const error = new BazframeError(code, 'native parent enumeration refused');
+      vi.spyOn(f.backend, 'enumerateStableDirectory').mockRejectedValue(error);
+      const before = f.snapshot();
+      await expect(createWindowsProfileDataReads(f.backend).viewReads.scanProfileNames(HOME)).rejects.toBe(error);
+      expect(f.snapshot()).toBe(before); expect(f.writes).toEqual([]);
+    }
+  );
+
+  it('refuses changed parent receipts even when their entry list is empty', async () => {
+    const f = windowsProvisioningFixture(); f.directory(HOME);
+    const enumerate = f.backend.enumerateStableDirectory;
+    vi.spyOn(f.backend, 'enumerateStableDirectory').mockImplementation(async (path, max) => {
+      const receipt = await enumerate(path, max);
+      return { ...receipt, directoryAfter: { ...receipt.directoryAfter, object: { ...receipt.directoryAfter.object, changeTime: '0000000000000002' } } };
+    });
+    const before = f.snapshot();
+    await expect(createWindowsProfileDataReads(f.backend).viewReads.scanProfileNames(HOME)).rejects.toMatchObject({ code: 'WINDOWS_ADDED_SKILL_NAMESPACE_CHANGED' });
+    expect(f.snapshot()).toBe(before); expect(f.writes).toEqual([]);
+  });
+
+  it('propagates native disappearance after the parent reports profiles present', async () => {
+    const f = windowsProvisioningFixture(); f.directory(HOME);
+    const root = win32.join(HOME, 'profiles'); f.directory(root);
+    const error = new BazframeError('WINDOWS_NATIVE_PATH_NOT_FOUND', 'present child disappeared');
+    const inspect = f.backend.inspectPath;
+    vi.spyOn(f.backend, 'inspectPath').mockImplementation((path) => { if (path === root) throw error; return inspect(path); });
+    const enumerate = vi.spyOn(f.backend, 'enumerateStableDirectory');
+    const before = f.snapshot();
+    await expect(createWindowsProfileDataReads(f.backend).viewReads.scanProfileNames(HOME)).rejects.toBe(error);
+    expect(enumerate).toHaveBeenCalledWith(HOME, PROFILE_PORTABILITY_PRODUCTION_LIMITS.stagingEntries);
+    expect(f.snapshot()).toBe(before); expect(f.writes).toEqual([]);
+  });
+
+  it.each(['malformed-name', 'profile-limit', 'parent-limit'])('retains the %s refusal', async (mode) => {
+    const f = windowsProvisioningFixture(); f.directory(HOME);
+    const root = win32.join(HOME, 'profiles'); f.directory(root);
+    if (mode === 'malformed-name') f.directory(win32.join(root, 'not_a_profile'));
+    if (mode === 'profile-limit') {
+      for (let index = 0; index <= PROFILE_PORTABILITY_PRODUCTION_LIMITS.profileNamespaceEntries; index++) f.directory(win32.join(root, `profile-${index}`));
+    }
+    if (mode === 'parent-limit') {
+      const enumerate = f.backend.enumerateStableDirectory;
+      vi.spyOn(f.backend, 'enumerateStableDirectory').mockImplementation(async (path, max) => {
+        const receipt = await enumerate(path, max);
+        if (path === HOME) receipt.entries = Array.from({ length: max + 1 }, (_, index) => ({ ...receipt.entries[0]!, name: `entry-${index}` }));
+        return receipt;
+      });
+    }
+    const before = f.snapshot();
+    await expect(createWindowsProfileDataReads(f.backend).viewReads.scanProfileNames(HOME)).rejects.toMatchObject({
+      code: mode === 'parent-limit' ? 'WINDOWS_ADDED_SKILL_NAMESPACE_INVALID' : 'WINDOWS_PROFILE_ACTIVATION_UNSUPPORTED_STATE'
+    });
+    expect(f.snapshot()).toBe(before); expect(f.writes).toEqual([]);
+  });
+});
 
 describe('requested-profile imported flat inputs for ready resources', () => {
   it.each(['direct', 'library-child', 'package-child'])('checks imported %s collisions only for the referencing profile', async (name) => {

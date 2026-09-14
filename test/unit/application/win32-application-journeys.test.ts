@@ -201,6 +201,20 @@ describe('shared Windows application composition (host receipts, not native acce
     expect(f.security(HOME + '\\profiles\\renamed').ownerSid).toBe('S-1-5-21-999');
   });
 
+  it.each([false, true])('loads an admitted empty-home dashboard without diagnostics or effects, profiles namespace present=%s', async (present) => {
+    const f = windowsApplicationFixture(); f.directories(HOME);
+    const root = HOME + '\\profiles';
+    if (present) f.directory(root);
+    else expect(() => f.backend.inspectPath(root)).toThrow(expect.objectContaining({ code: 'WINDOWS_NATIVE_PATH_NOT_FOUND' }));
+    const before = f.snapshot();
+    const tui = createBazframeTuiService({ bazframeHome: HOME, bazframeVersion: VERSION, cwd: REPOSITORY, environment: f.environment, application: f.application });
+    const dashboard = await tui.loadDashboard();
+    expect(dashboard.profiles).toEqual([]);
+    expect(dashboard.diagnostics).toEqual([]);
+    expect(f.snapshot()).toBe(before); expect(f.writes).toEqual([]);
+    expect(f.nodes.has(root)).toBe(present);
+  });
+
   it('never bootstraps state during disabled status, dashboard, discovery and missing-home listing', async () => {
     const f = windowsApplicationFixture(), before = f.snapshot();
     expect((await cli(f, ['profile', 'list', '--json'])).status).toBe(0);
