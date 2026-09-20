@@ -1,6 +1,9 @@
 import { spawnSync } from 'node:child_process';
-import { chmod, realpath } from 'node:fs/promises';
-import { afterEach, describe, expect, it } from 'vitest';
+import { chmod, lstat, readFile, readdir, realpath } from 'node:fs/promises';
+import { createElement } from 'react';
+import { cleanup, render } from 'ink-testing-library';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { TuiApp } from '../../src/tui/app.js';
 import { createBazframeTuiService } from '../../src/application/tui-service.js';
 import { runCli } from '../../src/cli/run-cli.js';
 import { snapshotFilesystem } from '../helpers/filesystem-snapshot.js';
@@ -9,10 +12,122 @@ import { createTempDirectory, type TempDirectory } from '../helpers/temp-directo
 const temporaryDirectories: TempDirectory[] = [];
 
 afterEach(async () => {
+  cleanup();
   await Promise.all(temporaryDirectories.splice(0).map((directory) => directory.cleanup()));
 });
 
 describe('CLI and TUI service state agreement', () => {
+  it('converges after inactive TUI create, rename, cancellation and retained removal', async () => {
+    // Real Ink app, application service and host filesystem; not Windows/installed evidence.
+    const directory = await createTempDirectory('bazframe tui inactive lifecycle ');
+    temporaryDirectories.push(directory);
+    const home = directory.path('home');
+    const cwd = await directory.mkdir('outside git');
+    const service = createBazframeTuiService({
+      bazframeHome: home,
+      bazframeVersion: '0.0.0-integration-test',
+      cwd,
+      environment: {
+        ...process.env,
+        BAZFRAME_HOME: home,
+        PI_CODING_AGENT_DIR: directory.path('pi-agent'),
+        NO_COLOR: '1'
+      },
+      userHome: directory.root
+    });
+    await service.createProfile('sentinel');
+    await directory.write('home/profiles/sentinel/AGENTS.md', 'Unrelated instructions\r\n');
+    await service.toggleProfileFavorite('sentinel');
+    const sentinel = await snapshotFilesystem(directory.path('home/profiles/sentinel'));
+    const favorites = await readFile(directory.path('home/profile-favorites.json'));
+    const use = vi.spyOn(service, 'useProfile');
+    const remove = vi.spyOn(service, 'removeProfile');
+    const view = render(createElement(TuiApp, { service, dimensions: { columns: 120, rows: 30 } }));
+    const frameContains = async (text: string) => {
+      await vi.waitFor(() => expect(view.lastFrame()).toContain(text));
+    };
+    const preserved = async () => {
+      expect(await snapshotFilesystem(directory.path('home/profiles/sentinel'))).toEqual(sentinel);
+      expect(await readFile(directory.path('home/profile-favorites.json'))).toEqual(favorites);
+      await expect(lstat(directory.path('home/active-profile'))).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(use).not.toHaveBeenCalled();
+    };
+    await frameContains('Status: Ready');
+    view.stdin.write('2');
+    await frameContains('c create');
+    view.stdin.write('c');
+    await frameContains('New profile ID');
+    view.stdin.write('life-a');
+    await frameContains('Input: life-a');
+    view.stdin.write('\r');
+    await frameContains('Profiles / life-a');
+    await frameContains('Included skills');
+    const generated = await snapshotFilesystem(directory.path('home/profiles/life-a'));
+    const generatedRootMode = (await lstat(directory.path('home/profiles/life-a'))).mode;
+    expect(generated).toEqual([
+      expect.objectContaining({ path: 'AGENTS.md', kind: 'file', size: 0,
+        sha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855' }),
+      expect.objectContaining({ path: 'skills', kind: 'directory' })
+    ]);
+    await preserved();
+
+    view.stdin.write('H');
+    await frameContains('R rename');
+    view.stdin.write('R');
+    await frameContains('New ID for life-a');
+    for (const remaining of ['life-', 'life', 'lif', 'li', 'l', '']) {
+      view.stdin.write('\u007f');
+      await vi.waitFor(() => expect(view.lastFrame()).toMatch(
+        new RegExp(`Input: ${remaining}\\s*[┃│]?\\s*$`, 'm')
+      ));
+    }
+    view.stdin.write('life-b');
+    await frameContains('Input: life-b');
+    view.stdin.write('\r');
+    await vi.waitFor(() => {
+      expect(view.lastFrame()).toContain('Profiles / life-b');
+      expect(view.lastFrame()).toMatch(/life-b\s+0/u);
+      expect(view.lastFrame()).not.toContain('life-a');
+      expect(view.lastFrame()).not.toContain('New ID for');
+    });
+    expect(await snapshotFilesystem(directory.path('home/profiles/life-b'))).toEqual(generated);
+    expect((await lstat(directory.path('home/profiles/life-b'))).mode).toBe(generatedRootMode);
+    await expect(lstat(directory.path('home/profiles/life-a'))).rejects.toMatchObject({ code: 'ENOENT' });
+    await preserved();
+
+    const beforeCancel = await snapshotFilesystem(home);
+    view.stdin.write('x');
+    await frameContains('Remove profile life-b');
+    await frameContains('y confirm generated-empty removal');
+    view.stdin.write('\u001b');
+    await vi.waitFor(() => {
+      expect(view.lastFrame()).not.toContain('y confirm generated-empty removal');
+      expect(view.lastFrame()).toContain('Profiles / life-b');
+    });
+    expect(remove).not.toHaveBeenCalled();
+    expect(await snapshotFilesystem(home)).toEqual(beforeCancel);
+    await preserved();
+
+    const siblingsBefore = await readdir(directory.path('home/profiles'));
+    view.stdin.write('x');
+    await frameContains('y confirm generated-empty removal');
+    view.stdin.write('y');
+    await vi.waitFor(() => {
+      expect(view.lastFrame()).toContain('Remove profile complete.');
+      expect(view.lastFrame()).toContain('Profiles / ★ sentinel');
+      expect(view.lastFrame()).not.toContain('life-b');
+    });
+    expect(remove).toHaveBeenCalledExactlyOnceWith('life-b', { kind: 'generated-empty' });
+    await expect(lstat(directory.path('home/profiles/life-b'))).rejects.toMatchObject({ code: 'ENOENT' });
+    const retired = (await readdir(directory.path('home/profiles')))
+      .filter((name) => !siblingsBefore.includes(name));
+    expect(retired).toEqual([expect.stringMatching(/^\.bazframe-backup-[a-f0-9]{32}$/u)]);
+    expect(await snapshotFilesystem(directory.path(`home/profiles/${retired[0]}`))).toEqual(generated);
+    expect((await lstat(directory.path(`home/profiles/${retired[0]}`))).mode).toBe(generatedRootMode);
+    expect(await service.loadDashboard()).toMatchObject({ profiles: [{ id: 'sentinel', active: false }] });
+    await preserved();
+  });
+
   it('shares authoritative profile and membership state without changing provider artifacts', async () => {
     const directory = await createTempDirectory('bazframe state agreement ');
     temporaryDirectories.push(directory);
