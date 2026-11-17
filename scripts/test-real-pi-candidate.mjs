@@ -645,9 +645,21 @@ export function assertDeprecatedTemporaryDisposition(stderr, { temporaryRoot, re
     ownershipBasis: 'Admitted Windows product private creation/publication and guarded disposal; lstat is not independent ACL or creation proof.', scope };
 }
 
-export function piJourneySteps(c) {
+// A single fixed suffix, not a general checkpoint/resume API. The caller must
+// authenticate these original receipts; fresh observations never replace them.
+export function piJourneySteps(c, resume) {
   const steps = [], agent = c.env.PI_CODING_AGENT_DIR;
   let repositoryBaseline, gitStatusBaseline, deprecatedBody, preservationSequence = 0;
+  let resumeAdmitted = false;
+  if (resume !== undefined) {
+    assert(resume && resume.repositoryBaseline?.inventory && typeof resume.repositoryBaseline.gitStatusBase64 === 'string', 'Original repository/Git baseline required');
+    for (const key of ['adapterBinding', 'importBinding', 'homeInventory', 'sourceInventory', 'agentInventory']) assert(resume[key] && typeof resume[key] === 'object', `Original ${key} required`);
+    assert(Buffer.isBuffer(resume.dryRunStdout), 'Original dry-run stdout required');
+    deprecatedBody = deprecatedDryRunBody(resume.dryRunStdout);
+    resume = structuredClone(resume);
+    repositoryBaseline = resume.repositoryBaseline.inventory;
+    gitStatusBaseline = Buffer.from(resume.repositoryBaseline.gitStatusBase64, 'base64');
+  }
   const temporaryDisposition = result => assertDeprecatedTemporaryDisposition(result.stderr, { temporaryRoot: c.env.TMPDIR, repository: c.repository, expectedBody: deprecatedBody });
   const gitStatus = async () => {
     c.revalidate();
@@ -655,12 +667,36 @@ export function piJourneySteps(c) {
     assertNaturalResult(result); return result.stdout;
   };
   const add = (name, run) => steps.push({ name, run: async () => {
+    if (resume && !resumeAdmitted) {
+      c.revalidate();
+      assert.deepEqual(inventory(c.home), resume.homeInventory, 'Original home/imported state changed');
+      assert.deepEqual(inventory(join(c.root, 'sources')), resume.sourceInventory, 'Original source state changed');
+      assert.deepEqual(inventory(agent), resume.agentInventory, 'Original agent state changed');
+      assert.deepEqual(jsonFile(join(c.root, 'import-binding.json')), resume.importBinding, 'Original import document changed');
+      const binding = resume.importBinding;
+      assert.equal(binding.zip, join(c.root, 'alpha.zip'), 'Original import archive path required');
+      assert.equal(sha256(readFileSync(binding.zip)), binding.sha256, 'Original import archive changed');
+      assert.equal(binding.document?.outcome, 'success');
+      assert.equal(binding.document?.result?.resolvedName, 'alpha-1');
+      assert(c.imported === undefined || c.imported === 'alpha-1', 'Imported identity changed');
+      assert.equal(readFileSync(join(c.home, 'active-profile'), 'utf8').trim(), 'alpha-1', 'Imported selection changed');
+      assert.deepEqual(readFileSync(join(agent, 'extensions', '99-probe-provider.ts')), c.probe, 'Frozen provider changed');
+      admitAdapter();
+      for (const path of [globalState, projectState(), join(c.root, 'retained-malformed-global.json'), join(c.root, 'retained-malformed-project.json')]) {
+        // existsSync would miss an occupied dangling link.
+        assert.equal(inventory(path), null, `Suffix destination occupied: ${path}`);
+      }
+      c.imported = 'alpha-1';
+      // Mark admitted only after the original repository and fresh Git status
+      // compare below, so a failed preflight cannot be bypassed on another call.
+    }
     if (repositoryBaseline) { assert.deepEqual(inventory(c.repository), repositoryBaseline, 'Repository/Git bytes changed before operation'); assert.deepEqual(await gitStatus(), gitStatusBaseline, 'Git status changed before operation'); }
+    if (resume) resumeAdmitted = true;
     const detail = await run();
     if (repositoryBaseline) { assert.deepEqual(inventory(c.repository), repositoryBaseline, 'Repository/Git bytes changed'); assert.deepEqual(await gitStatus(), gitStatusBaseline, 'Git status changed'); }
     return detail;
   } });
-  let commandNumber = 0, adapterBinding;
+  let commandNumber = 0, adapterBinding = resume?.adapterBinding;
   const admitAdapter = () => piEvidence(() => { const current = verifyAdapter(c); if (adapterBinding) assert.deepEqual(current, adapterBinding, 'Installed adapter bytes changed since installation'); return current; });
   async function cli(args, { code = 0, env = c.env, cwd = c.cwd, text, unchanged = false } = {}) {
     c.revalidate(); const before = inventory(env.BAZFRAME_HOME), sourcesBefore = inventory(join(c.root, 'sources'));
@@ -907,5 +943,5 @@ export function piJourneySteps(c) {
     put(extension, 'other owner\n'); await cli(['adapter', 'install', 'pi'], { code: 1, text: 'owned by another' }); assert.equal(readFileSync(extension, 'utf8'), 'other owner\n');
   });
   add('final-installed-byte-revalidation', c.revalidate);
-  return steps;
+  return resume ? steps.slice(steps.findIndex(step => step.name === 'deprecated-real-launch-and-natural-exit')) : steps;
 }

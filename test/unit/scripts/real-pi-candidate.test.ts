@@ -33,6 +33,79 @@ async function probe(code: string) {
 }
 
 describe('retained exact-candidate Pi seams (no installed Pi execution)', () => {
+  it.each(['valid', 'missing-baseline', 'repository', 'git', 'adapter', 'home', 'sources', 'agent', 'import', 'archive', 'selection', 'dry-run', 'occupied', 'dangling-destination', 'later-repository', 'later-git', 'after-repository', 'after-git', 'detached-state', 'missing-adapterBinding', 'missing-importBinding', 'missing-homeInventory', 'missing-sourceInventory', 'missing-agentInventory', 'missing-dryRunStdout', 'provider', 'global-occupied', 'project-occupied', 'import-identity'])('admits only original-bound suffix state: %s', fault => probe(String.raw`
+    const fault=${JSON.stringify(fault)};
+    const {inventory,sha256,saveJson}=await import(${JSON.stringify(join(process.cwd(), 'scripts/installed-candidate.mjs'))});
+    const home=join(root,'home'),agent=join(root,'pi'),repository=join(root,'repository'),packageRoot=join(root,'package');
+    const put=(path,bytes)=>{fs.mkdirSync(dirname(path),{recursive:true});fs.writeFileSync(path,bytes)};
+    for(const dir of [home,agent,repository,packageRoot,join(root,'sources')])fs.mkdirSync(dir);
+    put(join(repository,'AGENTS.md'),'repo');put(join(home,'profiles','alpha-1','AGENTS.md'),'ALPHA_BODY\n');put(join(home,'active-profile'),'alpha-1\n');
+    put(join(packageRoot,'package.json'),JSON.stringify({name:'bazframe',version:'test'}));put(join(packageRoot,'artifacts','pi','bazframe.ts'),'template');
+    put(join(agent,'extensions','bazframe.ts'),'template');put(join(agent,'extensions','99-probe-provider.ts'),'frozen provider');
+    put(join(home,'adapters','pi.json'),JSON.stringify({schemaVersion:1,adapter:'pi',bazframeVersion:'test',installedPath:join(agent,'extensions','bazframe.ts'),artifactSha256:sha256('template'),artifactBytes:8}));
+    put(join(root,'alpha.zip'),'archive');
+    const binding={zip:join(root,'alpha.zip'),sha256:sha256('archive'),document:{outcome:'success',result:{resolvedName:'alpha-1'}}};saveJson(join(root,'import-binding.json'),binding);
+    let git=Buffer.from('original status'),calls=[],validations=0,changeAt=Infinity;
+    const c={root,home,repository,packageRoot,cwd:root,git:'/bound/git',launch:{kind:'genuine-pi-shim'},probe:Buffer.from('frozen provider'),env:{BAZFRAME_HOME:home,PI_CODING_AGENT_DIR:agent,BAZFRAME_PI_PROBE_CAPTURE:join(root,'new-captures')},revalidate:()=>{validations++;if(validations===changeAt){if(fault==='after-repository')put(join(repository,'after-change'),'changed');else git=Buffer.from('after status')}},run:async(label)=>{
+      calls.push(label);assert(label.startsWith('git-status-'),'No setup or mutation allowed in preflight');
+      return{stdout:git,stderr:Buffer.alloc(0),code:0,signal:null,ioErrors:[],events:[{event:'exit',code:0,signal:null},{event:'close',code:0,signal:null}]};
+    }};
+    const resume={repositoryBaseline:{inventory:inventory(repository),gitStatusBase64:git.toString('base64')},adapterBinding:h.verifyAdapter(c),importBinding:binding,dryRunStdout:Buffer.from('--- effective instructions ---\nALPHA_BODY\n\n--- end effective instructions ---\n'),homeInventory:inventory(home),sourceInventory:inventory(join(root,'sources')),agentInventory:inventory(agent)};
+    if(fault==='missing-baseline')delete resume.repositoryBaseline;
+    if(fault.startsWith('missing-')&&fault!=='missing-baseline')delete resume[fault.slice(8)];
+    if(fault==='provider'){put(join(agent,'extensions','99-probe-provider.ts'),'changed');resume.agentInventory=inventory(agent)}
+    if(fault==='global-occupied'||fault==='project-occupied'){put(fault==='global-occupied'?join(home,'global.json'):join(home,'projects',sha256(repository)+'.json'),'occupied');resume.homeInventory=inventory(home)}
+    if(fault==='import-identity'){binding.document.result.resolvedName='beta';saveJson(join(root,'import-binding.json'),binding)}
+    if(fault==='repository')put(join(repository,'changed'),'changed');
+    if(fault==='git')git=Buffer.from('changed status');
+    if(fault==='adapter')resume.adapterBinding.extension='0'.repeat(64);
+    if(fault==='home')put(join(home,'changed'),'changed');
+    if(fault==='sources')put(join(root,'sources','changed'),'changed');
+    if(fault==='agent')put(join(agent,'changed'),'changed');
+    if(fault==='import')saveJson(join(root,'import-binding.json'),{...binding,sha256:'0'.repeat(64)});
+    if(fault==='archive')put(join(root,'alpha.zip'),'changed');
+    if(fault==='selection')put(join(home,'active-profile'),'beta\n');
+    if(fault==='dry-run')resume.dryRunStdout=Buffer.from('unframed');
+    if(fault==='occupied')put(join(root,'retained-malformed-global.json'),'other');
+    if(fault==='dangling-destination')fs.symlinkSync(join(root,'missing'),join(root,'retained-malformed-project.json'));
+    const attempt=async()=>h.piJourneySteps(c,resume).find(s=>s.name==='deprecated-signal-propagation').run();
+    if(['valid','later-repository','later-git','after-repository','after-git','detached-state'].includes(fault)){
+      const steps=h.piJourneySteps(c,resume);assert.equal(steps.length,8);assert.equal(steps[0].name,'deprecated-real-launch-and-natural-exit');assert.equal(steps.at(-1).name,'final-installed-byte-revalidation');if(fault==='detached-state')resume.adapterBinding.extension='forged';const signal=steps.find(s=>s.name==='deprecated-signal-propagation');assert.equal((await signal.run()).status,'not-run');assert.equal(c.imported,'alpha-1');assert(validations>0);assert(calls.length>=2);
+      if(fault==='later-repository'){put(join(repository,'late-change'),'changed');await assert.rejects(signal.run(),/Repository/)}
+      if(fault==='later-git'){git=Buffer.from('late status');await assert.rejects(signal.run(),/Git status/)}
+      if(fault.startsWith('after-')){changeAt=validations+2;await assert.rejects(steps.at(-1).run(),/Repository|Git status/)}
+    }else await assert.rejects(attempt);
+    assert.equal(spawns,0);
+  `));
+
+  it('uses restored raw dry-run bytes for both resumed Windows child outcomes', () => probe(String.raw`
+    Object.defineProperty(process,'platform',{value:'win32'});
+    const {inventory,sha256,saveJson}=await import(${JSON.stringify(join(process.cwd(), 'scripts/installed-candidate.mjs'))});
+    const home=join(root,'home'),agent=join(root,'pi'),repository=join(root,'repository'),packageRoot=join(root,'package'),tmp=join(root,'tmp');
+    const put=(path,bytes)=>{fs.mkdirSync(dirname(path),{recursive:true});fs.writeFileSync(path,bytes)};
+    for(const dir of [home,agent,repository,packageRoot,tmp,join(root,'sources')])fs.mkdirSync(dir);
+    const body=Buffer.from('ALPHA_BODY\noriginal bytes\n'),provider=Buffer.from('frozen'),manifest=Buffer.from(JSON.stringify({name:'bazframe',version:'test'}));
+    put(join(home,'active-profile'),'alpha-1\n');put(join(home,'profiles','alpha-1','AGENTS.md'),'ALPHA_BODY\n');
+    put(join(packageRoot,'package.json'),manifest);put(join(packageRoot,'dist','application','win32-application-services.js'),'runtime');put(join(packageRoot,'artifacts','native','win32-x64-msvc','bazframe-win32.node'),'native');
+    const template='const WINDOWS_INSTALL_REFERENCE = null;';put(join(packageRoot,'artifacts','pi','bazframe.ts'),template);
+    const runtimePath=join(agent,'bazframe','runtime.json'),binding={schemaVersion:1,bazframeVersion:'test',packageRoot,packageSha256:sha256(manifest),runtimeSha256:sha256('runtime'),nativeSha256:sha256('native')};
+    put(runtimePath,JSON.stringify(binding,null,2)+'\n');const installed=template.replace('null',JSON.stringify({path:runtimePath,binding}));put(join(agent,'extensions','bazframe.ts'),installed);put(join(agent,'extensions','99-probe-provider.ts'),provider);
+    fs.mkdirSync(join(home,'adapters'));saveJson(join(home,'adapters','pi.json'),{schemaVersion:1,adapter:'pi',bazframeVersion:'test',installedPath:join(agent,'extensions','bazframe.ts'),artifactSha256:sha256(installed),artifactBytes:Buffer.byteLength(installed)});
+    put(join(root,'alpha.zip'),'archive');const imported={zip:join(root,'alpha.zip'),sha256:sha256('archive'),document:{outcome:'success',result:{resolvedName:'alpha-1'}}};saveJson(join(root,'import-binding.json'),imported);
+    const temporary=join(tmp,'bazframe-profile-dry-run-'+'c'.repeat(32),'.baz.agents.md');put(temporary,body);
+    const capture=join(root,'new-capture.jsonl');let launches=0;
+    const c={root,home,repository,packageRoot,cwd:root,git:'/bound/git',executable:'C:\\bound\\bzf.cmd',launch:{kind:'genuine-pi-shim',file:join(root,'pi.cmd')},probe:provider,env:{BAZFRAME_HOME:home,PI_CODING_AGENT_DIR:agent,TMPDIR:tmp,BAZFRAME_PI_PROBE_CAPTURE:capture,PATH:'/bound',ComSpec:'C:\\Windows\\System32\\cmd.exe'},revalidate:()=>{},run:async(label,invocation)=>{
+      const git=label.startsWith('git-status-'),nonzero=invocation.args.join(' ').includes('candidate-invalid'),code=nonzero?1:0;
+      if(!git){launches++;if(!nonzero)fs.appendFileSync(capture,JSON.stringify({systemPrompt:'ALPHA_BODY'})+'\n')}
+      return{evidence:join(root,label),stdout:Buffer.from(git?'status':nonzero?'Invalid TUI mode':'probe-ok'),stderr:Buffer.from(git?'':'Effective instructions file: '+temporary+'\n'),code,signal:null,ioErrors:[],events:[{event:'exit',code,signal:null},{event:'close',code,signal:null}]};
+    }};
+    const resume={repositoryBaseline:{inventory:inventory(repository),gitStatusBase64:Buffer.from('status').toString('base64')},adapterBinding:h.verifyAdapter(c),importBinding:imported,dryRunStdout:Buffer.concat([Buffer.from('--- effective instructions ---\n'),body,Buffer.from('\n--- end effective instructions ---\n')]),homeInventory:inventory(home),sourceInventory:inventory(join(root,'sources')),agentInventory:inventory(agent)};
+    const steps=h.piJourneySteps(c,resume);
+    for(const step of steps.slice(0,2)){const result=await step.run();assert.equal(result.cleanup.sha256,sha256(body));assert.equal(result.cleanup.disposition,'retained')}
+    assert.equal(launches,2);assert.equal(c.imported,'alpha-1');
+    put(temporary,'ALPHA_BODY\nwrong bytes\n');await assert.rejects(steps[0].run(),/differ from dry-run/);assert.equal(spawns,0);
+  `));
+
   it('accepts actual deprecated usage refusals and retains diagnostic/state checks', () => probe(String.raw`
     const home=join(root,'home');fs.mkdirSync(home);fs.writeFileSync(join(home,'state'),'unchanged');
     let mode='correct',calls=[];
