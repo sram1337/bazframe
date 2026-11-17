@@ -212,12 +212,15 @@ describe('retained exact-candidate Pi seams (no installed Pi execution)', () => 
 
   it('binds EOF to exact selected version and executed bundled bytes', () => probe(`
     const rootPi=${JSON.stringify(join(process.cwd(), 'node_modules/@earendil-works/pi-coding-agent'))};
-    const pi={version:'0.84.4',manifest:join(rootPi,'package.json'),binPaths:{pi:join(rootPi,'dist/bundle/cli.js')}};
-    const binding=h.bindRpcLifetime(pi);assert.equal(binding.version,'0.84.4');
+    const manifest=join(rootPi,'package.json'),installed=JSON.parse(fs.readFileSync(manifest,'utf8'));
+    const reviewed=[h.reviewedRpc,h.reviewedRpc087,h.reviewedRpc152].find(candidate=>candidate.version===installed.version);
+    assert(reviewed,'Installed Pi needs its own reviewed EOF lifetime binding');
+    const pi={version:installed.version,manifest,binPaths:{pi:join(rootPi,installed.bin.pi)}};
+    const binding=h.bindRpcLifetime(pi);assert.equal(binding.version,installed.version);assert.equal(binding.files,reviewed.files);
     assert.throws(()=>h.bindRpcLifetime({...pi,version:'0.99.0'}),/own reviewed/);
     assert.throws(()=>h.bindRpcLifetime({...pi,binPaths:{pi:'/personal/pi'}}),/Unreviewed/);
-    const fake=join(root,'changed-pi');fs.mkdirSync(fake);for(const [name]of Object.entries(h.reviewedRpc.files)){fs.mkdirSync(dirname(join(fake,name)),{recursive:true});fs.copyFileSync(join(rootPi,name),join(fake,name));}
-    fs.appendFileSync(join(fake,'dist/bundle/chunks/chunk-OMWWHBTG.js'),'changed');
+    const fake=join(root,'changed-pi');fs.mkdirSync(fake);for(const [name]of Object.entries(reviewed.files)){fs.mkdirSync(dirname(join(fake,name)),{recursive:true});fs.copyFileSync(join(rootPi,name),join(fake,name));}
+    fs.appendFileSync(join(fake,'dist/bundle/cli.js'),'changed');
     assert.throws(()=>h.bindRpcLifetime({...pi,manifest:join(fake,'package.json'),binPaths:{pi:join(fake,'dist/bundle/cli.js')}}),/Unreviewed RPC bytes/);assert.equal(spawns,0);
   `));
 
