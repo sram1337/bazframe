@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { executableEnvironmentValue, resolveControlledExecutable, resolvePackageExecutable, type ExecutableResolutionEffects } from '../../../src/core/executable-resolution.js';
+import { executableEnvironmentValue, resolveControlledExecutable, resolvePackageExecutable, resolvePiExecutable, type ExecutableResolutionEffects } from '../../../src/core/executable-resolution.js';
 
 const npmShim = '@ECHO off\nGOTO start\n:find_dp0\nSET dp0=%~dp0\nEXIT /b\n:start\nSETLOCAL\nCALL :find_dp0\n\nIF EXIST "%dp0%\\node.exe" (\n  SET "_prog=%dp0%\\node.exe"\n) ELSE (\n  SET "_prog=node"\n  SET PATHEXT=%PATHEXT:;.JS;=;%\n)\n\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\npm\\bin\\npm-cli.js" %*';
 function fixture(files: string[], shim = npmShim) {
@@ -13,6 +13,38 @@ function fixture(files: string[], shim = npmShim) {
   return { probes, effects, cwd: 'C:\\caller', platform: 'win32' as const, environment: { Path: ';.;C:relative;\\rooted;C:\\fetched;C:\\tools' }, excludedRoots: ['C:\\fetched'] };
 }
 describe('literal executable resolution', () => {
+  // Fixture is npm cmd-shim output stored with LF; exercise the generated CRLF bytes.
+  it.each(['dist\\cli.js', 'dist\\bundle\\cli.js'])('translates only the exact generated Pi %s shim, preserving canonical target and selected Node', async (layout) => {
+    const current = readFileSync(new URL('../../fixtures/process/pi-bundle.cmd', import.meta.url), 'utf8').replaceAll('\n', '\r\n');
+    const shim = current.replace('dist\\bundle\\cli.js', layout);
+    const directory = 'C:\\tools with spaces', cli = `${directory}\\node_modules\\@earendil-works\\pi-coding-agent\\${layout}`;
+    const options = fixture([`${directory}\\pi.cmd`, 'C:\\tools\\node.exe', cli], shim);
+    options.effects.canonical = async path => path === cli ? 'C:\\canonical target\\cli.js' : path;
+    expect(await resolvePiExecutable(`${directory}\\pi.cmd`, options)).toEqual({ executable: 'C:\\tools\\node.exe', args: ['C:\\canonical target\\cli.js'] });
+    const adjacent = fixture([`${directory}\\pi.cmd`, `${directory}\\node.exe`, cli], shim);
+    expect(await resolvePiExecutable(`${directory}\\pi.cmd`, adjacent)).toEqual({ executable: `${directory}\\node.exe`, args: [cli] });
+  });
+  it.each(['dist\\cli.js', 'dist\\bundle\\cli.js'])('translates the exact dependency-local generated Pi %s shim', async layout => {
+    const current = readFileSync(new URL('../../fixtures/process/pi-bundle.cmd', import.meta.url), 'utf8').replaceAll('\n', '\r\n');
+    const shim = current.replace('node_modules\\@earendil-works', '..\\@earendil-works').replace('dist\\bundle\\cli.js', layout);
+    const cli = `C:\\tools\\node_modules\\bazframe\\node_modules\\@earendil-works\\pi-coding-agent\\${layout}`;
+    const launcher = 'C:\\tools\\node_modules\\bazframe\\node_modules\\.bin\\pi.cmd';
+    const options = fixture([launcher, 'C:\\tools\\node.exe', cli], shim);
+    expect(await resolvePiExecutable(launcher, options)).toEqual({ executable: 'C:\\tools\\node.exe', args: [cli] });
+    for (const wrong of [shim + '\necho injected', shim.replace('..\\@earendil-works', '..\\..\\@earendil-works'), shim.replace(layout, 'dist\\other.js')]) {
+      await expect(resolvePiExecutable(launcher, fixture([launcher, 'C:\\tools\\node.exe', cli], wrong))).rejects.toMatchObject({ code: 'EXECUTABLE_SHIM_UNSUPPORTED' });
+    }
+    await expect(resolvePiExecutable(launcher, fixture([launcher, 'C:\\tools\\node.exe'], shim))).rejects.toMatchObject({ code: 'EXECUTABLE_RESOLUTION_FAILED' });
+  });
+  it.each(['tampered', 'other-target', 'missing-target', 'relative-target', 'relative-node'])('refuses current Pi shim %s without another installation fallback', async variant => {
+    let shim = readFileSync(new URL('../../fixtures/process/pi-bundle.cmd', import.meta.url), 'utf8').replaceAll('\n', '\r\n');
+    const cli = 'C:\\tools\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js';
+    if (variant === 'tampered') shim += '\necho injected';
+    if (variant === 'other-target') shim = shim.replace('bundle\\cli.js', 'other\\cli.js');
+    const options = fixture(['C:\\tools\\pi.cmd', 'C:\\tools\\node.exe', ...(variant === 'missing-target' ? [] : [cli])], shim);
+    options.effects.canonical = async path => (variant === 'relative-target' && path === cli) || (variant === 'relative-node' && path.endsWith('node.exe')) ? 'relative.js' : path;
+    await expect(resolvePiExecutable('pi', options)).rejects.toThrow();
+  });
   it.each([true, false])('defers the exact Node24 npm prefix launcher until authorization, preferred CLI present=%s', async (present) => {
     const shim = readFileSync(new URL('../../fixtures/process/npm-prefix.cmd', import.meta.url), 'utf8');
     const prefixCli = 'C:\\prefix\\node_modules\\npm\\bin\\npm-cli.js';

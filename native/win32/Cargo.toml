@@ -1,6 +1,6 @@
 [package]
 name = "bazframe-win32-native"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"

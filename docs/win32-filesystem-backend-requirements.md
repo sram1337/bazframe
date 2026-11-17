@@ -175,6 +175,8 @@ An OS-released lock or safely guarded sidecar protocol may satisfy these outcome
 
 Atomic state-file writes require exclusive private temporary creation, complete bounded write, flush, strict existing-state validation, serialized atomic publication/replacement, and post-read evidence. Bazframe may derive committed, definite no-effect, or ambiguous status from its journal and observed predicates; the filesystem layer need not return a native tri-state result.
 
+NTFS file tunneling can restore a vacated destination name's creation time when a private regular file is renamed into place. Only the post-rename committed-file comparison permits that creation-time change: volume/file identity, kind, link count, attributes, size, allocation size, last-write time, complete bytes and candidate absence must still agree. Parent, expected-old, pre-effect candidate and retained/no-effect comparisons remain strict; raw observations and shared identity digests are unchanged. See Microsoft's [file-tunneling description](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/fltkernel/nf-fltkernel-fltgettunneledname#remarks).
+
 Directory publication uses fresh private same-volume siblings. Fresh publication must not replace an occupied destination. Existing-profile/resource replacement must:
 
 1. validate expected-old and candidate identities and closures under the operation lock;

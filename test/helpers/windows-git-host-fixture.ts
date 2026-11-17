@@ -33,6 +33,12 @@ export function windowsGitHostFixture() {
           let literalTarget: string | null = null;
           let readlinkError: { code: string | null; message: string } | undefined;
           try { literalTarget = readlinkSync(path); } catch (error) {
+            // Real Git can remove a capability probe between lstat and readlink.
+            // Use the walk's existing missing-entry policy only after confirming absence.
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+              try { lstatSync(path); }
+              catch (inspectionError) { if ((inspectionError as NodeJS.ErrnoException).code === 'ENOENT') throw inspectionError; }
+            }
             readlinkError = { code: error instanceof Error && 'code' in error ? String(error.code) : null, message: error instanceof Error ? error.message : String(error) };
           }
           throw new Error(`Host translator does not invent Windows junctions for Git symlinks: ${JSON.stringify({ path, name, literalTarget, node: node === undefined ? null : { kind: node.kind, id: node.id }, readlinkError })}`);

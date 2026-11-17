@@ -295,7 +295,9 @@ async function invokeWithProfileRuntime<T>(command: Command, dependencies: CliDe
   const injectedReady = gitAccess === undefined
     || (command.name === 'profile-publish' ? dependencies.profilePublicationAdapter !== undefined : dependencies.profileLifecycle?.git !== undefined);
   if (injectedReady) {
-    if (mutation && !dryRun) {
+    // Fresh import owns its inspection, consent and subsequent home bootstrap.
+    if (mutation && !dryRun && !(command.name === 'profile-import'
+      && await dependencies.profileLifecycle?.homeExists?.(home) === false)) {
       try { await recoverProfilePublishingTransactions(home, dependencies.profileRecoveryAdapter, dependencies.application?.lifecycle); }
       catch (error) {
         if (!(error instanceof BazframeError) || error.code !== 'PROFILE_RECOVERY_ADAPTER_REQUIRED') throw error;

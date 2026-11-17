@@ -44,17 +44,29 @@ describe('Windows Git host fixture symlink diagnostics (not native admission)', 
     expect(f.nodes.has(name)).toBe(false);
   });
 
-  it.each(['ENOENT', 'EACCES'] as const)('retains refusal diagnostics when literal readlink reports %s', (code) => {
+  it('ignores an unknown symlink that disappears during diagnostic readlink, like other vanished entries', () => {
+    const f = windowsGitHostFixture(); fixtures.push(f);
+    const name = 'C:\\boundary\\git-probe', path = f.hostPath(name);
+    symlinkSync('./missing-target', path);
+    vi.mocked(readlinkSync).mockImplementation(() => {
+      unlinkSync(path);
+      throw Object.assign(new Error('probe removed'), { code: 'ENOENT' });
+    });
+    expect(() => f.refresh()).not.toThrow();
+    expect(f.nodes.has(name)).toBe(false);
+    expect(() => lstatSync(path)).toThrow(expect.objectContaining({ code: 'ENOENT' }));
+  });
+
+  it('retains refusal diagnostics when literal readlink reports EACCES', () => {
+    const code = 'EACCES';
     const f = windowsGitHostFixture(); fixtures.push(f);
     const name = 'C:\\boundary\\unknown', path = f.hostPath(name);
     symlinkSync('./missing-target', path);
     vi.mocked(readlinkSync).mockImplementation(() => {
-      if (code === 'ENOENT') unlinkSync(path); // The link disappears only after refresh observed it.
       throw Object.assign(new Error('diagnostic readlink failed'), { code });
     });
     expect(() => f.refresh()).toThrow(`Host translator does not invent Windows junctions for Git symlinks: ${JSON.stringify({ path, name, literalTarget: null, node: null, readlinkError: { code, message: 'diagnostic readlink failed' } })}`);
     expect(readlinkSync).toHaveBeenCalledWith(path);
     expect(f.nodes.has(name)).toBe(false);
-    if (code === 'ENOENT') expect(() => lstatSync(path)).toThrow(expect.objectContaining({ code: 'ENOENT' }));
   });
 });

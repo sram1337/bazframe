@@ -4,6 +4,11 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 const PACKED_TUI_DEADLINE_MS = 30_000;
+// Candidate routing occurs before any regression-mode packing or fixture creation.
+if (process.argv.length > 2) {
+  const { runCandidate } = await import('./test-pack-candidate.mjs');
+  await runCandidate(process.argv.slice(2));
+} else {
 const projectRoot = process.cwd();
 const sourceManifest = JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf8'));
 const npmExecPath = process.env.npm_execpath;
@@ -496,6 +501,8 @@ import{spawnSync}from'node:child_process';const args=process.argv.slice(2);let o
   if (tarballPath !== undefined && existsSync(tarballPath)) unlinkSync(tarballPath);
   makeWritable(temporaryRoot);
   rmSync(temporaryRoot, { recursive: true, force: true, maxRetries: 3 });
+}
+
 }
 
 function makeWritable(path) {

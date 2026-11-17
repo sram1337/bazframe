@@ -1,21 +1,33 @@
 import { appendFileSync } from "node:fs";
-import {
-	createAssistantMessageEventStream,
-	type Api,
-	type AssistantMessage,
-	type AssistantMessageEventStream,
-	type Context,
-	type Model,
-	type SimpleStreamOptions,
+import * as piAi from "@earendil-works/pi-ai";
+import type {
+	Api,
+	AssistantMessage,
+	AssistantMessageEventStream,
+	Model,
+	SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
+type ProbeContext = { systemPrompt?: string; messages: readonly { role: string }[] };
+
+function probeSystemPrompt(context: ProbeContext): string {
+	if (typeof context.systemPrompt === "string") return context.systemPrompt;
+	if (!Array.isArray(context.messages) || !("getCurrentSystemPrompt" in piAi)
+		|| typeof piAi.getCurrentSystemPrompt !== "function") {
+		throw new Error("Pi probe requires a legacy system prompt or transcript prompt API.");
+	}
+	const prompt: unknown = piAi.getCurrentSystemPrompt(context.messages);
+	if (typeof prompt !== "string") throw new Error("Pi transcript prompt API did not return a string.");
+	return prompt;
+}
+
 function streamProbe(
 	model: Model<Api>,
-	context: Context,
+	context: ProbeContext,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
-	const stream = createAssistantMessageEventStream();
+	const stream = piAi.createAssistantMessageEventStream();
 	const output: AssistantMessage = {
 		role: "assistant",
 		content: [],
@@ -38,10 +50,11 @@ function streamProbe(
 		try {
 			const capturePath = process.env.BAZFRAME_PI_PROBE_CAPTURE;
 			if (capturePath === undefined) throw new Error("BAZFRAME_PI_PROBE_CAPTURE is required.");
+			const systemPrompt = probeSystemPrompt(context);
 			appendFileSync(capturePath, `${JSON.stringify({
 				cwd: process.cwd(),
-				systemPrompt: context.systemPrompt,
-				skills: context.systemPrompt.match(/<skill>/g)?.length ?? 0,
+				systemPrompt,
+				skills: systemPrompt.match(/<skill>/g)?.length ?? 0,
 			})}\n`);
 
 			stream.push({ type: "start", partial: output });

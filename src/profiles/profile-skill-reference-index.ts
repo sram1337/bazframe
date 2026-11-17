@@ -63,6 +63,10 @@ export async function captureProfileSkillReferenceIndex(
     const profileIds: string[] = [];
     const diagnostics: ProfileSkillReferenceDiagnostic[] = [];
     for (const profileId of await enumerateDirectory(root)) {
+      if (isReservedProfileSiblingName(profileId)) {
+        identityParts.push(`retained:${profileId}`);
+        continue;
+      }
       const directory = join(profilesRoot, profileId);
       if (!isSafeProfileId(profileId)) {
         diagnostics.push({ profileId: '<unknown-profile>', path: directory });
@@ -201,7 +205,7 @@ async function captureWindowsProfileSkillReferenceIndex(
       for (const entry of skills.entries) {
         if (!isSafeSkillId(entry.name)
           || !entry.directory
-          || entry.reparseTag !== 0xa0000003) {
+          || (entry.reparseTag !== null && entry.reparseTag !== 0xa0000003)) {
           diagnostics.push({ profileId, path: pathJoin(skillsPath, entry.name) });
           identityParts.push(`skills-entry:${profileId}:${entry.name}:unsupported`);
         }

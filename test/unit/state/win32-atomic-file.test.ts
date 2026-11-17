@@ -1,7 +1,8 @@
 import { win32 } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { readWindowsSelectionSnapshot } from '../../../src/profiles/win32-profile-selection.js';
-import { publishWindowsSelection, type WindowsSelectionPublicationHooks } from '../../../src/state/win32-atomic-file.js';
+import { publishWindowsPrivateStateFile, publishWindowsSelection, type WindowsSelectionPublicationHooks } from '../../../src/state/win32-atomic-file.js';
+import type { WindowsObjectObservation } from '../../../src/core/win32-native.js';
 import { ensureWindowsPrivateDirectoryPath } from '../../../src/state/win32-private-directory.js';
 import { windowsProvisioningFixture } from '../../helpers/windows-provisioning-fixture.js';
 const HOME = 'C:\\boundary\\home';
@@ -17,7 +18,71 @@ function fixture() {
   return { ...f, io, temps: () => [...f.nodes.keys()].filter((name) => /selection-[a-f0-9]{32}\.tmp$/u.test(name)) };
 }
 
+function metadataFixture() {
+  const f = fixture(), changes = new Map<string, Partial<WindowsObjectObservation>>();
+  const inspect = f.backend.inspectPath, read = f.backend.readStableFile;
+  const adjusted = (object: WindowsObjectObservation) => ({ ...object, ...changes.get(object.fileId) });
+  f.backend.inspectPath = (path) => { const value = inspect(path); return { ...value, object: adjusted(value.object) }; };
+  f.backend.readStableFile = async (...args) => { const value = await read(...args); return { ...value, before: adjusted(value.before), after: adjusted(value.after) }; };
+  return { ...f, change(path: string, fields: Partial<WindowsObjectObservation>) { changes.set(inspect(path).object.fileId, fields); } };
+}
+
 describe('private selection replacement predicate reconciliation', () => {
+  it.each([false, true])('accepts creation-time tunneling only across publication (no-replace: %s)', async (noReplaceOnAbsent) => {
+    const f = metadataFixture(); f.file(PATH, 'alpha\n');
+    const oldTime = '0000000000000002';
+    f.change(PATH, { creationTime: oldTime });
+    const oldId = f.nodes.get(PATH)!.id;
+    if (noReplaceOnAbsent) await f.io.rename(PATH, `${HOME}\\retained-old`);
+    const expected = await readWindowsSelectionSnapshot(f.backend, HOME);
+    const rename = f.backend.renameFileNoReplace;
+    f.backend.renameFileNoReplace = async (...args) => { await rename(...args); f.change(PATH, { creationTime: oldTime }); };
+    const result = await publishWindowsPrivateStateFile({ backend: f.backend, home: HOME, expected, bytes: Buffer.from('bravo\n'),
+      authority: { assertHeld() {} }, component: 'active-profile', temporaryPrefix: 'resource', maxBytes: 64, noReplaceOnAbsent,
+      readSnapshot: () => readWindowsSelectionSnapshot(f.backend, HOME),
+      io: { ...f.io, async rename(source, target) { await f.io.rename(source, target); f.change(target, { creationTime: oldTime }); } },
+      hooks: { afterCandidateRead() {
+        const path = [...f.nodes.keys()].find((name) => /resource-[a-f0-9]{32}\.tmp$/u.test(name))!;
+        expect(f.backend.inspectPath(path).object.creationTime).not.toBe(oldTime);
+      } }
+    });
+    expect(result).toEqual({ effect: 'committed' });
+    expect(f.nodes.get(PATH)!.id).not.toBe(oldId);
+    expect(f.nodes.get(PATH)!.bytes).toEqual(Buffer.from('bravo\n'));
+    expect([...f.nodes.keys()].filter((name) => /resource-[a-f0-9]{32}\.tmp$/u.test(name))).toEqual([]);
+    if (noReplaceOnAbsent) expect(f.nodes.get(`${HOME}\\retained-old`)?.bytes).toEqual(Buffer.from('alpha\n'));
+  });
+
+  it.each(['candidate', 'parent', 'old'] as const)('still rejects %s creation-time drift before replacement', async (kind) => {
+    const f = metadataFixture(); f.file(PATH, 'alpha\n');
+    const expected = await readWindowsSelectionSnapshot(f.backend, HOME);
+    await expect(publishWindowsSelection({ backend: f.backend, home: HOME, expected, bytes: Buffer.from('bravo\n'),
+      authority: { assertHeld() {} }, io: f.io, hooks: { beforeReplacement() {
+        f.change(kind === 'candidate' ? f.temps()[0]! : kind === 'parent' ? HOME : PATH, { creationTime: '0000000000000002' });
+      } }
+    })).rejects.toMatchObject({ code: 'WINDOWS_SELECTION_BEFORE_EFFECT' });
+    expect(f.nodes.get(PATH)?.bytes).toEqual(Buffer.from('alpha\n'));
+    expect(f.temps()).toHaveLength(1);
+  });
+
+  it.each(['volumeIdentity', 'fileId', 'numberOfLinks', 'attributes', 'size', 'allocationSize', 'lastWriteTime', 'bytes', 'kind', 'retained'] as const)(
+    'still rejects post-replacement %s changes with tunneled creation time', async (field) => {
+      const f = metadataFixture(); f.file(PATH, 'alpha\n');
+      const expected = await readWindowsSelectionSnapshot(f.backend, HOME);
+      await expect(publishWindowsSelection({ backend: f.backend, home: HOME, expected, bytes: Buffer.from('bravo\n'),
+        authority: { assertHeld() {} }, io: { ...f.io, async rename(source, target) {
+          await f.io.rename(source, target);
+          const fields: Partial<WindowsObjectObservation> = { creationTime: '0000000000000002' };
+          if (field === 'bytes') f.nodes.get(target)!.bytes = Buffer.from('other\n');
+          else if (field === 'kind') f.nodes.get(target)!.kind = 'directory';
+          else if (field === 'retained') f.nodes.set(source, f.nodes.get(target)!);
+          else if (field === 'attributes') fields.attributes = 0x22;
+          else fields[field] = 'f'.repeat(f.backend.inspectPath(target).object[field].length);
+          f.change(target, fields);
+        } }
+      })).rejects.toMatchObject({ code: 'WINDOWS_SELECTION_AMBIGUOUS' });
+    });
+
   it.each(['committed', 'no-effect'] as const)('accepts candidate access-only final recheck and %s reconciliation, preserving bytes', async (outcome) => {
     const f = fixture(); f.file(PATH, 'alpha\r\n');
     const expected = await readWindowsSelectionSnapshot(f.backend, HOME), old = { ...f.nodes.get(PATH)! };

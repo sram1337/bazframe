@@ -109,7 +109,8 @@ export async function publishWindowsPrivateStateFile(options: WindowsPrivateStat
     try { retained = await readWindowsPhysicalFileSnapshot(backend, candidatePath, options.maxBytes); }
     catch (error) { if (errorCode(error) !== 'WINDOWS_NATIVE_PATH_NOT_FOUND') throw error; }
     if (current.inspection !== undefined && current.bytes !== undefined && retained === undefined
-      && sameObject(candidate.inspection, current.inspection)
+      // NTFS can restore a vacated name's creation time during rename (file tunneling).
+      && sameIdentityAndShape(candidate.inspection, current.inspection)
       && candidate.inspection.object.size === current.inspection.object.size
       && candidate.inspection.object.allocationSize === current.inspection.object.allocationSize
       && candidate.inspection.object.lastWriteTime === current.inspection.object.lastWriteTime
@@ -124,10 +125,13 @@ export async function publishWindowsPrivateStateFile(options: WindowsPrivateStat
   throw new BazframeError('WINDOWS_SELECTION_AMBIGUOUS', `${label} replacement is ambiguous; inspect current ${state} and retain ${candidatePath}. No rollback or cleanup was attempted.`);
 }
 
-/** Rename may change path/timestamps; immutable physical identity must survive; rename preserves existing protection. */
+/** Outside our file rename, creation time must also remain unchanged. */
 function sameObject(left: WindowsPathInspection, right: WindowsPathInspection): boolean {
+  return left.object.creationTime === right.object.creationTime && sameIdentityAndShape(left, right);
+}
+function sameIdentityAndShape(left: WindowsPathInspection, right: WindowsPathInspection): boolean {
   return left.kind === right.kind && left.object.volumeIdentity === right.object.volumeIdentity
-    && left.object.fileId === right.object.fileId && left.object.creationTime === right.object.creationTime
+    && left.object.fileId === right.object.fileId
     && left.object.numberOfLinks === right.object.numberOfLinks && left.object.attributes === right.object.attributes;
 }
 function exactFile(left: { bytes: Buffer; inspection: WindowsPathInspection }, right: { bytes: Buffer; inspection: WindowsPathInspection }): boolean {

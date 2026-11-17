@@ -42,11 +42,15 @@ export async function resolvePiExecutable(command: string, options: ExecutableRe
   if ((options.platform ?? process.platform) !== 'win32' || !/\.(?:cmd|bat)$/iu.test(executable)) return { executable, args: [] };
   const effects = options.effects ?? nativeEffects(true);
   if (win32.basename(executable).toLowerCase() !== 'pi.cmd') throw shimUnsupported();
-  const expected = NPM_SHIMS[0]!.replace('node_modules\\npm\\bin\\npm-cli.js', 'node_modules\\@earendil-works\\pi-coding-agent\\dist\\cli.js');
-  if ((await effects.readShim(executable)).replace(/\r\n/gu, '\n').trimEnd() !== expected) throw shimUnsupported();
-  const directory = win32.dirname(executable), adjacentNode = win32.join(directory, 'node.exe');
+  const shim = (await effects.readShim(executable)).replace(/\r\n/gu, '\n').trimEnd();
+  const directory = win32.dirname(executable);
+  const target = ['node_modules', ...(win32.basename(directory).toLowerCase() === '.bin' ? ['..'] : [])].flatMap(prefix =>
+    ['dist\\cli.js', 'dist\\bundle\\cli.js'].map(entry => `${prefix}\\@earendil-works\\pi-coding-agent\\${entry}`))
+    .find(entry => shim === NPM_SHIMS[0]!.replace('node_modules\\npm\\bin\\npm-cli.js', entry));
+  if (!target) throw shimUnsupported();
+  const adjacentNode = win32.join(directory, 'node.exe');
   const node = await resolveControlledExecutable(await effects.executable(adjacentNode) ? adjacentNode : 'node', options);
-  const cli = win32.join(directory, 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'cli.js');
+  const cli = win32.join(directory, target);
   if (!await effects.executable(cli)) throw invalid('The selected pi.cmd has no supported adjacent Pi CLI entry. Reinstall that Pi installation or select an explicit native wrapper');
   const selectedCli = await effects.canonical(cli);
   if (!win32.isAbsolute(selectedCli)) throw invalid('The selected Pi CLI entry is not absolute');

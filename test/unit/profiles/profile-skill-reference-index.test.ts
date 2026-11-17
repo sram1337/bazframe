@@ -25,6 +25,33 @@ describe('profile skill reference index', () => {
     expect(broken.profileIds).toEqual(['one']);
   });
 
+  it.each(['candidate', 'backup'])('excludes exact retained %s siblings from live references', async (kind) => {
+    if (process.platform === 'win32') return;
+    const directory = await createTempDirectory('profile-skill-index-retained-'); directories.push(directory);
+    await directory.mkdir('home/profiles');
+    const target = await directory.mkdir('provider/demo-skill');
+    const before = await captureProfileSkillReferenceIndex(directory.path('home'), 'demo-skill', target);
+    const retained = `home/profiles/.bazframe-${kind}-${'a'.repeat(32)}`;
+    await directory.write(`${retained}/AGENTS.md`, 'retained\n');
+    await directory.mkdir(`${retained}/skills`);
+    await symlink(target, directory.path(`${retained}/skills/demo-skill`));
+    const after = await captureProfileSkillReferenceIndex(directory.path('home'), 'demo-skill', target);
+    expect(after).toMatchObject({ profileIds: [], diagnostics: [] });
+    expect(sameProfileSkillReferenceIndex(before, after)).toBe(false);
+    expect(sameProfileSkillReferenceIndex(after, await captureProfileSkillReferenceIndex(directory.path('home'), 'demo-skill', target))).toBe(true);
+  });
+
+  it('diagnoses malformed retained-name lookalikes', async () => {
+    if (process.platform === 'win32') return;
+    const directory = await createTempDirectory('profile-skill-index-unsafe-'); directories.push(directory);
+    const names = [`.bazframe-backup-${'a'.repeat(31)}`, `.bazframe-candidate-${'A'.repeat(32)}`, `.other-${'a'.repeat(32)}`];
+    for (const name of names) await directory.mkdir(`home/profiles/${name}`);
+    const target = await directory.mkdir('provider/demo-skill');
+    const result = await captureProfileSkillReferenceIndex(directory.path('home'), 'demo-skill', target);
+    expect(result.profileIds).toEqual([]);
+    expect(result.diagnostics.map(item => item.path).sort()).toEqual(names.map(name => directory.path('home/profiles', name)).sort());
+  });
+
   it('fails closed when profile or skills namespaces are substituted during traversal', async () => {
     if (process.platform === 'win32') return;
     const profileSwap = await createTempDirectory('profile-skill-index-race-'); directories.push(profileSwap);

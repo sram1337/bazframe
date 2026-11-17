@@ -10,6 +10,8 @@ import {
   removeDefaultSkill,
   sameDefaultSkillRegistrationSnapshot
 } from '../../../src/skills/default-skill-catalog.js';
+import { addProfile } from '../../../src/profiles/profile-management.js';
+import { removeManagedProfile } from '../../../src/profile-publishing/profile-managed-lifecycle.js';
 import { snapshotFilesystem } from '../../helpers/filesystem-snapshot.js';
 import { createTempDirectory, type TempDirectory } from '../../helpers/temp-directory.js';
 
@@ -114,6 +116,27 @@ describe('default skill catalog', () => {
     await expect(removeDefaultSkill(value.home, 'demo-skill')).resolves.toMatchObject({ action: 'removed', target: value.target });
     expect((await lstat(value.target)).isDirectory()).toBe(true);
     await expect(removeDefaultSkill(value.home, 'demo-skill')).resolves.toMatchObject({ action: 'absent' });
+  });
+
+  it('removes a catalog entry after profile retirement and live membership detachment', async () => {
+    if (process.platform === 'win32') return;
+    const value = await fixture();
+    await addDefaultSkill(value.home, value.target);
+    for (const profile of ['retired', 'live']) {
+      await addProfile(value.home, profile);
+      await symlink(value.target, value.directory.path(`home/profiles/${profile}/skills/demo-skill`), 'dir');
+    }
+    const removed = await removeManagedProfile(value.home, 'retired');
+    expect(removed.action).toBe('removed');
+    expect(removed.retainedPath).toMatch(/\.bazframe-backup-[a-f0-9]{32}$/u);
+    const retainedBefore = await snapshotFilesystem(removed.retainedPath!);
+    const sourceBefore = await snapshotFilesystem(value.target);
+    await expect(removeDefaultSkill(value.home, 'demo-skill')).rejects.toMatchObject({ code: 'DEFAULT_SKILL_REFERENCED' });
+    await rm(value.directory.path('home/profiles/live/skills/demo-skill'));
+    await expect(removeDefaultSkill(value.home, 'demo-skill')).resolves.toMatchObject({ action: 'removed', target: value.target });
+    await expect(lstat(value.directory.path('home/skills/demo-skill'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await snapshotFilesystem(removed.retainedPath!)).toEqual(retainedBefore);
+    expect(await snapshotFilesystem(value.target)).toEqual(sourceBefore);
   });
 
   it('rejects symlinked and substituted catalog namespaces without touching foreign entries', async () => {

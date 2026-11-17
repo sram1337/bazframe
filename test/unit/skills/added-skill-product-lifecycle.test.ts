@@ -75,6 +75,48 @@ describe('internal Windows added-Skill product lifecycle', () => {
     expect(nested).toBeGreaterThan(global);
   });
 
+  it('removes a detached added Skill while preserving unrelated physical profile Skills', async () => {
+    const fixture = await setup();
+    const options = { platformServices: fixture.services };
+    const membership = { bazframeHome: fixture.home, ...options };
+    await addDefaultSkill(fixture.home, fixture.target, options);
+    await addProfileSkill(membership, 'focused', 'demo-skill');
+    const physical = join(fixture.home, 'profiles', 'focused', 'skills', 'physical-skill');
+    const bytes = '---\nname: physical-skill\ndescription: Local instructions.\n---\n';
+    await mkdir(physical);
+    await writeFile(join(physical, 'SKILL.md'), bytes);
+    await expect(captureProfileSkillReferenceIndex(fixture.home, 'demo-skill', fixture.target, options))
+      .resolves.toMatchObject({ profileIds: ['focused'], diagnostics: [] });
+    await expect(removeDefaultSkill(fixture.home, 'demo-skill', options))
+      .rejects.toMatchObject({ code: 'DEFAULT_SKILL_REFERENCED' });
+    await removeProfileSkill(membership, 'focused', 'demo-skill');
+    await expect(captureProfileSkillReferenceIndex(fixture.home, 'demo-skill', fixture.target, options))
+      .resolves.toMatchObject({ profileIds: [], diagnostics: [] });
+    await expect(removeDefaultSkill(fixture.home, 'demo-skill', options))
+      .resolves.toMatchObject({ action: 'removed' });
+    expect(await readFile(join(physical, 'SKILL.md'), 'utf8')).toBe(bytes);
+    expect(await readFile(join(fixture.target, 'SKILL.md'), 'utf8')).toBe(fixture.skillBytes);
+    expect(fixture.links.size).toBe(0);
+  });
+
+  it('still refuses unrelated unknown directory reparses in the reference index', async () => {
+    const fixture = await setup();
+    const options = { platformServices: fixture.services };
+    await addDefaultSkill(fixture.home, fixture.target, options);
+    const skills = join(fixture.home, 'profiles', 'focused', 'skills');
+    await mkdir(join(skills, 'unknown-skill'));
+    const enumerate = fixture.services.enumeratePrivateDirectory;
+    fixture.services.enumeratePrivateDirectory = async (...args) => {
+      const result = await enumerate(...args);
+      if (args[0] === skills) result.entries = result.entries.map(entry => ({ ...entry, reparseTag: 0x80000027 }));
+      return result;
+    };
+    await expect(removeDefaultSkill(fixture.home, 'demo-skill', options))
+      .rejects.toMatchObject({ code: 'DEFAULT_SKILL_REFERENCE_INDEX_INVALID' });
+    expect(fixture.links.size).toBe(1);
+    expect(await readFile(join(fixture.target, 'SKILL.md'), 'utf8')).toBe(fixture.skillBytes);
+  });
+
   it('resolves active membership inside state lock and keeps explicit targeting selection-independent', async () => {
     const fixture = await setup();
     const options = { platformServices: fixture.services };

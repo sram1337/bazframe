@@ -34,6 +34,25 @@ describe('profile library/package reference codec', () => {
     expect(result.diagnostics.map((item) => item.profileId)).toEqual(['<unknown-profile>', 'valid']);
   });
 
+  it('ignores exact retained siblings while preserving live typed references, namespace drift and unsafe-name refusal', async () => {
+    const directory = await createTempDirectory('bazframe-reference-retained-'); directories.push(directory);
+    const home = directory.path('home');
+    await directory.write('home/profiles/work/libraries/toolkit.json', encodeProfileCollectionReference(library));
+    await directory.write('home/profiles/work/packages/toolkit.json', encodeProfileCollectionReference(pkg));
+    const before = await captureProfileCollectionReferenceBulkIndex(home);
+    for (const kind of ['backup', 'candidate']) {
+      await directory.write(`home/profiles/.bazframe-${kind}-${'a'.repeat(32)}/libraries/toolkit.json`, 'malformed retained bytes');
+    }
+    const retained = await captureProfileCollectionReferenceBulkIndex(home);
+    expect(retained.diagnostics).toEqual([]);
+    expect(retained.profileIdsByCollection.get('library:toolkit')).toEqual(['work']);
+    expect(retained.profileIdsByCollection.get('package:toolkit')).toEqual(['work']);
+    expect(retained.identity).not.toBe(before.identity);
+    expect((await captureProfileCollectionReferenceBulkIndex(home)).identity).toBe(retained.identity);
+    await directory.mkdir('home/profiles/.bazframe-backup-not-a-token');
+    expect((await captureProfileCollectionReferenceBulkIndex(home)).diagnostics.map(item => item.profileId)).toEqual(['<unknown-profile>']);
+  });
+
   it('captures same-ID library/package counts independently in one stable bulk snapshot and ignores old state', async () => {
     const directory = await createTempDirectory('bazframe-reference-bulk-'); directories.push(directory);
     await directory.write('home/profiles/first/libraries/toolkit.json', encodeProfileCollectionReference(library));

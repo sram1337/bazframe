@@ -17,7 +17,13 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
+// Exact-candidate mode bypasses every legacy pack, PI_BIN and cleanup path.
+if (process.argv.length > 2 && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const { runPiCandidate } = await import('./test-real-pi-candidate.mjs');
+  await runPiCandidate(process.argv.slice(2));
+} else {
 const projectRoot = process.cwd();
 const npmExecPath = process.env.npm_execpath;
 const piExecutable = process.env.PI_BIN ?? 'pi';
@@ -844,4 +850,6 @@ function assertMarkerOrder(value, markers, label) {
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
+}
+
 }

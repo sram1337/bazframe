@@ -226,6 +226,51 @@ describe('shared Windows application composition (host receipts, not native acce
     expect(f.snapshot()).toBe(before);
     expect(f.nodes.has(HOME)).toBe(false);
   });
+  it('imports a ZIP through the CLI into an absent Windows home before recovering existing-home imports', async () => {
+    const f = windowsApplicationFixture();
+    expect((await cli(f, ['profile', 'add', 'work'])).status).toBe(0);
+    expect((await cli(f, ['profile', 'export', '--profile', 'work', '--output', 'C:\\boundary\\fresh.zip', '--json'])).status).toBe(0);
+    const home = 'C:\\boundary\\fresh-home';
+    f.environment.BAZFRAME_HOME = home;
+    const lifecycle = f.application.lifecycle!;
+    vi.spyOn(f.application, 'lifecycle', 'get').mockReturnValue(lifecycle);
+    const scan = vi.spyOn(lifecycle, 'scanJournals');
+    expect(f.nodes.has(home)).toBe(false);
+    const dry = await cli(f, ['profile', 'import', 'C:\\boundary\\fresh.zip', '--dry-run', '--json']);
+    expect(dry.status, dry.stdout).toBe(0);
+    expect(f.nodes.has(home)).toBe(false);
+    expect(scan).not.toHaveBeenCalled();
+    const imported = await cli(f, ['profile', 'import', 'C:\\boundary\\fresh.zip', '--json']);
+    expect(imported.status, imported.stdout).toBe(0);
+    expect(JSON.parse(imported.stdout)).toMatchObject({ outcome: 'success', result: { profile: { name: 'work', active: false } } });
+    expect(f.nodes.has(home + '\\profiles\\work\\AGENTS.md')).toBe(true);
+    expect(f.nodes.has(home + '\\active-profile')).toBe(false);
+    expect(scan).not.toHaveBeenCalled();
+    const again = await cli(f, ['profile', 'import', 'C:\\boundary\\fresh.zip', '--yes', '--json']);
+    expect(again.status, again.stdout).toBe(0);
+    expect(scan).toHaveBeenCalledWith(home);
+    expect(f.nodes.has(home + '\\profiles\\work-1\\AGENTS.md')).toBe(true);
+  });
+
+  it('does not mistake an unavailable Windows home inspection for an absent import destination', async () => {
+    const f = windowsApplicationFixture();
+    const home = 'C:\\boundary\\unavailable-home';
+    f.environment.BAZFRAME_HOME = home;
+    const dependencies = f.application.profileLifecycle!;
+    vi.spyOn(f.application, 'profileLifecycle', 'get').mockReturnValue(dependencies);
+    const inspect = vi.spyOn(dependencies, 'homeExists').mockRejectedValue(new Error('home inspection denied'));
+    const lifecycle = f.application.lifecycle!;
+    vi.spyOn(f.application, 'lifecycle', 'get').mockReturnValue(lifecycle);
+    const scan = vi.spyOn(lifecycle, 'scanJournals');
+    const before = f.snapshot();
+    const result = await cli(f, ['profile', 'import', 'C:\\boundary\\missing.zip', '--json']);
+    expect(result.status).toBe(1);
+    expect(inspect).toHaveBeenCalledWith(home);
+    expect(scan).not.toHaveBeenCalled();
+    expect(f.snapshot()).toBe(before);
+    expect(f.nodes.has(home)).toBe(false);
+  });
+
   it('connects Windows ZIP export/dry-run/import and immutable imported runtime/status/TUI resources', async () => {
     const f = windowsApplicationFixture();
     expect((await cli(f, ['profile', 'add', 'work'])).status).toBe(0);
