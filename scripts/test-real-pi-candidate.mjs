@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { accessSync, constants, statSync, appendFileSync, existsSync, lstatSync, mkdirSync as rawMkdirSync, readFileSync as rawReadFileSync, realpathSync, renameSync as rawRenameSync, writeFileSync as rawWriteFileSync } from 'node:fs';
-import { dirname, isAbsolute, join, delimiter } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, sep, delimiter } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
 import { inspect } from 'node:util';
@@ -600,9 +600,55 @@ export function assertSkillLocations(prompt, expected) {
   assert.deepEqual(actual.sort((a, b) => a.name.localeCompare(b.name)), expected.map(row => Object.fromEntries(Object.entries(row).map(([key, value]) => [key, encode(value)]))).sort((a, b) => a.name.localeCompare(b.name)), 'Exact Skill file provenance/description set');
 }
 
+// Preserve the raw composed bytes, including their final newline. The CLI adds
+// one framing newline on each side; do not trim or normalize the body.
+export function deprecatedDryRunBody(stdout) {
+  const start = Buffer.from('--- effective instructions ---\n'), end = Buffer.from('\n--- end effective instructions ---\n');
+  const first = stdout.indexOf(start), last = stdout.indexOf(end, first + start.length);
+  assert(first >= 0 && last > first + start.length, 'Missing dry-run effective instruction body');
+  assert.equal(stdout.indexOf(start, first + start.length), -1, 'Ambiguous dry-run instruction body');
+  assert.equal(stdout.indexOf(end, last + end.length), -1, 'Ambiguous dry-run instruction body');
+  return Buffer.from(stdout.subarray(first + start.length, last));
+}
+
+export function assertDeprecatedTemporaryDisposition(stderr, { temporaryRoot, repository, expectedBody }, platform = process.platform) {
+  const paths = [...stderr.toString().matchAll(/^Effective instructions file: (.+)\r?$/gmu)];
+  assert.equal(paths.length, 1, 'Missing or ambiguous product temporary instruction path');
+  const path = paths[0][1].trim();
+  const scope = 'Product-owned temporary-file disposition only; harness roots retained; no descendant settlement inferred.';
+  if (platform !== 'win32') {
+    assert(!existsSync(path), 'Deprecated launcher should remove its own temporary instruction file');
+    return { path, disposition: 'removed', fileAbsent: true, scope };
+  }
+  // run-cli's NO_COLOR prose failure prefix is lowercase; reviewed Pi 0.84.4
+  // and 1.5.2 invalid-enum diagnostics use uppercase "Error: ". Exit 1 alone
+  // cannot distinguish the expected parser failure from failed disposal proof.
+  assert(!/^error: /mu.test(stderr.toString()), 'Bazframe reported a launcher/disposal error');
+  assert(Buffer.isBuffer(expectedBody), 'Prior dry-run effective instruction bytes required');
+  const root = realpathSync(temporaryRoot), repo = realpathSync(repository), directory = dirname(path);
+  const within = (parent, child) => { const rel = relative(parent, child); return rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel); };
+  assert(isAbsolute(path) && dirname(directory) === root && basename(path) === '.baz.agents.md' && /^bazframe-profile-dry-run-[a-f0-9]{32}$/u.test(basename(directory)), 'Unexpected product temporary instruction path');
+  assert(!within(repo, root), 'Temporary instructions must be outside repository');
+  const observe = () => [root, directory, path].map((entry, index) => {
+    const stat = lstatSync(entry, { bigint: true });
+    assert(!stat.isSymbolicLink() && (index === 2 ? stat.isFile() && stat.nlink === 1n : stat.isDirectory()), 'Temporary instructions require physical directories and a single-link regular file');
+    assert.equal(realpathSync(entry), entry, 'Temporary instruction path alias');
+    return { path: entry, dev: String(stat.dev), ino: String(stat.ino), mode: String(stat.mode), nlink: String(stat.nlink), size: String(stat.size), mtimeNs: String(stat.mtimeNs), ctimeNs: String(stat.ctimeNs) };
+  });
+  const before = observe(), bytes = readFileSync(path), after = observe();
+  assert.deepEqual(after, before, 'Temporary instruction identity/metadata changed during read');
+  assert.deepEqual(bytes, expectedBody, 'Retained temporary instruction bytes differ from dry-run');
+  // These are post-exit observations, not native creation/ACL receipts. Privacy
+  // and ownership remain established by the admitted product's private creation,
+  // publication and guarded disposal proofs (including on natural child exit 1).
+  return { path, disposition: 'retained', fileAbsent: false, bytes: bytes.length, sha256: sha256(bytes), observedIdentity: after,
+    ownershipBasis: 'Admitted Windows product private creation/publication and guarded disposal; lstat is not independent ACL or creation proof.', scope };
+}
+
 export function piJourneySteps(c) {
   const steps = [], agent = c.env.PI_CODING_AGENT_DIR;
-  let repositoryBaseline, gitStatusBaseline, preservationSequence = 0;
+  let repositoryBaseline, gitStatusBaseline, deprecatedBody, preservationSequence = 0;
+  const temporaryDisposition = result => assertDeprecatedTemporaryDisposition(result.stderr, { temporaryRoot: c.env.TMPDIR, repository: c.repository, expectedBody: deprecatedBody });
   const gitStatus = async () => {
     c.revalidate();
     const result = await c.run(`git-status-${++preservationSequence}`, { file: c.git, args: ['--no-optional-locks', 'status', '--porcelain=v1', '-z', '--untracked-files=all'] }, c.repository, c.env);
@@ -819,7 +865,8 @@ export function piJourneySteps(c) {
   });
   add('deprecated-dry-run-and-forwarding-refusals', async () => {
     await cli(['profile', 'use', c.imported]);
-    await cli(['pi', '--dry-run'], { cwd: c.repository, text: 'Would launch executable: pi' });
+    const dryRun = await cli(['pi', '--dry-run'], { cwd: c.repository, text: 'Would launch executable: pi' });
+    deprecatedBody = deprecatedDryRunBody(dryRun.stdout);
     await cli(['pi', '--', '--session', 'forbidden'], { cwd: c.repository, code: 2, text: 'not supported', unchanged: true });
     await cli(['pi', '--json'], { cwd: c.repository, code: 2, text: 'CLI_JSON_UNSUPPORTED', unchanged: true });
   });
@@ -829,10 +876,7 @@ export function piJourneySteps(c) {
     const before = captures().length;
     const result = await cli(['pi', '--', ...probeArgs, '--print', 'deprecated offline capture'], { env, cwd: c.repository, text: 'probe-ok' });
     assert.equal(captures().length, before + 1); assert(captures().at(-1).systemPrompt.includes('ALPHA_BODY'));
-    const temporaryPath = /Effective instructions file: (.+)\r?\n/u.exec(result.stderr.toString())?.[1];
-    assert(temporaryPath, 'Missing product temporary instruction path');
-    assert(!existsSync(temporaryPath.trim()), 'Deprecated launcher should remove its own temporary instruction file');
-    return { evidence: result.evidence, cleanup: { path: temporaryPath.trim(), fileAbsent: true, scope: 'Product-owned temporary-file cleanup only; harness roots retained; no descendant settlement inferred.' } };
+    return { evidence: result.evidence, cleanup: temporaryDisposition(result) };
   });
   add('deprecated-natural-nonzero-propagation', async () => {
     if (c.launch.kind !== 'genuine-pi-shim') return { status: 'not-run', reason: 'Requires an admitted deprecated-launch-capable actual Pi shim; no substitute child supplied.' };
@@ -841,9 +885,7 @@ export function piJourneySteps(c) {
     // invalid enum. This exercises natural child exit 1, not terminal behavior.
     const result = await cli(['pi', '--', ...probeArgs, '--print', '--tui-mode', 'candidate-invalid'], { env, cwd: c.repository, code: 1, text: 'Invalid TUI mode' });
     assert.equal(captures().length, before, 'Parser failure must not invoke provider');
-    const temporaryPath = /Effective instructions file: (.+)\r?\n/u.exec(result.stderr.toString())?.[1];
-    assert(temporaryPath); assert(!existsSync(temporaryPath.trim()));
-    return { evidence: result.evidence, childOutcome: 'Actual installed Pi parser diagnostic and propagated exit 1; product-owned temporary file absent.' };
+    return { evidence: result.evidence, childOutcome: 'Actual installed Pi parser diagnostic and propagated exit 1.', cleanup: temporaryDisposition(result) };
   });
   add('deprecated-signal-propagation', () => ({ status: 'not-run', reason: process.platform === 'win32' ? 'POSIX signal propagation is not a Windows promise; console interruption requires separately admitted native topology.' : 'Requires separately authorized real interruption topology; no signal sent or synthetic child substituted.' }));
   add('malformed-policy-preserved', async () => {

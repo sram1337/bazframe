@@ -41,7 +41,7 @@ describe('retained exact-candidate Pi seams (no installed Pi execution)', () => 
       const refusal=args.includes('--session')||args.includes('--json');
       const code=refusal?2:0;
       if(mode==='state'&&args.includes('--session'))fs.writeFileSync(join(home,'state'),'changed');
-      const text=args.includes('--dry-run')?'Would launch executable: pi':args.includes('--session')?(mode==='diagnostic'?'wrong':'not supported'):args.includes('--json')?'CLI_JSON_UNSUPPORTED':'';
+      const text=args.includes('--dry-run')?'--- effective instructions ---\nALPHA_BODY\n\n--- end effective instructions ---\nWould launch executable: pi':args.includes('--session')?(mode==='diagnostic'?'wrong':'not supported'):args.includes('--json')?'CLI_JSON_UNSUPPORTED':'';
       return{evidence:join(root,label),stdout:Buffer.from(text),stderr:Buffer.alloc(0),code,signal:null,ioErrors:[],events:[{event:'exit',code,signal:null},{event:'close',code,signal:null}]};
     }};
     const step=h.piJourneySteps(c).find(s=>s.name==='deprecated-dry-run-and-forwarding-refusals');
@@ -52,16 +52,60 @@ describe('retained exact-candidate Pi seams (no installed Pi execution)', () => 
 
   it.each(['win32', 'linux'])('requires actual deprecated positive and nonzero outcomes on %s, not a Windows not-run waiver', platform => probe(String.raw`
     Object.defineProperty(process,'platform',{value:${JSON.stringify(platform)}});
-    const home=join(root,'home'),capture=join(root,'capture.jsonl');fs.mkdirSync(home);let calls=0;
-    const c={root,home,repository:root,cwd:root,executable:process.platform==='win32'?'C:\\bound\\bzf.cmd':'/bound/bzf',launch:{kind:'genuine-pi-shim',file:join(root,'pi.cmd')},env:{BAZFRAME_HOME:home,PI_CODING_AGENT_DIR:join(root,'pi'),BAZFRAME_PI_PROBE_CAPTURE:capture,PATH:'/bound',ComSpec:'C:\\Windows\\System32\\cmd.exe'},revalidate:()=>{},run:async(label,invocation)=>{
-      calls++;const nonzero=invocation.args.join(' ').includes('candidate-invalid'),code=nonzero?1:0;
-      if(!nonzero)fs.appendFileSync(capture,JSON.stringify({systemPrompt:'ALPHA_BODY'})+String.fromCharCode(10));
-      return{evidence:join(root,label),stdout:Buffer.from(nonzero?'Invalid TUI mode':'probe-ok'),stderr:Buffer.from('Effective instructions file: '+join(root,'product-owned-removed')+String.fromCharCode(10)),code,signal:null,ioErrors:[],events:[{event:'exit',code,signal:null},{event:'close',code,signal:null}]};
+    const home=join(root,'home'),capture=join(root,'capture.jsonl'),tmp=join(root,'tmp'),repository=join(root,'repository');
+    for(const path of [home,tmp,repository])fs.mkdirSync(path);let calls=0,cleanupError=false;
+    const body=Buffer.from('ALPHA_BODY\nexact source path and trailing newline\n');
+    const temporary=join(tmp,'bazframe-profile-dry-run-'+'a'.repeat(32),'.baz.agents.md');
+    if(process.platform==='win32'){fs.mkdirSync(dirname(temporary));fs.writeFileSync(temporary,body);}
+    const c={root,home,repository,cwd:root,imported:'alpha-1',executable:process.platform==='win32'?'C:\\bound\\bzf.cmd':'/bound/bzf',launch:{kind:'genuine-pi-shim',file:join(root,'pi.cmd')},env:{BAZFRAME_HOME:home,PI_CODING_AGENT_DIR:join(root,'pi'),BAZFRAME_PI_PROBE_CAPTURE:capture,TMPDIR:tmp,PATH:'/bound',ComSpec:'C:\\Windows\\System32\\cmd.exe'},revalidate:()=>{},run:async(label,invocation)=>{
+      calls++;const args=invocation.args.join(' '),nonzero=args.includes('candidate-invalid'),refusal=args.includes('--session')||args.includes('--json'),launch=args.includes('--print'),code=refusal?2:nonzero?1:0;
+      if(launch&&!nonzero)fs.appendFileSync(capture,JSON.stringify({systemPrompt:'ALPHA_BODY'})+String.fromCharCode(10));
+      const stdout=args.includes('--dry-run')?Buffer.concat([Buffer.from('--- effective instructions ---\n'),body,Buffer.from('\n--- end effective instructions ---\nWould launch executable: pi')]):Buffer.from(refusal?(args.includes('--json')?'CLI_JSON_UNSUPPORTED':'not supported'):nonzero?'Invalid TUI mode':'probe-ok');
+      return{evidence:join(root,label),stdout,stderr:Buffer.from('Effective instructions file: '+temporary+'\n'+(nonzero?'Error: Invalid TUI mode "candidate-invalid". Valid values: regular, fullscreen\n':'')+(cleanupError?'error: Windows private Git effects refused: retained directory identity changed.\n':'')),code,signal:null,ioErrors:[],events:[{event:'exit',code,signal:null},{event:'close',code,signal:null}]};
     }};
     const steps=h.piJourneySteps(c);
-    for(const name of ['deprecated-real-launch-and-natural-exit','deprecated-natural-nonzero-propagation']){const result=await steps.find(s=>s.name===name).run();assert.notEqual(result.status,'not-run');assert(result.evidence);}
-    assert.equal(calls,2);assert(!steps.some(s=>s.name==='deprecated-current-Windows-shim-refusal'));
+    await steps.find(s=>s.name==='deprecated-dry-run-and-forwarding-refusals').run();
+    for(const name of ['deprecated-real-launch-and-natural-exit','deprecated-natural-nonzero-propagation']){
+      const result=await steps.find(s=>s.name===name).run();assert.notEqual(result.status,'not-run');assert(result.evidence);
+      assert.equal(result.cleanup.disposition,process.platform==='win32'?'retained':'removed');
+      if(process.platform==='win32'){assert.equal(result.cleanup.bytes,body.length);assert.equal(result.cleanup.observedIdentity.length,3);assert.deepEqual(fs.readFileSync(temporary),body);}
+    }
+    assert.equal(calls,6);assert(!steps.some(s=>s.name==='deprecated-current-Windows-shim-refusal'));
+    if(process.platform==='win32'){cleanupError=true;await assert.rejects(steps.find(s=>s.name==='deprecated-natural-nonzero-propagation').run(),/launcher\/disposal error/);}
     assert.equal(spawns,0);
+  `));
+
+  it.each(['bytes', 'newline', 'missing', 'outside-tmp', 'inside-repository', 'wrong-leaf', 'wrong-workspace', 'directory', 'hardlink', 'symlink', 'parent-symlink', 'changed-identity', 'no-dry-run'])('refuses unsafe or unproved Windows retained instructions: %s', fault => probe(String.raw`
+    const fault=${JSON.stringify(fault)},tmp=join(root,'tmp'),repository=join(root,'repository');
+    fs.mkdirSync(tmp);fs.mkdirSync(repository);
+    let directory=join(tmp,'bazframe-profile-dry-run-'+'b'.repeat(32));
+    if(fault==='outside-tmp')directory=join(root,'bazframe-profile-dry-run-'+'b'.repeat(32));
+    if(fault==='wrong-workspace')directory=join(tmp,'other-owner');
+    fs.mkdirSync(directory);
+    const path=join(directory,fault==='wrong-leaf'?'other.md':'.baz.agents.md'),body=Buffer.from('ALPHA_BODY\n/source/AGENTS.md\n');
+    if(fault==='directory')fs.mkdirSync(path);
+    else if(fault!=='missing')fs.writeFileSync(path,fault==='bytes'?Buffer.from('ALPHA_BODY\n/forged/AGENTS.md\n'):fault==='newline'?body.subarray(0,body.length-1):body);
+    if(fault==='hardlink')fs.linkSync(path,join(root,'extra-link'));
+    if(fault==='symlink'){fs.renameSync(path,join(root,'target'));fs.symlinkSync(join(root,'target'),path);}
+    if(fault==='parent-symlink'){fs.renameSync(directory,join(root,'target-dir'));fs.symlinkSync(join(root,'target-dir'),directory,'junction');}
+    if(fault==='changed-identity'){
+      const original=fs.lstatSync;let reads=0;
+      fs.lstatSync=(entry,options)=>{const stat=original(entry,options);if(entry===path&&++reads===2)stat.ino+=1n;return stat};syncBuiltinESMExports();
+    }
+    assert.throws(()=>h.assertDeprecatedTemporaryDisposition(Buffer.from('Effective instructions file: '+path+'\n'),{
+      temporaryRoot:tmp,repository:fault==='inside-repository'?root:repository,expectedBody:fault==='no-dry-run'?undefined:body
+    },'win32'),/instruction|ENOENT/i);
+    assert.equal(spawns,0);
+  `));
+
+  it('keeps POSIX removal mandatory and dry-run framing byte-exact', () => probe(String.raw`
+    const path=join(root,'retained'),stderr=Buffer.from('Effective instructions file: '+path+'\r\n');
+    fs.writeFileSync(path,'retained');assert.throws(()=>h.assertDeprecatedTemporaryDisposition(stderr,{},'linux'),/should remove/);
+    fs.renameSync(path,join(root,'kept-elsewhere'));assert.equal(h.assertDeprecatedTemporaryDisposition(stderr,{},'linux').fileAbsent,true);
+    const body=Buffer.from('ALPHA_BODY\n/source/AGENTS.md\r\n\n'),opening=Buffer.from('--- effective instructions ---\n'),closing=Buffer.from('\n--- end effective instructions ---\n');
+    assert.deepEqual(h.deprecatedDryRunBody(Buffer.concat([opening,body,closing])),body);
+    for(const invalid of [body,Buffer.concat([opening,body]),Buffer.concat([opening,body,closing,opening,body,closing])])assert.throws(()=>h.deprecatedDryRunBody(invalid),/body/);
+    assert.throws(()=>h.assertDeprecatedTemporaryDisposition(Buffer.alloc(0),{},'linux'),/path/);
   `));
 
   it('decodes LF-only JSONL across UTF8 splits and preserves Unicode separators', () => probe(`
