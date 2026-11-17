@@ -512,11 +512,6 @@ async function runPiCandidateOwned(argv, owners) {
   const probe = readFileSync(fileURLToPath(new URL('./fixtures/pi-probe-provider.ts', import.meta.url)));
   report.probeSha256 = sha256(probe);
   report.notRun = [
-    ['RPC-no-context/non-Git-reload', 'This fixed RPC journey uses plain Git-worktree context only'],
-    ['active-profile-instruction-edit-reload', 'Profile selection and Skill edits exercised; active instruction-body edit not implemented'],
-    ['Skill-expansion/support-resource-use', 'Descriptions/file provenance and preserved snapshot bytes are checked, not model/tool consumption'],
-    ['project-native-resource-trust', 'No project-local extension/Skill trust interaction implemented'],
-    ['full-info-collection-detail-format', 'Exact context suppliers, lexical Skills, aliases and corrective actions checked; full flat/reference/digest prose golden not implemented'],
     ['other-Pi-versions', `This run selects ${install.environment.pi.version}; other versions require separate matrix cells`]
   ].map(([cell, reason]) => ({ cell, status: 'not-run', reason }));
   for (const name of ['test-real-pi.mjs', 'test-real-pi-candidate.mjs']) put(join(options.root, 'harness', name), readFileSync(fileURLToPath(new URL(name, import.meta.url))));
@@ -587,11 +582,53 @@ export function assertCollectionConflictInfo(message) {
   assert.deepEqual(lines.slice(correction + 1, skills), ['  - Inspect failures with `bazframe profile library list` and `bazframe profile package list`.']);
 }
 
-export function assertInfo(message, { profileId, profilePath, globalPath, repositoryPath, skills, aliases = [] }) {
+export function assertInfo(message, { profileId, profilePath, globalPath, repositoryPath, skills, aliases = [], replacement = false }) {
   const lines = message.split('\n'), flat = lines.indexOf(lines.find(line => line.startsWith('Flat direct skills:')));
-  assert.deepEqual(lines.slice(0, flat), [`Profile: ${profileId ?? '(none)'}`, 'Context:', `  (pi) ${globalPath}`, `  (pi) ${repositoryPath}`, ...(profileId ? [`  (bazframe) ${profilePath}`] : [])], 'Exact ordered info context suppliers');
+  assert.deepEqual(lines.slice(0, flat), [`Profile: ${profileId ?? '(none)'}`, 'Context:', `  (${replacement ? 'bazframe' : 'pi'}) ${globalPath}`, ...(!replacement && repositoryPath ? [`  (pi) ${repositoryPath}`] : []), ...(profileId ? [`  (bazframe) ${profilePath}`] : [])], 'Exact ordered info context suppliers');
   assert.deepEqual(lines.filter(line => line.startsWith('Skills:')), [`Skills: ${skills.length ? [...new Set(skills)].sort().join(', ') : '(none)'}`], 'Exact lexical effective Skill report');
   assert.deepEqual(lines.filter(line => line.startsWith('Aliases:')), aliases.length ? [`Aliases: ${[...aliases].sort().join(', ')}`] : [], 'Exact live alias report');
+}
+
+const ordinarySkills = ['direct-skill', 'library-companion', 'library-skill', 'package-companion', 'package-skill'];
+
+export function assertOrdinaryInfoGolden(message, { profilePath, globalPath, repositoryPath, home, source, platform = process.platform }) {
+  const direct = platform === 'win32' ? join(source, 'direct-skill') : join(home, 'profiles', 'alpha', 'skills', 'direct-skill');
+  const library = jsonFile(join(home, 'libraries', 'demo-library.json'));
+  const pkg = jsonFile(join(home, 'packages', 'demo-package.json'));
+  assert.equal(message, [
+    'Profile: alpha', 'Context:', `  (pi) ${globalPath}`, `  (pi) ${repositoryPath}`, `  (bazframe) ${profilePath}`,
+    'Flat direct skills: 1', `  - direct-skill (${join(direct, 'SKILL.md')})`,
+    'Profile library/package references: 2',
+    `  - library demo-library -> ${join(source, 'demo-library')} (ready; refresh:available; sha256:${library.digest}; Skills root:.)`,
+    `  - package demo-package -> ${join(source, 'demo-package')} (ready; refresh:available; sha256:${pkg.digest}; Skills root:skills)`,
+    'Derived effective skills: 4',
+    '  - library-companion (library demo-library:library-companion/SKILL.md)',
+    '  - library-skill (library demo-library:library-skill/SKILL.md)',
+    '  - package-companion (package demo-package:package-companion/SKILL.md)',
+    '  - package-skill (package demo-package:package-skill/SKILL.md)',
+    'Library/package failures: 0', '  (none)', 'Corrective actions:', '  (none)', `Skills: ${ordinarySkills.join(', ')}`
+  ].join('\n'), 'Full ordinary info format, including reference health/digests/provenance');
+}
+
+// Presence-only inspection: never inventory/read an ancestor's personal resources.
+export function assertNativeDiscoveryIsolation(cwd) {
+  for (let path = realpathSync(cwd);; path = dirname(path)) {
+    for (const relativePath of ['.agents/skills', '.pi', 'AGENTS.override.md', 'AGENTS.md', 'AGENTS.MD', 'CLAUDE.md', 'CLAUDE.MD']) {
+      const candidate = join(path, relativePath);
+      let present = false;
+      try { lstatSync(candidate); present = true; } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      assert(!present, `Native discovery fixture requires absent ancestor resource: ${candidate}`);
+    }
+    if (dirname(path) === path) break;
+  }
+}
+
+export function assertSkillExpansion(capture, { name, file, body, argument }) {
+  const users = capture.messages.filter(message => message.role === 'user');
+  assert.equal(users.length, 1, 'One actual expanded Skill input');
+  const content = users[0].content;
+  const text = typeof content === 'string' ? content : content.filter(block => block.type === 'text').map(block => block.text).join('\n');
+  assert.equal(text, `<skill name="${name}" location="${file}">\nReferences are relative to ${dirname(file)}.\n\n${body}\n</skill>\n\n${argument}`, 'Actual Pi Skill expansion and original file/base-directory provenance');
 }
 
 export function assertSkillLocations(prompt, expected) {
@@ -649,7 +686,7 @@ export function assertDeprecatedTemporaryDisposition(stderr, { temporaryRoot, re
 // authenticate these original receipts; fresh observations never replace them.
 export function piJourneySteps(c, resume) {
   const steps = [], agent = c.env.PI_CODING_AGENT_DIR;
-  let repositoryBaseline, gitStatusBaseline, deprecatedBody, preservationSequence = 0;
+  let repositoryBaseline, gitStatusBaseline, deprecatedBody, ordinaryInfoGolden, preservationSequence = 0;
   let resumeAdmitted = false;
   if (resume !== undefined) {
     assert(resume && resume.repositoryBaseline?.inventory && typeof resume.repositoryBaseline.gitStatusBase64 === 'string', 'Original repository/Git baseline required');
@@ -754,20 +791,21 @@ export function piJourneySteps(c, resume) {
     }
     return { evidence: result.evidence, capture: before };
   }
-  async function inspectRpc(label, check) {
+  async function inspectRpc(label, check, { extra = [], cwd = c.repository, env = c.env } = {}) {
     c.revalidate(); admitAdapter(); const lifetime = piEvidence(() => bindRpcLifetime(c.pi));
-    const rpc = startRetainedRpc({ invocation: piInvocation(c.launch, ['--mode', 'rpc', ...probeArgs], c.env), cwd: c.repository, env: c.env, evidence: join(c.root, label), owners: c.owners, lifetime });
+    assert.deepEqual(readFileSync(join(agent, 'extensions', '99-probe-provider.ts')), c.probe);
+    const rpc = startRetainedRpc({ invocation: piInvocation(c.launch, ['--mode', 'rpc', ...probeArgs, ...extra], env), cwd, env, evidence: join(c.root, label), owners: c.owners, lifetime });
     await checkRetainedRpc(rpc, join(c.root, label), async () => { await rpc.request({ type: 'get_state' }); await check(rpc); });
   }
   const source = join(c.root, 'sources'), direct = join(source, 'direct-skill'), library = join(source, 'demo-library'), pkg = join(source, 'demo-package');
   const profile = name => join(c.home, 'profiles', name);
   const contextPaths = name => ({ profilePath: join(profile(name), 'AGENTS.md'), globalPath: join(agent, 'AGENTS.md'), repositoryPath: join(c.repository, 'AGENTS.md') });
-  async function info(rpc, profileId, skills, aliases = [], error = false) {
+  async function info(rpc, profileId, skills, aliases = [], error = false, context = {}) {
     const before = rpc.records.length; await rpc.command('/bazframe info');
     const notifications = rpc.records.slice(before).filter(row => row.type === 'extension_ui_request' && row.method === 'notify');
     assert.equal(notifications.length, 1, 'One actual info notification');
     assert.equal(notifications[0].notifyType, error ? 'error' : 'info');
-    assertInfo(notifications[0].message, { ...contextPaths(profileId ?? 'alpha'), profileId, skills, aliases });
+    assertInfo(notifications[0].message, { ...contextPaths(profileId ?? 'alpha'), profileId, skills, aliases, ...context });
     return notifications[0].message;
   }
   const extension = join(agent, 'extensions', 'bazframe.ts');
@@ -783,7 +821,7 @@ export function piJourneySteps(c, resume) {
     for (const [path, name, marker] of [[direct, 'direct-skill', 'DIRECT_MARKER'], [join(library, 'library-skill'), 'library-skill', 'LIBRARY_MARKER'], [join(library, 'library-companion'), 'library-companion', 'LIBRARY_COMPANION']]) put(join(path, 'SKILL.md'), skill(name, marker));
     put(join(pkg, 'bazframe-package.json'), JSON.stringify({ schemaVersion: 1, build: [process.execPath, 'build.mjs'], artifactRoot: 'dist', skillsRoot: 'skills' }));
     // Revision-specific outputs avoid deleting even source-owned old artifacts.
-    put(join(pkg, 'build.mjs'), `import{mkdirSync,writeFileSync,readFileSync}from'node:fs';const names=JSON.parse(readFileSync('skills.json'));for(const [name,marker]of names){mkdirSync('dist/skills/'+name,{recursive:true});writeFileSync('dist/skills/'+name+'/SKILL.md','---\\nname: '+name+'\\ndescription: '+marker+'\\n---\\n# '+name+'\\n')}mkdirSync('dist/shared',{recursive:true});writeFileSync('dist/shared/resource.txt','SHARED_RESOURCE');`);
+    put(join(pkg, 'build.mjs'), `import{mkdirSync,writeFileSync,readFileSync}from'node:fs';const names=JSON.parse(readFileSync('skills.json'));for(const [name,marker]of names){mkdirSync('dist/skills/'+name,{recursive:true});writeFileSync('dist/skills/'+name+'/SKILL.md','---\\nname: '+name+'\\ndescription: '+marker+'\\n---\\n# '+name+'\\n'+(name==='package-skill'?'Read ../../shared/resource.txt.\\n':''))}mkdirSync('dist/shared',{recursive:true});writeFileSync('dist/shared/resource.txt','SHARED_RESOURCE');`);
     put(join(pkg, 'skills.json'), JSON.stringify([['package-skill', 'PACKAGE_MARKER'], ['package-companion', 'PACKAGE_COMPANION']]));
     c.revalidate(); assertNaturalResult(await c.run('git-init', { file: c.git, args: ['init', '--quiet'] }, c.repository, c.env));
     gitStatusBaseline = await gitStatus(); repositoryBaseline = inventory(c.repository);
@@ -810,6 +848,93 @@ export function piJourneySteps(c, resume) {
   add('ordinary-plain', () => print('ordinary-plain', {}));
   add('ordinary-no-context', () => print('ordinary-no-context', { replacement: true }, ['-nc']));
   add('non-git-default', () => print('non-git-default', { repository: false }, [], c.cwd));
+  for (const [label, extra, cwd, context] of [
+    ['no-context', ['-nc'], c.repository, { replacement: true }],
+    ['non-git', [], c.cwd, { repository: false }]
+  ]) add(`same-process-${label}-reload`, async () => {
+    const projects = inventory(join(c.home, 'projects'));
+    await inspectRpc(`rpc-${label}`, async rpc => {
+      const capture = async enabled => {
+        const before = captures().length; await rpc.prompt('offline reload context');
+        assert.equal(captures(true).length, before + 1);
+        if (!enabled && context.replacement) {
+          const prompt = captures().at(-1).systemPrompt;
+          for (const marker of ['GLOBAL_BODY', 'REPOSITORY_BODY', 'ALPHA_BODY', '<project_instructions ', '<bazframe_', 'DIRECT_MARKER', 'LIBRARY_MARKER', 'PACKAGE_MARKER']) assert(!prompt.includes(marker), `Disabled -nc must retain native empty context: ${marker}`);
+        } else assertPrompt(captures().at(-1), { ...contextPaths('alpha'), ...context, enabled });
+      };
+      await capture(true);
+      await cli(['global', 'disable']); await rpc.command('/bazframe reload'); await capture(false);
+      await cli(['global', 'enable']); await rpc.command('/bazframe reload'); await capture(true);
+      await info(rpc, 'alpha', ordinarySkills, [], false, { ...(context.repository === false ? { repositoryPath: undefined } : {}), ...context });
+      assert.equal(rpc.records.filter(row => row.type === 'agent_start').length, 3, 'Reload/info do not invoke provider');
+    }, { extra, cwd });
+    assert.deepEqual(inventory(join(c.home, 'projects')), projects, 'Reload/global inheritance must not create project overrides');
+  });
+  add('active-profile-instruction-edit-reload', async () => {
+    const path = join(profile('alpha'), 'AGENTS.md'), original = readFileSync(path), selection = readFileSync(join(c.home, 'active-profile'));
+    await inspectRpc('rpc-instruction-edit', async rpc => {
+      const capture = async body => {
+        const before = captures().length; await rpc.prompt('offline active instruction body');
+        assert.equal(captures(true).length, before + 1);
+        assertPrompt(captures().at(-1), { ...contextPaths('alpha'), profile: body });
+      };
+      await capture('ALPHA_BODY'); put(path, 'ALPHA_EDITED_BODY\n');
+      await rpc.command('/bazframe reload'); await capture('ALPHA_EDITED_BODY');
+      assert(!captures().at(-1).systemPrompt.includes('ALPHA_BODY'));
+      assert.deepEqual(readFileSync(join(c.home, 'active-profile')), selection, 'Instruction edit must retain selection');
+      put(path, original); await rpc.command('/bazframe reload'); await capture('ALPHA_BODY');
+      assert(!captures().at(-1).systemPrompt.includes('ALPHA_EDITED_BODY'));
+      assert.equal(rpc.records.filter(row => row.type === 'agent_start').length, 3);
+    });
+  });
+  add('skill-expansion-support-resource-read', async () => {
+    const record = jsonFile(join(c.home, 'packages', 'demo-package.json'));
+    const artifact = join(c.home, 'skill-snapshots', 'sha256', record.digest, 'artifact');
+    const file = join(artifact, 'skills', 'package-skill', 'SKILL.md'), resource = join(artifact, 'shared', 'resource.txt');
+    assert.equal(realpathSync(resource), resource, 'Admitted resource must be physical');
+    const metadata = lstatSync(resource); assert(metadata.isFile() && !metadata.isSymbolicLink() && metadata.nlink === 1);
+    assert.equal(readFileSync(resource, 'utf8'), 'SHARED_RESOURCE');
+    const before = captures().length, snapshot = inventory(artifact), sources = inventory(source);
+    await inspectRpc('rpc-support-read', async rpc => {
+      await rpc.prompt('/skill:package-skill consume admitted support resource');
+      const rows = captures(true).slice(before); assert.equal(rows.length, 2, 'One read request and one actual tool-result provider turn');
+      assertSkillExpansion(rows[0], { name: 'package-skill', file, body: '# package-skill\nRead ../../shared/resource.txt.', argument: 'consume admitted support resource' });
+      const starts = rpc.records.filter(row => row.type === 'tool_execution_start');
+      assert.equal(starts.length, 1); assert.equal(starts[0].toolName, 'read'); assert.deepEqual(starts[0].args, { path: resource });
+      const ends = rpc.records.filter(row => row.type === 'tool_execution_end');
+      assert.equal(ends.length, 1); assert.equal(ends[0].toolCallId, starts[0].toolCallId); assert.equal(ends[0].isError, false);
+      const results = rows[1].messages.filter(message => message.role === 'toolResult');
+      assert.equal(results.length, 1); assert.equal(results[0].toolCallId, starts[0].toolCallId); assert.equal(results[0].toolName, 'read'); assert.equal(results[0].isError, false);
+      assert.deepEqual(results[0].content, [{ type: 'text', text: 'SHARED_RESOURCE' }]);
+      assert.deepEqual(ends[0].result.content, results[0].content, 'Actual tool receipt agrees with provider-visible consumption');
+    }, { extra: ['--tools', 'read'], env: { ...c.env, BAZFRAME_PI_PROBE_MESSAGES: '1', BAZFRAME_PI_PROBE_READ: resource } });
+    assert.deepEqual(inventory(artifact), snapshot); assert.deepEqual(inventory(source), sources);
+    return { resource, sha256: sha256('SHARED_RESOURCE'), captures: [before, before + 1] };
+  });
+  for (const [mode, flags, approved] of [['approved', ['--approve'], true], ['denied', ['--no-approve'], false], ['default', [], false]]) add(`project-native-trust-${mode}`, async () => {
+    const cwd = join(c.root, `trust-${mode}`); mkdirSync(cwd); assertNativeDiscoveryIsolation(cwd);
+    const nativeSkill = join(cwd, '.pi', 'skills', 'native-boundary', 'SKILL.md');
+    const nativeExtension = join(cwd, '.pi', 'extensions', 'native-boundary.ts');
+    put(nativeSkill, skill('native-boundary', 'NATIVE_BOUNDARY_SKILL'));
+    put(nativeExtension, 'export default function(pi) { pi.registerCommand("native-boundary", { description: "NATIVE_BOUNDARY_EXTENSION", handler: async (_args, ctx) => ctx.ui.notify("NATIVE_BOUNDARY_EXTENSION", "info") }); }\n');
+    const project = inventory(cwd), trust = inventory(join(agent, 'trust.json')), before = captures().length;
+    assert.equal(trust, null, 'Trust cases require fresh default ask state');
+    await inspectRpc(`rpc-trust-${mode}`, async rpc => {
+      const commands = (await rpc.request({ type: 'get_commands' })).data.commands;
+      for (const [name, source, path] of [['native-boundary', 'extension', nativeExtension], ['skill:native-boundary', 'skill', nativeSkill]]) {
+        const matches = commands.filter(row => row.name === name); assert.equal(matches.length, approved ? 1 : 0);
+        if (approved) { assert.equal(matches[0].source, source); assert.equal(matches[0].sourceInfo.path, path); assert.equal(matches[0].sourceInfo.scope, 'project'); }
+      }
+      assert(commands.some(row => row.name === 'bazframe' && row.source === 'extension'));
+      assert(commands.some(row => row.name === 'skill:direct-skill' && row.source === 'skill'));
+      await info(rpc, 'alpha', [...ordinarySkills, ...(approved ? ['native-boundary'] : [])], [], false, { repositoryPath: undefined });
+      await rpc.prompt('offline native trust context'); assert.equal(captures(true).length, before + 1);
+      assertPrompt(captures().at(-1), { ...contextPaths('alpha'), repository: false });
+      assert.equal(captures().at(-1).systemPrompt.includes('NATIVE_BOUNDARY_SKILL'), approved);
+      assert(!rpc.records.some(row => row.type === 'extension_ui_request' && (['select', 'confirm', 'input'].includes(row.method) || row.message === 'NATIVE_BOUNDARY_EXTENSION')));
+    }, { extra: flags, cwd });
+    assert.deepEqual(inventory(cwd), project, 'Native fixture unchanged'); assert.deepEqual(inventory(join(agent, 'trust.json')), trust, 'Session trust flags/default must not persist a decision');
+  });
   add('global-disable-both-directories', async () => {
     await cli(['global', 'disable']); assert.equal(jsonFile(globalState).disabled, true);
     await print('disabled-git', { enabled: false }); await print('disabled-non-git', { enabled: false, repository: false }, [], c.cwd);
@@ -845,7 +970,10 @@ export function piJourneySteps(c, resume) {
     await checkRetainedRpc(rpc, join(c.root, 'rpc'), async () => {
       await rpc.request({ type: 'get_state' });
       const initial = await commands(); assert(names(initial).includes('bazframe')); assert(names(initial).includes('skill:direct-skill'));
-      await info(rpc, 'alpha', ['direct-skill', 'library-skill', 'library-companion', 'package-skill', 'package-companion']);
+      const initialInfo = await info(rpc, 'alpha', ordinarySkills);
+      assertOrdinaryInfoGolden(initialInfo, { ...contextPaths('alpha'), home: c.home, source, platform: process.platform });
+      ordinaryInfoGolden = { evidence: join(c.root, 'rpc.stdout'), message: initialInfo };
+      saveJson(join(c.root, 'full-info-golden.json'), ordinaryInfoGolden);
       put(join(direct, 'SKILL.md'), skill('direct-skill', 'DIRECT_LIVE'));
       put(join(library, 'library-live', 'SKILL.md'), skill('library-live', 'LIBRARY_LIVE'));
       put(join(pkg, 'skills.json'), JSON.stringify([['package-skill', 'PACKAGE_MARKER'], ['package-companion', 'PACKAGE_COMPANION'], ['package-live', 'PACKAGE_LIVE']]));
@@ -869,11 +997,26 @@ export function piJourneySteps(c, resume) {
       const state = (await rpc.request({ type: 'get_state' })).data; assert.equal(state.isStreaming, false); assert.equal(state.pendingMessageCount, 0);
     });
   });
+  add('full-info-collection-detail-format', () => {
+    assert(ordinaryInfoGolden, 'The existing initial RPC info reply must pass the full golden');
+    return { evidence: ordinaryInfoGolden.evidence, golden: join(c.root, 'full-info-golden.json') };
+  });
   add('native-name-collision-alias', async () => {
     await cli(['profile', 'use', 'alpha']); put(join(agent, 'skills', 'direct-skill', 'SKILL.md'), skill('direct-skill', 'NATIVE_OCCUPANT'));
     await print('native-name-collision', { resources: ['DIRECT_LIVE', 'LIBRARY_MARKER', 'PACKAGE_MARKER'] });
     assert(captures().at(-1).systemPrompt.includes('<name>direct-skill-x-bazframe</name>'), 'Deterministic alias missing');
     await inspectRpc('native-alias-info', rpc => info(rpc, 'alpha', ['direct-skill', 'direct-skill-x-bazframe', 'library-skill', 'library-companion', 'library-live', 'package-skill', 'package-companion', 'package-live'], ['direct-skill -> direct-skill-x-bazframe']));
+  });
+  add('aliased-skill-expansion', async () => {
+    const before = captures().length;
+    const original = process.platform === 'win32' ? direct : join(profile('alpha'), 'skills', 'direct-skill');
+    const name = 'direct-skill-x-bazframe', file = join(c.home, 'adapter-cache', 'pi', 'skill-aliases', 'alpha', name, 'SKILL.md');
+    await inspectRpc('rpc-alias-expansion', async rpc => {
+      await rpc.prompt(`/skill:${name} alias expansion probe`);
+      assert.equal(captures(true).length, before + 1);
+      assertSkillExpansion(captures().at(-1), { name, file, argument: 'alias expansion probe', body: `# Bazframe alias for direct-skill\n\nRead and follow the original skill file at ${JSON.stringify(join(original, 'SKILL.md'))}.\nResolve its relative references against ${JSON.stringify(original)}.` });
+      assert.equal(rpc.records.filter(row => row.type === 'tool_execution_start').length, 0, 'Alias expansion alone does not request a tool');
+    }, { env: { ...c.env, BAZFRAME_PI_PROBE_MESSAGES: '1' } });
   });
   add('occupied-alias-withholds-profile-projection', async () => {
     put(join(agent, 'skills', 'direct-skill-x-bazframe', 'SKILL.md'), skill('direct-skill-x-bazframe', 'ALIAS_OCCUPANT'));

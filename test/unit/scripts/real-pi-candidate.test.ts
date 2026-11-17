@@ -33,6 +33,80 @@ async function probe(code: string) {
 }
 
 describe('retained exact-candidate Pi seams (no installed Pi execution)', () => {
+  it('places the remaining required rows before destructive fixture transitions and preserves the suffix', () => probe(`
+    const rows=h.piJourneySteps({env:{PI_CODING_AGENT_DIR:'/pi'},home:'/home',root:'/root',repository:'/repo',cwd:'/plain'}).map(row=>row.name);
+    for(const name of ['same-process-no-context-reload','same-process-non-git-reload','active-profile-instruction-edit-reload','skill-expansion-support-resource-read','project-native-trust-approved','project-native-trust-denied','project-native-trust-default']){
+      assert(rows.indexOf(name)>rows.indexOf('adapter-install-current-unrelated-preserved'));assert(rows.indexOf(name)<rows.indexOf('export-import-real-resources'));
+    }
+    assert(rows.indexOf('full-info-collection-detail-format')>rows.indexOf('same-process-reload-profile-policy-and-resources'));assert(rows.indexOf('full-info-collection-detail-format')<rows.indexOf('native-name-collision-alias'));
+    assert(rows.indexOf('aliased-skill-expansion')>rows.indexOf('native-name-collision-alias'));assert(rows.indexOf('aliased-skill-expansion')<rows.indexOf('occupied-alias-withholds-profile-projection'));
+    assert.equal(rows.length-rows.indexOf('deprecated-real-launch-and-natural-exit'),8);assert.equal(spawns,0);
+  `));
+  it('does not report a full-info pass without the prior actual RPC reply', () => probe(`
+    const step=h.piJourneySteps({env:{PI_CODING_AGENT_DIR:'/pi'},home:'/home',root:'/root',repository:'/repo',cwd:'/plain'}).find(row=>row.name==='full-info-collection-detail-format');
+    await assert.rejects(step.run(),/existing initial RPC info reply/);assert.equal(spawns,0);
+  `));
+  it('rejects any ancestor native resource by presence, including dangling links, without reading contents', () => probe(`
+    const cwd=join(root,'child');fs.mkdirSync(cwd);
+    // Use a fake canonical root chain so the test never depends on personal ancestor resources.
+    const originalReal=fs.realpathSync,originalStat=fs.lstatSync;fs.realpathSync=p=>p;
+    for(const resource of ['.agents/skills','.pi','AGENTS.md','CLAUDE.md']){
+      fs.lstatSync=p=>{if(p===join(root,resource))return{isSymbolicLink:()=>true};const e=Error('absent');e.code='ENOENT';throw e};syncBuiltinESMExports();
+      assert.throws(()=>h.assertNativeDiscoveryIsolation(cwd),/absent ancestor resource/);
+    }
+    fs.lstatSync=()=>{const e=Error('denied');e.code='EACCES';throw e};syncBuiltinESMExports();assert.throws(()=>h.assertNativeDiscoveryIsolation(cwd),/denied/);
+    fs.realpathSync=originalReal;fs.lstatSync=originalStat;syncBuiltinESMExports();assert.equal(spawns,0);
+  `));
+  it.each(['AGENTS.override.md', 'AGENTS.MD', 'CLAUDE.MD'].flatMap(resource =>
+    ['regular', 'dangling', 'denied'].map(kind => ({ resource, kind }))))('refuses native ancestor $resource ($kind) before trust fixture content or Pi launch', ({ resource, kind }) => probe(`
+    const resource=${JSON.stringify(resource)},kind=${JSON.stringify(kind)},cwd=join(root,'child');fs.mkdirSync(cwd);
+    const originalReal=fs.realpathSync,originalStat=fs.lstatSync,originalRead=fs.readFileSync;
+    let reads=0,validations=0;
+    fs.realpathSync=p=>p;
+    fs.lstatSync=p=>{if(p===join(root,resource)){if(kind==='denied'){const e=Error('ancestor denied');e.code='EACCES';throw e}return{isFile:()=>kind==='regular',isSymbolicLink:()=>kind==='dangling'}}const e=Error('absent');e.code='ENOENT';throw e};
+    fs.readFileSync=()=>{reads++;throw Error('FORBIDDEN_CONTENT_READ')};syncBuiltinESMExports();
+    try{
+      const expected=kind==='denied'?/ancestor denied/:/absent ancestor resource/;
+      assert.throws(()=>h.assertNativeDiscoveryIsolation(cwd),expected);
+      const c={root,home:join(root,'home'),env:{PI_CODING_AGENT_DIR:join(root,'pi')},revalidate:()=>{validations++;throw Error('FORBIDDEN_PRELAUNCH')}};
+      const steps=h.piJourneySteps(c);
+      for(const mode of ['approved','denied','default'])await assert.rejects(steps.find(row=>row.name==='project-native-trust-'+mode).run(),expected);
+      assert.equal(reads,0);assert.equal(validations,0);assert.equal(spawns,0);
+    }finally{fs.realpathSync=originalReal;fs.lstatSync=originalStat;fs.readFileSync=originalRead;syncBuiltinESMExports()}
+    for(const mode of ['approved','denied','default'])assert(!fs.existsSync(join(root,'trust-'+mode,'.pi')),'Refuse before writing native fixture content');
+  `));
+  it('requires exact actual expanded Skill body, argument, file and base directory', () => probe(String.raw`
+    const expected={name:'package-skill',file:'/snapshot/skills/package-skill/SKILL.md',body:'# package-skill',argument:'consume resource'};
+    const text='<skill name="package-skill" location="/snapshot/skills/package-skill/SKILL.md">\nReferences are relative to /snapshot/skills/package-skill.\n\n# package-skill\n</skill>\n\nconsume resource';
+    for(const content of [text,[{type:'text',text}]])h.assertSkillExpansion({messages:[{role:'user',content}]},expected);
+    for(const wrong of [text.replace('package-skill','wrong'),text.replace('References are relative to /snapshot','References are relative to /other'),text.replace('# package-skill','# wrong'),text.replace('consume resource','other'),'/skill:package-skill consume resource'])assert.throws(()=>h.assertSkillExpansion({messages:[{role:'user',content:wrong}]},expected));
+    assert.throws(()=>h.assertSkillExpansion({messages:[]},expected));assert.throws(()=>h.assertSkillExpansion({messages:[{role:'user',content:text},{role:'user',content:text}]},expected));assert.equal(spawns,0);
+  `));
+  it('checks every ordinary info line including typed roots, health, refresh, digests and derived provenance', () => probe(String.raw`
+    const home=join(root,'home'),source=join(root,'sources');fs.mkdirSync(join(home,'libraries'),{recursive:true});fs.mkdirSync(join(home,'packages'));
+    fs.writeFileSync(join(home,'libraries','demo-library.json'),JSON.stringify({digest:'a'.repeat(64)}));fs.writeFileSync(join(home,'packages','demo-package.json'),JSON.stringify({digest:'b'.repeat(64)}));
+    for(const platform of ['darwin','win32']){
+      const direct=platform==='win32'?join(source,'direct-skill'):join(home,'profiles','alpha','skills','direct-skill');
+      const expected={profilePath:'/alpha/AGENTS.md',globalPath:'/pi/AGENTS.md',repositoryPath:'/repo/AGENTS.md',home,source,platform};
+      const lines=['Profile: alpha','Context:','  (pi) /pi/AGENTS.md','  (pi) /repo/AGENTS.md','  (bazframe) /alpha/AGENTS.md',
+        'Flat direct skills: 1','  - direct-skill ('+join(direct,'SKILL.md')+')','Profile library/package references: 2',
+        '  - library demo-library -> '+join(source,'demo-library')+' (ready; refresh:available; sha256:'+'a'.repeat(64)+'; Skills root:.)',
+        '  - package demo-package -> '+join(source,'demo-package')+' (ready; refresh:available; sha256:'+'b'.repeat(64)+'; Skills root:skills)',
+        'Derived effective skills: 4','  - library-companion (library demo-library:library-companion/SKILL.md)','  - library-skill (library demo-library:library-skill/SKILL.md)',
+        '  - package-companion (package demo-package:package-companion/SKILL.md)','  - package-skill (package demo-package:package-skill/SKILL.md)',
+        'Library/package failures: 0','  (none)','Corrective actions:','  (none)','Skills: direct-skill, library-companion, library-skill, package-companion, package-skill'];
+      h.assertOrdinaryInfoGolden(lines.join('\n'),expected);
+      for(let i=0;i<lines.length;i++){const wrong=[...lines];wrong[i]+=' altered';assert.throws(()=>h.assertOrdinaryInfoGolden(wrong.join('\n'),expected));}
+      assert.throws(()=>h.assertOrdinaryInfoGolden(lines.join('\n')+'\nAliases: ghost -> alias',expected));
+    }
+    assert.equal(spawns,0);
+  `));
+  it('checks non-Git and restored-global info suppliers without claiming repository context', () => probe(String.raw`
+    const options={profileId:'alpha',profilePath:'/profile/AGENTS.md',globalPath:'/pi/AGENTS.md',skills:[]};
+    const native='Profile: alpha\nContext:\n  (pi) /pi/AGENTS.md\n  (bazframe) /profile/AGENTS.md\nFlat direct skills: 0\nSkills: (none)';
+    h.assertInfo(native,options);h.assertInfo(native.replace('(pi)','(bazframe)'),{...options,replacement:true});
+    assert.throws(()=>h.assertInfo(native,{...options,replacement:true}));assert.throws(()=>h.assertInfo(native.replace('  (bazframe)','  (pi) /repo/AGENTS.md\n  (bazframe)'),options));
+  `));
   it.each(['valid', 'missing-baseline', 'repository', 'git', 'adapter', 'home', 'sources', 'agent', 'import', 'archive', 'selection', 'dry-run', 'occupied', 'dangling-destination', 'later-repository', 'later-git', 'after-repository', 'after-git', 'detached-state', 'missing-adapterBinding', 'missing-importBinding', 'missing-homeInventory', 'missing-sourceInventory', 'missing-agentInventory', 'missing-dryRunStdout', 'provider', 'global-occupied', 'project-occupied', 'import-identity'])('admits only original-bound suffix state: %s', fault => probe(String.raw`
     const fault=${JSON.stringify(fault)};
     const {inventory,sha256,saveJson}=await import(${JSON.stringify(join(process.cwd(), 'scripts/installed-candidate.mjs'))});

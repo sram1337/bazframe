@@ -9,7 +9,8 @@ import type {
 } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-type ProbeContext = { systemPrompt?: string; messages: readonly { role: string }[] };
+type ProbeMessage = { role: string; content?: unknown; toolCallId?: string; toolName?: string; isError?: boolean };
+type ProbeContext = { systemPrompt?: string; messages: readonly ProbeMessage[] };
 
 function probeSystemPrompt(context: ProbeContext): string {
 	if (typeof context.systemPrompt === "string") return context.systemPrompt;
@@ -55,9 +56,32 @@ function streamProbe(
 				cwd: process.cwd(),
 				systemPrompt,
 				skills: systemPrompt.match(/<skill>/g)?.length ?? 0,
+				...(process.env.BAZFRAME_PI_PROBE_MESSAGES === "1" ? { messages: context.messages } : {}),
 			})}\n`);
 
 			stream.push({ type: "start", partial: output });
+			// Opt-in single-resource fixture only. The journey admits this exact benign
+			// snapshot path before launch; Pi's installed read tool executes the call.
+			// Never read the file here or manufacture a tool-result receipt.
+			const resource = process.env.BAZFRAME_PI_PROBE_READ;
+			if (resource !== undefined) {
+				if (process.env.BAZFRAME_PI_PROBE_MESSAGES !== "1" || !resource) throw new Error("Read probe requires explicit capture and resource admission.");
+				const results = context.messages.filter(message => message.role === "toolResult");
+				if (results.length === 0) {
+					const call = { type: "toolCall" as const, id: "bazframe-support-read", name: "read", arguments: { path: resource } };
+					output.content.push(call);
+					stream.push({ type: "toolcall_start", contentIndex: 0, partial: output });
+					stream.push({ type: "toolcall_delta", contentIndex: 0, delta: JSON.stringify(call.arguments), partial: output });
+					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: call, partial: output });
+					output.stopReason = "toolUse";
+					stream.push({ type: "done", reason: "toolUse", message: output });
+					stream.end();
+					return;
+				}
+				if (results.length !== 1 || results[0].toolCallId !== "bazframe-support-read" || results[0].toolName !== "read" || results[0].isError !== false) {
+					throw new Error("Read probe requires one successful correlated Pi tool result.");
+				}
+			}
 			const block = { type: "text" as const, text: "probe-ok" };
 			output.content.push(block);
 			stream.push({ type: "text_start", contentIndex: 0, partial: output });

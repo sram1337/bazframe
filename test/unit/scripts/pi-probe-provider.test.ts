@@ -12,13 +12,13 @@ type Event = { type: string; [key: string]: unknown };
 type Provider = { streamSimple: (model: object, context: unknown) => unknown };
 
 // Fixture wiring only: no Pi process, provider network call or installed-runtime admission.
-async function probe(context: unknown, transcriptApi: Record<string, unknown> = {}) {
+async function probe(context: unknown, transcriptApi: Record<string, unknown> = {}, env: Record<string, string> = {}) {
   const events: Event[] = [], captures: Array<{ path: string; text: string }> = [];
   let ended = false, provider: Provider | undefined;
   const exports: { default?: (api: object) => void } = {};
   new Script(compiled, { filename }).runInNewContext({
     exports, queueMicrotask, Error,
-    process: { env: { BAZFRAME_PI_PROBE_CAPTURE: '/probe/capture.jsonl' }, cwd: () => '/probe' },
+    process: { env: { BAZFRAME_PI_PROBE_CAPTURE: '/probe/capture.jsonl', ...env }, cwd: () => '/probe' },
     require: (name: string) => {
       if (name === 'node:fs') return { appendFileSync: (path: string, text: string) => { captures.push({ path, text }); } };
       if (name === '@earendil-works/pi-ai') return {
@@ -47,6 +47,41 @@ function expectCapture(result: Awaited<ReturnType<typeof probe>>, systemPrompt: 
 }
 
 describe('offline Pi probe context compatibility', () => {
+  const readEnv = { BAZFRAME_PI_PROBE_MESSAGES: '1', BAZFRAME_PI_PROBE_READ: '/admitted/artifact/shared/resource.txt' };
+  it('retains default one-capture text-only behavior even with conversation and tool history', async () => {
+    expectCapture(await probe({ systemPrompt: 'ordinary', messages: [{ role: 'user', content: 'ordinary task' }, { role: 'toolResult', toolCallId: 'unrelated', toolName: 'read', isError: false, content: [] }] }), 'ordinary', 0);
+  });
+  it('emits one opt-in installed read request without reading or inventing its result', async () => {
+    const messages = [{ role: 'user', content: 'expanded Skill' }];
+    const result = await probe({ systemPrompt: 'context', messages }, {}, readEnv);
+    expect(result.captures).toHaveLength(1);
+    expect(JSON.parse(result.captures[0]!.text).messages).toEqual(messages);
+    expect(result.events.map(event => event.type)).toEqual(['start', 'toolcall_start', 'toolcall_delta', 'toolcall_end', 'done']);
+    expect(result.events.at(-1)).toMatchObject({ reason: 'toolUse', message: { stopReason: 'toolUse', content: [{ type: 'toolCall', id: 'bazframe-support-read', name: 'read', arguments: { path: readEnv.BAZFRAME_PI_PROBE_READ } }] } });
+    expect(result.ended).toBe(true);
+  });
+  it('consumes the supplied Pi read result without issuing another tool call', async () => {
+    const messages = [{ role: 'toolResult', toolCallId: 'bazframe-support-read', toolName: 'read', isError: false, content: [{ type: 'text', text: 'resource bytes' }] }];
+    const result = await probe({ messages }, { getCurrentSystemPrompt: () => 'transcript' }, readEnv);
+    expect(JSON.parse(result.captures[0]!.text).messages).toEqual(messages);
+    expect(result.events.at(-1)).toMatchObject({ reason: 'stop', message: { content: [{ type: 'text', text: 'probe-ok' }] } });
+    expect(result.events.some(event => event.type.startsWith('toolcall'))).toBe(false);
+  });
+  it.each([
+    [{ toolCallId: 'other', toolName: 'read', isError: false }],
+    [{ toolCallId: 'bazframe-support-read', toolName: 'bash', isError: false }],
+    [{ toolCallId: 'bazframe-support-read', toolName: 'read', isError: true }],
+    [{ toolCallId: 'bazframe-support-read', toolName: 'read' }],
+    [{ toolCallId: 'bazframe-support-read', toolName: 'read', isError: false }, { toolCallId: 'extra' }]
+  ].map(rows => ({ rows })))('refuses uncorrelated/error/duplicate tool results $rows', async ({ rows }) => {
+    const result = await probe({ systemPrompt: '', messages: rows.map(row => ({ role: 'toolResult', ...row })) }, {}, readEnv);
+    expect(result.events.at(-1)).toMatchObject({ type: 'error' });
+    expect(result.events.some(event => event.type.startsWith('toolcall'))).toBe(false);
+  });
+  it.each([{ BAZFRAME_PI_PROBE_READ: '/unadmitted' }, { ...readEnv, BAZFRAME_PI_PROBE_READ: '' }])('requires explicit capture and nonempty read admission', async env => {
+    const result = await probe({ systemPrompt: '', messages: [] }, {}, env);
+    expect(result.events.at(-1)).toMatchObject({ type: 'error' });
+  });
   it.each(['base <skill>one</skill> <skill>two</skill>', ''])('preserves a supplied legacy prompt %j without a new API', async systemPrompt => {
     expectCapture(await probe({ systemPrompt, messages: [] }), systemPrompt, systemPrompt === '' ? 0 : 2);
   });
