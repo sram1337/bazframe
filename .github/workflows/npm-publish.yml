@@ -185,7 +185,7 @@ jobs:
           path: release
       - name: Verify and publish the exact tarball
         run: |
-          mapfile -t TARBALLS < <(find release -maxdepth 1 -type f -name '*.tgz' -print)
+          mapfile -t TARBALLS < <(find ./release -maxdepth 1 -type f -name '*.tgz' -print)
           test "${#TARBALLS[@]}" -eq 1
           (cd release && sha256sum --check "$(basename "${TARBALLS[0]}").sha256")
           node ./scripts/verify-win32-native-release-tarball.mjs \

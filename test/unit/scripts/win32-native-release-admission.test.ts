@@ -58,6 +58,13 @@ describe('Win32 native release admission', () => {
     expect(publishWorkflow).toContain('test "$ACTUAL_DIGEST" = "$ARTIFACT_DIGEST_OUTPUT"');
   });
 
+  it('passes the verified tarball to npm as an explicit local path', async () => {
+    const workflow = await readFile('.github/workflows/npm-publish.yml', 'utf8');
+    expect(workflow).toContain("mapfile -t TARBALLS < <(find ./release -maxdepth 1 -type f -name '*.tgz' -print)");
+    expect(workflow).toContain('--tarball "${TARBALLS[0]}"');
+    expect(workflow).toContain('npm publish "${TARBALLS[0]}" --access public --tag latest');
+  });
+
   it('derives no-replace evidence from immediate before/after identity and security', async () => {
     const conformance = await readFile('scripts/test-win32-native-foundation.mjs', 'utf8');
     expect(conformance).toContain('const occupiedBefore = backend.inspectPath(privateRoot);');
