@@ -156,7 +156,7 @@ jobs:
             ${{ steps.pack.outputs.tarball }}.sha256
             win32-native-release-admission.json
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
   publish:
     needs: validate
