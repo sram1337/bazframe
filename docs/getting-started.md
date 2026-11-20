@@ -24,11 +24,11 @@ Use drive-absolute paths on Windows, such as `C:\Skills\review`. `VISUAL` then `
 Install Pi and the Bazframe public beta globally:
 
 ```bash
-npm install --global --ignore-scripts '@earendil-works/pi-coding-agent@>=0.84.4 <0.85.0 || >=0.85.1'
+npm install --global --ignore-scripts "@earendil-works/pi-coding-agent@>=0.84.4 <0.85.0 || >=0.85.1"
 npm install --global bazframe
 ```
 
-The current beta is Bazframe's default npm release. This source prepares Windows public routing; the already-published `0.1.0-beta.3` is unchanged. Windows use requires a separately qualified package with the matching native addon, not an ordinary binary-free checkout build. See [the Windows requirements](win32-filesystem-backend-requirements.md). Verify the installed commands:
+The current beta is Bazframe's default npm release. On Windows, use a release qualified for Windows x64 with its matching native addon. The published `0.1.0-beta.3` does not include this support. See [the Windows requirements](win32-filesystem-backend-requirements.md). Verify the installed commands:
 
 ```bash
 pi --version
@@ -40,7 +40,7 @@ Pi must report a supported version: 0.84.4 or newer except 0.85.0. Bazframe repo
 To update, repeat the installation commands. After each Bazframe update, reinstall the packaged Pi adapter so its version matches the CLI:
 
 ```bash
-npm install --global --ignore-scripts '@earendil-works/pi-coding-agent@>=0.84.4 <0.85.0 || >=0.85.1'
+npm install --global --ignore-scripts "@earendil-works/pi-coding-agent@>=0.84.4 <0.85.0 || >=0.85.1"
 npm install --global bazframe
 bazframe adapter install pi
 ```

@@ -147,6 +147,8 @@ Bazify packages one Skill or a collection with source content under `skills/<nam
 {"schemaVersion":1,"build":["node","scripts/bazify-build.mjs"],"artifactRoot":"dist","skillsRoot":"skills"}
 ```
 
+The Bazify helper runs `bazframe` directly, without a shell. It cannot use the standard Windows npm `bazframe.cmd` launcher for validation, including validation during `create`, `adapt` and `publish`. To build and register an existing package, run `bazframe package add "C:\Skills\my-package"` from a Windows command prompt. This adds the package to your catalog; it is not a disposable validation run.
+
 Use `create` to extract one or more Skills into a new package. One source may be a Skill root or a project/collection root whose immediate `skills/` children are Skills; several explicit Skill roots are also accepted. A singleton defaults to its Skill name, a collection defaults to its source-root basename, and several explicit roots require `--name`. The destination defaults to `~/<package-name>`.
 
 ```bash

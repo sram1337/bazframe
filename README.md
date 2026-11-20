@@ -13,7 +13,7 @@ Compose standard [Agent Skills](https://agentskills.io/) and personal `AGENTS.md
 - Shares ready profiles through deterministic ZIP exports or versioned GitHub repositories.
 - Provides a scriptable CLI, setup diagnostics, and a keyboard-first terminal UI.
 
-Bazframe is currently a beta for Pi 0.84.4 or newer. This source opens public CLI routing on Windows x64 alongside macOS and Linux; Windows package qualification remains a separate release gate. The already-published `0.1.0-beta.3` does not gain these source changes. The broken published Pi 0.85.0 package is excluded because it omits a required runtime dependency.
+Bazframe is currently a beta for Pi 0.84.4 or newer. On Windows x64, use a Bazframe release qualified for Windows; the published `0.1.0-beta.3` does not include this support. The broken published Pi 0.85.0 package is excluded because it omits a required runtime dependency.
 
 ## Requirements
 
@@ -23,10 +23,12 @@ Bazframe is currently a beta for Pi 0.84.4 or newer. This source opens public CL
 - A model provider configured for Pi; see [Pi's authentication documentation](https://github.com/earendil-works/pi#readme).
 - Git for remote resources and Git profile imports; [GitHub CLI](https://cli.github.com/) (`gh`) for publishing and private Git imports. Neither is required for basic profile use or ZIP sharing.
 
+On Windows, each local Skill, library or package source, Git worktree used for project policy, Pi agent directory and ZIP output directory must also pass local NTFS checks. They can be on a different local NTFS volume from Bazframe home. A ZIP input can come from other storage, including a network share: Bazframe copies it into private local staging within a size limit before reading the archive.
+
 ## Quick start
 
 ```bash
-npm install --global --ignore-scripts '@earendil-works/pi-coding-agent@>=0.84.4 <0.85.0 || >=0.85.1'
+npm install --global --ignore-scripts "@earendil-works/pi-coding-agent@>=0.84.4 <0.85.0 || >=0.85.1"
 npm install --global bazframe
 
 # Create a profile. `profile edit` uses VISUAL, then EDITOR.
@@ -46,7 +48,7 @@ bazframe status
 pi
 ```
 
-On Windows, use drive-absolute paths, for example `bazframe skill add "C:\Skills\review"`. Set `VISUAL` or `EDITOR` to one executable name/path, not a shell command or flags; use an executable wrapper for fixed arguments. A local Skill can be added before creating a profile; adding it does not select or invent a profile. No WSL, compiler or runtime native download is required by an accepted Windows package. See [Windows qualification and limits](docs/win32-filesystem-backend-requirements.md); opening CLI routing is not a production-ready TUI claim.
+On Windows, use drive-absolute paths, for example `bazframe skill add "C:\Skills\review"`. Set `VISUAL` or `EDITOR` to one executable name/path, not a shell command or flags; use an executable wrapper for fixed arguments. A local Skill can be added before creating a profile; adding it does not select or invent a profile. No WSL, compiler or runtime native download is required by an accepted Windows package. See [Windows qualification and limits](docs/win32-filesystem-backend-requirements.md); the TUI is beta and terminal coverage is limited.
 
 Inside Pi, run `/bazframe info` to inspect the effective profile and `/bazframe reload` after changing profile instructions or resources. `bzf` is an equivalent short alias for `bazframe`.
 
@@ -58,7 +60,7 @@ Bazframe keeps resource ownership explicit:
 | --- | --- |
 | **Added Skill** | A live local or remote Git Skill registered individually in `(default)`. Local source edits are visible after reload. |
 | **Skill library** | An already-prepared directory captured as an immutable snapshot. Adding or updating a library executes no source code. |
-| **Skill package** | A source project with `bazframe-package.json`. Bazframe runs its declared build command, then snapshots the resulting artifact. |
+| **Skill package** | A source project with `bazframe-package.json`. Bazframe runs its declared build command, then snapshots the resulting artifact. Portable content does not make Skill scripts or build tools cross-platform. For Windows builds, prefer Node with a JavaScript entry point or a native executable; arbitrary `.cmd`/`.bat` launchers are not supported. |
 | **Profile** | Personal `AGENTS.md` instructions plus individual Skills and whole-library/package references. |
 
 ```bash

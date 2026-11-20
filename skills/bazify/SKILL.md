@@ -10,6 +10,8 @@ Bazify selected Skills into a package with source content under `skills/`, a rep
 
 On Windows, use drive-absolute source/destination paths and a qualified Windows x64 Bazframe package with its matching native addon. Bazframe managed state and staging require accepted local NTFS. Review each Skill and build script for OS-specific requirements; portable transport does not make arbitrary source code cross-platform.
 
+The Bazify helper runs `bazframe` directly, without a shell. It cannot use the standard Windows npm `bazframe.cmd` launcher for validation, including validation during `create`, `adapt` and `publish`. To build and register an existing package, run `bazframe package add "C:\Skills\my-package"` from a Windows command prompt. This adds the package to your catalog; it is not a disposable validation run.
+
 Resolve `<bazify-skill-root>` from the directory containing this loaded `SKILL.md` and invoke its bundled script by absolute path. Use `./bazframe/`, relative to the current working directory, for review notes and task tracking. Follow an existing local todo convention there when available; otherwise keep one temporary checklist and remove it when the work is complete.
 
 ## Workflow
